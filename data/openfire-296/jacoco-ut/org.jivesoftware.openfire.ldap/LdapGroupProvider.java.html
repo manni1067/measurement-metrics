@@ -1,0 +1,363 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>LdapGroupProvider.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.ldap</a> &gt; <span class="el_source">LdapGroupProvider.java</span></div><h1>LdapGroupProvider.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.ldap;
+
+import java.text.MessageFormat;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Set;
+import java.util.TreeSet;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+import javax.naming.NamingEnumeration;
+import javax.naming.NamingException;
+import javax.naming.directory.Attribute;
+import javax.naming.directory.Attributes;
+import javax.naming.directory.SearchControls;
+import javax.naming.directory.SearchResult;
+import javax.naming.ldap.LdapContext;
+import javax.naming.ldap.LdapName;
+
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.group.AbstractGroupProvider;
+import org.jivesoftware.openfire.group.Group;
+import org.jivesoftware.openfire.group.GroupNotFoundException;
+import org.jivesoftware.openfire.user.UserManager;
+import org.jivesoftware.openfire.user.UserNotFoundException;
+import org.jivesoftware.util.JiveConstants;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmpp.packet.JID;
+
+/**
+ * LDAP implementation of the GroupProvider interface.  All data in the directory is treated as
+ * read-only so any set operations will result in an exception.
+ *
+ * @author Matt Tucker, Greg Ferguson and Cameron Moore
+ */
+public class LdapGroupProvider extends AbstractGroupProvider {
+
+<span class="nc" id="L55">    private static final Logger Log = LoggerFactory.getLogger(LdapGroupProvider.class);</span>
+
+    private LdapManager manager;
+    private UserManager userManager;
+    private String[] standardAttributes;
+<span class="nc" id="L60">    private int groupCount = -1;</span>
+<span class="nc" id="L61">    private long expiresStamp = System.currentTimeMillis();</span>
+
+    /**
+     * Constructs a new LDAP group provider.
+     */
+<span class="nc" id="L66">    public LdapGroupProvider() {</span>
+<span class="nc" id="L67">        manager = LdapManager.getInstance();</span>
+<span class="nc" id="L68">        userManager = UserManager.getInstance();</span>
+<span class="nc" id="L69">        standardAttributes = new String[3];</span>
+<span class="nc" id="L70">        standardAttributes[0] = manager.getGroupNameField();</span>
+<span class="nc" id="L71">        standardAttributes[1] = manager.getGroupDescriptionField();</span>
+<span class="nc" id="L72">        standardAttributes[2] = manager.getGroupMemberField();</span>
+<span class="nc" id="L73">    }</span>
+
+    @Override
+    public Group getGroup(String groupName) throws GroupNotFoundException {
+<span class="nc" id="L77">        LdapContext ctx = null;</span>
+        try {
+<span class="nc" id="L79">            String groupDN = manager.findGroupDN(groupName);</span>
+            // Load record.
+<span class="nc" id="L81">            ctx = manager.getContext(manager.getGroupsBaseDN(groupName));</span>
+<span class="nc" id="L82">            Attributes attrs = ctx.getAttributes(groupDN, standardAttributes);</span>
+
+<span class="nc" id="L84">            return processGroup(ctx, attrs);</span>
+        }
+<span class="nc" id="L86">        catch (Exception e) {</span>
+<span class="nc" id="L87">            Log.error(e.getMessage(), e);</span>
+<span class="nc" id="L88">            throw new GroupNotFoundException(&quot;Group with name &quot; + groupName + &quot; not found.&quot;, e);</span>
+        }
+        finally {
+<span class="nc" id="L91">            try {</span>
+<span class="nc bnc" id="L92" title="All 4 branches missed.">                if (ctx != null) {</span>
+<span class="nc" id="L93">                    ctx.setRequestControls(null);</span>
+<span class="nc" id="L94">                    ctx.close();</span>
+                }
+            }
+<span class="nc" id="L97">            catch (Exception ignored) {</span>
+                // Ignore.
+<span class="nc" id="L99">            }</span>
+<span class="nc" id="L100">        }</span>
+    }
+
+    @Override
+    public int getGroupCount() {
+<span class="nc bnc" id="L105" title="All 2 branches missed.">        if (manager.isDebugEnabled()) {</span>
+<span class="nc" id="L106">            Log.debug(&quot;LdapGroupProvider: Trying to get the number of groups in the system.&quot;);</span>
+        }
+        // Cache user count for 5 minutes.
+<span class="nc bnc" id="L109" title="All 4 branches missed.">        if (groupCount != -1 &amp;&amp; System.currentTimeMillis() &lt; expiresStamp) {</span>
+<span class="nc" id="L110">            return groupCount;</span>
+        }
+<span class="nc" id="L112">        this.groupCount = manager.retrieveListCount(</span>
+<span class="nc" id="L113">                manager.getGroupNameField(),</span>
+<span class="nc" id="L114">                MessageFormat.format(manager.getGroupSearchFilter(), &quot;*&quot;)</span>
+        );
+<span class="nc" id="L116">        this.expiresStamp = System.currentTimeMillis() + JiveConstants.MINUTE *5;</span>
+<span class="nc" id="L117">        return this.groupCount;</span>
+    }
+
+    @Override
+    public Collection&lt;String&gt; getGroupNames() {
+<span class="nc" id="L122">        return getGroupNames(-1, -1);</span>
+    }
+
+    @Override
+    public Collection&lt;String&gt; getGroupNames(int startIndex, int numResults) {
+<span class="nc" id="L127">        return manager.retrieveList(</span>
+<span class="nc" id="L128">                manager.getGroupNameField(),</span>
+<span class="nc" id="L129">                MessageFormat.format(manager.getGroupSearchFilter(), &quot;*&quot;),</span>
+                startIndex,
+                numResults,
+                null
+        );
+    }
+
+    @Override
+    public Collection&lt;String&gt; getGroupNames(JID user) {
+        // Get DN of specified user
+<span class="nc" id="L139">        XMPPServer server = XMPPServer.getInstance();</span>
+        String username;
+<span class="nc bnc" id="L141" title="All 2 branches missed.">        if (!manager.isPosixMode()) {</span>
+            // Check if the user exists (only if user is a local user)
+<span class="nc bnc" id="L143" title="All 2 branches missed.">            if (!server.isLocal(user)) {</span>
+<span class="nc" id="L144">                return Collections.emptyList();</span>
+            }
+<span class="nc" id="L146">            username = JID.unescapeNode(user.getNode());</span>
+            try {
+<span class="nc" id="L148">                username = manager.findUserDN(username) + &quot;,&quot; + manager.getUsersBaseDN(username);</span>
+            }
+<span class="nc" id="L150">            catch (Exception e) {</span>
+<span class="nc" id="L151">                Log.error(&quot;Could not find user in LDAP &quot; + username);</span>
+<span class="nc" id="L152">                return Collections.emptyList();</span>
+<span class="nc" id="L153">            }</span>
+        }
+        else {
+<span class="nc bnc" id="L156" title="All 2 branches missed.">            username = server.isLocal(user) ? JID.unescapeNode(user.getNode()) : user.toString();</span>
+        }
+        // Do nothing if the user is empty or null
+<span class="nc bnc" id="L159" title="All 4 branches missed.">        if (username == null || &quot;&quot;.equals(username)) {</span>
+<span class="nc" id="L160">            return Collections.emptyList();</span>
+        }
+<span class="nc" id="L162">        return search(manager.getGroupMemberField(), username);</span>
+    }
+
+    @Override
+    public Collection&lt;String&gt; search(String key, String value) {
+<span class="nc" id="L167">        StringBuilder filter = new StringBuilder();</span>
+<span class="nc" id="L168">        filter.append(&quot;(&amp;&quot;);</span>
+<span class="nc" id="L169">        filter.append(MessageFormat.format(manager.getGroupSearchFilter(), &quot;*&quot;));</span>
+<span class="nc" id="L170">        filter.append('(').append(key).append('=').append(LdapManager.sanitizeSearchFilter(value));</span>
+<span class="nc" id="L171">        filter.append(&quot;))&quot;);</span>
+<span class="nc bnc" id="L172" title="All 2 branches missed.">        if (Log.isDebugEnabled()) {</span>
+<span class="nc" id="L173">            Log.debug(&quot;Trying to find group names using query: &quot; + filter.toString());</span>
+        }
+        // Perform the LDAP query
+<span class="nc" id="L176">        return manager.retrieveList(</span>
+<span class="nc" id="L177">                manager.getGroupNameField(),</span>
+<span class="nc" id="L178">                filter.toString(),</span>
+                -1,
+                -1,
+                null
+        );
+    }
+
+    @Override
+    public Collection&lt;String&gt; search(String query) {
+<span class="nc" id="L187">        return search(query, -1, -1);</span>
+    }
+
+    @Override
+    public Collection&lt;String&gt; search(String query, int startIndex, int numResults) {
+<span class="nc bnc" id="L192" title="All 4 branches missed.">        if (query == null || &quot;&quot;.equals(query)) {</span>
+<span class="nc" id="L193">            return Collections.emptyList();</span>
+        }
+<span class="nc" id="L195">        StringBuilder filter = new StringBuilder();</span>
+        // Make the query be a wildcard search by default. So, if the user searches for
+        // &quot;Test&quot;, make the sanitized search be &quot;Test*&quot; instead.
+<span class="nc" id="L198">        filter.append('(').append(manager.getGroupNameField()).append('=')</span>
+<span class="nc" id="L199">                .append(LdapManager.sanitizeSearchFilter(query)).append(&quot;*)&quot;);</span>
+        // Perform the LDAP query
+<span class="nc" id="L201">        return manager.retrieveList(</span>
+<span class="nc" id="L202">                manager.getGroupNameField(),</span>
+<span class="nc" id="L203">                filter.toString(),</span>
+                startIndex,
+                numResults,
+                null
+        );
+    }
+
+    @Override
+    public boolean isSearchSupported() {
+<span class="nc" id="L212">        return true;</span>
+    }
+
+    private Group processGroup(LdapContext ctx, Attributes a) throws NamingException {
+<span class="nc" id="L216">        XMPPServer server = XMPPServer.getInstance();</span>
+<span class="nc" id="L217">        String serverName = server.getServerInfo().getXMPPDomain();</span>
+        // Build `3 groups.
+        // group 1: uid=
+        // group 2: rest of the text until first comma
+        // group 3: rest of the text
+<span class="nc" id="L222">        Pattern pattern =</span>
+<span class="nc" id="L223">                Pattern.compile(&quot;(?i)(^&quot; + manager.getUsernameField() + &quot;=)([^,]+)(.+)&quot;);</span>
+
+        // We have to process Active Directory differently.
+<span class="nc" id="L226">        boolean isAD = manager.getUsernameField().equals(&quot;sAMAccountName&quot;);</span>
+<span class="nc bnc" id="L227" title="All 2 branches missed.">        String[] returningAttributes = isAD ? new String[] { &quot;distinguishedName&quot;, manager.getUsernameField() } : new String[] { manager.getUsernameField() };</span>
+        
+<span class="nc" id="L229">        SearchControls searchControls = new SearchControls();</span>
+<span class="nc" id="L230">        searchControls.setReturningAttributes(returningAttributes);</span>
+        // See if recursive searching is enabled. Otherwise, only search one level.
+<span class="nc bnc" id="L232" title="All 2 branches missed.">        if (manager.isSubTreeSearch()) {</span>
+<span class="nc" id="L233">            searchControls.setSearchScope(SearchControls.SUBTREE_SCOPE);</span>
+        }
+        else {
+<span class="nc" id="L236">            searchControls.setSearchScope(SearchControls.ONELEVEL_SCOPE);</span>
+        }
+
+        String name;
+        String description;
+        try {
+<span class="nc" id="L242">            name = ((String)((a.get(manager.getGroupNameField())).get()));</span>
+        }
+<span class="nc" id="L244">        catch (Exception e) {</span>
+<span class="nc" id="L245">            name = &quot;&quot;;</span>
+<span class="nc" id="L246">        }</span>
+        try {
+<span class="nc" id="L248">            description = ((String)((a.get(manager.getGroupDescriptionField())).get()));</span>
+        }
+<span class="nc" id="L250">        catch (Exception e) {</span>
+<span class="nc" id="L251">            description = &quot;&quot;;</span>
+<span class="nc" id="L252">        }</span>
+<span class="nc" id="L253">        Set&lt;JID&gt; members = new TreeSet&lt;&gt;();</span>
+<span class="nc" id="L254">        Attribute memberField = a.get(manager.getGroupMemberField());</span>
+<span class="nc bnc" id="L255" title="All 2 branches missed.">        if (memberField != null) {</span>
+<span class="nc" id="L256">            NamingEnumeration ne = memberField.getAll();</span>
+<span class="nc bnc" id="L257" title="All 2 branches missed.">            while (ne.hasMore()) {</span>
+<span class="nc" id="L258">                String username = (String) ne.next();</span>
+                // If not posix mode, each group member is stored as a full DN.
+<span class="nc bnc" id="L260" title="All 2 branches missed.">                if (!manager.isPosixMode()) {</span>
+                    try {
+                        // Try to find the username with a regex pattern match.
+<span class="nc" id="L263">                        Matcher matcher = pattern.matcher(username);</span>
+<span class="nc bnc" id="L264" title="All 4 branches missed.">                        if (matcher.matches() &amp;&amp; matcher.groupCount() == 3) {</span>
+                            // The username is in the DN, no additional search needed
+<span class="nc" id="L266">                            username = matcher.group(2);</span>
+                        }
+                        // The regex pattern match failed. This will happen if the
+                        // the member DN's don't use the standard username field. For
+                        // example, Active Directory has a username field of
+                        // sAMAccountName, but stores group members as &quot;CN=...&quot;.
+                        else {
+                            // Create an LDAP name with the full DN.
+<span class="nc" id="L274">                            LdapName ldapName = new LdapName(username);</span>
+                            // Turn the LDAP name into something we can use in a
+                            // search by stripping off the comma.
+<span class="nc" id="L277">                            StringBuilder userFilter = new StringBuilder();</span>
+<span class="nc" id="L278">                            userFilter.append(&quot;(&amp;(&quot;);</span>
+<span class="nc" id="L279">                            userFilter.append(ldapName.get(ldapName.size() - 1));</span>
+<span class="nc" id="L280">                            userFilter.append(')');</span>
+<span class="nc" id="L281">                            userFilter.append(MessageFormat.format(manager.getSearchFilter(), &quot;*&quot;));</span>
+<span class="nc" id="L282">                            userFilter.append(')');</span>
+<span class="nc" id="L283">                            NamingEnumeration usrAnswer = ctx.search(&quot;&quot;,</span>
+<span class="nc" id="L284">                                    userFilter.toString(), searchControls);</span>
+<span class="nc bnc" id="L285" title="All 4 branches missed.">                            if (usrAnswer != null &amp;&amp; usrAnswer.hasMoreElements()) {</span>
+<span class="nc" id="L286">                                SearchResult searchResult = null;</span>
+                                // We may get multiple search results for the same user CN.
+                                // Iterate through the entire set to find a matching distinguished name.
+<span class="nc bnc" id="L289" title="All 2 branches missed.">                                while(usrAnswer.hasMoreElements()) {</span>
+<span class="nc" id="L290">                                    searchResult = (SearchResult) usrAnswer.nextElement();</span>
+<span class="nc" id="L291">                                    Attributes attrs = searchResult.getAttributes();</span>
+<span class="nc bnc" id="L292" title="All 2 branches missed.">                                    if (isAD) {</span>
+<span class="nc" id="L293">                                        Attribute userdnAttr = attrs.get(&quot;distinguishedName&quot;);</span>
+<span class="nc bnc" id="L294" title="All 2 branches missed.">                                        if (username.equals((String)userdnAttr.get())) {</span>
+                                            // Exact match found, use it.
+<span class="nc" id="L296">                                            username = (String)attrs.get(manager.getUsernameField()).get();</span>
+<span class="nc" id="L297">                                            break;</span>
+                                        }
+<span class="nc" id="L299">                                    }</span>
+                                    else {
+                                        // No iteration occurs here, which is probably a bug.
+<span class="nc" id="L302">                                        username = (String)attrs.get(manager.getUsernameField()).get();</span>
+<span class="nc" id="L303">                                        break;</span>
+                                    }
+<span class="nc" id="L305">                                }</span>
+                            }
+                            // Close the enumeration.
+<span class="nc" id="L308">                            usrAnswer.close();</span>
+                        }
+                    }
+<span class="nc" id="L311">                    catch (Exception e) {</span>
+                        // TODO: A NPE is occuring here
+<span class="nc" id="L313">                        Log.error(e.getMessage(), e);</span>
+<span class="nc" id="L314">                    }</span>
+                }
+                // A search filter may have been defined in the LdapUserProvider.
+                // Therefore, we have to try to load each user we found to see if
+                // it passes the filter.
+                try {
+                    JID userJID;
+<span class="nc" id="L321">                    int position = username.indexOf(&quot;@&quot; + serverName);</span>
+                    // Create JID of local user if JID does not match a component's JID
+<span class="nc bnc" id="L323" title="All 2 branches missed.">                    if (position == -1) {</span>
+                        // In order to lookup a username from the manager, the username
+                        // must be a properly escaped JID node.
+<span class="nc" id="L326">                        String escapedUsername = JID.escapeNode(username);</span>
+<span class="nc bnc" id="L327" title="All 2 branches missed.">                        if (!escapedUsername.equals(username)) {</span>
+                            // Check if escaped username is valid
+<span class="nc" id="L329">                            userManager.getUser(escapedUsername);</span>
+                        }
+                        // No exception, so the user must exist. Add the user as a group
+                        // member using the escaped username.
+<span class="nc" id="L333">                        userJID = server.createJID(escapedUsername, null);</span>
+<span class="nc" id="L334">                    }</span>
+                    else {
+                        // This is a JID of a component or node of a server's component
+<span class="nc" id="L337">                        String node = username.substring(0, position);</span>
+<span class="nc" id="L338">                        String escapedUsername = JID.escapeNode(node);</span>
+<span class="nc" id="L339">                        userJID = new JID(escapedUsername + &quot;@&quot; + serverName);</span>
+                    }
+<span class="nc" id="L341">                    members.add(userJID);</span>
+                }
+<span class="nc" id="L343">                catch (UserNotFoundException e) {</span>
+                    // We can safely ignore this error. It likely means that
+                    // the user didn't pass the search filter that's defined.
+                    // So, we want to simply ignore the user as a group member.
+<span class="nc bnc" id="L347" title="All 2 branches missed.">                    if (manager.isDebugEnabled()) {</span>
+<span class="nc" id="L348">                        Log.debug(&quot;LdapGroupProvider: User not found: &quot; + username);</span>
+                    }
+<span class="nc" id="L350">                }</span>
+<span class="nc" id="L351">            }</span>
+            // Close the enumeration.
+<span class="nc" id="L353">            ne.close();</span>
+        }
+<span class="nc bnc" id="L355" title="All 2 branches missed.">        if (manager.isDebugEnabled()) {</span>
+<span class="nc" id="L356">            Log.debug(&quot;LdapGroupProvider: Adding group \&quot;&quot; + name + &quot;\&quot; with &quot; + members.size() +</span>
+                    &quot; members.&quot;);
+        }
+<span class="nc" id="L359">        Collection&lt;JID&gt; admins = Collections.emptyList();</span>
+<span class="nc" id="L360">        return new Group(name, description, members, admins);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

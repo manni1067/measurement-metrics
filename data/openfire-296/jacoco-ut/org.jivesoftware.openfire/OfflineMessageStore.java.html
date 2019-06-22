@@ -1,0 +1,526 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>OfflineMessageStore.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire</a> &gt; <span class="el_source">OfflineMessageStore.java</span></div><h1>OfflineMessageStore.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2004-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire;
+
+import org.dom4j.DocumentException;
+import org.dom4j.Element;
+import org.dom4j.Namespace;
+import org.dom4j.QName;
+import org.dom4j.io.SAXReader;
+import org.jivesoftware.database.DbConnectionManager;
+import org.jivesoftware.database.SequenceManager;
+import org.jivesoftware.openfire.container.BasicModule;
+import org.jivesoftware.openfire.event.UserEventDispatcher;
+import org.jivesoftware.openfire.event.UserEventListener;
+import org.jivesoftware.openfire.user.User;
+import org.jivesoftware.openfire.user.UserManager;
+import org.jivesoftware.util.JiveConstants;
+import org.jivesoftware.util.LocaleUtils;
+import org.jivesoftware.util.StringUtils;
+import org.jivesoftware.util.XMPPDateTimeFormat;
+import org.jivesoftware.util.cache.Cache;
+import org.jivesoftware.util.cache.CacheFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmpp.packet.JID;
+import org.xmpp.packet.Message;
+
+import java.io.StringReader;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.util.*;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+/**
+ * Represents the user's offline message storage. A message store holds messages that were
+ * sent to the user while they were unavailable. The user can retrieve their messages by
+ * setting their presence to &quot;available&quot;. The messages will then be delivered normally.
+ * Offline message storage is optional, in which case a null implementation is returned that
+ * always throws UnauthorizedException when adding messages to the store.
+ *
+ * @author Iain Shigeoka
+ */
+public class OfflineMessageStore extends BasicModule implements UserEventListener {
+
+<span class="fc" id="L63">    private static final Logger Log = LoggerFactory.getLogger(OfflineMessageStore.class);</span>
+
+    private static final String INSERT_OFFLINE =
+        &quot;INSERT INTO ofOffline (username, messageID, creationDate, messageSize, stanza) &quot; +
+        &quot;VALUES (?, ?, ?, ?, ?)&quot;;
+    private static final String LOAD_OFFLINE =
+        &quot;SELECT stanza, creationDate FROM ofOffline WHERE username=? ORDER BY creationDate ASC&quot;;
+    private static final String LOAD_OFFLINE_MESSAGE =
+        &quot;SELECT stanza FROM ofOffline WHERE username=? AND creationDate=?&quot;;
+    private static final String SELECT_SIZE_OFFLINE =
+        &quot;SELECT SUM(messageSize) FROM ofOffline WHERE username=?&quot;;
+    private static final String SELECT_SIZE_ALL_OFFLINE =
+        &quot;SELECT SUM(messageSize) FROM ofOffline&quot;;
+    private static final String DELETE_OFFLINE =
+        &quot;DELETE FROM ofOffline WHERE username=?&quot;;
+    private static final String DELETE_OFFLINE_MESSAGE =
+        &quot;DELETE FROM ofOffline WHERE username=? AND creationDate=?&quot;;
+
+    private static final int POOL_SIZE = 10;
+    
+    private Cache&lt;String, Integer&gt; sizeCache;
+
+    /**
+     * Pattern to use for detecting invalid XML characters. Invalid XML characters will
+     * be removed from the stored offline messages.
+     */
+<span class="nc" id="L89">    private Pattern pattern = Pattern.compile(&quot;&amp;\\#[\\d]+;&quot;);</span>
+
+    /**
+     * Returns the instance of {@code OfflineMessageStore} being used by the XMPPServer.
+     *
+     * @return the instance of {@code OfflineMessageStore} being used by the XMPPServer.
+     */
+    public static OfflineMessageStore getInstance() {
+<span class="nc" id="L97">        return XMPPServer.getInstance().getOfflineMessageStore();</span>
+    }
+
+    /**
+     * Pool of SAX Readers. SAXReader is not thread safe so we need to have a pool of readers.
+     */
+<span class="nc" id="L103">    private BlockingQueue&lt;SAXReader&gt; xmlReaders = new LinkedBlockingQueue&lt;&gt;(POOL_SIZE);</span>
+
+    /**
+     * Constructs a new offline message store.
+     */
+    public OfflineMessageStore() {
+<span class="nc" id="L109">        super(&quot;Offline Message Store&quot;);</span>
+<span class="nc" id="L110">        sizeCache = CacheFactory.createCache(&quot;Offline Message Size&quot;);</span>
+<span class="nc" id="L111">    }</span>
+
+    /**
+     * Adds a message to this message store. Messages will be stored and made
+     * available for later delivery.
+     *
+     * @param message the message to store.
+     */
+    public void addMessage(Message message) {
+<span class="nc bnc" id="L120" title="All 2 branches missed.">        if (message == null) {</span>
+<span class="nc" id="L121">            return;</span>
+        }
+<span class="nc bnc" id="L123" title="All 2 branches missed.">        if(!shouldStoreMessage(message)) {</span>
+<span class="nc" id="L124">            return;</span>
+        }
+<span class="nc" id="L126">        JID recipient = message.getTo();</span>
+<span class="nc" id="L127">        String username = recipient.getNode();</span>
+        // If the username is null (such as when an anonymous user), don't store.
+<span class="nc bnc" id="L129" title="All 4 branches missed.">        if (username == null || !UserManager.getInstance().isRegisteredUser(recipient)) {</span>
+<span class="nc" id="L130">            return;</span>
+        }
+        else
+<span class="nc bnc" id="L133" title="All 2 branches missed.">        if (!XMPPServer.getInstance().getServerInfo().getXMPPDomain().equals(recipient.getDomain())) {</span>
+            // Do not store messages sent to users of remote servers
+<span class="nc" id="L135">            return;</span>
+        }
+
+<span class="nc" id="L138">        long messageID = SequenceManager.nextID(JiveConstants.OFFLINE);</span>
+
+        // Get the message in XML format.
+<span class="nc" id="L141">        String msgXML = message.getElement().asXML();</span>
+
+<span class="nc" id="L143">        Connection con = null;</span>
+<span class="nc" id="L144">        PreparedStatement pstmt = null;</span>
+        try {
+<span class="nc" id="L146">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L147">            pstmt = con.prepareStatement(INSERT_OFFLINE);</span>
+<span class="nc" id="L148">            pstmt.setString(1, username);</span>
+<span class="nc" id="L149">            pstmt.setLong(2, messageID);</span>
+<span class="nc" id="L150">            pstmt.setString(3, StringUtils.dateToMillis(new java.util.Date()));</span>
+<span class="nc" id="L151">            pstmt.setInt(4, msgXML.length());</span>
+<span class="nc" id="L152">            pstmt.setString(5, msgXML);</span>
+<span class="nc" id="L153">            pstmt.executeUpdate();</span>
+        }
+
+<span class="nc" id="L156">        catch (Exception e) {</span>
+<span class="nc" id="L157">            Log.error(LocaleUtils.getLocalizedString(&quot;admin.error&quot;), e);</span>
+        }
+        finally {
+<span class="nc" id="L160">            DbConnectionManager.closeConnection(pstmt, con);</span>
+<span class="nc" id="L161">        }</span>
+
+        // Update the cached size if it exists.
+<span class="nc bnc" id="L164" title="All 2 branches missed.">        if (sizeCache.containsKey(username)) {</span>
+<span class="nc" id="L165">            int size = sizeCache.get(username);</span>
+<span class="nc" id="L166">            size += msgXML.length();</span>
+<span class="nc" id="L167">            sizeCache.put(username, size);</span>
+        }
+<span class="nc" id="L169">    }</span>
+
+    /**
+     * Returns a Collection of all messages in the store for a user.
+     * Messages may be deleted after being selected from the database depending on
+     * the delete param.
+     *
+     * @param username the username of the user who's messages you'd like to receive.
+     * @param delete true if the offline messages should be deleted.
+     * @return An iterator of packets containing all offline messages.
+     */
+    public Collection&lt;OfflineMessage&gt; getMessages(String username, boolean delete) {
+<span class="nc" id="L181">        List&lt;OfflineMessage&gt; messages = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L182">        SAXReader xmlReader = null;</span>
+<span class="nc" id="L183">        Connection con = null;</span>
+<span class="nc" id="L184">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L185">        ResultSet rs = null;</span>
+        try {
+            // Get a sax reader from the pool
+<span class="nc" id="L188">            xmlReader = xmlReaders.take();</span>
+<span class="nc" id="L189">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L190">            pstmt = con.prepareStatement(LOAD_OFFLINE);</span>
+<span class="nc" id="L191">            pstmt.setString(1, username);</span>
+<span class="nc" id="L192">            rs = pstmt.executeQuery();</span>
+<span class="nc bnc" id="L193" title="All 2 branches missed.">            while (rs.next()) {</span>
+<span class="nc" id="L194">                String msgXML = rs.getString(1);</span>
+<span class="nc" id="L195">                Date creationDate = new Date(Long.parseLong(rs.getString(2).trim()));</span>
+                OfflineMessage message;
+                try {
+<span class="nc" id="L198">                    message = new OfflineMessage(creationDate,</span>
+<span class="nc" id="L199">                            xmlReader.read(new StringReader(msgXML)).getRootElement());</span>
+<span class="nc" id="L200">                } catch (DocumentException e) {</span>
+                    // Try again after removing invalid XML chars (e.g. &amp;#12;)
+<span class="nc" id="L202">                    Matcher matcher = pattern.matcher(msgXML);</span>
+<span class="nc bnc" id="L203" title="All 2 branches missed.">                    if (matcher.find()) {</span>
+<span class="nc" id="L204">                        msgXML = matcher.replaceAll(&quot;&quot;);</span>
+                    }
+                    try {
+<span class="nc" id="L207">                        message = new OfflineMessage(creationDate,</span>
+<span class="nc" id="L208">                            xmlReader.read(new StringReader(msgXML)).getRootElement());</span>
+<span class="nc" id="L209">                    } catch (DocumentException de) {</span>
+<span class="nc" id="L210">                        Log.error(&quot;Failed to route packet (offline message): &quot; + msgXML, de);</span>
+<span class="nc" id="L211">                        continue; // skip and process remaining offline messages</span>
+<span class="nc" id="L212">                    }</span>
+<span class="nc" id="L213">                }</span>
+
+                // if there is already a delay stamp, we shouldn't add another.
+<span class="nc" id="L216">                Element delaytest = message.getChildElement(&quot;delay&quot;, &quot;urn:xmpp:delay&quot;);</span>
+<span class="nc bnc" id="L217" title="All 2 branches missed.">                if (delaytest == null) {</span>
+                    // Add a delayed delivery (XEP-0203) element to the message.
+<span class="nc" id="L219">                    Element delay = message.addChildElement(&quot;delay&quot;, &quot;urn:xmpp:delay&quot;);</span>
+<span class="nc" id="L220">                    delay.addAttribute(&quot;from&quot;, XMPPServer.getInstance().getServerInfo().getXMPPDomain());</span>
+<span class="nc" id="L221">                    delay.addAttribute(&quot;stamp&quot;, XMPPDateTimeFormat.format(creationDate));</span>
+                }
+<span class="nc" id="L223">                messages.add(message);</span>
+<span class="nc" id="L224">            }</span>
+            // Check if the offline messages loaded should be deleted, and that there are
+            // messages to delete.
+<span class="nc bnc" id="L227" title="All 4 branches missed.">            if (delete &amp;&amp; !messages.isEmpty()) {</span>
+<span class="nc" id="L228">                PreparedStatement pstmt2 = null;</span>
+                try {
+<span class="nc" id="L230">                    pstmt2 = con.prepareStatement(DELETE_OFFLINE);</span>
+<span class="nc" id="L231">                    pstmt2.setString(1, username);</span>
+<span class="nc" id="L232">                    pstmt2.executeUpdate();</span>
+<span class="nc" id="L233">                    removeUsernameFromSizeCache(username);</span>
+                }
+<span class="nc" id="L235">                catch (Exception e) {</span>
+<span class="nc" id="L236">                    Log.error(&quot;Error deleting offline messages of username: &quot; + username, e);</span>
+                }
+                finally {
+<span class="nc" id="L239">                    DbConnectionManager.closeStatement(pstmt2);</span>
+<span class="nc" id="L240">                } </span>
+            }
+        }
+<span class="nc" id="L243">        catch (Exception e) {</span>
+<span class="nc" id="L244">            Log.error(&quot;Error retrieving offline messages of username: &quot; + username, e);</span>
+        }
+        finally {
+<span class="nc" id="L247">            DbConnectionManager.closeConnection(rs, pstmt, con);</span>
+            // Return the sax reader to the pool
+<span class="nc bnc" id="L249" title="All 6 branches missed.">            if (xmlReader != null) {</span>
+<span class="nc" id="L250">                xmlReaders.add(xmlReader);</span>
+            }
+<span class="nc" id="L252">        }</span>
+<span class="nc" id="L253">        return messages;</span>
+    }
+
+    /**
+     * Returns the offline message of the specified user with the given creation date. The
+     * returned message will NOT be deleted from the database.
+     *
+     * @param username the username of the user who's message you'd like to receive.
+     * @param creationDate the date when the offline message was stored in the database.
+     * @return the offline message of the specified user with the given creation stamp.
+     */
+    public OfflineMessage getMessage(String username, Date creationDate) {
+<span class="nc" id="L265">        OfflineMessage message = null;</span>
+<span class="nc" id="L266">        Connection con = null;</span>
+<span class="nc" id="L267">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L268">        ResultSet rs = null;</span>
+<span class="nc" id="L269">        SAXReader xmlReader = null;</span>
+        try {
+            // Get a sax reader from the pool
+<span class="nc" id="L272">            xmlReader = xmlReaders.take();</span>
+<span class="nc" id="L273">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L274">            pstmt = con.prepareStatement(LOAD_OFFLINE_MESSAGE);</span>
+<span class="nc" id="L275">            pstmt.setString(1, username);</span>
+<span class="nc" id="L276">            pstmt.setString(2, StringUtils.dateToMillis(creationDate));</span>
+<span class="nc" id="L277">            rs = pstmt.executeQuery();</span>
+<span class="nc bnc" id="L278" title="All 2 branches missed.">            while (rs.next()) {</span>
+<span class="nc" id="L279">                String msgXML = rs.getString(1);</span>
+<span class="nc" id="L280">                message = new OfflineMessage(creationDate,</span>
+<span class="nc" id="L281">                        xmlReader.read(new StringReader(msgXML)).getRootElement());</span>
+                // Add a delayed delivery (XEP-0203) element to the message.
+<span class="nc" id="L283">                Element delay = message.addChildElement(&quot;delay&quot;, &quot;urn:xmpp:delay&quot;);</span>
+<span class="nc" id="L284">                delay.addAttribute(&quot;from&quot;, XMPPServer.getInstance().getServerInfo().getXMPPDomain());</span>
+<span class="nc" id="L285">                delay.addAttribute(&quot;stamp&quot;, XMPPDateTimeFormat.format(creationDate));</span>
+<span class="nc" id="L286">            }</span>
+        }
+<span class="nc" id="L288">        catch (Exception e) {</span>
+<span class="nc" id="L289">            Log.error(&quot;Error retrieving offline messages of username: &quot; + username +</span>
+                    &quot; creationDate: &quot; + creationDate, e);
+        }
+        finally {
+            // Return the sax reader to the pool
+<span class="nc bnc" id="L294" title="All 6 branches missed.">            if (xmlReader != null) {</span>
+<span class="nc" id="L295">                xmlReaders.add(xmlReader);</span>
+            }
+<span class="nc" id="L297">            DbConnectionManager.closeConnection(rs, pstmt, con);</span>
+<span class="nc" id="L298">        }</span>
+<span class="nc" id="L299">        return message;</span>
+    }
+
+    /**
+     * Deletes all offline messages in the store for a user.
+     *
+     * @param username the username of the user who's messages are going to be deleted.
+     */
+    public void deleteMessages(String username) {
+<span class="nc" id="L308">        Connection con = null;</span>
+<span class="nc" id="L309">        PreparedStatement pstmt = null;</span>
+        try {
+<span class="nc" id="L311">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L312">            pstmt = con.prepareStatement(DELETE_OFFLINE);</span>
+<span class="nc" id="L313">            pstmt.setString(1, username);</span>
+<span class="nc" id="L314">            pstmt.executeUpdate();</span>
+            
+<span class="nc" id="L316">            removeUsernameFromSizeCache(username);</span>
+        }
+<span class="nc" id="L318">        catch (Exception e) {</span>
+<span class="nc" id="L319">            Log.error(&quot;Error deleting offline messages of username: &quot; + username, e);</span>
+        }
+        finally {
+<span class="nc" id="L322">            DbConnectionManager.closeConnection(pstmt, con);</span>
+<span class="nc" id="L323">        }</span>
+<span class="nc" id="L324">    }</span>
+
+    private void removeUsernameFromSizeCache(String username) {
+        // Update the cached size if it exists.
+<span class="nc bnc" id="L328" title="All 2 branches missed.">        if (sizeCache.containsKey(username)) {</span>
+<span class="nc" id="L329">            sizeCache.remove(username);</span>
+        }
+<span class="nc" id="L331">    }</span>
+
+    /**
+     * Deletes the specified offline message in the store for a user. The way to identify the
+     * message to delete is based on the creationDate and username.
+     *
+     * @param username the username of the user who's message is going to be deleted.
+     * @param creationDate the date when the offline message was stored in the database.
+     */
+    public void deleteMessage(String username, Date creationDate) {
+<span class="nc" id="L341">        Connection con = null;</span>
+<span class="nc" id="L342">        PreparedStatement pstmt = null;</span>
+        try {
+<span class="nc" id="L344">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L345">            pstmt = con.prepareStatement(DELETE_OFFLINE_MESSAGE);</span>
+<span class="nc" id="L346">            pstmt.setString(1, username);</span>
+<span class="nc" id="L347">            pstmt.setString(2, StringUtils.dateToMillis(creationDate));</span>
+<span class="nc" id="L348">            pstmt.executeUpdate();</span>
+            
+            // Force a refresh for next call to getSize(username),
+            // it's easier than loading the message to be deleted just
+            // to update the cache.
+<span class="nc" id="L353">            removeUsernameFromSizeCache(username);</span>
+        }
+<span class="nc" id="L355">        catch (Exception e) {</span>
+<span class="nc" id="L356">            Log.error(&quot;Error deleting offline messages of username: &quot; + username +</span>
+                    &quot; creationDate: &quot; + creationDate, e);
+        }
+        finally {
+<span class="nc" id="L360">            DbConnectionManager.closeConnection(pstmt, con);</span>
+<span class="nc" id="L361">        }</span>
+<span class="nc" id="L362">    }</span>
+
+    /**
+     * Returns the approximate size (in bytes) of the XML messages stored for
+     * a particular user.
+     *
+     * @param username the username of the user.
+     * @return the approximate size of stored messages (in bytes).
+     */
+    public int getSize(String username) {
+        // See if the size is cached.
+<span class="nc bnc" id="L373" title="All 2 branches missed.">        if (sizeCache.containsKey(username)) {</span>
+<span class="nc" id="L374">            return sizeCache.get(username);</span>
+        }
+<span class="nc" id="L376">        int size = 0;</span>
+<span class="nc" id="L377">        Connection con = null;</span>
+<span class="nc" id="L378">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L379">        ResultSet rs = null;</span>
+        try {
+<span class="nc" id="L381">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L382">            pstmt = con.prepareStatement(SELECT_SIZE_OFFLINE);</span>
+<span class="nc" id="L383">            pstmt.setString(1, username);</span>
+<span class="nc" id="L384">            rs = pstmt.executeQuery();</span>
+<span class="nc bnc" id="L385" title="All 2 branches missed.">            if (rs.next()) {</span>
+<span class="nc" id="L386">                size = rs.getInt(1);</span>
+            }
+            // Add the value to cache.
+<span class="nc" id="L389">            sizeCache.put(username, size);</span>
+        }
+<span class="nc" id="L391">        catch (Exception e) {</span>
+<span class="nc" id="L392">            Log.error(LocaleUtils.getLocalizedString(&quot;admin.error&quot;), e);</span>
+        }
+        finally {
+<span class="nc" id="L395">            DbConnectionManager.closeConnection(rs, pstmt, con);</span>
+<span class="nc" id="L396">        }</span>
+<span class="nc" id="L397">        return size;</span>
+    }
+
+    /**
+     * Returns the approximate size (in bytes) of the XML messages stored for all
+     * users.
+     *
+     * @return the approximate size of all stored messages (in bytes).
+     */
+    public int getSize() {
+<span class="nc" id="L407">        int size = 0;</span>
+<span class="nc" id="L408">        Connection con = null;</span>
+<span class="nc" id="L409">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L410">        ResultSet rs = null;</span>
+        try {
+<span class="nc" id="L412">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L413">            pstmt = con.prepareStatement(SELECT_SIZE_ALL_OFFLINE);</span>
+<span class="nc" id="L414">            rs = pstmt.executeQuery();</span>
+<span class="nc bnc" id="L415" title="All 2 branches missed.">            if (rs.next()) {</span>
+<span class="nc" id="L416">                size = rs.getInt(1);</span>
+            }
+        }
+<span class="nc" id="L419">        catch (Exception e) {</span>
+<span class="nc" id="L420">            Log.error(LocaleUtils.getLocalizedString(&quot;admin.error&quot;), e);</span>
+        }
+        finally {
+<span class="nc" id="L423">            DbConnectionManager.closeConnection(rs, pstmt, con);</span>
+<span class="nc" id="L424">        }</span>
+<span class="nc" id="L425">        return size;</span>
+    }
+
+    @Override
+    public void userCreated(User user, Map params) {
+        //Do nothing
+<span class="nc" id="L431">    }</span>
+
+    @Override
+    public void userDeleting(User user, Map params) {
+        // Delete all offline messages of the user
+<span class="nc" id="L436">        deleteMessages(user.getUsername());</span>
+<span class="nc" id="L437">    }</span>
+
+    @Override
+    public void userModified(User user, Map params) {
+        //Do nothing
+<span class="nc" id="L442">    }</span>
+
+    @Override
+    public void start() throws IllegalStateException {
+<span class="nc" id="L446">        super.start();</span>
+        // Initialize the pool of sax readers
+<span class="nc bnc" id="L448" title="All 2 branches missed.">        for (int i=0; i&lt;POOL_SIZE; i++) {</span>
+<span class="nc" id="L449">            SAXReader xmlReader = new SAXReader();</span>
+<span class="nc" id="L450">            xmlReader.setEncoding(&quot;UTF-8&quot;);</span>
+<span class="nc" id="L451">            xmlReaders.add(xmlReader);</span>
+        }
+        // Add this module as a user event listener so we can delete
+        // all offline messages when a user is deleted
+<span class="nc" id="L455">        UserEventDispatcher.addListener(this);</span>
+<span class="nc" id="L456">    }</span>
+
+    @Override
+    public void stop() {
+<span class="nc" id="L460">        super.stop();</span>
+        // Clean up the pool of sax readers
+<span class="nc" id="L462">        xmlReaders.clear();</span>
+        // Remove this module as a user event listener
+<span class="nc" id="L464">        UserEventDispatcher.removeListener(this);</span>
+<span class="nc" id="L465">    }</span>
+
+    /**
+     * Decide whether a message should be stored offline according to XEP-0160 and XEP-0334.
+     *
+     * @param message
+     * @return &lt;code&gt;true&lt;/code&gt; if the message should be stored offline, &lt;code&gt;false&lt;/code&gt; otherwise.
+     */
+    static boolean shouldStoreMessage(final Message message) {
+        // XEP-0334: Implement the &lt;no-store/&gt; hint to override offline storage
+<span class="pc bpc" id="L475" title="1 of 2 branches missed.">        if (message.getChildElement(&quot;no-store&quot;, &quot;urn:xmpp:hints&quot;) != null) {</span>
+<span class="nc" id="L476">            return false;</span>
+        }
+
+<span class="pc bfc" id="L479" title="All 4 branches covered.">        switch (message.getType()) {</span>
+            case chat:
+                // XEP-0160: Messages with a 'type' attribute whose value is &quot;chat&quot; SHOULD be stored offline, with the exception of messages that contain only Chat State Notifications (XEP-0085) [7] content
+
+                // Iterate through the child elements to see if we can find anything that's not a chat state notification or
+                // real time text notification
+<span class="fc" id="L485">                Iterator&lt;?&gt; it = message.getElement().elementIterator();</span>
+
+<span class="fc bfc" id="L487" title="All 2 branches covered.">                while (it.hasNext()) {</span>
+<span class="fc" id="L488">                    Object item = it.next();</span>
+
+<span class="pc bpc" id="L490" title="1 of 2 branches missed.">                    if (item instanceof Element) {</span>
+<span class="fc" id="L491">                        Element el = (Element) item;</span>
+<span class="fc bfc" id="L492" title="All 2 branches covered.">                        if (Namespace.NO_NAMESPACE.equals(el.getNamespace())) {</span>
+<span class="fc" id="L493">                            continue;</span>
+                        }
+<span class="fc bfc" id="L495" title="All 2 branches covered.">                        if (!el.getNamespaceURI().equals(&quot;http://jabber.org/protocol/chatstates&quot;)</span>
+<span class="pc bpc" id="L496" title="1 of 2 branches missed.">                                &amp;&amp; !(el.getQName().equals(QName.get(&quot;rtt&quot;, &quot;urn:xmpp:rtt:0&quot;)))</span>
+                                ) {
+<span class="fc" id="L498">                            return true;</span>
+                        }
+                    }
+<span class="fc" id="L501">                }</span>
+
+<span class="pc bpc" id="L503" title="1 of 4 branches missed.">                return message.getBody() != null &amp;&amp; !message.getBody().isEmpty();</span>
+
+            case groupchat:
+            case headline:
+                // XEP-0160: &quot;groupchat&quot; message types SHOULD NOT be stored offline
+                // XEP-0160: &quot;headline&quot; message types SHOULD NOT be stored offline
+<span class="fc" id="L509">                return false;</span>
+
+            case error:
+                // XEP-0160: &quot;error&quot; message types SHOULD NOT be stored offline,
+                // although a server MAY store advanced message processing errors offline
+<span class="pc bpc" id="L514" title="1 of 2 branches missed.">                if (message.getChildElement(&quot;amp&quot;, &quot;http://jabber.org/protocol/amp&quot;) == null) {</span>
+<span class="fc" id="L515">                    return false;</span>
+                }
+                break;
+
+            default:
+                // XEP-0160: Messages with a 'type' attribute whose value is &quot;normal&quot; (or messages with no 'type' attribute) SHOULD be stored offline.
+                break;
+        }
+<span class="fc" id="L523">        return true;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

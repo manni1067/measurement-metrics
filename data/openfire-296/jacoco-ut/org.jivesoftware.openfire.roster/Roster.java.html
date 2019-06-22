@@ -1,0 +1,1187 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>Roster.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.roster</a> &gt; <span class="el_source">Roster.java</span></div><h1>Roster.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.roster;
+
+import org.jivesoftware.database.JiveID;
+import org.jivesoftware.openfire.*;
+import org.jivesoftware.openfire.group.Group;
+import org.jivesoftware.openfire.group.GroupManager;
+import org.jivesoftware.openfire.privacy.PrivacyList;
+import org.jivesoftware.openfire.privacy.PrivacyListManager;
+import org.jivesoftware.openfire.session.ClientSession;
+import org.jivesoftware.openfire.user.UserAlreadyExistsException;
+import org.jivesoftware.openfire.user.UserNameManager;
+import org.jivesoftware.openfire.user.UserNotFoundException;
+import org.jivesoftware.util.JiveConstants;
+import org.jivesoftware.util.cache.CacheSizes;
+import org.jivesoftware.util.cache.Cacheable;
+import org.jivesoftware.util.cache.CannotCalculateSizeException;
+import org.jivesoftware.util.cache.ExternalizableUtil;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmpp.packet.IQ;
+import org.xmpp.packet.JID;
+import org.xmpp.packet.Presence;
+
+import java.io.Externalizable;
+import java.io.IOException;
+import java.io.ObjectInput;
+import java.io.ObjectOutput;
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+
+/**
+ * &lt;p&gt;A roster is a list of users that the user wishes to know if they are online.&lt;/p&gt;
+ * &lt;p&gt;Rosters are similar to buddy groups in popular IM clients. The Roster class is
+ * a representation of the roster data.&lt;/p&gt;
+ *
+ * &lt;p&gt;Updates to this roster is effectively a change to the user's roster. To reflect this,
+ * the changes to this class will automatically update the persistently stored roster, as well as
+ * send out update announcements to all logged in user sessions.&lt;/p&gt;
+ *
+ * @author Gaston Dombiak
+ */
+@JiveID(JiveConstants.ROSTER)
+public class Roster implements Cacheable, Externalizable {
+
+<span class="nc" id="L62">    private static final Logger Log = LoggerFactory.getLogger(Roster.class);</span>
+
+    /**
+     * Roster item cache - table: key jabberid string; value roster item.
+     */
+<span class="nc" id="L67">    protected ConcurrentMap&lt;String, RosterItem&gt; rosterItems = new ConcurrentHashMap&lt;&gt;();</span>
+    /**
+     * Contacts with subscription FROM that only exist due to shared groups
+     * key: jabberid string; value: groups why the implicit roster item exists (aka invisibleSharedGroups).
+     */
+<span class="nc" id="L72">    protected ConcurrentMap&lt;String, Set&lt;String&gt;&gt; implicitFrom = new ConcurrentHashMap&lt;&gt;();</span>
+
+    private String username;
+
+    /**
+     * Constructor added for Externalizable. Do not use this constructor.
+     */
+<span class="nc" id="L79">    public Roster() {</span>
+<span class="nc" id="L80">    }</span>
+
+    /**
+     * Create a roster for the given user, pulling the existing roster items
+     * out of the backend storage provider. The roster will also include items that
+     * belong to the user's shared groups.&lt;p&gt;
+     *
+     * RosterItems that ONLY belong to shared groups won't be persistent unless the user
+     * explicitly subscribes to the contact's presence, renames the contact in his roster or adds
+     * the item to a personal group.&lt;p&gt;
+     *
+     * This constructor is not public and instead you should use
+     * {@link org.jivesoftware.openfire.roster.RosterManager#getRoster(String)}.
+     *
+     * @param username The username of the user that owns this roster
+     */
+<span class="nc" id="L96">    Roster(String username) {</span>
+<span class="nc" id="L97">        final RosterManager rosterManager = XMPPServer.getInstance().getRosterManager();</span>
+
+<span class="nc" id="L99">        this.username = username;</span>
+
+        // Get the shared groups of this user
+<span class="nc" id="L102">        Collection&lt;Group&gt; sharedGroups = rosterManager.getSharedGroups(username);</span>
+        //Collection&lt;Group&gt; userGroups = GroupManager.getInstance().getGroups(getUserJID());
+
+        // Add RosterItems that belong to the personal roster
+<span class="nc" id="L106">        Iterator&lt;RosterItem&gt; items = RosterManager.getRosterItemProvider().getItems(username);</span>
+<span class="nc bnc" id="L107" title="All 2 branches missed.">        while (items.hasNext()) {</span>
+<span class="nc" id="L108">            RosterItem item = items.next();</span>
+            // Check if the item (i.e. contact) belongs to a shared group of the user. Add the
+            // shared group (if any) to this item
+<span class="nc bnc" id="L111" title="All 2 branches missed.">            for (Group group : sharedGroups) {</span>
+<span class="nc bnc" id="L112" title="All 2 branches missed.">                if (group.isUser(item.getJid())) {</span>
+                    // TODO Group name conflicts are not being considered (do we need this?)
+<span class="nc" id="L114">                    item.addSharedGroup(group);</span>
+<span class="nc" id="L115">                    item.setSubStatus(RosterItem.SUB_BOTH);</span>
+                }
+<span class="nc" id="L117">            }</span>
+<span class="nc" id="L118">            rosterItems.put(item.getJid().toBareJID(), item);</span>
+<span class="nc" id="L119">        }</span>
+        // Add RosterItems that belong only to shared groups
+<span class="nc" id="L121">        Map&lt;JID, List&lt;Group&gt;&gt; sharedUsers = getSharedUsers(sharedGroups);</span>
+<span class="nc bnc" id="L122" title="All 2 branches missed.">        for (Map.Entry&lt;JID, List&lt;Group&gt;&gt; entry : sharedUsers.entrySet()) {</span>
+<span class="nc" id="L123">            JID jid = entry.getKey();</span>
+<span class="nc" id="L124">            List&lt;Group&gt; groups = entry.getValue();</span>
+            try {
+<span class="nc" id="L126">                Collection&lt;Group&gt; itemGroups = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L127">                String nickname = &quot;&quot;;</span>
+<span class="nc" id="L128">                RosterItem item = new RosterItem(jid, RosterItem.SUB_TO, RosterItem.ASK_NONE,</span>
+                        RosterItem.RECV_NONE, nickname, null);
+                // Add the shared groups to the new roster item
+<span class="nc bnc" id="L131" title="All 2 branches missed.">                for (Group group : groups) {</span>
+<span class="nc bnc" id="L132" title="All 2 branches missed.">                    if (group.isUser(jid)) {</span>
+<span class="nc" id="L133">                        item.addSharedGroup(group);</span>
+<span class="nc" id="L134">                        itemGroups.add(group);</span>
+                    } else {
+<span class="nc" id="L136">                        item.addInvisibleSharedGroup(group);</span>
+                    }
+<span class="nc" id="L138">                }</span>
+                // Set subscription type to BOTH if the roster user belongs to a shared group
+                // that is mutually visible with a shared group of the new roster item
+<span class="nc bnc" id="L141" title="All 2 branches missed.">                if (rosterManager.hasMutualVisibility(username, sharedGroups, jid, itemGroups)) {</span>
+<span class="nc" id="L142">                    item.setSubStatus(RosterItem.SUB_BOTH);</span>
+                } else {
+                    // Set subscription type to FROM if the contact does not belong to any of
+                    // the associated shared groups
+<span class="nc" id="L146">                    boolean belongsToGroup = false;</span>
+<span class="nc bnc" id="L147" title="All 2 branches missed.">                    for (Group group : groups) {</span>
+<span class="nc bnc" id="L148" title="All 2 branches missed.">                        if (group.isUser(jid)) {</span>
+<span class="nc" id="L149">                            belongsToGroup = true;</span>
+                        }
+<span class="nc" id="L151">                    }</span>
+<span class="nc bnc" id="L152" title="All 2 branches missed.">                    if (!belongsToGroup) {</span>
+<span class="nc" id="L153">                        item.setSubStatus(RosterItem.SUB_FROM);</span>
+                    }
+                }
+                // Set nickname and store in memory only if subscription type is not FROM.
+                // Roster items with subscription type FROM that exist only because of shared
+                // groups will be recreated on demand in #getRosterItem(JID) and #isRosterItem()
+                // but will never be stored in memory nor in the database. This is an important
+                // optimization to reduce objects in memory and avoid loading users in memory
+                // to get their nicknames that will never be shown
+<span class="nc bnc" id="L162" title="All 2 branches missed.">                if (item.getSubStatus() != RosterItem.SUB_FROM) {</span>
+<span class="nc" id="L163">                    item.setNickname(UserNameManager.getUserName(jid));</span>
+<span class="nc" id="L164">                    rosterItems.put(item.getJid().toBareJID(), item);</span>
+                } else {
+                    // Cache information about shared contacts with subscription status FROM
+<span class="nc" id="L167">                    implicitFrom</span>
+<span class="nc" id="L168">                            .put(item.getJid().toBareJID(), item.getInvisibleSharedGroupsNames());</span>
+                }
+<span class="nc" id="L170">            } catch (UserNotFoundException e) {</span>
+<span class="nc" id="L171">                Log.error(&quot;Groups (&quot; + groups + &quot;) include non-existent username (&quot; +</span>
+<span class="nc" id="L172">                        jid.getNode() +</span>
+                        &quot;)&quot;);
+<span class="nc" id="L174">            }</span>
+<span class="nc" id="L175">        }</span>
+        // Fire event indicating that a roster has just been loaded
+<span class="nc" id="L177">        RosterEventDispatcher.rosterLoaded(this);</span>
+<span class="nc" id="L178">    }</span>
+
+    /**
+     * Returns true if the specified user is a member of the roster, false otherwise.
+     *
+     * @param user the user object to check.
+     * @return true if the specified user is a member of the roster, false otherwise.
+     */
+    public boolean isRosterItem(JID user) {
+        // Optimization: Check if the contact has a FROM subscription due to shared groups
+        // (only when not present in the rosterItems collection)
+<span class="nc bnc" id="L189" title="All 4 branches missed.">        return rosterItems.containsKey(user.toBareJID()) || getImplicitRosterItem(user) != null;</span>
+    }
+
+    /**
+     * Returns a collection of users in this roster.&lt;p&gt;
+     *
+     * Note: Roster items with subscription type FROM that exist only because of shared groups
+     * are not going to be returned.
+     *
+     * @return a collection of users in this roster.
+     */
+    public Collection&lt;RosterItem&gt; getRosterItems() {
+<span class="nc" id="L201">        return Collections.unmodifiableCollection(rosterItems.values());</span>
+    }
+
+    /**
+     * Returns the roster item that is associated with the specified JID. If no roster item
+     * was found then a UserNotFoundException will be thrown.
+     *
+     * @param user the XMPPAddress for the roster item to retrieve
+     * @return The roster item associated with the user XMPPAddress.
+     * @throws UserNotFoundException if no roster item was found for the specified JID.
+     */
+    public RosterItem getRosterItem(JID user) throws UserNotFoundException {
+<span class="nc" id="L213">        RosterItem item = rosterItems.get(user.toBareJID());</span>
+<span class="nc bnc" id="L214" title="All 2 branches missed.">        if (item == null) {</span>
+            // Optimization: Check if the contact has a FROM subscription due to shared groups
+<span class="nc" id="L216">            item = getImplicitRosterItem(user);</span>
+<span class="nc bnc" id="L217" title="All 2 branches missed.">            if (item == null) {</span>
+<span class="nc" id="L218">                throw new UserNotFoundException(user.toBareJID());</span>
+            }
+        }
+<span class="nc" id="L221">        return item;</span>
+    }
+
+    /**
+     * Returns a roster item if the specified user has a subscription of type FROM to this
+     * user and the susbcription only exists due to some shared groups or otherwise
+     * {@code null}. This method assumes that this user does not have a subscription to
+     * the contact. In other words, this method will not check if there should be a subscription
+     * of type TO ot BOTH.
+     *
+     * @param user the contact to check if he is subscribed to the presence of this user.
+     * @return a roster item if the specified user has a subscription of type FROM to this
+     *         user and the susbcription only exists due to some shared groups or otherwise null.
+     */
+    private RosterItem getImplicitRosterItem(JID user) {
+<span class="nc" id="L236">        Set&lt;String&gt; invisibleSharedGroups = implicitFrom.get(user.toBareJID());</span>
+<span class="nc bnc" id="L237" title="All 2 branches missed.">        if (invisibleSharedGroups != null) {</span>
+<span class="nc" id="L238">            RosterItem rosterItem = new RosterItem(user, RosterItem.SUB_FROM, RosterItem.ASK_NONE,</span>
+                    RosterItem.RECV_NONE, &quot;&quot;, null);
+<span class="nc" id="L240">            rosterItem.setInvisibleSharedGroupsNames(invisibleSharedGroups);</span>
+<span class="nc" id="L241">            return rosterItem;</span>
+        }
+<span class="nc" id="L243">        return null;</span>
+    }
+
+    /**
+     * Create a new item to the roster. Roster items may not be created that contain the same user
+     * address as an existing item.
+     *
+     * @param user       The item to add to the roster.
+     * @param push       True if the new item must be pushed to the user.
+     * @param persistent True if the new roster item should be persisted to the DB.
+     * @return the roster item
+     * @throws UserAlreadyExistsException if the user is already in the roster
+     * @throws SharedGroupException if the group is a shared group
+     */
+    public RosterItem createRosterItem(JID user, boolean push, boolean persistent)
+            throws UserAlreadyExistsException, SharedGroupException {
+<span class="nc" id="L259">        return createRosterItem(user, null, null, push, persistent);</span>
+    }
+
+    /**
+     * Create a new item to the roster. Roster items may not be created that contain the same user
+     * address as an existing item.
+     *
+     * @param user       The item to add to the roster.
+     * @param nickname   The nickname for the roster entry (can be null).
+     * @param push       True if the new item must be push to the user.
+     * @param persistent True if the new roster item should be persisted to the DB.
+     * @param groups     The list of groups to assign this roster item to (can be null)
+     * @return the roster item
+     * @throws UserAlreadyExistsException if the user is already in the roster
+     * @throws SharedGroupException if the group is a shared group
+     */
+    public RosterItem createRosterItem(JID user, String nickname, List&lt;String&gt; groups, boolean push,
+                                       boolean persistent)
+            throws UserAlreadyExistsException, SharedGroupException {
+<span class="nc" id="L278">        return provideRosterItem(user, nickname, groups, push, persistent);</span>
+    }
+
+    /**
+     * Create a new item to the roster based as a copy of the given item.
+     * Roster items may not be created that contain the same user address
+     * as an existing item in the roster.
+     *
+     * @param item the item to copy and add to the roster.
+     * @throws UserAlreadyExistsException if the user is already in the roster
+     * @throws SharedGroupException if the group is a shared group
+     */
+    public void createRosterItem(org.xmpp.packet.Roster.Item item)
+            throws UserAlreadyExistsException, SharedGroupException {
+<span class="nc" id="L292">        provideRosterItem(item.getJID(), item.getName(), new ArrayList&lt;&gt;(item.getGroups()), true, true);</span>
+<span class="nc" id="L293">    }</span>
+
+    /**
+     * Generate a new RosterItem for use with createRosterItem.
+     *
+     * @param user       The roster jid address to create the roster item for.
+     * @param nickname   The nickname to assign the item (or null for none).
+     * @param groups     The groups the item belongs to (or null for none).
+     * @param push       True if the new item must be push to the user.
+     * @param persistent True if the new roster item should be persisted to the DB.
+     * @return The newly created roster items ready to be stored by the Roster item's hash table
+     * @throws UserAlreadyExistsException if the user is already in the roster
+     * @throws SharedGroupException if the group is a shared group
+     */
+    protected RosterItem provideRosterItem(JID user, String nickname, List&lt;String&gt; groups,
+                                           boolean push, boolean persistent)
+            throws UserAlreadyExistsException, SharedGroupException {
+<span class="nc bnc" id="L310" title="All 4 branches missed.">        if (groups != null &amp;&amp; !groups.isEmpty()) {</span>
+            // Raise an error if the groups the item belongs to include a shared group
+<span class="nc bnc" id="L312" title="All 2 branches missed.">            for (String groupDisplayName : groups) {</span>
+                Collection&lt;Group&gt; groupsWithProp = GroupManager
+<span class="nc" id="L314">                        .getInstance()</span>
+<span class="nc" id="L315">                        .search(&quot;sharedRoster.displayName&quot;, groupDisplayName);</span>
+<span class="nc bnc" id="L316" title="All 2 branches missed.">                for ( Group group : groupsWithProp )</span>
+                {
+<span class="nc" id="L318">                    String showInRoster = group.getProperties().get( &quot;sharedRoster.showInRoster&quot; );</span>
+<span class="nc bnc" id="L319" title="All 4 branches missed.">                    if ( showInRoster != null &amp;&amp; !showInRoster.equals( &quot;nobody&quot; ) )</span>
+                    {
+<span class="nc" id="L321">                        throw new SharedGroupException( &quot;Cannot add an item to a shared group&quot; );</span>
+                    }
+<span class="nc" id="L323">                }</span>
+<span class="nc" id="L324">            }</span>
+        }
+<span class="nc" id="L326">        org.xmpp.packet.Roster roster = new org.xmpp.packet.Roster();</span>
+<span class="nc" id="L327">        roster.setType(IQ.Type.set);</span>
+<span class="nc" id="L328">        org.xmpp.packet.Roster.Item item = roster.addItem(user, nickname, null,</span>
+                org.xmpp.packet.Roster.Subscription.none, groups);
+
+<span class="nc" id="L331">        RosterItem rosterItem = new RosterItem(item);</span>
+        // Fire event indicating that a roster item is about to be added
+<span class="nc" id="L333">        persistent = RosterEventDispatcher.addingContact(this, rosterItem, persistent);</span>
+
+        // Check if we need to make the new roster item persistent
+<span class="nc bnc" id="L336" title="All 2 branches missed.">        if (persistent) {</span>
+<span class="nc" id="L337">            rosterItem = RosterManager.getRosterItemProvider().createItem(username, rosterItem);</span>
+        }
+
+<span class="nc bnc" id="L340" title="All 2 branches missed.">        if (push) {</span>
+            // Broadcast the roster push to the user
+<span class="nc" id="L342">            broadcast(roster);</span>
+        }
+
+<span class="nc" id="L345">        rosterItems.put(user.toBareJID(), rosterItem);</span>
+
+        // Fire event indicating that a roster item has been added
+<span class="nc" id="L348">        RosterEventDispatcher.contactAdded(this, rosterItem);</span>
+
+<span class="nc" id="L350">        return rosterItem;</span>
+    }
+
+    /**
+     * Update an item that is already in the roster.
+     *
+     * @param item the item to update in the roster.
+     * @throws UserNotFoundException If the roster item for the given user doesn't already exist
+     */
+    public void updateRosterItem(RosterItem item) throws UserNotFoundException {
+        // Check if we need to convert an implicit roster item into an explicit one
+<span class="nc bnc" id="L361" title="All 2 branches missed.">        if (implicitFrom.remove(item.getJid().toBareJID()) != null) {</span>
+            // Ensure that the item is an explicit roster item
+<span class="nc" id="L363">            rosterItems.put(item.getJid().toBareJID(), item);</span>
+            // Fire event indicating that a roster item has been updated
+<span class="nc" id="L365">            RosterEventDispatcher.contactUpdated(this, item);</span>
+        }
+<span class="nc bnc" id="L367" title="All 2 branches missed.">        if (rosterItems.putIfAbsent(item.getJid().toBareJID(), item) == null) {</span>
+<span class="nc" id="L368">            rosterItems.remove(item.getJid().toBareJID());</span>
+<span class="nc bnc" id="L369" title="All 2 branches missed.">            if (item.getSubStatus() != RosterItem.SUB_NONE) {</span>
+<span class="nc" id="L370">                throw new UserNotFoundException(item.getJid().toBareJID());</span>
+            }
+<span class="nc" id="L372">            return;</span>
+        }
+        // Check if the item is not persistent
+<span class="nc bnc" id="L375" title="All 2 branches missed.">        if (item.getID() == 0) {</span>
+            // Make the item persistent if a new nickname has been set for a shared contact
+<span class="nc bnc" id="L377" title="All 2 branches missed.">            if (item.isShared()) {</span>
+                // Do nothing if item is only shared and it is using the default user name
+<span class="nc bnc" id="L379" title="All 2 branches missed.">                if (item.isOnlyShared()) {</span>
+                    String defaultContactName;
+                    try {
+<span class="nc" id="L382">                        defaultContactName = UserNameManager.getUserName(item.getJid());</span>
+<span class="nc" id="L383">                    } catch (UserNotFoundException e) {</span>
+                        // Cannot update a roster item for a local user that does not exist
+<span class="nc" id="L385">                        defaultContactName = item.getNickname();</span>
+<span class="nc" id="L386">                    }</span>
+<span class="nc bnc" id="L387" title="All 2 branches missed.">                    if (defaultContactName.equals(item.getNickname())) {</span>
+<span class="nc" id="L388">                        return;</span>
+                    }
+                }
+                try {
+<span class="nc" id="L392">                    RosterManager.getRosterItemProvider().createItem(username, item);</span>
+<span class="nc" id="L393">                } catch (UserAlreadyExistsException e) {</span>
+                    // Do nothing. We shouldn't be here.
+<span class="nc" id="L395">                    Log.warn( &quot;Unexpected error while updating roster item for user '{}'!&quot;, username, e);</span>
+<span class="nc" id="L396">                }</span>
+            } else {
+                // Item is not persistent and it does not belong to a shared contact so do nothing
+            }
+        } else {
+            // Update the backend data store
+<span class="nc" id="L402">            RosterManager.getRosterItemProvider().updateItem(username, item);</span>
+        }
+        // broadcast roster update
+        // Do not push items with a state of &quot;None + Pending In&quot;
+<span class="nc bnc" id="L406" title="All 2 branches missed.">        if (item.getSubStatus() != RosterItem.SUB_NONE ||</span>
+<span class="nc bnc" id="L407" title="All 4 branches missed.">                item.getRecvStatus() != RosterItem.RECV_SUBSCRIBE &amp;&amp; !isSubscriptionRejected(item)) {</span>
+<span class="nc" id="L408">            broadcast(item, true);</span>
+        }
+        /*if (item.getSubStatus() == RosterItem.SUB_BOTH || item.getSubStatus() == RosterItem.SUB_TO) {
+            probePresence(item.getJid());
+        }*/
+        // Fire event indicating that a roster item has been updated
+<span class="nc" id="L414">        RosterEventDispatcher.contactUpdated(this, item);</span>
+<span class="nc" id="L415">    }</span>
+
+    /**
+     * Returns true if roster item represents a rejected subscription request.
+     *
+     * @param item The roster item.
+     * @return True, if the roster item represents a rejected subscription request.
+     */
+    private static boolean isSubscriptionRejected(RosterItem item) {
+<span class="nc bnc" id="L424" title="All 2 branches missed.">        return item.getSubStatus() == RosterItem.SUB_NONE &amp;&amp;</span>
+<span class="nc bnc" id="L425" title="All 2 branches missed.">                item.getRecvStatus() == RosterItem.RECV_NONE &amp;&amp;</span>
+<span class="nc bnc" id="L426" title="All 2 branches missed.">                item.getAskStatus() == RosterItem.AskType.NONE;</span>
+    }
+
+    /**
+     * Remove a user from the roster.
+     *
+     * @param user       the user to remove from the roster.
+     * @param doChecking flag that indicates if checkings should be done before deleting the user.
+     * @return The roster item being removed or null if none existed
+     * @throws SharedGroupException if the user to remove belongs to a shared group
+     */
+    public RosterItem deleteRosterItem(JID user, boolean doChecking) throws SharedGroupException {
+        // Answer an error if user (i.e. contact) to delete belongs to a shared group
+<span class="nc" id="L439">        RosterItem itemToRemove = rosterItems.get(user.toBareJID());</span>
+<span class="nc bnc" id="L440" title="All 6 branches missed.">        if (doChecking &amp;&amp; itemToRemove != null &amp;&amp; !itemToRemove.getSharedGroups().isEmpty()) {</span>
+<span class="nc" id="L441">            throw new SharedGroupException(&quot;Cannot remove contact that belongs to a shared group&quot;);</span>
+        }
+
+<span class="nc bnc" id="L444" title="All 2 branches missed.">        if (itemToRemove != null) {</span>
+<span class="nc" id="L445">            RosterItem.SubType subType = itemToRemove.getSubStatus();</span>
+
+            // Cancel any existing presence subscription between the user and the contact
+<span class="nc bnc" id="L448" title="All 4 branches missed.">            if (subType == RosterItem.SUB_TO || subType == RosterItem.SUB_BOTH) {</span>
+<span class="nc" id="L449">                Presence presence = new Presence();</span>
+<span class="nc" id="L450">                presence.setFrom(XMPPServer.getInstance().createJID(username, null));</span>
+<span class="nc" id="L451">                presence.setTo(itemToRemove.getJid());</span>
+<span class="nc" id="L452">                presence.setType(Presence.Type.unsubscribe);</span>
+<span class="nc" id="L453">                XMPPServer.getInstance().getPacketRouter().route(presence);</span>
+            }
+
+            // cancel any existing presence subscription between the contact and the user
+<span class="nc bnc" id="L457" title="All 4 branches missed.">            if (subType == RosterItem.SUB_FROM || subType == RosterItem.SUB_BOTH) {</span>
+<span class="nc" id="L458">                Presence presence = new Presence();</span>
+<span class="nc" id="L459">                presence.setFrom(XMPPServer.getInstance().createJID(username, null));</span>
+<span class="nc" id="L460">                presence.setTo(itemToRemove.getJid());</span>
+<span class="nc" id="L461">                presence.setType(Presence.Type.unsubscribed);</span>
+<span class="nc" id="L462">                XMPPServer.getInstance().getPacketRouter().route(presence);</span>
+            }
+
+            // If removing the user was successful, remove the user from the subscriber list:
+<span class="nc" id="L466">            RosterItem item = rosterItems.remove(user.toBareJID());</span>
+
+<span class="nc bnc" id="L468" title="All 2 branches missed.">            if (item != null) {</span>
+                // Delete the item from the provider if the item is persistent. RosteItems that only
+                // belong to shared groups won't be persistent
+<span class="nc bnc" id="L471" title="All 2 branches missed.">                if (item.getID() &gt; 0) {</span>
+                    // If removing the user was successful, remove the user from the backend store
+<span class="nc" id="L473">                    RosterManager.getRosterItemProvider().deleteItem(username, item.getID());</span>
+                }
+
+                // Broadcast the update to the user
+<span class="nc" id="L477">                org.xmpp.packet.Roster roster = new org.xmpp.packet.Roster();</span>
+<span class="nc" id="L478">                roster.setType(IQ.Type.set);</span>
+<span class="nc" id="L479">                roster.addItem(user, org.xmpp.packet.Roster.Subscription.remove);</span>
+<span class="nc" id="L480">                broadcast(roster);</span>
+                // Fire event indicating that a roster item has been deleted
+<span class="nc" id="L482">                RosterEventDispatcher.contactDeleted(this, item);</span>
+            }
+
+<span class="nc" id="L485">            return item;</span>
+        } else {
+            // Verify if the item being removed is an implicit roster item
+            // that only exists due to some shared group
+<span class="nc" id="L489">            RosterItem item = getImplicitRosterItem(user);</span>
+<span class="nc bnc" id="L490" title="All 2 branches missed.">            if (item != null) {</span>
+<span class="nc" id="L491">                implicitFrom.remove(user.toBareJID());</span>
+                // If the contact being removed is not a local user then ACK unsubscription
+<span class="nc bnc" id="L493" title="All 2 branches missed.">                if (!XMPPServer.getInstance().isLocal(user)) {</span>
+<span class="nc" id="L494">                    Presence presence = new Presence();</span>
+<span class="nc" id="L495">                    presence.setFrom(XMPPServer.getInstance().createJID(username, null));</span>
+<span class="nc" id="L496">                    presence.setTo(user);</span>
+<span class="nc" id="L497">                    presence.setType(Presence.Type.unsubscribed);</span>
+<span class="nc" id="L498">                    XMPPServer.getInstance().getPacketRouter().route(presence);</span>
+                }
+                // Fire event indicating that a roster item has been deleted
+<span class="nc" id="L501">                RosterEventDispatcher.contactDeleted(this, item);</span>
+            }
+        }
+
+<span class="nc" id="L505">        return null;</span>
+    }
+
+    /**
+     * &lt;p&gt;Return the username of the user or chatbot that owns this roster.&lt;/p&gt;
+     *
+     * @return the username of the user or chatbot that owns this roster
+     */
+    public String getUsername() {
+<span class="nc" id="L514">        return username;</span>
+    }
+
+    /**
+     * &lt;p&gt;Obtain a 'roster reset', a snapshot of the full cached roster as an Roster.&lt;/p&gt;
+     *
+     * @return The roster reset (snapshot) as an Roster
+     */
+    public org.xmpp.packet.Roster getReset() {
+<span class="nc" id="L523">        org.xmpp.packet.Roster roster = new org.xmpp.packet.Roster();</span>
+
+        // Add the roster items (includes the personal roster and shared groups) to the answer
+<span class="nc bnc" id="L526" title="All 2 branches missed.">        for (RosterItem item : rosterItems.values()) {</span>
+            // Do not include items with status FROM that exist only because of shared groups
+<span class="nc bnc" id="L528" title="All 4 branches missed.">            if (item.isOnlyShared() &amp;&amp; item.getSubStatus() == RosterItem.SUB_FROM) {</span>
+<span class="nc" id="L529">                continue;</span>
+            }
+<span class="nc" id="L531">            org.xmpp.packet.Roster.Ask ask = getAskStatus(item.getAskStatus());</span>
+<span class="nc" id="L532">            org.xmpp.packet.Roster.Subscription sub = org.xmpp.packet.Roster.Subscription.valueOf(item.getSubStatus()</span>
+<span class="nc" id="L533">                    .getName());</span>
+            // Set the groups to broadcast (include personal and shared groups)
+<span class="nc" id="L535">            List&lt;String&gt; groups = new ArrayList&lt;&gt;(item.getGroups());</span>
+<span class="nc bnc" id="L536" title="All 2 branches missed.">            if (groups.contains(null)) {</span>
+<span class="nc" id="L537">                Log.warn(&quot;A group is null in roster item: &quot; + item.getJid() + &quot; of user: &quot; +</span>
+<span class="nc" id="L538">                        getUsername());</span>
+            }
+<span class="nc bnc" id="L540" title="All 2 branches missed.">            for (Group sharedGroup : item.getSharedGroups()) {</span>
+<span class="nc" id="L541">                String displayName = sharedGroup.getProperties().get(&quot;sharedRoster.displayName&quot;);</span>
+<span class="nc bnc" id="L542" title="All 2 branches missed.">                if (displayName != null) {</span>
+<span class="nc" id="L543">                    groups.add(displayName);</span>
+                } else {
+                    // Do not add the shared group if it does not have a displayName. 
+<span class="nc" id="L546">                    Log.warn(&quot;Found shared group: &quot; + sharedGroup.getName() +</span>
+                            &quot; with no displayName&quot;);
+                }
+<span class="nc" id="L549">            }</span>
+            // Do not push items with a state of &quot;None + Pending In&quot;
+<span class="nc bnc" id="L551" title="All 2 branches missed.">            if (item.getSubStatus() != RosterItem.SUB_NONE ||</span>
+<span class="nc bnc" id="L552" title="All 4 branches missed.">                    item.getRecvStatus() != RosterItem.RECV_SUBSCRIBE &amp;&amp; !isSubscriptionRejected(item)) {</span>
+<span class="nc" id="L553">                roster.addItem(item.getJid(), item.getNickname(), ask, sub, groups);</span>
+            }
+<span class="nc" id="L555">        }</span>
+<span class="nc" id="L556">        return roster;</span>
+    }
+
+    private org.xmpp.packet.Roster.Ask getAskStatus(RosterItem.AskType askType) {
+<span class="nc bnc" id="L560" title="All 4 branches missed.">        if (askType == null || askType == RosterItem.AskType.NONE) {</span>
+<span class="nc" id="L561">            return null;</span>
+        }
+<span class="nc" id="L563">        return org.xmpp.packet.Roster.Ask.valueOf(askType.name().toLowerCase());</span>
+    }
+
+    /**
+     * &lt;p&gt;Broadcast the presence update to all subscribers of the roster.&lt;/p&gt;
+     * &lt;p&gt;Any presence change typically results in a broadcast to the roster members.&lt;/p&gt;
+     *
+     * @param packet The presence packet to broadcast
+     */
+    public void broadcastPresence(Presence packet) {
+<span class="nc" id="L573">        final RoutingTable routingTable = XMPPServer.getInstance().getRoutingTable();</span>
+
+<span class="nc bnc" id="L575" title="All 2 branches missed.">        if (routingTable == null) {</span>
+<span class="nc" id="L576">            return;</span>
+        }
+        // Get the privacy list of this user
+<span class="nc" id="L579">        PrivacyList list = null;</span>
+<span class="nc" id="L580">        JID from = packet.getFrom();</span>
+<span class="nc bnc" id="L581" title="All 2 branches missed.">        if (from != null) {</span>
+            // Try to use the active list of the session. If none was found then try to use
+            // the default privacy list of the session
+<span class="nc" id="L584">            ClientSession session = SessionManager.getInstance().getSession(from);</span>
+<span class="nc bnc" id="L585" title="All 2 branches missed.">            if (session != null) {</span>
+<span class="nc" id="L586">                list = session.getActiveList();</span>
+<span class="nc bnc" id="L587" title="All 2 branches missed.">                list = list == null ? session.getDefaultList() : list;</span>
+            }
+        }
+<span class="nc bnc" id="L590" title="All 2 branches missed.">        if (list == null) {</span>
+            // No privacy list was found (based on the session) so check if there is a default list
+<span class="nc" id="L592">            list = PrivacyListManager.getInstance().getDefaultPrivacyList(username);</span>
+        }
+        // Broadcast presence to subscribed entities
+<span class="nc bnc" id="L595" title="All 2 branches missed.">        for (RosterItem item : rosterItems.values()) {</span>
+<span class="nc bnc" id="L596" title="All 4 branches missed.">            if (item.getSubStatus() == RosterItem.SUB_BOTH || item.getSubStatus() == RosterItem.SUB_FROM) {</span>
+<span class="nc" id="L597">                packet.setTo(item.getJid());</span>
+<span class="nc bnc" id="L598" title="All 4 branches missed.">                if (list != null &amp;&amp; list.shouldBlockPacket(packet)) {</span>
+                    // Outgoing presence notifications are blocked for this contact
+<span class="nc" id="L600">                    continue;</span>
+                }
+<span class="nc" id="L602">                JID searchNode = new JID(item.getJid().getNode(), item.getJid().getDomain(), null, true);</span>
+<span class="nc bnc" id="L603" title="All 2 branches missed.">                for (JID jid : routingTable.getRoutes(searchNode, null)) {</span>
+                    try {
+<span class="nc" id="L605">                        routingTable.routePacket(jid, packet, false);</span>
+<span class="nc" id="L606">                    } catch (Exception e) {</span>
+                        // Theoretically only happens if session has been closed.
+<span class="nc" id="L608">                        Log.debug(e.getMessage(), e);</span>
+<span class="nc" id="L609">                    }</span>
+<span class="nc" id="L610">                }</span>
+            }
+<span class="nc" id="L612">        }</span>
+        // Broadcast presence to shared contacts whose subscription status is FROM
+<span class="nc bnc" id="L614" title="All 2 branches missed.">        for (String contact : implicitFrom.keySet()) {</span>
+<span class="nc bnc" id="L615" title="All 2 branches missed.">            if (contact.contains(&quot;@&quot;)) {</span>
+<span class="nc" id="L616">                String node = contact.substring(0, contact.lastIndexOf(&quot;@&quot;));</span>
+<span class="nc" id="L617">                String domain = contact.substring(contact.lastIndexOf(&quot;@&quot;) + 1);</span>
+<span class="nc" id="L618">                node = JID.escapeNode(node);</span>
+<span class="nc" id="L619">                contact = new JID(node, domain, null).toBareJID();</span>
+            }
+
+<span class="nc" id="L622">            packet.setTo(contact);</span>
+<span class="nc bnc" id="L623" title="All 4 branches missed.">            if (list != null &amp;&amp; list.shouldBlockPacket(packet)) {</span>
+                // Outgoing presence notifications are blocked for this contact
+<span class="nc" id="L625">                continue;</span>
+            }
+<span class="nc bnc" id="L627" title="All 2 branches missed.">            for (JID jid : routingTable.getRoutes(new JID(contact), null)) {</span>
+                try {
+<span class="nc" id="L629">                    routingTable.routePacket(jid, packet, false);</span>
+<span class="nc" id="L630">                } catch (Exception e) {</span>
+                    // Theoretically only happens if session has been closed.
+<span class="nc" id="L632">                    Log.debug(e.getMessage(), e);</span>
+<span class="nc" id="L633">                }</span>
+<span class="nc" id="L634">            }</span>
+<span class="nc" id="L635">        }</span>
+<span class="nc bnc" id="L636" title="All 2 branches missed.">        if (from != null) {</span>
+            // Broadcast presence to all resources of the user.
+<span class="nc" id="L638">            SessionManager.getInstance().broadcastPresenceToResources( from, packet);</span>
+        }
+<span class="nc" id="L640">    }</span>
+
+    /**
+     * Returns the list of users that belong ONLY to a shared group of this user. If the contact
+     * belongs to the personal roster and a shared group then it wont' be included in the answer.
+     *
+     * @param sharedGroups the shared groups of this user.
+     * @return the list of users that belong ONLY to a shared group of this user.
+     */
+    private Map&lt;JID, List&lt;Group&gt;&gt; getSharedUsers(Collection&lt;Group&gt; sharedGroups) {
+<span class="nc" id="L650">        final RosterManager rosterManager = XMPPServer.getInstance().getRosterManager();</span>
+        // Get the users to process from the shared groups. Users that belong to different groups
+        // will have one entry in the map associated with all the groups
+<span class="nc" id="L653">        Map&lt;JID, List&lt;Group&gt;&gt; sharedGroupUsers = new HashMap&lt;&gt;();</span>
+<span class="nc bnc" id="L654" title="All 2 branches missed.">        for (Group group : sharedGroups) {</span>
+            // Get all the users that should be in this roster
+<span class="nc" id="L656">            Collection&lt;JID&gt; users = rosterManager.getSharedUsersForRoster(group, this);</span>
+            // Add the users of the group to the general list of users to process
+<span class="nc" id="L658">            JID userJID = getUserJID();</span>
+<span class="nc bnc" id="L659" title="All 2 branches missed.">            for (JID jid : users) {</span>
+                // Add the user to the answer if the user doesn't belong to the personal roster
+                // (since we have already added the user to the answer)
+<span class="nc" id="L662">                boolean isRosterItem = rosterItems.containsKey(jid.toBareJID());</span>
+<span class="nc bnc" id="L663" title="All 4 branches missed.">                if (!isRosterItem &amp;&amp; !userJID.equals(jid)) {</span>
+<span class="nc" id="L664">                    List&lt;Group&gt; groups = sharedGroupUsers.get(jid);</span>
+<span class="nc bnc" id="L665" title="All 2 branches missed.">                    if (groups == null) {</span>
+<span class="nc" id="L666">                        groups = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L667">                        sharedGroupUsers.put(jid, groups);</span>
+                    }
+<span class="nc" id="L669">                    groups.add(group);</span>
+                }
+<span class="nc" id="L671">            }</span>
+<span class="nc" id="L672">        }</span>
+<span class="nc" id="L673">        return sharedGroupUsers;</span>
+    }
+
+    private void broadcast(org.xmpp.packet.Roster roster) {
+<span class="nc" id="L677">        JID recipient = XMPPServer.getInstance().createJID(username, null, true);</span>
+<span class="nc" id="L678">        roster.setTo(recipient);</span>
+
+        // When roster versioning is enabled, the server MUST include 
+        // the updated roster version with each roster push.
+<span class="nc bnc" id="L682" title="All 2 branches missed.">        if (RosterManager.isRosterVersioningEnabled()) {</span>
+<span class="nc" id="L683">            roster.getChildElement().addAttribute(&quot;ver&quot;, String.valueOf( roster.hashCode() ) );</span>
+        }
+<span class="nc" id="L685">        SessionManager.getInstance().userBroadcast(username, roster);</span>
+<span class="nc" id="L686">    }</span>
+
+    /**
+     * Broadcasts the RosterItem to all the connected resources of this user. Due to performance
+     * optimizations and due to some clients errors that are showing items with subscription status
+     * FROM we added a flag that indicates if a roster items that exists only because of a shared
+     * group with subscription status FROM will not be sent.
+     *
+     * @param item     the item to broadcast.
+     * @param optimize true indicates that items that exists only because of a shared
+     *                 group with subscription status FROM will not be sent
+     */
+    public void broadcast(RosterItem item, boolean optimize) {
+        // Do not broadcast items with status FROM that exist only because of shared groups
+<span class="nc bnc" id="L700" title="All 6 branches missed.">        if (optimize &amp;&amp; item.isOnlyShared() &amp;&amp; item.getSubStatus() == RosterItem.SUB_FROM) {</span>
+<span class="nc" id="L701">            return;</span>
+        }
+        // Set the groups to broadcast (include personal and shared groups)
+<span class="nc" id="L704">        List&lt;String&gt; groups = new ArrayList&lt;&gt;(item.getGroups());</span>
+<span class="nc bnc" id="L705" title="All 2 branches missed.">        for (Group sharedGroup : item.getSharedGroups()) {</span>
+<span class="nc" id="L706">            String displayName = sharedGroup.getProperties().get(&quot;sharedRoster.displayName&quot;);</span>
+<span class="nc bnc" id="L707" title="All 2 branches missed.">            if (displayName != null) {</span>
+<span class="nc" id="L708">                groups.add(displayName);</span>
+            }
+<span class="nc" id="L710">        }</span>
+
+<span class="nc" id="L712">        org.xmpp.packet.Roster roster = new org.xmpp.packet.Roster();</span>
+<span class="nc" id="L713">        roster.setType(IQ.Type.set);</span>
+<span class="nc" id="L714">        roster.addItem(item.getJid(), item.getNickname(),</span>
+<span class="nc" id="L715">                getAskStatus(item.getAskStatus()),</span>
+<span class="nc" id="L716">                org.xmpp.packet.Roster.Subscription.valueOf(item.getSubStatus().getName()),</span>
+                groups);
+<span class="nc" id="L718">        broadcast(roster);</span>
+<span class="nc" id="L719">    }</span>
+
+    /**
+     * Sends a presence probe to the probee for each connected resource of this user.
+     */
+    private void probePresence(JID probee) {
+<span class="nc" id="L725">        final PresenceManager presenceManager = XMPPServer.getInstance().getPresenceManager();</span>
+<span class="nc bnc" id="L726" title="All 2 branches missed.">        for (ClientSession session : SessionManager.getInstance().getSessions(username)) {</span>
+<span class="nc" id="L727">            presenceManager.probePresence(session.getAddress(), probee);</span>
+<span class="nc" id="L728">        }</span>
+<span class="nc" id="L729">    }</span>
+
+    @Override
+    public int getCachedSize() throws CannotCalculateSizeException {
+        // Approximate the size of the object in bytes by calculating the size
+        // of the content of each field, if that content is likely to be eligable for
+        // garbage collection if the Roster instance is dereferenced.
+<span class="nc" id="L736">        int size = 0;</span>
+<span class="nc" id="L737">        size += CacheSizes.sizeOfObject();                           // overhead of object</span>
+<span class="nc" id="L738">        size += CacheSizes.sizeOfCollection(rosterItems.values());   // roster item cache</span>
+<span class="nc" id="L739">        size += CacheSizes.sizeOfString(username);                   // username</span>
+
+        // implicitFrom
+<span class="nc bnc" id="L742" title="All 2 branches missed.">        for (Map.Entry&lt;String, Set&lt;String&gt;&gt; entry : implicitFrom.entrySet()) {</span>
+<span class="nc" id="L743">            size += CacheSizes.sizeOfString(entry.getKey());</span>
+<span class="nc" id="L744">            size += CacheSizes.sizeOfCollection(entry.getValue());</span>
+<span class="nc" id="L745">        }</span>
+
+<span class="nc" id="L747">        return size;</span>
+    }
+
+    /**
+     * Update the roster since a group user has been added to a shared group. Create a new
+     * RosterItem if the there doesn't exist an item for the added user. The new RosterItem won't be
+     * saved to the backend store unless the user explicitly subscribes to the contact's presence,
+     * renames the contact in his roster or adds the item to a personal group. Otherwise the shared
+     * group will be added to the shared groups lists. In any case an update broadcast will be sent
+     * to all the users logged resources.
+     *
+     * @param group     the shared group where the user was added.
+     * @param addedUser the contact to update in the roster.
+     */
+    void addSharedUser(Group group, JID addedUser) {
+        boolean newItem;
+        RosterItem item;
+        try {
+            // Get the RosterItem for the *local* user to add
+<span class="nc" id="L766">            item = getRosterItem(addedUser);</span>
+            // Do nothing if the item already includes the shared group
+<span class="nc bnc" id="L768" title="All 2 branches missed.">            if (item.getSharedGroups().contains(group)) {</span>
+<span class="nc" id="L769">                return;</span>
+            }
+<span class="nc" id="L771">            newItem = false;</span>
+<span class="nc" id="L772">        } catch (UserNotFoundException e) {</span>
+            try {
+                // Create a new RosterItem for this new user
+<span class="nc" id="L775">                String nickname = UserNameManager.getUserName(addedUser);</span>
+<span class="nc" id="L776">                item =</span>
+                        new RosterItem(addedUser, RosterItem.SUB_BOTH, RosterItem.ASK_NONE,
+                                RosterItem.RECV_NONE, nickname, null);
+                // Add the new item to the list of items
+<span class="nc" id="L780">                rosterItems.put(item.getJid().toBareJID(), item);</span>
+<span class="nc" id="L781">                newItem = true;</span>
+<span class="nc" id="L782">            } catch (UserNotFoundException ex) {</span>
+<span class="nc" id="L783">                Log.error(&quot;Group (&quot; + group.getName() + &quot;) includes non-existent username (&quot; +</span>
+                        addedUser +
+                        &quot;)&quot;);
+<span class="nc" id="L786">                return;</span>
+<span class="nc" id="L787">            }</span>
+<span class="nc" id="L788">        }</span>
+
+        // If an item already exists then take note of the old subscription status
+<span class="nc" id="L791">        RosterItem.SubType prevSubscription = null;</span>
+<span class="nc bnc" id="L792" title="All 2 branches missed.">        if (!newItem) {</span>
+<span class="nc" id="L793">            prevSubscription = item.getSubStatus();</span>
+        }
+
+        // Update the subscription of the item **based on the item groups**
+<span class="nc" id="L797">        Collection&lt;Group&gt; userGroups = GroupManager.getInstance().getGroups(getUserJID());</span>
+<span class="nc" id="L798">        Collection&lt;Group&gt; sharedGroups = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L799">        sharedGroups.addAll(item.getSharedGroups());</span>
+        // Add the new group to the list of groups to check
+<span class="nc" id="L801">        sharedGroups.add(group);</span>
+        // Set subscription type to BOTH if the roster user belongs to a shared group
+        // that is mutually visible with a shared group of the new roster item
+<span class="nc" id="L804">        final RosterManager rosterManager = XMPPServer.getInstance().getRosterManager();</span>
+<span class="nc bnc" id="L805" title="All 2 branches missed.">        if (rosterManager.hasMutualVisibility(getUsername(), userGroups, addedUser, sharedGroups)) {</span>
+<span class="nc" id="L806">            item.setSubStatus(RosterItem.SUB_BOTH);</span>
+        }
+        // Update the subscription status depending on the group membership of the new
+        // user and this user
+<span class="nc bnc" id="L810" title="All 4 branches missed.">        else if (group.isUser(addedUser) &amp;&amp; !group.isUser(getUsername())) {</span>
+<span class="nc" id="L811">            item.setSubStatus(RosterItem.SUB_TO);</span>
+<span class="nc bnc" id="L812" title="All 4 branches missed.">        } else if (!group.isUser(addedUser) &amp;&amp; group.isUser(getUsername())) {</span>
+<span class="nc" id="L813">            item.setSubStatus(RosterItem.SUB_FROM);</span>
+        }
+
+        // Add the shared group to the list of shared groups
+<span class="nc bnc" id="L817" title="All 2 branches missed.">        if (item.getSubStatus() != RosterItem.SUB_FROM) {</span>
+<span class="nc" id="L818">            item.addSharedGroup(group);</span>
+        } else {
+<span class="nc" id="L820">            item.addInvisibleSharedGroup(group);</span>
+        }
+
+        // If the item already exists then check if the subscription status should be
+        // changed to BOTH based on the old and new subscription status
+<span class="nc bnc" id="L825" title="All 2 branches missed.">        if (prevSubscription != null) {</span>
+<span class="nc bnc" id="L826" title="All 2 branches missed.">            if (prevSubscription == RosterItem.SUB_TO &amp;&amp;</span>
+<span class="nc bnc" id="L827" title="All 2 branches missed.">                    item.getSubStatus() == RosterItem.SUB_FROM) {</span>
+<span class="nc" id="L828">                item.setSubStatus(RosterItem.SUB_BOTH);</span>
+<span class="nc bnc" id="L829" title="All 2 branches missed.">            } else if (prevSubscription == RosterItem.SUB_FROM &amp;&amp;</span>
+<span class="nc bnc" id="L830" title="All 2 branches missed.">                    item.getSubStatus() == RosterItem.SUB_TO) {</span>
+<span class="nc" id="L831">                item.setSubStatus(RosterItem.SUB_BOTH);</span>
+            }
+        }
+
+        // Optimization: Check if we do not need to keep the item in memory
+<span class="nc bnc" id="L836" title="All 4 branches missed.">        if (item.isOnlyShared() &amp;&amp; item.getSubStatus() == RosterItem.SUB_FROM) {</span>
+            // Remove from memory and do nothing else
+<span class="nc" id="L838">            rosterItems.remove(item.getJid().toBareJID());</span>
+            // Cache information about shared contacts with subscription status FROM
+<span class="nc" id="L840">            implicitFrom.put(item.getJid().toBareJID(), item.getInvisibleSharedGroupsNames());</span>
+        } else {
+            // Remove from list of shared contacts with status FROM (if any)
+<span class="nc" id="L843">            implicitFrom.remove(item.getJid().toBareJID());</span>
+            // Ensure that the item is an explicit roster item
+<span class="nc" id="L845">            rosterItems.put(item.getJid().toBareJID(), item);</span>
+            // Brodcast to all the user resources of the updated roster item
+<span class="nc" id="L847">            broadcast(item, true);</span>
+            // Probe the presence of the new group user
+<span class="nc bnc" id="L849" title="All 2 branches missed.">            if (item.getSubStatus() == RosterItem.SUB_BOTH ||</span>
+<span class="nc bnc" id="L850" title="All 2 branches missed.">                    item.getSubStatus() == RosterItem.SUB_TO) {</span>
+<span class="nc" id="L851">                probePresence(item.getJid());</span>
+            }
+        }
+<span class="nc bnc" id="L854" title="All 2 branches missed.">        if (newItem) {</span>
+            // Fire event indicating that a roster item has been added
+<span class="nc" id="L856">            RosterEventDispatcher.contactAdded(this, item);</span>
+        } else {
+            // Fire event indicating that a roster item has been updated
+<span class="nc" id="L859">            RosterEventDispatcher.contactUpdated(this, item);</span>
+        }
+<span class="nc" id="L861">    }</span>
+
+    /**
+     * Adds a new contact that belongs to a certain list of groups to the roster. Depending on
+     * the contact's groups and this user's groups, the presence subscription of the roster item may
+     * vary.
+     *
+     * @param addedUser the new contact to add to the roster
+     * @param groups    the groups where the contact is a member
+     */
+    void addSharedUser(JID addedUser, Collection&lt;Group&gt; groups, Group addedGroup) {
+        boolean newItem;
+        RosterItem item;
+        try {
+            // Get the RosterItem for the *local* user to add
+<span class="nc" id="L876">            item = getRosterItem(addedUser);</span>
+<span class="nc" id="L877">            newItem = false;</span>
+<span class="nc" id="L878">        } catch (UserNotFoundException e) {</span>
+            try {
+                // Create a new RosterItem for this new user
+<span class="nc" id="L881">                String nickname = UserNameManager.getUserName(addedUser);</span>
+<span class="nc" id="L882">                item =</span>
+                        new RosterItem(addedUser, RosterItem.SUB_BOTH, RosterItem.ASK_NONE,
+                                RosterItem.RECV_NONE, nickname, null);
+                // Add the new item to the list of items
+<span class="nc" id="L886">                rosterItems.put(item.getJid().toBareJID(), item);</span>
+<span class="nc" id="L887">                newItem = true;</span>
+<span class="nc" id="L888">            } catch (UserNotFoundException ex) {</span>
+<span class="nc" id="L889">                Log.error(&quot;Couldn't find a user with username (&quot; + addedUser + &quot;)&quot;);</span>
+<span class="nc" id="L890">                return;</span>
+<span class="nc" id="L891">            }</span>
+<span class="nc" id="L892">        }</span>
+        // Update the subscription of the item **based on the item groups**
+<span class="nc" id="L894">        Collection&lt;Group&gt; userGroups = GroupManager.getInstance().getGroups(getUserJID());</span>
+        // Set subscription type to BOTH if the roster user belongs to a shared group
+        // that is mutually visible with a shared group of the new roster item
+<span class="nc" id="L897">        final RosterManager rosterManager = XMPPServer.getInstance().getRosterManager();</span>
+<span class="nc bnc" id="L898" title="All 2 branches missed.">        if (rosterManager.hasMutualVisibility(getUsername(), userGroups, addedUser, groups)) {</span>
+<span class="nc" id="L899">            item.setSubStatus(RosterItem.SUB_BOTH);</span>
+<span class="nc bnc" id="L900" title="All 2 branches missed.">            for (Group group : groups) {</span>
+<span class="nc bnc" id="L901" title="All 2 branches missed.">                if (rosterManager.isGroupVisible(group, getUserJID())) {</span>
+                    // Add the shared group to the list of shared groups
+<span class="nc" id="L903">                    item.addSharedGroup(group);</span>
+                }
+<span class="nc" id="L905">            }</span>
+            // Add to the item the groups of this user that generated a FROM subscription
+            // Note: This FROM subscription is overridden by the BOTH subscription but in
+            // fact there is a TO-FROM relation between these two users that ends up in a
+            // BOTH subscription
+<span class="nc bnc" id="L910" title="All 2 branches missed.">            for (Group group : userGroups) {</span>
+<span class="nc bnc" id="L911" title="All 4 branches missed.">                if (!group.isUser(addedUser) &amp;&amp; rosterManager.isGroupVisible(group, addedUser)) {</span>
+                    // Add the shared group to the list of invisible shared groups
+<span class="nc" id="L913">                    item.addInvisibleSharedGroup(group);</span>
+                }
+<span class="nc" id="L915">            }</span>
+        } else {
+            // If an item already exists then take note of the old subscription status
+<span class="nc" id="L918">            RosterItem.SubType prevSubscription = null;</span>
+<span class="nc bnc" id="L919" title="All 2 branches missed.">            if (!newItem) {</span>
+<span class="nc" id="L920">                prevSubscription = item.getSubStatus();</span>
+            }
+
+            // Assume by default that the contact has subscribed from the presence of
+            // this user
+<span class="nc" id="L925">            item.setSubStatus(RosterItem.SUB_FROM);</span>
+            // Check if the user may see the new contact in a shared group
+<span class="nc bnc" id="L927" title="All 2 branches missed.">            for (Group group : groups) {</span>
+<span class="nc bnc" id="L928" title="All 2 branches missed.">                if (rosterManager.isGroupVisible(group, getUserJID())) {</span>
+                    // Add the shared group to the list of shared groups
+<span class="nc" id="L930">                    item.addSharedGroup(group);</span>
+<span class="nc" id="L931">                    item.setSubStatus(RosterItem.SUB_TO);</span>
+                }
+<span class="nc" id="L933">            }</span>
+<span class="nc bnc" id="L934" title="All 2 branches missed.">            if (item.getSubStatus() == RosterItem.SUB_FROM) {</span>
+<span class="nc" id="L935">                item.addInvisibleSharedGroup(addedGroup);</span>
+            }
+
+            // If the item already exists then check if the subscription status should be
+            // changed to BOTH based on the old and new subscription status
+<span class="nc bnc" id="L940" title="All 2 branches missed.">            if (prevSubscription != null) {</span>
+<span class="nc bnc" id="L941" title="All 2 branches missed.">                if (prevSubscription == RosterItem.SUB_TO &amp;&amp;</span>
+<span class="nc bnc" id="L942" title="All 2 branches missed.">                        item.getSubStatus() == RosterItem.SUB_FROM) {</span>
+<span class="nc" id="L943">                    item.setSubStatus(RosterItem.SUB_BOTH);</span>
+<span class="nc bnc" id="L944" title="All 2 branches missed.">                } else if (prevSubscription == RosterItem.SUB_FROM &amp;&amp;</span>
+<span class="nc bnc" id="L945" title="All 2 branches missed.">                        item.getSubStatus() == RosterItem.SUB_TO) {</span>
+<span class="nc" id="L946">                    item.setSubStatus(RosterItem.SUB_BOTH);</span>
+                }
+            }
+        }
+        // Optimization: Check if we do not need to keep the item in memory
+<span class="nc bnc" id="L951" title="All 4 branches missed.">        if (item.isOnlyShared() &amp;&amp; item.getSubStatus() == RosterItem.SUB_FROM) {</span>
+            // Remove from memory and do nothing else
+<span class="nc" id="L953">            rosterItems.remove(item.getJid().toBareJID());</span>
+            // Cache information about shared contacts with subscription status FROM
+<span class="nc" id="L955">            implicitFrom.put(item.getJid().toBareJID(), item.getInvisibleSharedGroupsNames());</span>
+        } else {
+            // Remove from list of shared contacts with status FROM (if any)
+<span class="nc" id="L958">            implicitFrom.remove(item.getJid().toBareJID());</span>
+            // Ensure that the item is an explicit roster item
+<span class="nc" id="L960">            rosterItems.put(item.getJid().toBareJID(), item);</span>
+            // Brodcast to all the user resources of the updated roster item
+<span class="nc" id="L962">            broadcast(item, true);</span>
+            // Probe the presence of the new group user
+<span class="nc bnc" id="L964" title="All 2 branches missed.">            if (item.getSubStatus() == RosterItem.SUB_BOTH ||</span>
+<span class="nc bnc" id="L965" title="All 2 branches missed.">                    item.getSubStatus() == RosterItem.SUB_TO) {</span>
+<span class="nc" id="L966">                probePresence(item.getJid());</span>
+            }
+        }
+<span class="nc bnc" id="L969" title="All 2 branches missed.">        if (newItem) {</span>
+            // Fire event indicating that a roster item has been added
+<span class="nc" id="L971">            RosterEventDispatcher.contactAdded(this, item);</span>
+        } else {
+            // Fire event indicating that a roster item has been updated
+<span class="nc" id="L974">            RosterEventDispatcher.contactUpdated(this, item);</span>
+        }
+<span class="nc" id="L976">    }</span>
+
+    /**
+     * Update the roster since a group user has been deleted from a shared group. If the RosterItem
+     * (of the deleted contact) exists only because of of the sahred group then the RosterItem will
+     * be deleted physically from the backend store. Otherwise the shared group will be removed from
+     * the shared groups lists. In any case an update broadcast will be sent to all the users
+     * logged resources.
+     *
+     * @param sharedGroup the shared group from where the user was deleted.
+     * @param deletedUser the contact to update in the roster.
+     */
+    void deleteSharedUser(Group sharedGroup, JID deletedUser) {
+        try {
+            // Get the RosterItem for the *local* user to remove
+<span class="nc" id="L991">            RosterItem item = getRosterItem(deletedUser);</span>
+<span class="nc" id="L992">            int groupSize = item.getSharedGroups().size() + item.getInvisibleSharedGroups().size();</span>
+<span class="nc bnc" id="L993" title="All 4 branches missed.">            if (item.isOnlyShared() &amp;&amp; groupSize == 1) {</span>
+                // Do nothing if the existing shared group is not the sharedGroup to remove
+<span class="nc bnc" id="L995" title="All 2 branches missed.">                if (!item.getSharedGroups().contains(sharedGroup) &amp;&amp;</span>
+<span class="nc bnc" id="L996" title="All 2 branches missed.">                        !item.getInvisibleSharedGroups().contains(sharedGroup)) {</span>
+<span class="nc" id="L997">                    return;</span>
+                }
+                // Delete the roster item from the roster since it exists only because of this
+                // group which is being removed
+<span class="nc" id="L1001">                deleteRosterItem(deletedUser, false);</span>
+            } else {
+                // Remove the removed shared group from the list of shared groups
+<span class="nc" id="L1004">                item.removeSharedGroup(sharedGroup);</span>
+                // Update the subscription of the item based on the remaining groups
+<span class="nc bnc" id="L1006" title="All 2 branches missed.">                if (item.isOnlyShared()) {</span>
+                    Collection&lt;Group&gt; userGroups =
+<span class="nc" id="L1008">                            GroupManager.getInstance().getGroups(getUserJID());</span>
+<span class="nc" id="L1009">                    Collection&lt;Group&gt; sharedGroups = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L1010">                    sharedGroups.addAll(item.getSharedGroups());</span>
+                    // Set subscription type to BOTH if the roster user belongs to a shared group
+                    // that is mutually visible with a shared group of the new roster item
+<span class="nc" id="L1013">                    final RosterManager rosterManager = XMPPServer.getInstance().getRosterManager();</span>
+<span class="nc bnc" id="L1014" title="All 2 branches missed.">                    if (rosterManager.hasMutualVisibility(getUsername(), userGroups, deletedUser,</span>
+                            sharedGroups)) {
+<span class="nc" id="L1016">                        item.setSubStatus(RosterItem.SUB_BOTH);</span>
+<span class="nc bnc" id="L1017" title="All 2 branches missed.">                    } else if (item.getSharedGroups().isEmpty() &amp;&amp;</span>
+<span class="nc bnc" id="L1018" title="All 2 branches missed.">                            !item.getInvisibleSharedGroups().isEmpty()) {</span>
+<span class="nc" id="L1019">                        item.setSubStatus(RosterItem.SUB_FROM);</span>
+                    } else {
+<span class="nc" id="L1021">                        item.setSubStatus(RosterItem.SUB_TO);</span>
+                    }
+                    // Fire event indicating that a roster item has been updated
+<span class="nc" id="L1024">                    RosterEventDispatcher.contactUpdated(this, item);</span>
+<span class="nc" id="L1025">                } else {</span>
+                    // Fire event indicating that a roster item has been removed
+<span class="nc" id="L1027">                    RosterEventDispatcher.contactDeleted(this, item);                	</span>
+                }
+                // Brodcast to all the user resources of the updated roster item
+<span class="nc" id="L1030">                broadcast(item, false);</span>
+            }
+<span class="nc" id="L1032">        } catch (SharedGroupException e) {</span>
+            // Do nothing. Checkings are disabled so this exception should never happen.
+<span class="nc" id="L1034">            Log.error( &quot;Unexpected error while deleting user '{}' from shared group '{}'!&quot;, deletedUser, sharedGroup, e );</span>
+<span class="nc" id="L1035">        } catch (UserNotFoundException e) {</span>
+            // Do nothing since the contact does not exist in the user's roster. (strange case!)
+<span class="nc" id="L1037">            Log.warn( &quot;Unexpected error while deleting user '{}' from shared group '{}'!&quot;, deletedUser, sharedGroup, e );</span>
+<span class="nc" id="L1038">        }</span>
+<span class="nc" id="L1039">    }</span>
+
+    void deleteSharedUser(JID deletedUser, Group deletedGroup) {
+        try {
+<span class="nc" id="L1043">            final RosterManager rosterManager = XMPPServer.getInstance().getRosterManager();</span>
+            // Get the RosterItem for the *local* user to remove
+<span class="nc" id="L1045">            RosterItem item = getRosterItem(deletedUser);</span>
+<span class="nc" id="L1046">            int groupSize = item.getSharedGroups().size() + item.getInvisibleSharedGroups().size();</span>
+<span class="nc bnc" id="L1047" title="All 4 branches missed.">            if (item.isOnlyShared() &amp;&amp; groupSize == 1 &amp;&amp;</span>
+                    // Do not delete the item if deletedUser belongs to a public group since the
+                    // subcription status will change
+<span class="nc bnc" id="L1050" title="All 2 branches missed.">                    !(deletedGroup.isUser(deletedUser) &amp;&amp;</span>
+<span class="nc bnc" id="L1051" title="All 2 branches missed.">                            RosterManager.isPublicSharedGroup(deletedGroup))) {</span>
+                // Delete the roster item from the roster since it exists only because of this
+                // group which is being removed
+<span class="nc" id="L1054">                deleteRosterItem(deletedUser, false);</span>
+            } else {
+                // Remove the shared group from the item if deletedUser does not belong to a
+                // public group
+<span class="nc bnc" id="L1058" title="All 2 branches missed.">                if (!(deletedGroup.isUser(deletedUser) &amp;&amp;</span>
+<span class="nc bnc" id="L1059" title="All 2 branches missed.">                        RosterManager.isPublicSharedGroup(deletedGroup))) {</span>
+<span class="nc" id="L1060">                    item.removeSharedGroup(deletedGroup);</span>
+                }
+                // Get the groups of the deleted user
+<span class="nc" id="L1063">                Collection&lt;Group&gt; groups = GroupManager.getInstance().getGroups(deletedUser);</span>
+                // Remove all invalid shared groups from the roster item
+<span class="nc bnc" id="L1065" title="All 2 branches missed.">                for (Group group : groups) {</span>
+<span class="nc bnc" id="L1066" title="All 2 branches missed.">                    if (!rosterManager.isGroupVisible(group, getUserJID())) {</span>
+                        // Remove the shared group from the list of shared groups
+<span class="nc" id="L1068">                        item.removeSharedGroup(group);</span>
+                    }
+<span class="nc" id="L1070">                }</span>
+
+                // Update the subscription of the item **based on the item groups**
+<span class="nc bnc" id="L1073" title="All 2 branches missed.">                if (item.isOnlyShared()) {</span>
+                    Collection&lt;Group&gt; userGroups =
+<span class="nc" id="L1075">                            GroupManager.getInstance().getGroups(getUserJID());</span>
+                    // Set subscription type to BOTH if the roster user belongs to a shared group
+                    // that is mutually visible with a shared group of the new roster item
+<span class="nc" id="L1078">                    if (rosterManager</span>
+<span class="nc bnc" id="L1079" title="All 2 branches missed.">                            .hasMutualVisibility(getUsername(), userGroups, deletedUser, groups)) {</span>
+<span class="nc" id="L1080">                        item.setSubStatus(RosterItem.SUB_BOTH);</span>
+                    } else {
+                        // Assume by default that the contact has subscribed from the presence of
+                        // this user
+<span class="nc" id="L1084">                        item.setSubStatus(RosterItem.SUB_FROM);</span>
+                        // Check if the user may see the new contact in a shared group
+<span class="nc bnc" id="L1086" title="All 2 branches missed.">                        for (Group group : groups) {</span>
+<span class="nc bnc" id="L1087" title="All 2 branches missed.">                            if (rosterManager.isGroupVisible(group, getUserJID())) {</span>
+<span class="nc" id="L1088">                                item.setSubStatus(RosterItem.SUB_TO);</span>
+                            }
+<span class="nc" id="L1090">                        }</span>
+                    }
+                    // Fire event indicating that a roster item has been updated
+<span class="nc" id="L1093">                    RosterEventDispatcher.contactUpdated(this, item);</span>
+<span class="nc" id="L1094">                } else {</span>
+                    // Fire event indicating that a roster item has been removed
+<span class="nc" id="L1096">                    RosterEventDispatcher.contactDeleted(this, item);</span>
+                }
+                // Brodcast to all the user resources of the updated roster item
+<span class="nc" id="L1099">                broadcast(item, false);</span>
+            }
+<span class="nc" id="L1101">        } catch (SharedGroupException e) {</span>
+            // Do nothing. Checkings are disabled so this exception should never happen.
+<span class="nc" id="L1103">            Log.error( &quot;Unexpected error while deleting user '{}' from shared group '{}'!&quot;, deletedUser, deletedGroup, e);</span>
+<span class="nc" id="L1104">        } catch (UserNotFoundException e) {</span>
+            // Do nothing since the contact does not exist in the user's roster. (strange case!)
+<span class="nc" id="L1106">            Log.warn( &quot;Unexpected error while deleting user '{}' from shared group '{}'!&quot;, deletedUser, deletedGroup, e);</span>
+<span class="nc" id="L1107">        }</span>
+<span class="nc" id="L1108">    }</span>
+
+    /**
+     * A shared group of the user has been renamed. Update the existing roster items with the new
+     * name of the shared group and make a roster push for all the available resources.
+     *
+     * @param users group users of the renamed group.
+     */
+    void shareGroupRenamed(Collection&lt;JID&gt; users) {
+<span class="nc" id="L1117">        JID userJID = getUserJID();</span>
+<span class="nc bnc" id="L1118" title="All 2 branches missed.">        for (JID user : users) {</span>
+<span class="nc bnc" id="L1119" title="All 2 branches missed.">            if (userJID.equals(user)) {</span>
+<span class="nc" id="L1120">                continue;</span>
+            }
+            RosterItem item;
+            try {
+                // Get the RosterItem for the *local* user to add
+<span class="nc" id="L1125">                item = getRosterItem(user);</span>
+                // Broadcast to all the user resources of the updated roster item
+<span class="nc" id="L1127">                broadcast(item, true);</span>
+<span class="nc" id="L1128">            } catch (UserNotFoundException e) {</span>
+                // Do nothing since the contact does not exist in the user's roster. (strange case!)
+<span class="nc" id="L1130">                Log.warn( &quot;Unexpected error while broadcasting shared group rename for user '{}'!&quot;, user, e);</span>
+<span class="nc" id="L1131">            }</span>
+<span class="nc" id="L1132">        }</span>
+<span class="nc" id="L1133">    }</span>
+
+    private JID getUserJID() {
+<span class="nc" id="L1136">        return XMPPServer.getInstance().createJID(getUsername(), null, true);</span>
+    }
+
+    @Override
+    public boolean equals( Object o )
+    {
+<span class="nc bnc" id="L1142" title="All 2 branches missed.">        if ( this == o )</span>
+        {
+<span class="nc" id="L1144">            return true;</span>
+        }
+<span class="nc bnc" id="L1146" title="All 4 branches missed.">        if ( o == null || getClass() != o.getClass() )</span>
+        {
+<span class="nc" id="L1148">            return false;</span>
+        }
+
+<span class="nc" id="L1151">        final Roster roster = (Roster) o;</span>
+
+<span class="nc bnc" id="L1153" title="All 2 branches missed.">        if ( !rosterItems.equals( roster.rosterItems ) )</span>
+        {
+<span class="nc" id="L1155">            return false;</span>
+        }
+<span class="nc bnc" id="L1157" title="All 2 branches missed.">        if ( !implicitFrom.equals( roster.implicitFrom ) )</span>
+        {
+<span class="nc" id="L1159">            return false;</span>
+        }
+<span class="nc" id="L1161">        return username.equals( roster.username );</span>
+    }
+
+    @Override
+    public int hashCode()
+    {
+<span class="nc" id="L1167">        int result = rosterItems.hashCode();</span>
+<span class="nc" id="L1168">        result = 31 * result + implicitFrom.hashCode();</span>
+<span class="nc" id="L1169">        result = 31 * result + username.hashCode();</span>
+<span class="nc" id="L1170">        return result;</span>
+    }
+
+    @Override
+    public void writeExternal(ObjectOutput out) throws IOException {
+<span class="nc" id="L1175">        ExternalizableUtil.getInstance().writeSafeUTF(out, username);</span>
+<span class="nc" id="L1176">        ExternalizableUtil.getInstance().writeExternalizableMap(out, rosterItems);</span>
+<span class="nc" id="L1177">        ExternalizableUtil.getInstance().writeStringsMap(out, implicitFrom);</span>
+<span class="nc" id="L1178">    }</span>
+
+    @Override
+    public void readExternal(ObjectInput in) throws IOException, ClassNotFoundException {
+<span class="nc" id="L1182">        username = ExternalizableUtil.getInstance().readSafeUTF(in);</span>
+<span class="nc" id="L1183">        ExternalizableUtil.getInstance().readExternalizableMap(in, rosterItems, getClass().getClassLoader());</span>
+<span class="nc" id="L1184">        ExternalizableUtil.getInstance().readStringsMap(in, implicitFrom);</span>
+<span class="nc" id="L1185">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

@@ -1,0 +1,275 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>AuthCheckFilter.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.admin</a> &gt; <span class="el_source">AuthCheckFilter.java</span></div><h1>AuthCheckFilter.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2004-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.admin;
+
+import java.io.IOException;
+import java.net.URLEncoder;
+import java.util.Collections;
+import java.util.Set;
+import java.util.StringTokenizer;
+import java.util.concurrent.ConcurrentHashMap;
+
+import javax.servlet.Filter;
+import javax.servlet.FilterChain;
+import javax.servlet.FilterConfig;
+import javax.servlet.ServletContext;
+import javax.servlet.ServletException;
+import javax.servlet.ServletRequest;
+import javax.servlet.ServletResponse;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
+
+import org.jivesoftware.openfire.admin.AdminManager;
+import org.jivesoftware.openfire.auth.AuthFactory;
+import org.jivesoftware.openfire.auth.AuthToken;
+import org.jivesoftware.openfire.user.User;
+import org.jivesoftware.util.ClassUtils;
+import org.jivesoftware.util.JiveGlobals;
+import org.jivesoftware.util.WebManager;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * A simple filter which checks for the auth token in the user's session. If it's not there
+ * the filter will redirect to the login page.
+ */
+public class AuthCheckFilter implements Filter {
+
+<span class="fc" id="L52">    private static final Logger Log = LoggerFactory.getLogger(AuthCheckFilter.class);</span>
+    private static AuthCheckFilter instance;
+
+<span class="fc" id="L55">    private static Set&lt;String&gt; excludes = Collections.newSetFromMap(new ConcurrentHashMap&lt;String, Boolean&gt;());</span>
+
+    private final AdminManager adminManager;
+    private final LoginLimitManager loginLimitManager;
+    private final ServletRequestAuthenticator servletRequestAuthenticator;
+
+    private ServletContext context;
+    private String defaultLoginPage;
+
+    public AuthCheckFilter() {
+<span class="nc" id="L65">        this(AdminManager.getInstance(), LoginLimitManager.getInstance(), JiveGlobals.getProperty(&quot;adminConsole.servlet-request-authenticator&quot;, &quot;&quot;).trim());</span>
+<span class="nc" id="L66">    }</span>
+
+    /* Exposed for test use only */
+<span class="fc" id="L69">    AuthCheckFilter(final AdminManager adminManager, final LoginLimitManager loginLimitManager, final String servletRequestAuthenticatorClassName) {</span>
+<span class="fc" id="L70">        this.adminManager = adminManager;</span>
+<span class="fc" id="L71">        this.loginLimitManager = loginLimitManager;</span>
+<span class="fc" id="L72">        AuthCheckFilter.instance = this;</span>
+<span class="fc" id="L73">        ServletRequestAuthenticator authenticator = null;</span>
+<span class="fc bfc" id="L74" title="All 2 branches covered.">        if (!servletRequestAuthenticatorClassName.isEmpty()) {</span>
+            try {
+<span class="fc" id="L76">                final Class clazz = ClassUtils.forName(servletRequestAuthenticatorClassName);</span>
+<span class="fc" id="L77">                authenticator = (ServletRequestAuthenticator) clazz.newInstance();</span>
+<span class="fc" id="L78">            } catch (final Exception e) {</span>
+<span class="fc" id="L79">                Log.error(&quot;Error loading ServletRequestAuthenticator: &quot; + servletRequestAuthenticatorClassName, e);</span>
+<span class="fc" id="L80">            }</span>
+        }
+<span class="fc" id="L82">        this.servletRequestAuthenticator = authenticator;</span>
+<span class="fc" id="L83">    }</span>
+
+    /**
+     * Returns a singleton instance of the AuthCheckFilter.
+     *
+     * @return an instance.
+     */
+    public static AuthCheckFilter getInstance() {
+<span class="fc" id="L91">        return instance;</span>
+    }
+
+    /**
+     * Indicates if the currently-installed ServletRequestAuthenticator is an instance of a specific class.
+     *
+     * @param clazz the class to check
+     * @return {@code true} if the currently-installed ServletRequestAuthenticator is an instance of clazz, otherwise {@code false}.
+     */
+    public static boolean isServletRequestAuthenticatorInstanceOf(Class&lt;? extends ServletRequestAuthenticator&gt; clazz) {
+<span class="fc" id="L101">        final AuthCheckFilter instance = getInstance();</span>
+<span class="pc bpc" id="L102" title="1 of 2 branches missed.">        if (instance == null) {</span>
+            // We've not yet been instantiated
+<span class="nc" id="L104">            return false;</span>
+        }
+<span class="fc" id="L106">        final ServletRequestAuthenticator authenticator = instance.servletRequestAuthenticator;</span>
+<span class="fc bfc" id="L107" title="All 4 branches covered.">        return authenticator != null &amp;&amp; clazz.isAssignableFrom(authenticator.getClass());</span>
+    }
+
+    /**
+     * Adds a new string that when present in the requested URL will skip
+     * the &quot;is logged&quot; checking.
+     *
+     * @param exclude the string to exclude.
+     */
+    public static void addExclude(String exclude) {
+<span class="nc" id="L117">        excludes.add(exclude);</span>
+<span class="nc" id="L118">    }</span>
+
+    /**
+     * Removes a string that when present in the requested URL will skip
+     * the &quot;is logged&quot; checking.
+     *
+     * @param exclude the string that was being excluded.
+     */
+    public static void removeExclude(String exclude) {
+<span class="nc" id="L127">        excludes.remove(exclude);</span>
+<span class="nc" id="L128">    }</span>
+
+    /**
+     * Returns true if a URL passes an exclude rule.
+     *
+     * @param url the URL to test.
+     * @param exclude the exclude rule.
+     * @return true if the URL passes the exclude test.
+     */
+    public static boolean testURLPassesExclude(String url, String exclude) {
+        // If the exclude rule includes a &quot;?&quot; character, the url must exactly match the exclude rule.
+        // If the exclude rule does not contain the &quot;?&quot; character, we chop off everything starting at the first &quot;?&quot;
+        // in the URL and then the resulting url must exactly match the exclude rule. If the exclude ends with a &quot;*&quot;
+        // character then the URL is allowed if it exactly matches everything before the * and there are no &quot;..&quot;
+        // characters after the &quot;*&quot;. All data in the URL before
+
+<span class="fc bfc" id="L144" title="All 2 branches covered.">        if (exclude.endsWith(&quot;*&quot;)) {</span>
+<span class="pc bpc" id="L145" title="1 of 2 branches missed.">            if (url.startsWith(exclude.substring(0, exclude.length()-1))) {</span>
+                // Now make sure that there are no &quot;..&quot; characters in the rest of the URL.
+<span class="fc bfc" id="L147" title="All 4 branches covered.">                if (!url.contains(&quot;..&quot;) &amp;&amp; !url.toLowerCase().contains(&quot;%2e&quot;)) {</span>
+<span class="fc" id="L148">                    return true;</span>
+                }
+            }
+        }
+<span class="fc bfc" id="L152" title="All 2 branches covered.">        else if (exclude.contains(&quot;?&quot;)) {</span>
+<span class="fc bfc" id="L153" title="All 2 branches covered.">            if (url.equals(exclude)) {</span>
+<span class="fc" id="L154">                return true;</span>
+            }
+        }
+        else {
+<span class="fc" id="L158">            int paramIndex = url.indexOf(&quot;?&quot;);</span>
+<span class="fc bfc" id="L159" title="All 2 branches covered.">            if (paramIndex != -1) {</span>
+<span class="fc" id="L160">                url = url.substring(0, paramIndex);</span>
+            }
+<span class="fc bfc" id="L162" title="All 2 branches covered.">            if (url.equals(exclude)) {</span>
+<span class="fc" id="L163">                return true;</span>
+            }
+        }
+<span class="fc" id="L166">        return false;</span>
+    }
+
+    @Override
+    public void init(FilterConfig config) throws ServletException {
+<span class="nc" id="L171">        context = config.getServletContext();</span>
+<span class="nc" id="L172">        defaultLoginPage = config.getInitParameter(&quot;defaultLoginPage&quot;);</span>
+<span class="nc" id="L173">        String excludesProp = config.getInitParameter(&quot;excludes&quot;);</span>
+<span class="nc bnc" id="L174" title="All 2 branches missed.">        if (excludesProp != null) {</span>
+<span class="nc" id="L175">            StringTokenizer tokenizer = new StringTokenizer(excludesProp, &quot;,&quot;);</span>
+<span class="nc bnc" id="L176" title="All 2 branches missed.">            while (tokenizer.hasMoreTokens()) {</span>
+<span class="nc" id="L177">                String tok = tokenizer.nextToken().trim();</span>
+<span class="nc" id="L178">                excludes.add(tok);</span>
+<span class="nc" id="L179">            }</span>
+        }
+<span class="nc" id="L181">    }</span>
+
+    @Override
+    public void doFilter(ServletRequest req, ServletResponse res, FilterChain chain)
+            throws IOException, ServletException
+    {
+<span class="fc" id="L187">        HttpServletRequest request = (HttpServletRequest)req;</span>
+<span class="fc" id="L188">        HttpServletResponse response = (HttpServletResponse)res;</span>
+        // Do not allow framing; OF-997
+<span class="fc" id="L190">        response.addHeader(&quot;X-Frame-Options&quot;, JiveGlobals.getProperty(&quot;adminConsole.frame-options&quot;, &quot;same&quot;));</span>
+        // Reset the defaultLoginPage variable
+<span class="fc" id="L192">        String loginPage = defaultLoginPage;</span>
+<span class="pc bpc" id="L193" title="1 of 2 branches missed.">        if (loginPage == null) {</span>
+<span class="pc bpc" id="L194" title="1 of 2 branches missed.">            loginPage = request.getContextPath() + (AuthFactory.isOneTimeAccessTokenEnabled() ? &quot;/loginToken.jsp&quot; : &quot;/login.jsp&quot; );</span>
+        }
+        // Get the page we're on:
+<span class="fc" id="L197">        String url = request.getRequestURI().substring(1);</span>
+<span class="pc bpc" id="L198" title="1 of 2 branches missed.">        if (url.startsWith(&quot;plugins/&quot;)) {</span>
+<span class="nc" id="L199">            url = url.substring(&quot;plugins/&quot;.length());</span>
+        }
+        // See if it's contained in the exclude list. If so, skip filter execution
+<span class="fc" id="L202">        boolean doExclude = false;</span>
+<span class="pc bpc" id="L203" title="1 of 2 branches missed.">        for (String exclude : excludes) {</span>
+<span class="nc bnc" id="L204" title="All 2 branches missed.">            if (testURLPassesExclude(url, exclude)) {</span>
+<span class="nc" id="L205">                doExclude = true;</span>
+<span class="nc" id="L206">                break;</span>
+            }
+<span class="nc" id="L208">        }</span>
+<span class="pc bpc" id="L209" title="1 of 2 branches missed.">        if (!doExclude) {</span>
+<span class="fc" id="L210">            WebManager manager = new WebManager();</span>
+<span class="fc" id="L211">            manager.init(request, response, request.getSession(), context);</span>
+<span class="fc" id="L212">            boolean haveOneTimeToken = manager.getAuthToken() instanceof AuthToken.OneTimeAuthToken;</span>
+<span class="fc" id="L213">            User loggedUser = manager.getUser();</span>
+<span class="pc bpc" id="L214" title="1 of 2 branches missed.">            boolean loggedAdmin = loggedUser == null ? false : adminManager.isUserAdmin(loggedUser.getUsername(), true);</span>
+<span class="pc bpc" id="L215" title="2 of 6 branches missed.">            if (!haveOneTimeToken &amp;&amp; !loggedAdmin &amp;&amp; !authUserFromRequest(request)) {</span>
+<span class="fc" id="L216">                response.sendRedirect(getRedirectURL(request, loginPage, null));</span>
+<span class="fc" id="L217">                return;</span>
+            }
+        }
+<span class="fc" id="L220">        chain.doFilter(req, res);</span>
+<span class="fc" id="L221">    }</span>
+
+    private boolean authUserFromRequest(final HttpServletRequest request) {
+
+<span class="fc bfc" id="L225" title="All 2 branches covered.">        final String userFromRequest = servletRequestAuthenticator == null ? null : servletRequestAuthenticator.authenticateRequest(request);</span>
+<span class="fc bfc" id="L226" title="All 2 branches covered.">        if (userFromRequest == null) {</span>
+            // The user is not authenticated
+<span class="fc" id="L228">            return false;</span>
+        }
+
+<span class="fc bfc" id="L231" title="All 2 branches covered.">        if (!adminManager.isUserAdmin(userFromRequest, true)) {</span>
+            // The user is not authorised
+<span class="fc" id="L233">            Log.warn(&quot;The user '&quot; + userFromRequest + &quot;' is not an Openfire administrator.&quot;);</span>
+<span class="fc" id="L234">            return false;</span>
+        }
+
+        // We're authenticated and authorised, so record the login,
+<span class="fc" id="L238">        loginLimitManager.recordSuccessfulAttempt(userFromRequest, request.getRemoteAddr());</span>
+
+        // Set the auth token
+<span class="fc" id="L241">        request.getSession().setAttribute(&quot;jive.admin.authToken&quot;, AuthToken.generateUserToken( userFromRequest ));</span>
+
+        // And proceed
+<span class="fc" id="L244">        return true;</span>
+    }
+
+    @Override
+    public void destroy() {
+<span class="nc" id="L249">    }</span>
+
+    private String getRedirectURL(HttpServletRequest request, String loginPage,
+            String optionalParams)
+    {
+<span class="fc" id="L254">        StringBuilder buf = new StringBuilder();</span>
+        try {
+<span class="fc" id="L256">            buf.append(request.getRequestURI());</span>
+<span class="fc" id="L257">            String qs = request.getQueryString();</span>
+<span class="pc bpc" id="L258" title="1 of 2 branches missed.">            if (qs != null) {</span>
+<span class="nc" id="L259">                buf.append('?').append(qs);</span>
+            }
+        }
+<span class="nc" id="L262">        catch (Exception e) {</span>
+<span class="nc" id="L263">            Log.error(e.getMessage(), e);</span>
+<span class="fc" id="L264">        }</span>
+        try {
+<span class="pc bpc" id="L266" title="1 of 2 branches missed.">            return loginPage + &quot;?url=&quot; + URLEncoder.encode(buf.toString(), &quot;ISO-8859-1&quot;)</span>
+                    + (optionalParams != null ? &quot;&amp;&quot;+optionalParams : &quot;&quot;);
+        }
+<span class="nc" id="L269">        catch (Exception e) {</span>
+<span class="nc" id="L270">            Log.error(e.getMessage(), e);</span>
+<span class="nc" id="L271">            return null;</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

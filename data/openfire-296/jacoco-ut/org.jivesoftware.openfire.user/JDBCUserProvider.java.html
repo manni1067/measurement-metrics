@@ -1,0 +1,449 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>JDBCUserProvider.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.user</a> &gt; <span class="el_source">JDBCUserProvider.java</span></div><h1>JDBCUserProvider.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.user;
+
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Date;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Set;
+
+import org.jivesoftware.database.DbConnectionManager;
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.util.JiveGlobals;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmpp.packet.JID;
+
+/**
+ * The JDBC user provider allows you to use an external database to define the users.
+ * It is best used with the JDBCAuthProvider &amp;amp; JDBCGroupProvider to provide integration
+ * between your external system and Openfire. All data is treated as read-only so any
+ * set operations will result in an exception.
+ * &lt;p&gt;For the seach facility, the SQL will be constructed from the SQL in the &lt;i&gt;search&lt;/i&gt;
+ * section below, as well as the &lt;i&gt;usernameField&lt;/i&gt;, the &lt;i&gt;nameField&lt;/i&gt; and the
+ * &lt;i&gt;emailField&lt;/i&gt;.&lt;/p&gt;
+ * &lt;p&gt;To enable this provider, set the following in the system properties:&lt;/p&gt;
+ * &lt;ul&gt;
+ * &lt;li&gt;{@code provider.user.className = org.jivesoftware.openfire.user.JDBCUserProvider}&lt;/li&gt;
+ * &lt;/ul&gt;
+ * &lt;p&gt;
+ * Then you need to set your driver, connection string and SQL statements:
+ * &lt;/p&gt;
+ * &lt;ul&gt;
+ * &lt;li&gt;{@code jdbcProvider.driver = com.mysql.jdbc.Driver}&lt;/li&gt;
+ * &lt;li&gt;{@code jdbcProvider.connectionString = jdbc:mysql://localhost/dbname?user=username&amp;amp;password=secret}&lt;/li&gt;
+ * &lt;li&gt;{@code jdbcUserProvider.loadUserSQL = SELECT name,email FROM myUser WHERE user = ?}&lt;/li&gt;
+ * &lt;li&gt;{@code jdbcUserProvider.userCountSQL = SELECT COUNT(*) FROM myUser}&lt;/li&gt;
+ * &lt;li&gt;{@code jdbcUserProvider.allUsersSQL = SELECT user FROM myUser}&lt;/li&gt;
+ * &lt;li&gt;{@code jdbcUserProvider.searchSQL = SELECT user FROM myUser WHERE}&lt;/li&gt;
+ * &lt;li&gt;{@code jdbcUserProvider.usernameField = myUsernameField}&lt;/li&gt;
+ * &lt;li&gt;{@code jdbcUserProvider.nameField = myNameField}&lt;/li&gt;
+ * &lt;li&gt;{@code jdbcUserProvider.emailField = mymailField}&lt;/li&gt;
+ * &lt;/ul&gt;
+ *
+ * In order to use the configured JDBC connection provider do not use a JDBC
+ * connection string, set the following property
+ *
+ * &lt;ul&gt;
+ * &lt;li&gt;{@code jdbcUserProvider.useConnectionProvider = true}&lt;/li&gt;
+ * &lt;/ul&gt;
+ *
+ *
+ * @author Huw Richards huw.richards@gmail.com
+ */
+public class JDBCUserProvider implements UserProvider {
+
+<span class="nc" id="L79">    private static final Logger Log = LoggerFactory.getLogger(JDBCUserProvider.class);</span>
+
+    private String connectionString;
+
+    private String loadUserSQL;
+    private String userCountSQL;
+    private String allUsersSQL;
+    private String searchSQL;
+    private String usernameField;
+    private String nameField;
+    private String emailField;
+    private boolean useConnectionProvider;
+    private static final boolean IS_READ_ONLY = true;
+
+    /**
+     * Constructs a new JDBC user provider.
+     */
+<span class="nc" id="L96">    public JDBCUserProvider() {</span>
+        // Convert XML based provider setup to Database based
+<span class="nc" id="L98">        JiveGlobals.migrateProperty(&quot;jdbcProvider.driver&quot;);</span>
+<span class="nc" id="L99">        JiveGlobals.migrateProperty(&quot;jdbcProvider.connectionString&quot;);</span>
+<span class="nc" id="L100">        JiveGlobals.migrateProperty(&quot;jdbcUserProvider.loadUserSQL&quot;);</span>
+<span class="nc" id="L101">        JiveGlobals.migrateProperty(&quot;jdbcUserProvider.userCountSQL&quot;);</span>
+<span class="nc" id="L102">        JiveGlobals.migrateProperty(&quot;jdbcUserProvider.allUsersSQL&quot;);</span>
+<span class="nc" id="L103">        JiveGlobals.migrateProperty(&quot;jdbcUserProvider.searchSQL&quot;);</span>
+<span class="nc" id="L104">        JiveGlobals.migrateProperty(&quot;jdbcUserProvider.usernameField&quot;);</span>
+<span class="nc" id="L105">        JiveGlobals.migrateProperty(&quot;jdbcUserProvider.nameField&quot;);</span>
+<span class="nc" id="L106">        JiveGlobals.migrateProperty(&quot;jdbcUserProvider.emailField&quot;);</span>
+
+<span class="nc" id="L108">        useConnectionProvider = JiveGlobals.getBooleanProperty(&quot;jdbcUserProvider.useConnectionProvider&quot;);</span>
+
+            // Load the JDBC driver and connection string.
+<span class="nc bnc" id="L111" title="All 2 branches missed.">        if (!useConnectionProvider) {</span>
+<span class="nc" id="L112">            String jdbcDriver = JiveGlobals.getProperty(&quot;jdbcProvider.driver&quot;);</span>
+            try {
+<span class="nc" id="L114">                Class.forName(jdbcDriver).newInstance();</span>
+            }
+<span class="nc" id="L116">            catch (Exception e) {</span>
+<span class="nc" id="L117">                Log.error(&quot;Unable to load JDBC driver: &quot; + jdbcDriver, e);</span>
+<span class="nc" id="L118">                return;</span>
+<span class="nc" id="L119">            }</span>
+<span class="nc" id="L120">            connectionString = JiveGlobals.getProperty(&quot;jdbcProvider.connectionString&quot;);</span>
+        }
+
+        // Load database statements for user data.
+<span class="nc" id="L124">        loadUserSQL = JiveGlobals.getProperty(&quot;jdbcUserProvider.loadUserSQL&quot;);</span>
+<span class="nc" id="L125">        userCountSQL = JiveGlobals.getProperty(&quot;jdbcUserProvider.userCountSQL&quot;);</span>
+<span class="nc" id="L126">        allUsersSQL = JiveGlobals.getProperty(&quot;jdbcUserProvider.allUsersSQL&quot;);</span>
+<span class="nc" id="L127">        searchSQL = JiveGlobals.getProperty(&quot;jdbcUserProvider.searchSQL&quot;);</span>
+<span class="nc" id="L128">        usernameField = JiveGlobals.getProperty(&quot;jdbcUserProvider.usernameField&quot;);</span>
+<span class="nc" id="L129">        nameField = JiveGlobals.getProperty(&quot;jdbcUserProvider.nameField&quot;);</span>
+<span class="nc" id="L130">        emailField = JiveGlobals.getProperty(&quot;jdbcUserProvider.emailField&quot;);</span>
+<span class="nc" id="L131">    }</span>
+
+    @Override
+    public User loadUser(String username) throws UserNotFoundException {
+<span class="nc bnc" id="L135" title="All 2 branches missed.">        if(username.contains(&quot;@&quot;)) {</span>
+<span class="nc bnc" id="L136" title="All 2 branches missed.">            if (!XMPPServer.getInstance().isLocal(new JID(username))) {</span>
+<span class="nc" id="L137">                throw new UserNotFoundException(&quot;Cannot load user of remote server: &quot; + username);</span>
+            }
+<span class="nc" id="L139">            username = username.substring(0,username.lastIndexOf(&quot;@&quot;));</span>
+        }
+<span class="nc" id="L141">        Connection con = null;</span>
+<span class="nc" id="L142">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L143">        ResultSet rs = null;</span>
+        try {
+<span class="nc" id="L145">            con = getConnection();</span>
+<span class="nc" id="L146">            pstmt = con.prepareStatement(loadUserSQL);</span>
+<span class="nc" id="L147">            pstmt.setString(1, username);</span>
+<span class="nc" id="L148">            rs = pstmt.executeQuery();</span>
+<span class="nc bnc" id="L149" title="All 2 branches missed.">            if (!rs.next()) {</span>
+<span class="nc" id="L150">                throw new UserNotFoundException();</span>
+            }
+<span class="nc" id="L152">            String name = rs.getString(1);</span>
+<span class="nc" id="L153">            String email = rs.getString(2);</span>
+
+<span class="nc" id="L155">            return new User(username, name, email, new Date(), new Date());</span>
+        }
+<span class="nc" id="L157">        catch (Exception e) {</span>
+<span class="nc" id="L158">            throw new UserNotFoundException(e);</span>
+        }
+        finally {
+<span class="nc" id="L161">            DbConnectionManager.closeConnection(rs, pstmt, con);</span>
+<span class="nc" id="L162">        }</span>
+    }
+
+    @Override
+    public User createUser(String username, String password, String name, String email)
+            throws UserAlreadyExistsException {
+        // Reject the operation since the provider is read-only
+<span class="nc" id="L169">        throw new UnsupportedOperationException();</span>
+    }
+
+    @Override
+    public void deleteUser(String username) {
+        // Reject the operation since the provider is read-only
+<span class="nc" id="L175">        throw new UnsupportedOperationException();</span>
+    }
+
+    @Override
+    public int getUserCount() {
+<span class="nc" id="L180">        int count = 0;</span>
+<span class="nc" id="L181">        Connection con = null;</span>
+<span class="nc" id="L182">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L183">        ResultSet rs = null;</span>
+        try {
+<span class="nc" id="L185">            con = getConnection();</span>
+<span class="nc" id="L186">            pstmt = con.prepareStatement(userCountSQL);</span>
+<span class="nc" id="L187">            rs = pstmt.executeQuery();</span>
+<span class="nc bnc" id="L188" title="All 2 branches missed.">            if (rs.next()) {</span>
+<span class="nc" id="L189">                count = rs.getInt(1);</span>
+            }
+        }
+<span class="nc" id="L192">        catch (SQLException e) {</span>
+<span class="nc" id="L193">            Log.error(e.getMessage(), e);</span>
+        }
+        finally {
+<span class="nc" id="L196">            DbConnectionManager.closeConnection(rs, pstmt, con);</span>
+<span class="nc" id="L197">        }</span>
+<span class="nc" id="L198">        return count;</span>
+    }
+
+    @Override
+    public Collection&lt;User&gt; getUsers() {
+<span class="nc" id="L203">        Collection&lt;String&gt; usernames = getUsernames(0, Integer.MAX_VALUE);</span>
+<span class="nc" id="L204">        return new UserCollection(usernames.toArray(new String[usernames.size()]));</span>
+    }
+
+    @Override
+    public Collection&lt;String&gt; getUsernames() {
+<span class="nc" id="L209">        return getUsernames(0, Integer.MAX_VALUE);</span>
+    }
+
+    private Collection&lt;String&gt; getUsernames(int startIndex, int numResults) {
+<span class="nc" id="L213">        List&lt;String&gt; usernames = new ArrayList&lt;&gt;(500);</span>
+<span class="nc" id="L214">        Connection con = null;</span>
+<span class="nc" id="L215">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L216">        ResultSet rs = null;</span>
+        try {
+<span class="nc" id="L218">            con = getConnection();</span>
+<span class="nc bnc" id="L219" title="All 4 branches missed.">            if ((startIndex==0) &amp;&amp; (numResults==Integer.MAX_VALUE))</span>
+            {
+<span class="nc" id="L221">                pstmt = con.prepareStatement(allUsersSQL);</span>
+                // Set the fetch size. This will prevent some JDBC drivers from trying
+                // to load the entire result set into memory.
+<span class="nc" id="L224">                DbConnectionManager.setFetchSize(pstmt, 500);</span>
+<span class="nc" id="L225">                rs = pstmt.executeQuery();</span>
+<span class="nc bnc" id="L226" title="All 2 branches missed.">                while (rs.next()) {</span>
+<span class="nc" id="L227">                    usernames.add(rs.getString(1));</span>
+                }
+            }
+            else {
+<span class="nc" id="L231">                pstmt = DbConnectionManager.createScrollablePreparedStatement(con, allUsersSQL);</span>
+<span class="nc" id="L232">                DbConnectionManager.limitRowsAndFetchSize(pstmt, startIndex, numResults);</span>
+<span class="nc" id="L233">                rs = pstmt.executeQuery();</span>
+<span class="nc" id="L234">                DbConnectionManager.scrollResultSet(rs, startIndex);</span>
+<span class="nc" id="L235">                int count = 0;</span>
+<span class="nc bnc" id="L236" title="All 4 branches missed.">                while (rs.next() &amp;&amp; count &lt; numResults) {</span>
+<span class="nc" id="L237">                    usernames.add(rs.getString(1));</span>
+<span class="nc" id="L238">                    count++;</span>
+                }
+            }
+<span class="nc bnc" id="L241" title="All 2 branches missed.">            if (Log.isDebugEnabled()) {</span>
+<span class="nc" id="L242">                   Log.debug(&quot;Results: &quot; + usernames.size());</span>
+<span class="nc" id="L243">                   LogResults(usernames);</span>
+            }
+        }
+<span class="nc" id="L246">        catch (SQLException e) {</span>
+<span class="nc" id="L247">            Log.error(e.getMessage(), e);</span>
+        }
+        finally {
+<span class="nc" id="L250">            DbConnectionManager.closeConnection(rs, pstmt, con);</span>
+<span class="nc" id="L251">        }</span>
+<span class="nc" id="L252">        return usernames;</span>
+    }
+
+    @Override
+    public Collection&lt;User&gt; getUsers(int startIndex, int numResults) {
+<span class="nc" id="L257">        Collection&lt;String&gt; usernames = getUsernames(startIndex, numResults);</span>
+<span class="nc" id="L258">        return new UserCollection(usernames.toArray(new String[usernames.size()]));</span>
+    }
+    
+    @Override
+    public void setName(String username, String name) throws UserNotFoundException {
+        // Reject the operation since the provider is read-only
+<span class="nc" id="L264">        throw new UnsupportedOperationException();</span>
+    }
+
+    @Override
+    public void setEmail(String username, String email) throws UserNotFoundException {
+        // Reject the operation since the provider is read-only
+<span class="nc" id="L270">        throw new UnsupportedOperationException();</span>
+    }
+
+    @Override
+    public void setCreationDate(String username, Date creationDate) throws UserNotFoundException {
+        // Reject the operation since the provider is read-only
+<span class="nc" id="L276">        throw new UnsupportedOperationException();</span>
+    }
+
+    @Override
+    public void setModificationDate(String username, Date modificationDate) throws UserNotFoundException {
+        // Reject the operation since the provider is read-only
+<span class="nc" id="L282">        throw new UnsupportedOperationException();</span>
+    }
+
+    @Override
+    public Set&lt;String&gt; getSearchFields() throws UnsupportedOperationException {
+<span class="nc bnc" id="L287" title="All 2 branches missed.">        if (searchSQL == null) {</span>
+<span class="nc" id="L288">            throw new UnsupportedOperationException();</span>
+        }
+<span class="nc" id="L290">        return new LinkedHashSet&lt;&gt;(Arrays.asList(&quot;Username&quot;, &quot;Name&quot;, &quot;Email&quot;));</span>
+    }
+
+    @Override
+    public Collection&lt;User&gt; findUsers(Set&lt;String&gt; fields, String query) throws UnsupportedOperationException {
+<span class="nc" id="L295">        return findUsers(fields, query, 0, Integer.MAX_VALUE);</span>
+    }
+
+    @Override
+    public Collection&lt;User&gt; findUsers(Set&lt;String&gt; fields, String query, int startIndex,
+            int numResults) throws UnsupportedOperationException
+    {
+<span class="nc bnc" id="L302" title="All 2 branches missed.">        if (searchSQL == null) {</span>
+<span class="nc" id="L303">            throw new UnsupportedOperationException();</span>
+        }
+<span class="nc bnc" id="L305" title="All 2 branches missed.">        if (fields.isEmpty()) {</span>
+<span class="nc" id="L306">            return Collections.emptyList();</span>
+        }
+<span class="nc bnc" id="L308" title="All 2 branches missed.">        if (!getSearchFields().containsAll(fields)) {</span>
+<span class="nc" id="L309">            throw new IllegalArgumentException(&quot;Search fields &quot; + fields + &quot; are not valid.&quot;);</span>
+        }
+<span class="nc bnc" id="L311" title="All 4 branches missed.">        if (query == null || &quot;&quot;.equals(query)) {</span>
+<span class="nc" id="L312">            return Collections.emptyList();</span>
+        }
+        // SQL LIKE queries don't map directly into a keyword/wildcard search like we want.
+        // Therefore, we do a best approximiation by replacing '*' with '%' and then
+        // surrounding the whole query with two '%'. This will return more data than desired,
+        // but is better than returning less data than desired.
+<span class="nc" id="L318">        query = &quot;%&quot; + query.replace('*', '%') + &quot;%&quot;;</span>
+<span class="nc bnc" id="L319" title="All 2 branches missed.">        if (query.endsWith(&quot;%%&quot;)) {</span>
+<span class="nc" id="L320">            query = query.substring(0, query.length() - 1);</span>
+        }
+
+<span class="nc" id="L323">        List&lt;String&gt; usernames = new ArrayList&lt;&gt;(50);</span>
+<span class="nc" id="L324">        Connection con = null;</span>
+<span class="nc" id="L325">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L326">        int queries=0;</span>
+<span class="nc" id="L327">        ResultSet rs = null;</span>
+        try {
+<span class="nc" id="L329">            StringBuilder sql = new StringBuilder(90);</span>
+<span class="nc" id="L330">            sql.append(searchSQL);</span>
+<span class="nc" id="L331">            boolean first = true;</span>
+<span class="nc bnc" id="L332" title="All 2 branches missed.">            if (fields.contains(&quot;Username&quot;)) {</span>
+<span class="nc" id="L333">                sql.append(' ');</span>
+<span class="nc" id="L334">                sql.append(usernameField);</span>
+<span class="nc" id="L335">                sql.append(&quot; LIKE ?&quot;);</span>
+<span class="nc" id="L336">                queries++;</span>
+<span class="nc" id="L337">                first = false;</span>
+            }
+<span class="nc bnc" id="L339" title="All 2 branches missed.">            if (fields.contains(&quot;Name&quot;)) {</span>
+<span class="nc bnc" id="L340" title="All 2 branches missed.">                if (!first) {</span>
+<span class="nc" id="L341">                    sql.append(&quot; AND&quot;);</span>
+                }
+<span class="nc" id="L343">                sql.append(' ');</span>
+<span class="nc" id="L344">                sql.append(nameField);</span>
+<span class="nc" id="L345">                sql.append(&quot; LIKE ?&quot;);</span>
+<span class="nc" id="L346">                queries++;</span>
+<span class="nc" id="L347">                first = false;</span>
+            }
+<span class="nc bnc" id="L349" title="All 2 branches missed.">            if (fields.contains(&quot;Email&quot;)) {</span>
+<span class="nc bnc" id="L350" title="All 2 branches missed.">                if (!first) {</span>
+<span class="nc" id="L351">                    sql.append(&quot; AND&quot;);</span>
+                }
+<span class="nc" id="L353">                sql.append(' ');</span>
+<span class="nc" id="L354">                sql.append(emailField);</span>
+<span class="nc" id="L355">                sql.append(&quot; LIKE ?&quot;);</span>
+<span class="nc" id="L356">                queries++;</span>
+            }
+<span class="nc" id="L358">            con = getConnection();</span>
+<span class="nc bnc" id="L359" title="All 4 branches missed.">            if ((startIndex==0) &amp;&amp; (numResults==Integer.MAX_VALUE))</span>
+            {
+<span class="nc" id="L361">                pstmt = con.prepareStatement(sql.toString());</span>
+<span class="nc bnc" id="L362" title="All 2 branches missed.">                for (int i=1; i&lt;=queries; i++)</span>
+                {
+<span class="nc" id="L364">                    pstmt.setString(i, query);</span>
+                }
+<span class="nc" id="L366">                rs = pstmt.executeQuery();</span>
+<span class="nc bnc" id="L367" title="All 2 branches missed.">                while (rs.next()) {</span>
+<span class="nc" id="L368">                    usernames.add(rs.getString(1));</span>
+                }
+            } else {
+<span class="nc" id="L371">                pstmt = DbConnectionManager.createScrollablePreparedStatement(con, sql.toString());</span>
+<span class="nc" id="L372">                DbConnectionManager.limitRowsAndFetchSize(pstmt, startIndex, numResults);</span>
+<span class="nc bnc" id="L373" title="All 2 branches missed.">                for (int i=1; i&lt;=queries; i++)</span>
+                {
+<span class="nc" id="L375">                    pstmt.setString(i, query);</span>
+                }
+<span class="nc" id="L377">                rs = pstmt.executeQuery();</span>
+                // Scroll to the start index.
+<span class="nc" id="L379">                DbConnectionManager.scrollResultSet(rs, startIndex);</span>
+<span class="nc" id="L380">                int count = 0;</span>
+<span class="nc bnc" id="L381" title="All 4 branches missed.">                while (rs.next() &amp;&amp; count &lt; numResults) {</span>
+<span class="nc" id="L382">                    usernames.add(rs.getString(1));</span>
+<span class="nc" id="L383">                    count++;</span>
+             }
+          }
+<span class="nc bnc" id="L386" title="All 2 branches missed.">            if (Log.isDebugEnabled())</span>
+            {
+<span class="nc" id="L388">                Log.debug(&quot;Results: &quot; + usernames.size());</span>
+<span class="nc" id="L389">                LogResults(usernames);</span>
+            }
+        }
+<span class="nc" id="L392">        catch (SQLException e) {</span>
+<span class="nc" id="L393">            Log.error(e.getMessage(), e);</span>
+        }
+        finally {
+<span class="nc" id="L396">            DbConnectionManager.closeConnection(rs, pstmt, con);</span>
+<span class="nc" id="L397">        }</span>
+<span class="nc" id="L398">        return new UserCollection(usernames.toArray(new String[usernames.size()]));</span>
+    }
+
+    @Override
+    public boolean isReadOnly() {
+<span class="nc" id="L403">        return IS_READ_ONLY;</span>
+    }
+
+    @Override
+    public boolean isNameRequired() {
+<span class="nc" id="L408">        return false;</span>
+    }
+
+    @Override
+    public boolean isEmailRequired() {
+<span class="nc" id="L413">        return false;</span>
+    }
+    /**
+     * Make sure that Log.isDebugEnabled()==true before calling this method.
+     * Twenty elements will be logged in every log line, so for 81-100 elements
+     * five log lines will be generated
+     * @param listElements a list of Strings which will be logged 
+     */
+    private void LogResults(List&lt;String&gt; listElements) {
+<span class="nc" id="L422">        String callingMethod = Thread.currentThread().getStackTrace()[3].getMethodName();</span>
+<span class="nc" id="L423">        StringBuilder sb = new StringBuilder(256);</span>
+<span class="nc" id="L424">        int count = 0;</span>
+<span class="nc bnc" id="L425" title="All 2 branches missed.">        for (String element : listElements)</span>
+        {
+<span class="nc bnc" id="L427" title="All 2 branches missed.">            if (count &gt; 20)</span>
+            {
+<span class="nc" id="L429">                Log.debug(callingMethod + &quot; results: &quot; + sb.toString());</span>
+<span class="nc" id="L430">                sb.delete(0, sb.length());</span>
+<span class="nc" id="L431">                count = 0;</span>
+            }
+<span class="nc" id="L433">            sb.append(element).append(',');</span>
+<span class="nc" id="L434">            count++;</span>
+<span class="nc" id="L435">        }</span>
+<span class="nc" id="L436">        sb.append('.');</span>
+<span class="nc" id="L437">        Log.debug(callingMethod + &quot; results: &quot; + sb.toString());</span>
+<span class="nc" id="L438">    }</span>
+
+    private Connection getConnection() throws SQLException {
+<span class="nc bnc" id="L441" title="All 2 branches missed.">        if (useConnectionProvider) {</span>
+<span class="nc" id="L442">            return DbConnectionManager.getConnection();</span>
+        } else
+        {
+<span class="nc" id="L445">            return DriverManager.getConnection(connectionString);</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

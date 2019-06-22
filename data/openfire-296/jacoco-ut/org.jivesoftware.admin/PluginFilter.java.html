@@ -1,0 +1,320 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>PluginFilter.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.admin</a> &gt; <span class="el_source">PluginFilter.java</span></div><h1>PluginFilter.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.admin;
+
+import org.apache.mina.util.CopyOnWriteMap;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import javax.servlet.*;
+import javax.servlet.http.HttpServletRequest;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.CopyOnWriteArrayList;
+
+/**
+ * A servlet filter that plugin classes can use to dynamically register and un-register filter logic.
+ *
+ * The original, now deprecated, filter logic that each plugin can register was fairly limited; instead of having full
+ * control over the filter chain, each instance of {@link SimpleFilter} only has the ability to use the ServletRequest
+ * and ServletResponse objects and then return {@code true} if further filters in the chain should be run.
+ *
+ * The new, non-deprecated functionality allows for regular {@link Filter} instances to be registered with this class,
+ * which removes much of the limitations that was present in the SimpleFilter approach.
+ *
+ * This implementation assumes, but does not enforce, that filters installed by plugins are applied to URL patterns that
+ * match the plugin. When filters installed by different plugins are applied to the same URL, the behavior of this
+ * implementation is undetermined.
+ *
+ * @author Matt Tucker
+ * @author Guus der Kinderen, guus.der.kinderen@gmail.com
+ */
+<span class="nc" id="L49">public class PluginFilter implements Filter {</span>
+
+<span class="nc" id="L51">    private static final Logger Log = LoggerFactory.getLogger( PluginFilter.class );</span>
+
+    @Deprecated
+<span class="nc" id="L54">    private static List&lt;SimpleFilter&gt; pluginFilters = new CopyOnWriteArrayList&lt;&gt;();</span>
+
+<span class="nc" id="L56">    private static Map&lt;String, List&lt;Filter&gt;&gt; filters = new CopyOnWriteMap&lt;&gt;();</span>
+
+    /**
+     * Adds a filter to the list of filters that will be run on every request.
+     * This method should be called by plugins when starting up.
+     *
+     * @param filter the filter.
+     * @deprecated Replaced by {@link #addPluginFilter(String, Filter)}
+     */
+    @Deprecated
+    public static void addPluginFilter(SimpleFilter filter) {
+<span class="nc" id="L67">        pluginFilters.add(filter);</span>
+<span class="nc" id="L68">    }</span>
+
+    /**
+     * Adds a filter to the list of filters that will be run on every request of which the URL matches the URL that
+     * is registered with this filter. More specifically, the request URL should be equal to, or start with, the filter
+     * URL.
+     *
+     * Multiple filters can be registered on the same URL, in which case they will be executed in the order in which
+     * they were added.
+     *
+     * Adding a filter does not initialize the plugin instance.
+     *
+     * @param filterUrl The URL pattern to which the filter is to be applied. Cannot be null nor an empty string.
+     * @param filter The filter. Cannot be null.
+     */
+    public static void addPluginFilter( String filterUrl, Filter filter )
+    {
+<span class="nc bnc" id="L85" title="All 6 branches missed.">        if ( filterUrl == null || filterUrl.isEmpty() || filter == null )</span>
+        {
+<span class="nc" id="L87">            throw new IllegalArgumentException();</span>
+        }
+<span class="nc bnc" id="L89" title="All 2 branches missed.">        if ( !filters.containsKey( filterUrl ) )</span>
+        {
+<span class="nc" id="L91">            filters.put( filterUrl, new ArrayList&lt;Filter&gt;() );</span>
+        }
+
+<span class="nc" id="L94">        final List&lt;Filter&gt; urlFilters = PluginFilter.filters.get( filterUrl );</span>
+<span class="nc bnc" id="L95" title="All 2 branches missed.">        if ( urlFilters.contains( filter ) )</span>
+        {
+<span class="nc" id="L97">            Log.warn( &quot;Cannot add filter '{}' as it was already added for URL '{}'!&quot;, filter, filterUrl );</span>
+        }
+        else
+        {
+<span class="nc" id="L101">            urlFilters.add( filter );</span>
+<span class="nc" id="L102">            Log.debug( &quot;Added filter '{}' for URL '{}'&quot;, filter, filterUrl );</span>
+        }
+<span class="nc" id="L104">    }</span>
+
+    /**
+     * Removes a filter from the list of filters that will be run on every request.
+     * This method should be called by plugins when shutting down.
+     *
+     * @param filter the filter.
+     * @deprecated
+     */
+    @Deprecated
+    public static void removePluginFilter(SimpleFilter filter) {
+<span class="nc" id="L115">        pluginFilters.remove(filter);</span>
+<span class="nc" id="L116">    }</span>
+
+    /**
+     * Removes a filter that is applied to a certain URL.
+     *
+     * Removing a filter does not destroy the plugin instance.
+     *
+     * @param filterUrl The URL pattern to which the filter is applied. Cannot be null nor an empty string.
+     * @param filterClassName The filter class name. Cannot be null or empty string.
+     * @return The filter instance that was removed, or null if the URL and name combination did not match a filter.
+     */
+    public static Filter removePluginFilter( String filterUrl, String filterClassName )
+    {
+<span class="nc bnc" id="L129" title="All 8 branches missed.">        if ( filterUrl == null || filterUrl.isEmpty() || filterClassName == null || filterClassName.isEmpty() )</span>
+        {
+<span class="nc" id="L131">            throw new IllegalArgumentException();</span>
+        }
+
+<span class="nc" id="L134">        Filter result = null;</span>
+<span class="nc bnc" id="L135" title="All 2 branches missed.">        if ( filters.containsKey( filterUrl ) )</span>
+        {
+<span class="nc" id="L137">            final List&lt;Filter&gt; urlFilters = PluginFilter.filters.get( filterUrl );</span>
+<span class="nc" id="L138">            final Iterator&lt;Filter&gt; iterator = urlFilters.iterator();</span>
+<span class="nc bnc" id="L139" title="All 2 branches missed.">            while ( iterator.hasNext() )</span>
+            {
+<span class="nc" id="L141">                final Filter filter = iterator.next();</span>
+<span class="nc bnc" id="L142" title="All 2 branches missed.">                if ( filter.getClass().getName().equals( filterClassName ) )</span>
+                {
+<span class="nc" id="L144">                    iterator.remove();</span>
+<span class="nc" id="L145">                    result = filter; // assumed to be unique, but check the entire collection to avoid leaks.</span>
+                }
+<span class="nc" id="L147">            }</span>
+<span class="nc bnc" id="L148" title="All 2 branches missed.">            if ( urlFilters.isEmpty() )</span>
+            {
+<span class="nc" id="L150">                filters.remove( filterUrl );</span>
+            }
+        }
+
+<span class="nc bnc" id="L154" title="All 2 branches missed.">        if ( result == null )</span>
+        {
+<span class="nc" id="L156">            Log.warn( &quot;Unable to removed filter of class '{}' for URL '{}'. No such filter is present.&quot;, filterClassName, filterUrl );</span>
+        }
+        else
+        {
+<span class="nc" id="L160">            Log.debug( &quot;Removed filter '{}' for URL '{}'&quot;, result, filterUrl );</span>
+        }
+<span class="nc" id="L162">        return result;</span>
+    }
+
+    @Override
+    public void init(FilterConfig filterConfig) throws ServletException {
+<span class="nc" id="L167">    }</span>
+
+    /**
+     * This class is a Filter implementation itself. It acts as a dynamic proxy to filters that are registered by
+     * Openfire plugins.
+     */
+    @Override
+    public void doFilter(ServletRequest servletRequest, ServletResponse servletResponse,
+            FilterChain filterChain) throws IOException, ServletException
+    {
+<span class="nc" id="L177">        boolean continueChain = true;</span>
+        // Process each of the (deprecated) SimplePlugin filters.
+<span class="nc bnc" id="L179" title="All 2 branches missed.">        for ( SimpleFilter filter : pluginFilters ) {</span>
+<span class="nc" id="L180">            Log.trace( &quot;(deprecated) Executing wrapped simple filter '{}'...&quot;, filter );</span>
+<span class="nc bnc" id="L181" title="All 2 branches missed.">            if (!filter.doFilter(servletRequest, servletResponse)) {</span>
+<span class="nc" id="L182">                Log.debug( &quot;The simple filter returned false so no further filters in the chain should be run.&quot; );</span>
+<span class="nc" id="L183">                continueChain = false;</span>
+<span class="nc" id="L184">                break;</span>
+            }
+<span class="nc" id="L186">        }</span>
+
+        // Process the 'regular' servlet filters.
+<span class="nc bnc" id="L189" title="All 2 branches missed.">        if ( continueChain )</span>
+        {
+<span class="nc bnc" id="L191" title="All 2 branches missed.">            if ( servletRequest instanceof HttpServletRequest )</span>
+            {
+<span class="nc" id="L193">                final HttpServletRequest httpServletRequest = (HttpServletRequest) servletRequest;</span>
+<span class="nc" id="L194">                final String requestPath = ( httpServletRequest.getContextPath() + httpServletRequest.getServletPath() + httpServletRequest.getPathInfo() ).toLowerCase();</span>
+
+<span class="nc" id="L196">                final List&lt;Filter&gt; applicableFilters = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L197" title="All 2 branches missed.">                for ( final Map.Entry&lt;String, List&lt;Filter&gt;&gt; entry : filters.entrySet() )</span>
+                {
+<span class="nc" id="L199">                    String filterUrl = entry.getKey();</span>
+<span class="nc bnc" id="L200" title="All 2 branches missed.">                    if ( filterUrl.endsWith( &quot;*&quot; ))</span>
+                    {
+<span class="nc" id="L202">                        filterUrl = filterUrl.substring( 0, filterUrl.length() -1 );</span>
+                    }
+<span class="nc" id="L204">                    filterUrl = filterUrl.toLowerCase();</span>
+
+<span class="nc bnc" id="L206" title="All 2 branches missed.">                    if ( requestPath.startsWith( filterUrl ) )</span>
+                    {
+<span class="nc bnc" id="L208" title="All 2 branches missed.">                        for ( final Filter filter : entry.getValue() )</span>
+                        {
+<span class="nc" id="L210">                            applicableFilters.add( filter );</span>
+<span class="nc" id="L211">                        }</span>
+                    }
+<span class="nc" id="L213">                }</span>
+<span class="nc bnc" id="L214" title="All 2 branches missed.">                if ( !applicableFilters.isEmpty() )</span>
+                {
+<span class="nc" id="L216">                    Log.debug( &quot;Wrapping filter chain in order to run plugin-specific filters.&quot; );</span>
+<span class="nc" id="L217">                    filterChain = new FilterChainInjector( filterChain, applicableFilters );</span>
+                }
+<span class="nc" id="L219">            }</span>
+            else
+            {
+<span class="nc" id="L222">                Log.warn( &quot;ServletRequest is not an instance of an HttpServletRequest.&quot; );</span>
+            }
+
+            // Plugin filtering is done. Progress down the filter chain that was initially provided.
+<span class="nc" id="L226">            filterChain.doFilter(servletRequest, servletResponse);</span>
+        }
+<span class="nc" id="L228">    }</span>
+
+    @Override
+    public void destroy() {
+        // If the destroy method is being called, the Openfire instance is being shutdown.
+        // Therefore, clear out the list of plugin filters.
+<span class="nc" id="L234">        pluginFilters.clear();</span>
+<span class="nc" id="L235">        filters.clear();</span>
+<span class="nc" id="L236">    }</span>
+
+    /**
+     * A simplified version of a servlet filter. Instead of having full control
+     * over the filter chain, a simple filter can only control whether further
+     * filters in the chain are run.
+     *
+     * @deprecated Use {@link Filter} instead.
+     */
+    @Deprecated
+    public interface SimpleFilter {
+
+        /**
+         * The doFilter method of the Filter is called by the PluginFilter each time a
+         * request/response pair is passed through the chain due to a client request
+         * for a resource at the end of the chain. This method should return {@code true} if
+         * the additional filters in the chain should be processed or {@code false}
+         * if no additional filters should be run.&lt;p&gt;
+         *
+         * Note that the filter will apply to all requests for JSP pages in the admin console
+         * and not just requests in the respective plugins. To only apply filtering to
+         * individual plugins, examine the context path of the request and only filter
+         * relevant requests.
+         *
+         * @param request the servlet request.
+         * @param response the servlet response
+         * @throws IOException if an IOException occurs.
+         * @throws ServletException if a servlet exception occurs.
+         * @return true if further filters in the chain should be run.
+         */
+        boolean doFilter( ServletRequest request, ServletResponse response )
+                throws IOException, ServletException;
+
+    }
+
+    /**
+     * A wrapper that can be used to inject a list of filters into an existing a filter chain.
+     *
+     * An instance of this class is expected to be created within the execution of a 'parent' filter chain. After
+     * instantiation, the caller is expected to invoke #doFilter once, after which all provided filters will be
+     * invoked. Afterwards, the original filter chain (as supplied in the constructor) will be resumed.
+     *
+     * @author Guus der Kinderen, guus.der.kinderen@gmail.com
+     */
+    private static class FilterChainInjector implements FilterChain
+    {
+<span class="nc" id="L282">        private static final Logger Log = LoggerFactory.getLogger( FilterChainInjector.class );</span>
+
+        private final FilterChain parentChain;
+        private final List&lt;Filter&gt; filters;
+<span class="nc" id="L286">        private int index = 0;</span>
+
+        /**
+         * Creates a new instance.
+         *
+         * @param parentChain the chain to which the filters are to be appended (cannot be null).
+         * @param filters The filters to append (cannot be null, but can be empty).
+         */
+        private FilterChainInjector( FilterChain parentChain, List&lt;Filter&gt; filters )
+<span class="nc" id="L295">        {</span>
+<span class="nc bnc" id="L296" title="All 4 branches missed.">            if ( parentChain == null || filters == null )</span>
+            {
+<span class="nc" id="L298">                throw new IllegalArgumentException();</span>
+            }
+<span class="nc" id="L300">            this.parentChain = parentChain;</span>
+<span class="nc" id="L301">            this.filters = filters;</span>
+<span class="nc" id="L302">        }</span>
+
+        @Override
+        public void doFilter( ServletRequest servletRequest, ServletResponse servletResponse ) throws IOException, ServletException
+        {
+<span class="nc bnc" id="L307" title="All 2 branches missed.">            if ( index &lt; filters.size() )</span>
+            {
+<span class="nc" id="L309">                Log.trace( &quot;Executing injected filter {} of {}...&quot;, index + 1, filters.size() );</span>
+<span class="nc" id="L310">                filters.get( index++ ).doFilter( servletRequest, servletResponse, this );</span>
+            }
+            else
+            {
+<span class="nc" id="L314">                Log.trace( &quot;Executed all injected filters. Resuming original chain.&quot; );</span>
+<span class="nc" id="L315">                parentChain.doFilter( servletRequest, servletResponse );</span>
+            }
+<span class="nc" id="L317">        }</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

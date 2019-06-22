@@ -1,0 +1,197 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>AesEncryptor.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.util</a> &gt; <span class="el_source">AesEncryptor.java</span></div><h1>AesEncryptor.java</h1><pre class="source lang-java linenums">package org.jivesoftware.util;
+
+import java.nio.charset.StandardCharsets;
+import java.security.Key;
+import java.security.Security;
+
+import javax.crypto.Cipher;
+import javax.crypto.spec.IvParameterSpec;
+import javax.crypto.spec.SecretKeySpec;
+
+import org.bouncycastle.jce.provider.BouncyCastleProvider;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Utility class providing symmetric AES encryption/decryption. To strengthen
+ * the encrypted result, use the {@link #setKey} method to provide a custom
+ * key prior to invoking the {@link #encrypt} or {@link #decrypt} methods.
+ *
+ * @author Tom Evans
+ */
+public class AesEncryptor implements Encryptor {
+
+<span class="fc" id="L24">    private static final Logger log = LoggerFactory.getLogger(AesEncryptor.class);</span>
+    private static final String ALGORITHM = &quot;AES/CBC/PKCS7Padding&quot;;
+
+<span class="fc" id="L27">    private static final byte[] INIT_PARM =</span>
+    {
+        (byte)0xcd, (byte)0x91, (byte)0xa7, (byte)0xc5,
+        (byte)0x27, (byte)0x8b, (byte)0x39, (byte)0xe0,
+        (byte)0xfa, (byte)0x72, (byte)0xd0, (byte)0x29,
+        (byte)0x83, (byte)0x65, (byte)0x9d, (byte)0x74
+    };
+
+<span class="fc" id="L35">    private static final byte[] DEFAULT_KEY =</span>
+    {
+        (byte)0xf2, (byte)0x46, (byte)0x5d, (byte)0x2a,
+        (byte)0xd1, (byte)0x73, (byte)0x0b, (byte)0x18,
+        (byte)0xcb, (byte)0x86, (byte)0x95, (byte)0xa3,
+        (byte)0xb1, (byte)0xe5, (byte)0x89, (byte)0x27
+    };
+
+<span class="fc" id="L43">    private static boolean isInitialized = false;</span>
+
+<span class="fc" id="L45">    private byte[] cipherKey = null;</span>
+
+    /** Default constructor */
+<span class="fc" id="L48">    public AesEncryptor() { initialize(); }</span>
+
+    /**
+     * Custom key constructor
+     *
+     * @param key the custom key
+     */
+<span class="fc" id="L55">    public AesEncryptor(String key) { </span>
+<span class="fc" id="L56">        initialize();</span>
+<span class="fc" id="L57">        setKey(key);</span>
+<span class="fc" id="L58">    }</span>
+
+    /* (non-Javadoc)
+     * @see org.jivesoftware.util.Encryptor#encrypt(java.lang.String)
+     */
+    @Override
+    public String encrypt(String value) {
+<span class="fc" id="L65">        return encrypt(value, null);</span>
+    }
+
+    @Override
+    public String encrypt(String value, byte[] iv) {
+<span class="fc bfc" id="L70" title="All 2 branches covered.">        if (value == null) { return null; }</span>
+<span class="fc" id="L71">        byte [] bytes = value.getBytes(StandardCharsets.UTF_8);</span>
+<span class="fc bfc" id="L72" title="All 2 branches covered.">        return Base64.encodeBytes(cipher(bytes, getKey(), iv == null ? INIT_PARM : iv, Cipher.ENCRYPT_MODE));</span>
+    }
+
+    /* (non-Javadoc)
+     * @see org.jivesoftware.util.Encryptor#decrypt(java.lang.String)
+     */
+    @Override
+    public String decrypt(String value) {
+<span class="fc" id="L80">        return decrypt(value, null);</span>
+    }
+
+    @Override
+    public String decrypt(String value, byte[] iv) {
+<span class="pc bpc" id="L85" title="1 of 2 branches missed.">        if (value == null) { return null; }</span>
+<span class="fc bfc" id="L86" title="All 2 branches covered.">        byte [] bytes = cipher(Base64.decode(value), getKey(), iv == null ? INIT_PARM : iv, Cipher.DECRYPT_MODE);</span>
+<span class="pc bpc" id="L87" title="1 of 2 branches missed.">        if (bytes == null) { return null; }</span>
+<span class="fc" id="L88">        return new String(bytes, StandardCharsets.UTF_8);</span>
+    }
+
+    /**
+     * Symmetric encrypt/decrypt routine.
+     *
+     * @param attribute The value to be converted
+     * @param key The encryption key
+     * @param mode The cipher mode (encrypt or decrypt)
+     * @return The converted attribute, or null if conversion fails
+     */
+    private byte [] cipher(byte [] attribute, byte [] key, byte[] iv, int mode)
+    {
+<span class="fc" id="L101">        byte [] result = null;</span>
+        try
+        {
+            // Create AES encryption key
+<span class="fc" id="L105">            Key aesKey = new SecretKeySpec(key, &quot;AES&quot;);</span>
+
+            // Create AES Cipher
+<span class="fc" id="L108">            Cipher aesCipher = Cipher.getInstance(ALGORITHM);</span>
+
+            // Initialize AES Cipher and convert
+<span class="fc" id="L111">            aesCipher.init(mode, aesKey, new IvParameterSpec(iv));</span>
+<span class="fc" id="L112">            result = aesCipher.doFinal(attribute);</span>
+        }
+<span class="nc" id="L114">        catch (Exception e)</span>
+        {
+<span class="nc" id="L116">            log.error(&quot;AES cipher failed&quot;, e);</span>
+<span class="fc" id="L117">        }</span>
+<span class="fc" id="L118">        return result;</span>
+    }
+
+    /**
+     * Return the encryption key. This will return the user-defined
+     * key (if available) or a default encryption key.
+     *
+     * @return The encryption key
+     */
+    private byte [] getKey()
+    {
+<span class="fc bfc" id="L129" title="All 2 branches covered.">        return cipherKey == null ? DEFAULT_KEY : cipherKey;</span>
+    }
+
+    /**
+     * Set the encryption key. This will apply the user-defined key,
+     * truncated or filled (via the default key) as needed  to meet
+     * the key length specifications.
+     *
+     * @param key The encryption key
+     */
+    private void setKey(byte [] key)
+    {
+<span class="fc" id="L141">        cipherKey = editKey(key);</span>
+<span class="fc" id="L142">    }</span>
+
+    /* (non-Javadoc)
+     * @see org.jivesoftware.util.Encryptor#setKey(java.lang.String)
+     */
+    @Override
+    public void setKey(String key)
+    {
+<span class="pc bpc" id="L150" title="1 of 2 branches missed.">        if (key == null) { </span>
+<span class="nc" id="L151">            cipherKey = null; </span>
+<span class="nc" id="L152">            return;</span>
+        }
+<span class="fc" id="L154">        byte [] bytes = key.getBytes(StandardCharsets.UTF_8);</span>
+<span class="fc" id="L155">        setKey(editKey(bytes));</span>
+<span class="fc" id="L156">    }</span>
+
+    /**
+     * Validates an optional user-defined encryption key. Only the
+     * first sixteen bytes of the input array will be used for the key.
+     * It will be filled (if necessary) to a minimum length of sixteen.
+     *
+     * @param key The user-defined encryption key
+     * @return A valid encryption key, or null
+     */
+    private byte [] editKey(byte [] key)
+    {
+<span class="pc bpc" id="L168" title="1 of 2 branches missed.">        if (key == null) { return null; }</span>
+<span class="fc" id="L169">        byte [] result = new byte [DEFAULT_KEY.length];</span>
+<span class="fc bfc" id="L170" title="All 2 branches covered.">        for (int x=0; x&lt;DEFAULT_KEY.length; x++)</span>
+        {
+<span class="pc bpc" id="L172" title="1 of 2 branches missed.">            result[x] = x &lt; key.length ? key[x] : DEFAULT_KEY[x];</span>
+        }
+<span class="fc" id="L174">        return result;</span>
+    }
+
+    /** Installs the required security provider(s) */
+    private synchronized void initialize()
+    {
+<span class="fc bfc" id="L180" title="All 2 branches covered.">        if (!isInitialized)</span>
+        {
+            try
+            {
+<span class="fc" id="L184">                Security.addProvider(new BouncyCastleProvider());</span>
+<span class="fc" id="L185">                isInitialized = true;</span>
+            }
+<span class="nc" id="L187">            catch (Throwable t)</span>
+            {
+<span class="nc" id="L189">                log.warn(&quot;JCE provider failure; unable to load BC&quot;, t);</span>
+<span class="fc" id="L190">            }</span>
+        }
+<span class="fc" id="L192">    }</span>
+
+/* */
+    
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

@@ -1,0 +1,520 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>EmailService.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.util</a> &gt; <span class="el_source">EmailService.java</span></div><h1>EmailService.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2003-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.util;
+
+import java.security.Security;
+import java.text.SimpleDateFormat;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Date;
+import java.util.Properties;
+
+import javax.mail.Address;
+import javax.mail.Message;
+import javax.mail.MessagingException;
+import javax.mail.Part;
+import javax.mail.SendFailedException;
+import javax.mail.Session;
+import javax.mail.Transport;
+import javax.mail.URLName;
+import javax.mail.internet.AddressException;
+import javax.mail.internet.InternetAddress;
+import javax.mail.internet.MimeBodyPart;
+import javax.mail.internet.MimeMessage;
+import javax.mail.internet.MimeMultipart;
+import javax.mail.internet.MimeUtility;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * A service to send email.&lt;p&gt;
+ *
+ * This class has a few factory methods you can use to return message objects
+ * or to add messages into a queue to be sent. Using these methods, you can
+ * send emails in the following couple of ways:
+ * &lt;pre&gt;
+ *   EmailService.sendMessage(
+ *     &quot;Joe Bloe&quot;, &quot;jbloe@place.org&quot;,
+ *     &quot;Jane Doe&quot;, &quot;jane@doe.com&quot;,
+ *     &quot;Hello...&quot;,
+ *     &quot;This is the body of the email...&quot;,
+ *     null
+ *   );
+ * &lt;/pre&gt;
+ * or
+ * &lt;pre&gt;
+ *   Message message = EmailService.createMimeMessage();
+ *   // call setters on the message object
+ *   // .
+ *   // .
+ *   // .
+ *   emailService.sendMessage(message);
+ * &lt;/pre&gt;&lt;p&gt;
+ *
+ * This class is configured with a set of Jive properties:&lt;ul&gt;
+ *      &lt;li&gt;{@code mail.smtp.host} -- the host name of your mail server, i.e.
+ *          mail.yourhost.com. The default value is &quot;localhost&quot;.
+ *      &lt;li&gt;{@code mail.smtp.port} -- an optional property to change the smtp
+ *          port used from the default of 25.
+ *      &lt;li&gt;{@code mail.smtp.username} -- an optional property to change the
+ *          username used to connect to the smtp server. Default is no username.
+ *      &lt;li&gt;{@code mail.smtp.password} -- an optional property to change the
+ *          password used to connect to the smtp server. Default is no password.
+ *      &lt;li&gt;{@code mail.smtp.ssl} -- an optional property to set whether to use
+ *          SSL to connect to the smtp server or not. Default is false.
+ *      &lt;li&gt;{@code mail.debugEnabled} -- true if debug information should written out.
+ *          Default is false.
+ * &lt;/ul&gt;
+ */
+public class EmailService {
+
+<span class="nc" id="L86">    private static final Logger Log = LoggerFactory.getLogger(EmailService.class);</span>
+
+    private static final String SSL_FACTORY = &quot;org.jivesoftware.util.SimpleSSLSocketFactory&quot;;
+
+<span class="nc" id="L90">    private static EmailService instance = new EmailService();</span>
+
+    public static EmailService getInstance() {
+<span class="nc" id="L93">        return instance;</span>
+    }
+
+    private String host;
+    private int port;
+    private String username;
+    private String password;
+    private boolean sslEnabled;
+    private boolean debugEnabled;
+
+<span class="nc" id="L103">    private Session session = null;</span>
+
+    /**
+     * Constructs a new EmailService instance.
+     */
+<span class="nc" id="L108">    private EmailService() {</span>
+<span class="nc" id="L109">        host = JiveGlobals.getProperty(&quot;mail.smtp.host&quot;, &quot;localhost&quot;);</span>
+<span class="nc" id="L110">        port = JiveGlobals.getIntProperty(&quot;mail.smtp.port&quot;, 25);</span>
+<span class="nc" id="L111">        username = JiveGlobals.getProperty(&quot;mail.smtp.username&quot;);</span>
+<span class="nc" id="L112">        password = JiveGlobals.getProperty(&quot;mail.smtp.password&quot;);</span>
+<span class="nc" id="L113">        sslEnabled = JiveGlobals.getBooleanProperty(&quot;mail.smtp.ssl&quot;);</span>
+<span class="nc" id="L114">        debugEnabled = JiveGlobals.getBooleanProperty(&quot;mail.debug&quot;);</span>
+<span class="nc" id="L115">    }</span>
+
+    /**
+     * Factory method to return a blank JavaMail message. You should use the
+     * object returned and set desired message properties. When done, pass the
+     * object to the addMessage(Message) method.
+     *
+     * @return a new JavaMail message.
+     */
+    public MimeMessage createMimeMessage() {
+<span class="nc bnc" id="L125" title="All 2 branches missed.">        if (session == null) {</span>
+<span class="nc" id="L126">            createSession();</span>
+        }
+<span class="nc" id="L128">        return new MimeMessage(session);</span>
+    }
+
+    /**
+     * Sends a JavaMail message. To create a message, use the
+     * {@link #createMimeMessage()} method.
+     *
+     * @param message the message to send.
+     */
+    public void sendMessage(MimeMessage message) {
+<span class="nc bnc" id="L138" title="All 2 branches missed.">        if (message != null) {</span>
+<span class="nc" id="L139">            sendMessages(Collections.singletonList(message));</span>
+        }
+        else {
+<span class="nc" id="L142">            Log.error(&quot;Cannot add null email message to queue.&quot;);</span>
+        }
+<span class="nc" id="L144">    }</span>
+
+    /**
+     * Send a collection of messages. To create a message, use the
+     * {@link #createMimeMessage()} method.
+     *
+     * @param messages a collection of the messages to send.
+     */
+    public void sendMessages(Collection&lt;MimeMessage&gt; messages) {
+        // If there are no messages, do nothing.
+<span class="nc bnc" id="L154" title="All 2 branches missed.">        if (messages.size() == 0) {</span>
+<span class="nc" id="L155">            return;</span>
+        }
+<span class="nc" id="L157">        TaskEngine.getInstance().submit(new EmailTask(messages));</span>
+<span class="nc" id="L158">    }</span>
+
+    /**
+     * Sends a message, specifying all of its fields.&lt;p&gt;
+     *
+     * To have more advanced control over the message sent, use the
+     * {@link #sendMessage(MimeMessage)} method.&lt;p&gt;
+     *
+     * Both a plain text and html body can be specified. If one of the values is null,
+     * only the other body type is sent. If both body values are set, a multi-part
+     * message will be sent. If parts of the message are invalid (ie, the toEmail is null)
+     * the message won't be sent.
+     *
+     * @param toName the name of the recipient of this email.
+     * @param toEmail the email address of the recipient of this email.
+     * @param fromName the name of the sender of this email.
+     * @param fromEmail the email address of the sender of this email.
+     * @param subject the subject of the email.
+     * @param textBody plain text body of the email, which can be {@code null} if the
+     *      html body is not null.
+     * @param htmlBody html body of the email, which can be {@code null} if the text body
+     *      is not null.
+     */
+    public void sendMessage(String toName, String toEmail, String fromName,
+            String fromEmail, String subject, String textBody, String htmlBody) 
+    {
+        // Check for errors in the given fields:
+<span class="nc bnc" id="L185" title="All 10 branches missed.">        if (toEmail == null || fromEmail == null || subject == null ||</span>
+                (textBody == null &amp;&amp; htmlBody == null))
+        {
+<span class="nc bnc" id="L188" title="All 10 branches missed.">            Log.error(&quot;Error sending email: Invalid fields: &quot;</span>
+                    + ((toEmail == null) ? &quot;toEmail &quot; : &quot;&quot;)
+                    + ((fromEmail == null) ? &quot;fromEmail &quot; : &quot;&quot;)
+                    + ((subject == null) ? &quot;subject &quot; : &quot;&quot;)
+                    + ((textBody == null &amp;&amp; htmlBody == null) ? &quot;textBody or htmlBody &quot; : &quot;&quot;)
+            );
+        }
+        else {
+            try {
+<span class="nc" id="L197">                String encoding = MimeUtility.mimeCharset(&quot;UTF-8&quot;);</span>
+<span class="nc" id="L198">                MimeMessage message = createMimeMessage();</span>
+                Address to;
+                Address from;
+
+<span class="nc bnc" id="L202" title="All 2 branches missed.">                if (toName != null) {</span>
+<span class="nc" id="L203">                    to = new InternetAddress(toEmail, toName, encoding);</span>
+                }
+                else {
+<span class="nc" id="L206">                    to = new InternetAddress(toEmail, &quot;&quot;, encoding);</span>
+                }
+
+<span class="nc bnc" id="L209" title="All 2 branches missed.">                if (fromName != null) {</span>
+<span class="nc" id="L210">                    from = new InternetAddress(fromEmail, fromName, encoding);</span>
+                }
+                else {
+<span class="nc" id="L213">                    from = new InternetAddress(fromEmail, &quot;&quot;, encoding);</span>
+                }
+
+                // Set the date of the message to be the current date
+<span class="nc" id="L217">                SimpleDateFormat format = new SimpleDateFormat(&quot;EEE, dd MMM yyyy HH:mm:ss Z&quot;,</span>
+                        java.util.Locale.US);
+<span class="nc" id="L219">                format.setTimeZone(JiveGlobals.getTimeZone());</span>
+<span class="nc" id="L220">                message.setHeader(&quot;Date&quot;, format.format(new Date()));</span>
+<span class="nc" id="L221">                message.setHeader(&quot;Content-Transfer-Encoding&quot;, &quot;8bit&quot;);</span>
+<span class="nc" id="L222">                message.setRecipient(Message.RecipientType.TO, to);</span>
+<span class="nc" id="L223">                message.setFrom(from);</span>
+<span class="nc" id="L224">                message.setSubject(StringUtils.replace(subject, &quot;\n&quot;, &quot;&quot;), encoding);</span>
+                // Create HTML, plain-text, or combination message
+<span class="nc bnc" id="L226" title="All 4 branches missed.">                if (textBody != null &amp;&amp; htmlBody != null) {</span>
+<span class="nc" id="L227">                    MimeMultipart content = new MimeMultipart(&quot;alternative&quot;);</span>
+                    // Plain-text
+<span class="nc" id="L229">                    MimeBodyPart text = new MimeBodyPart();</span>
+<span class="nc" id="L230">                    text.setText(textBody, encoding);</span>
+<span class="nc" id="L231">                    text.setDisposition(Part.INLINE);</span>
+<span class="nc" id="L232">                    content.addBodyPart(text);</span>
+                    // HTML
+<span class="nc" id="L234">                    MimeBodyPart html = new MimeBodyPart();</span>
+<span class="nc" id="L235">                    html.setContent(htmlBody, &quot;text/html; charset=UTF-8&quot;);</span>
+<span class="nc" id="L236">                    html.setDisposition(Part.INLINE);</span>
+<span class="nc" id="L237">                   html.setHeader(&quot;Content-Transfer-Encoding&quot;, &quot;8bit&quot;);</span>
+<span class="nc" id="L238">                    content.addBodyPart(html);</span>
+                    // Add multipart to message.
+<span class="nc" id="L240">                    message.setContent(content);</span>
+<span class="nc" id="L241">                    message.setDisposition(Part.INLINE);</span>
+<span class="nc" id="L242">                    sendMessage(message);</span>
+<span class="nc" id="L243">                }</span>
+<span class="nc bnc" id="L244" title="All 2 branches missed.">                else if (textBody != null) {</span>
+<span class="nc" id="L245">                    MimeBodyPart bPart = new MimeBodyPart();</span>
+<span class="nc" id="L246">                    bPart.setText(textBody, encoding);</span>
+<span class="nc" id="L247">                    bPart.setDisposition(Part.INLINE);</span>
+<span class="nc" id="L248">                   bPart.setHeader(&quot;Content-Transfer-Encoding&quot;, &quot;8bit&quot;);</span>
+<span class="nc" id="L249">                    MimeMultipart mPart = new MimeMultipart();</span>
+<span class="nc" id="L250">                    mPart.addBodyPart(bPart);</span>
+<span class="nc" id="L251">                    message.setContent(mPart);</span>
+<span class="nc" id="L252">                    message.setDisposition(Part.INLINE);</span>
+                    // Add the message to the send list
+<span class="nc" id="L254">                    sendMessage(message);</span>
+<span class="nc" id="L255">                }</span>
+<span class="nc bnc" id="L256" title="All 2 branches missed.">                else if (htmlBody != null) {</span>
+<span class="nc" id="L257">                    MimeBodyPart bPart = new MimeBodyPart();</span>
+<span class="nc" id="L258">                    bPart.setContent(htmlBody, &quot;text/html; charset=UTF-8&quot;);</span>
+<span class="nc" id="L259">                    bPart.setDisposition(Part.INLINE);</span>
+<span class="nc" id="L260">                   bPart.setHeader(&quot;Content-Transfer-Encoding&quot;, &quot;8bit&quot;);</span>
+<span class="nc" id="L261">                    MimeMultipart mPart = new MimeMultipart();</span>
+<span class="nc" id="L262">                    mPart.addBodyPart(bPart);</span>
+<span class="nc" id="L263">                    message.setContent(mPart);</span>
+<span class="nc" id="L264">                    message.setDisposition(Part.INLINE);</span>
+                    // Add the message to the send list
+<span class="nc" id="L266">                    sendMessage(message);</span>
+                }
+            }
+<span class="nc" id="L269">            catch (Exception e) {</span>
+<span class="nc" id="L270">                Log.error(e.getMessage(), e);</span>
+<span class="nc" id="L271">            }</span>
+        }
+<span class="nc" id="L273">    }</span>
+
+    /**
+     * Sends a collection of email messages. This method differs from
+     * {@link #sendMessages(Collection)} in that messages are sent
+     * before this method returns rather than queueing the messages to be sent later.
+     *
+     * @param messages the messages to send.
+     * @throws MessagingException if an error occurs.
+     */
+    public void sendMessagesImmediately(Collection&lt;MimeMessage&gt; messages)
+            throws MessagingException
+    {
+<span class="nc" id="L286">        EmailTask task = new EmailTask(messages);</span>
+<span class="nc" id="L287">        task.sendMessages();</span>
+<span class="nc" id="L288">    }</span>
+
+    /**
+     * Returns the SMTP host (e.g. mail.example.com). The default value is &quot;localhost&quot;.
+     *
+     * @return the SMTP host.
+     */
+    public String getHost() {
+<span class="nc" id="L296">        return host;</span>
+    }
+
+    /**
+     * Sets the SMTP host (e.g. mail.example.com). The default value is &quot;localhost&quot;.
+     *
+     * @param host the SMTP host.
+     */
+    public void setHost(String host) {
+<span class="nc" id="L305">        this.host = host;</span>
+<span class="nc" id="L306">        JiveGlobals.setProperty(&quot;mail.smtp.host&quot;, host);</span>
+<span class="nc" id="L307">        session = null;</span>
+<span class="nc" id="L308">    }</span>
+
+    /**
+     * Returns the port number used when connecting to the SMTP server. The default
+     * port is 25.
+     *
+     * @return the SMTP port.
+     */
+    public int getPort() {
+<span class="nc" id="L317">        return port;</span>
+    }
+
+    /**
+     * Sets the port number that will be used when connecting to the SMTP
+     * server. The default is 25, the standard SMTP port number.
+     *
+     * @param port the SMTP port number.
+     */
+    public void setPort(int port) {
+<span class="nc bnc" id="L327" title="All 2 branches missed.">        if (port &lt; 0) {</span>
+<span class="nc" id="L328">            throw new IllegalArgumentException(&quot;Invalid port value: &quot; + port);</span>
+        }
+<span class="nc" id="L330">        this.port = port;</span>
+<span class="nc" id="L331">        JiveGlobals.setProperty(&quot;mail.smtp.port&quot;, Integer.toString(port));</span>
+<span class="nc" id="L332">        session = null;</span>
+<span class="nc" id="L333">    }</span>
+
+    /**
+     * Returns the username used to connect to the SMTP server. If the username
+     * is {@code null}, no username will be used when connecting to the server.
+     *
+     * @return the username used to connect to the SMTP server, or {@code null} if
+     *      there is no username.
+     */
+    public String getUsername() {
+<span class="nc" id="L343">        return username;</span>
+    }
+
+    /**
+     * Sets the username that will be used when connecting to the SMTP
+     * server. The default is {@code null}, or no username.
+     *
+     * @param username the SMTP username.
+     */
+    public void setUsername(String username) {
+<span class="nc" id="L353">        this.username = username;</span>
+<span class="nc bnc" id="L354" title="All 2 branches missed.">        if (username == null) {</span>
+<span class="nc" id="L355">            JiveGlobals.deleteProperty(&quot;mail.smtp.username&quot;);</span>
+        }
+        else {
+<span class="nc" id="L358">            JiveGlobals.setProperty(&quot;mail.smtp.username&quot;, username);</span>
+        }
+<span class="nc" id="L360">        session = null;</span>
+<span class="nc" id="L361">    }</span>
+
+    /**
+     * Returns the password used to connect to the SMTP server. If the password
+     * is {@code null}, no password will be used when connecting to the server.
+     *
+     * @return the password used to connect to the SMTP server, or {@code null} if
+     *      there is no password.
+     */
+    public String getPassword() {
+<span class="nc" id="L371">        return password;</span>
+    }
+
+    /**
+     * Sets the password that will be used when connecting to the SMTP
+     * server. The default is {@code null}, or no password.
+     *
+     * @param password the SMTP password.
+     */
+    public void setPassword(String password) {
+<span class="nc" id="L381">        this.password = password;</span>
+<span class="nc bnc" id="L382" title="All 2 branches missed.">        if (password == null) {</span>
+<span class="nc" id="L383">            JiveGlobals.deleteProperty(&quot;mail.smtp.password&quot;);</span>
+        }
+        else {
+<span class="nc" id="L386">            JiveGlobals.setProperty(&quot;mail.smtp.password&quot;, password);</span>
+        }
+<span class="nc" id="L388">        session = null;</span>
+<span class="nc" id="L389">    }</span>
+
+    /**
+     * Returns true if SMTP debugging is enabled. Debug information is
+     * written to {@code System.out} by the underlying JavaMail provider.
+     *
+     * @return true if SMTP debugging is enabled.
+     */
+    public boolean isDebugEnabled() {
+<span class="nc" id="L398">        return debugEnabled;</span>
+    }
+
+    /**
+     * Enables or disables SMTP transport layer debugging. Debug information is
+     * written to {@code System.out} by the underlying JavaMail provider.
+     *
+     * @param debugEnabled true if SMTP debugging should be enabled.
+     */
+    public void setDebugEnabled(boolean debugEnabled) {
+<span class="nc" id="L408">        this.debugEnabled = debugEnabled;</span>
+<span class="nc" id="L409">        JiveGlobals.setProperty(&quot;mail.debug&quot;, Boolean.toString(debugEnabled));</span>
+<span class="nc" id="L410">        session = null;</span>
+<span class="nc" id="L411">    }</span>
+
+    /**
+     * Returns true if SSL is enabled for SMTP connections.
+     *
+     * @return true if SSL is enabled.
+     */
+    public boolean isSSLEnabled() {
+<span class="nc" id="L419">        return sslEnabled;</span>
+    }
+
+    /**
+     * Sets whether the SMTP connection is configured to use SSL or not.
+     * Typically, the port should be 465 when using SSL with SMTP.
+     *
+     * @param sslEnabled true if ssl should be enabled, false otherwise.
+     */
+    public void setSSLEnabled(boolean sslEnabled) {
+<span class="nc" id="L429">        this.sslEnabled = sslEnabled;</span>
+<span class="nc" id="L430">        JiveGlobals.setProperty(&quot;mail.smtp.ssl&quot;, Boolean.toString(sslEnabled));</span>
+<span class="nc" id="L431">        session = null;</span>
+<span class="nc" id="L432">    }</span>
+
+    /**
+     * Creates a Javamail session.
+     */
+    private synchronized void createSession() {
+<span class="nc bnc" id="L438" title="All 2 branches missed.">        if (host == null) {</span>
+<span class="nc" id="L439">            throw new IllegalArgumentException(&quot;Host cannot be null.&quot;);</span>
+        }
+
+<span class="nc" id="L442">        Properties mailProps = new Properties();</span>
+<span class="nc" id="L443">        mailProps.setProperty(&quot;mail.smtp.host&quot;, host);</span>
+<span class="nc" id="L444">        mailProps.setProperty(&quot;mail.smtp.port&quot;, String.valueOf(port));</span>
+        // Allow messages with a mix of valid and invalid recipients to still be sent.
+<span class="nc" id="L446">        mailProps.setProperty(&quot;mail.smtp.sendpartial&quot;, &quot;true&quot;);</span>
+<span class="nc" id="L447">        mailProps.setProperty(&quot;mail.debug&quot;, String.valueOf(debugEnabled));</span>
+
+        // Methology from an article on www.javaworld.com (Java Tip 115)
+        // We will attempt to failback to an insecure connection
+        // if the secure one cannot be made
+<span class="nc bnc" id="L452" title="All 2 branches missed.">        if (sslEnabled) {</span>
+            // Register with security provider.
+<span class="nc" id="L454">            Security.setProperty(&quot;ssl.SocketFactory.provider&quot;, SSL_FACTORY);</span>
+
+<span class="nc" id="L456">            mailProps.setProperty(&quot;mail.smtp.socketFactory.class&quot;, SSL_FACTORY);</span>
+<span class="nc" id="L457">            mailProps.setProperty(&quot;mail.smtp.socketFactory.fallback&quot;, &quot;true&quot;);</span>
+        }
+
+        // If a username is defined, use SMTP authentication.
+<span class="nc bnc" id="L461" title="All 2 branches missed.">        if (username != null) {</span>
+<span class="nc" id="L462">            mailProps.put(&quot;mail.smtp.auth&quot;, &quot;true&quot;);</span>
+        }
+<span class="nc" id="L464">        session = Session.getInstance(mailProps, null);</span>
+<span class="nc" id="L465">    }</span>
+
+    /**
+     * Task to send one or more emails via the SMTP server.
+     */
+    private class EmailTask implements Runnable {
+
+        private Collection&lt;MimeMessage&gt; messages;
+
+<span class="nc" id="L474">        public EmailTask(Collection&lt;MimeMessage&gt; messages) {</span>
+<span class="nc" id="L475">            this.messages = messages;</span>
+<span class="nc" id="L476">        }</span>
+
+        @Override
+        public void run() {
+            try {
+<span class="nc" id="L481">                sendMessages();</span>
+            }
+<span class="nc" id="L483">            catch (MessagingException me) {</span>
+<span class="nc" id="L484">                Log.error(me.getMessage(), me);</span>
+<span class="nc" id="L485">            }</span>
+<span class="nc" id="L486">        }</span>
+
+        public void sendMessages() throws MessagingException {
+<span class="nc" id="L489">            Transport transport = null;</span>
+            try {
+<span class="nc" id="L491">                URLName url = new URLName(&quot;smtp&quot;, host, port, &quot;&quot;, username, password);</span>
+<span class="nc bnc" id="L492" title="All 2 branches missed.">                if (session == null) {</span>
+<span class="nc" id="L493">                    createSession();</span>
+                }
+<span class="nc" id="L495">                transport = new com.sun.mail.smtp.SMTPTransport(session, url);</span>
+<span class="nc" id="L496">                transport.connect(host, port, username, password);</span>
+<span class="nc bnc" id="L497" title="All 2 branches missed.">                for (MimeMessage message : messages) {</span>
+                    // Attempt to send message, but catch exceptions caused by invalid
+                    // addresses so that other messages can continue to be sent.
+                    try {
+<span class="nc" id="L501">                        transport.sendMessage(message,</span>
+<span class="nc" id="L502">                            message.getRecipients(MimeMessage.RecipientType.TO));</span>
+                    }
+<span class="nc" id="L504">                    catch (AddressException | SendFailedException ae) {</span>
+<span class="nc" id="L505">                        Log.error(ae.getMessage(), ae);</span>
+<span class="nc" id="L506">                    }</span>
+<span class="nc" id="L507">                }</span>
+            }
+            finally {
+<span class="nc bnc" id="L510" title="All 4 branches missed.">                if (transport != null) {</span>
+                    try {
+<span class="nc" id="L512">                        transport.close();</span>
+                    }
+<span class="nc" id="L514">                    catch (MessagingException e) { /* ignore */ }</span>
+                }
+<span class="nc" id="L516">            }</span>
+<span class="nc" id="L517">        }</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

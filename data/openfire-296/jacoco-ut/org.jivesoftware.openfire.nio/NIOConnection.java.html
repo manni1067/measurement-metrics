@@ -1,0 +1,483 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>NIOConnection.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.nio</a> &gt; <span class="el_source">NIOConnection.java</span></div><h1>NIOConnection.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.nio;
+
+import static org.jivesoftware.openfire.spi.ConnectionManagerImpl.COMPRESSION_FILTER_NAME;
+import static org.jivesoftware.openfire.spi.ConnectionManagerImpl.EXECUTOR_FILTER_NAME;
+import static org.jivesoftware.openfire.spi.ConnectionManagerImpl.TLS_FILTER_NAME;
+
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.SocketAddress;
+import java.net.UnknownHostException;
+import java.nio.charset.CharsetEncoder;
+import java.nio.charset.CodingErrorAction;
+import java.nio.charset.StandardCharsets;
+import java.security.cert.Certificate;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.ReentrantLock;
+
+import javax.net.ssl.*;
+
+import org.apache.mina.core.buffer.IoBuffer;
+import org.apache.mina.core.filterchain.IoFilterChain;
+import org.apache.mina.core.session.IoSession;
+import org.apache.mina.filter.compression.CompressionFilter;
+import org.apache.mina.filter.ssl.SslFilter;
+import org.jivesoftware.openfire.Connection;
+import org.jivesoftware.openfire.ConnectionCloseListener;
+import org.jivesoftware.openfire.PacketDeliverer;
+import org.jivesoftware.openfire.auth.UnauthorizedException;
+import org.jivesoftware.openfire.net.StanzaHandler;
+import org.jivesoftware.openfire.session.LocalSession;
+import org.jivesoftware.openfire.session.Session;
+import org.jivesoftware.openfire.spi.ConnectionConfiguration;
+import org.jivesoftware.openfire.spi.EncryptionArtifactFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmpp.packet.Packet;
+
+/**
+ * Implementation of {@link Connection} interface specific for NIO connections when using the Apache MINA framework.
+ *
+ * @author Gaston Dombiak
+ * @see &lt;a href=&quot;http://mina.apache.org&quot;&gt;Apache MINA&lt;/a&gt;
+ */
+public class NIOConnection implements Connection {
+
+<span class="nc" id="L66">    private static final Logger Log = LoggerFactory.getLogger(NIOConnection.class);</span>
+    private ConnectionConfiguration configuration;
+
+    /**
+     * The utf-8 charset for decoding and encoding XMPP packet streams.
+     */
+    public static final String CHARSET = &quot;UTF-8&quot;;
+
+    private LocalSession session;
+    private IoSession ioSession;
+
+<span class="nc" id="L77">    final private Map&lt;ConnectionCloseListener, Object&gt; closeListeners = new HashMap&lt;&gt;();</span>
+
+    /**
+     * Deliverer to use when the connection is closed or was closed when delivering
+     * a packet.
+     */
+    private PacketDeliverer backupDeliverer;
+<span class="nc" id="L84">    private boolean flashClient = false;</span>
+<span class="nc" id="L85">    private int majorVersion = 1;</span>
+<span class="nc" id="L86">    private int minorVersion = 0;</span>
+<span class="nc" id="L87">    private String language = null;</span>
+
+    /**
+     * TLS policy currently in use for this connection.
+     */
+<span class="nc" id="L92">    private TLSPolicy tlsPolicy = TLSPolicy.optional;</span>
+    private boolean usingSelfSignedCertificate;
+
+    /**
+     * Compression policy currently in use for this connection.
+     */
+<span class="nc" id="L98">    private CompressionPolicy compressionPolicy = CompressionPolicy.disabled;</span>
+<span class="nc" id="L99">    private static final ThreadLocal&lt;CharsetEncoder&gt; encoder = new ThreadLocalEncoder();</span>
+
+    /**
+     * Flag that specifies if the connection should be considered closed. Closing a NIO connection
+     * is an asynch operation so instead of waiting for the connection to be actually closed just
+     * keep this flag to avoid using the connection between #close was used and the socket is actually
+     * closed.
+     */
+<span class="nc" id="L107">    private AtomicReference&lt;State&gt; state = new AtomicReference&lt;&gt;(State.OPEN);</span>
+    
+    /**
+     * Lock used to ensure the integrity of the underlying IoSession (refer to
+     * https://issues.apache.org/jira/browse/DIRMINA-653 for details)
+     * &lt;p&gt;
+     * This lock can be removed once Openfire guarantees a stable delivery
+     * order, in which case {@link #deliver(Packet)} won't be called
+     * concurrently any more, which made this lock necessary in the first place.
+     * &lt;/p&gt;
+     */
+<span class="nc" id="L118">    private final ReentrantLock ioSessionLock = new ReentrantLock(true);</span>
+
+<span class="nc" id="L120">    public NIOConnection( IoSession session, PacketDeliverer packetDeliverer, ConnectionConfiguration configuration ) {</span>
+<span class="nc" id="L121">        this.ioSession = session;</span>
+<span class="nc" id="L122">        this.backupDeliverer = packetDeliverer;</span>
+<span class="nc" id="L123">        this.configuration = configuration;</span>
+<span class="nc" id="L124">    }</span>
+
+    @Override
+    public boolean validate() {
+<span class="nc bnc" id="L128" title="All 2 branches missed.">        if (isClosed()) {</span>
+<span class="nc" id="L129">            return false;</span>
+        }
+<span class="nc" id="L131">        deliverRawText(&quot; &quot;);</span>
+<span class="nc bnc" id="L132" title="All 2 branches missed.">        return !isClosed();</span>
+    }
+
+    @Override
+    public void registerCloseListener(ConnectionCloseListener listener, Object callback) {
+<span class="nc bnc" id="L137" title="All 2 branches missed.">        if (isClosed()) {</span>
+<span class="nc" id="L138">            listener.onConnectionClose(session);</span>
+        }
+        else {
+<span class="nc" id="L141">            closeListeners.put( listener, callback );</span>
+        }
+<span class="nc" id="L143">    }</span>
+
+    @Override
+    public void removeCloseListener(ConnectionCloseListener listener) {
+<span class="nc" id="L147">        closeListeners.remove( listener );</span>
+<span class="nc" id="L148">    }</span>
+
+    @Override
+    public byte[] getAddress() throws UnknownHostException {
+<span class="nc" id="L152">        final SocketAddress remoteAddress = ioSession.getRemoteAddress();</span>
+<span class="nc bnc" id="L153" title="All 2 branches missed.">        if (remoteAddress == null) throw new UnknownHostException();</span>
+<span class="nc" id="L154">        final InetSocketAddress socketAddress = (InetSocketAddress) remoteAddress;</span>
+<span class="nc" id="L155">        final InetAddress address = socketAddress.getAddress();</span>
+<span class="nc" id="L156">        return address.getAddress();</span>
+    }
+
+    @Override
+    public String getHostAddress() throws UnknownHostException {
+<span class="nc" id="L161">        final SocketAddress remoteAddress = ioSession.getRemoteAddress();</span>
+<span class="nc bnc" id="L162" title="All 2 branches missed.">        if (remoteAddress == null) throw new UnknownHostException();</span>
+<span class="nc" id="L163">        final InetSocketAddress socketAddress = (InetSocketAddress) remoteAddress;</span>
+<span class="nc" id="L164">        final InetAddress inetAddress = socketAddress.getAddress();</span>
+<span class="nc" id="L165">        return inetAddress.getHostAddress();</span>
+    }
+
+    @Override
+    public String getHostName() throws UnknownHostException {
+<span class="nc" id="L170">        final SocketAddress remoteAddress = ioSession.getRemoteAddress();</span>
+<span class="nc bnc" id="L171" title="All 2 branches missed.">        if (remoteAddress == null) throw new UnknownHostException();</span>
+<span class="nc" id="L172">        final InetSocketAddress socketAddress = (InetSocketAddress) remoteAddress;</span>
+<span class="nc" id="L173">        final InetAddress inetAddress = socketAddress.getAddress();</span>
+<span class="nc" id="L174">        return inetAddress.getHostName();</span>
+    }
+
+    @Override
+    public Certificate[] getLocalCertificates() {
+<span class="nc" id="L179">        SSLSession sslSession = (SSLSession) ioSession.getAttribute(SslFilter.SSL_SESSION);</span>
+<span class="nc bnc" id="L180" title="All 2 branches missed.">        if (sslSession != null) {</span>
+<span class="nc" id="L181">            return sslSession.getLocalCertificates();</span>
+        }
+<span class="nc" id="L183">        return new Certificate[0];</span>
+    }
+
+    @Override
+    public Certificate[] getPeerCertificates() {
+        try {
+<span class="nc" id="L189">            SSLSession sslSession = (SSLSession) ioSession.getAttribute(SslFilter.SSL_SESSION);</span>
+<span class="nc bnc" id="L190" title="All 2 branches missed.">            if (sslSession != null) {</span>
+<span class="nc" id="L191">                return sslSession.getPeerCertificates();</span>
+            }
+<span class="nc" id="L193">        } catch (SSLPeerUnverifiedException e) {</span>
+<span class="nc bnc" id="L194" title="All 2 branches missed.">            if (Log.isTraceEnabled()) {</span>
+                // This is perfectly acceptable when mutual authentication is not enforced by Openfire configuration.
+<span class="nc" id="L196">                Log.trace( &quot;Peer does not offer certificates in session: &quot; + session, e);</span>
+            }
+<span class="nc" id="L198">        }</span>
+<span class="nc" id="L199">        return new Certificate[0];</span>
+    }
+
+    @Override
+    public void setUsingSelfSignedCertificate(boolean isSelfSigned) {
+<span class="nc" id="L204">        this.usingSelfSignedCertificate = isSelfSigned;</span>
+<span class="nc" id="L205">    }</span>
+
+    @Override
+    public boolean isUsingSelfSignedCertificate() {
+<span class="nc" id="L209">        return usingSelfSignedCertificate;</span>
+    }
+
+    @Override
+    public PacketDeliverer getPacketDeliverer() {
+<span class="nc" id="L214">        return backupDeliverer;</span>
+    }
+
+    @Override
+    public void close() {
+<span class="nc bnc" id="L219" title="All 2 branches missed.">        if (state.compareAndSet(State.OPEN, State.CLOSED)) {</span>
+
+            // Ensure that the state of this connection, its session and the MINA context are eventually closed.
+
+<span class="nc bnc" id="L223" title="All 2 branches missed.">            if (session != null) {</span>
+<span class="nc" id="L224">                session.setStatus(Session.STATUS_CLOSED);</span>
+            }
+
+            try {
+<span class="nc bnc" id="L228" title="All 2 branches missed.">                deliverRawText0(flashClient ? &quot;&lt;/flash:stream&gt;&quot; : &quot;&lt;/stream:stream&gt;&quot;);</span>
+<span class="nc" id="L229">            } catch (Exception e) {</span>
+<span class="nc" id="L230">                Log.error(&quot;Failed to deliver stream close tag: &quot; + e.getMessage());</span>
+<span class="nc" id="L231">            }</span>
+
+            try {
+<span class="nc" id="L234">                ioSession.closeOnFlush();</span>
+<span class="nc" id="L235">            } catch (Exception e) {</span>
+<span class="nc" id="L236">                Log.error(&quot;Exception while closing MINA session&quot;, e);</span>
+<span class="nc" id="L237">            }</span>
+<span class="nc" id="L238">            notifyCloseListeners(); // clean up session, etc.</span>
+<span class="nc" id="L239">            closeListeners.clear();</span>
+        }
+<span class="nc" id="L241">    }</span>
+
+    @Override
+    public void systemShutdown() {
+<span class="nc" id="L245">        deliverRawText(&quot;&lt;stream:error&gt;&lt;system-shutdown &quot; +</span>
+                &quot;xmlns='urn:ietf:params:xml:ns:xmpp-streams'/&gt;&lt;/stream:error&gt;&quot;);
+<span class="nc" id="L247">        close();</span>
+<span class="nc" id="L248">    }</span>
+
+    /**
+     * Notifies all close listeners that the connection has been closed.
+     * Used by subclasses to properly finish closing the connection.
+     */
+    private void notifyCloseListeners() {
+<span class="nc bnc" id="L255" title="All 2 branches missed.">        for( final Map.Entry&lt;ConnectionCloseListener, Object&gt; entry : closeListeners.entrySet() )</span>
+        {
+<span class="nc bnc" id="L257" title="All 2 branches missed.">            if (entry.getKey() != null) {</span>
+                try {
+<span class="nc" id="L259">                    entry.getKey().onConnectionClose(entry.getValue());</span>
+<span class="nc" id="L260">                } catch (Exception e) {</span>
+<span class="nc" id="L261">                    Log.error(&quot;Error notifying listener: &quot; + entry.getKey(), e);</span>
+<span class="nc" id="L262">                }</span>
+            }
+<span class="nc" id="L264">        }</span>
+<span class="nc" id="L265">    }</span>
+
+    @Override
+    public void init(LocalSession owner) {
+<span class="nc" id="L269">        session = owner;</span>
+<span class="nc" id="L270">    }</span>
+
+    @Override
+    public void reinit(LocalSession owner) {
+<span class="nc" id="L274">        session = owner;</span>
+<span class="nc" id="L275">        StanzaHandler stanzaHandler = getStanzaHandler();</span>
+<span class="nc" id="L276">        stanzaHandler.setSession(owner);</span>
+<span class="nc" id="L277">    }</span>
+
+    protected StanzaHandler getStanzaHandler() {
+<span class="nc" id="L280">        return (StanzaHandler)ioSession.getAttribute(ConnectionHandler.HANDLER);</span>
+    }
+
+    @Override
+    public boolean isClosed() {
+<span class="nc bnc" id="L285" title="All 2 branches missed.">        return state.get() == State.CLOSED;</span>
+    }
+
+    @Override
+    public boolean isSecure() {
+<span class="nc" id="L290">        return ioSession.getFilterChain().contains(TLS_FILTER_NAME);</span>
+    }
+
+    @Override
+    public void deliver(Packet packet) throws UnauthorizedException {
+<span class="nc bnc" id="L295" title="All 2 branches missed.">        if (isClosed()) {</span>
+<span class="nc" id="L296">            backupDeliverer.deliver(packet);</span>
+        }
+        else {
+<span class="nc" id="L299">            boolean errorDelivering = false;</span>
+<span class="nc" id="L300">            IoBuffer buffer = IoBuffer.allocate(4096);</span>
+<span class="nc" id="L301">            buffer.setAutoExpand(true);</span>
+            try {
+<span class="nc" id="L303">                buffer.putString(packet.getElement().asXML(), encoder.get());</span>
+<span class="nc bnc" id="L304" title="All 2 branches missed.">                if (flashClient) {</span>
+<span class="nc" id="L305">                    buffer.put((byte) '\0');</span>
+                }
+<span class="nc" id="L307">                buffer.flip();</span>
+                
+<span class="nc" id="L309">                ioSessionLock.lock();</span>
+                try {
+<span class="nc" id="L311">                    ioSession.write(buffer);</span>
+                } finally {
+<span class="nc" id="L313">                    ioSessionLock.unlock();</span>
+<span class="nc" id="L314">                }</span>
+            }
+<span class="nc" id="L316">            catch (Exception e) {</span>
+<span class="nc" id="L317">                Log.debug(&quot;Error delivering packet:\n&quot; + packet, e);</span>
+<span class="nc" id="L318">                errorDelivering = true;</span>
+<span class="nc" id="L319">            }</span>
+<span class="nc bnc" id="L320" title="All 2 branches missed.">            if (errorDelivering) {</span>
+<span class="nc" id="L321">                close();</span>
+                // Retry sending the packet again. Most probably if the packet is a
+                // Message it will be stored offline
+<span class="nc" id="L324">                backupDeliverer.deliver(packet);</span>
+            }
+            else {
+<span class="nc" id="L327">                session.incrementServerPacketCount();</span>
+            }
+        }
+<span class="nc" id="L330">    }</span>
+
+    @Override
+    public void deliverRawText(String text) {
+<span class="nc bnc" id="L334" title="All 2 branches missed.">        if (!isClosed()) {</span>
+<span class="nc" id="L335">            deliverRawText0(text);</span>
+        }
+<span class="nc" id="L337">    }</span>
+
+    private void deliverRawText0(String text){
+<span class="nc" id="L340">        boolean errorDelivering = false;</span>
+<span class="nc" id="L341">        IoBuffer buffer = IoBuffer.allocate(text.length());</span>
+<span class="nc" id="L342">        buffer.setAutoExpand(true);</span>
+        try {
+            //Charset charset = Charset.forName(CHARSET);
+            //buffer.putString(text, charset.newEncoder());
+<span class="nc" id="L346">            buffer.put(text.getBytes(StandardCharsets.UTF_8));</span>
+<span class="nc bnc" id="L347" title="All 2 branches missed.">            if (flashClient) {</span>
+<span class="nc" id="L348">                buffer.put((byte) '\0');</span>
+            }
+<span class="nc" id="L350">            buffer.flip();</span>
+<span class="nc" id="L351">            ioSessionLock.lock();</span>
+            try {
+<span class="nc" id="L353">                ioSession.write(buffer);</span>
+            }
+            finally {
+<span class="nc" id="L356">                ioSessionLock.unlock();</span>
+<span class="nc" id="L357">            }</span>
+        }
+<span class="nc" id="L359">        catch (Exception e) {</span>
+<span class="nc" id="L360">            Log.debug(&quot;Error delivering raw text:\n&quot; + text, e);</span>
+<span class="nc" id="L361">            errorDelivering = true;</span>
+<span class="nc" id="L362">        }</span>
+
+        // Attempt to close the connection if delivering text fails.
+<span class="nc bnc" id="L365" title="All 2 branches missed.">        if (errorDelivering) {</span>
+<span class="nc" id="L366">            close();</span>
+        }
+<span class="nc" id="L368">    }</span>
+
+    public void startTLS(boolean clientMode, boolean directTLS) throws Exception {
+
+<span class="nc" id="L372">        final EncryptionArtifactFactory factory = new EncryptionArtifactFactory( configuration );</span>
+        final SslFilter filter;
+<span class="nc bnc" id="L374" title="All 2 branches missed.">        if ( clientMode )</span>
+        {
+<span class="nc" id="L376">            filter = factory.createClientModeSslFilter();</span>
+        }
+        else
+        {
+<span class="nc" id="L380">            filter = factory.createServerModeSslFilter();</span>
+        }
+
+<span class="nc" id="L383">        ioSession.getFilterChain().addBefore(EXECUTOR_FILTER_NAME, TLS_FILTER_NAME, filter);</span>
+
+<span class="nc bnc" id="L385" title="All 2 branches missed.">        if (!directTLS)</span>
+        {
+<span class="nc" id="L387">            ioSession.setAttribute( SslFilter.DISABLE_ENCRYPTION_ONCE, Boolean.TRUE );</span>
+        }
+
+<span class="nc bnc" id="L390" title="All 4 branches missed.">        if ( !clientMode &amp;&amp; !directTLS ) {</span>
+            // Indicate the client that the server is ready to negotiate TLS
+<span class="nc" id="L392">            deliverRawText( &quot;&lt;proceed xmlns=\&quot;urn:ietf:params:xml:ns:xmpp-tls\&quot;/&gt;&quot; );</span>
+        }
+<span class="nc" id="L394">    }</span>
+
+    @Override
+    public void addCompression() {
+<span class="nc" id="L398">        IoFilterChain chain = ioSession.getFilterChain();</span>
+<span class="nc" id="L399">        String baseFilter = EXECUTOR_FILTER_NAME;</span>
+<span class="nc bnc" id="L400" title="All 2 branches missed.">        if (chain.contains(TLS_FILTER_NAME)) {</span>
+<span class="nc" id="L401">            baseFilter = TLS_FILTER_NAME;</span>
+        }
+<span class="nc" id="L403">        chain.addAfter(baseFilter, COMPRESSION_FILTER_NAME, new CompressionFilter(true, false, CompressionFilter.COMPRESSION_MAX));</span>
+<span class="nc" id="L404">    }</span>
+
+    @Override
+    public void startCompression() {
+<span class="nc" id="L408">        CompressionFilter ioFilter = (CompressionFilter) ioSession.getFilterChain().get(COMPRESSION_FILTER_NAME);</span>
+<span class="nc" id="L409">        ioFilter.setCompressOutbound(true);</span>
+<span class="nc" id="L410">    }</span>
+
+    @Override
+    public ConnectionConfiguration getConfiguration()
+    {
+<span class="nc" id="L415">        return configuration;</span>
+    }
+
+    public boolean isFlashClient() {
+<span class="nc" id="L419">        return flashClient;</span>
+    }
+
+    @Override
+    public void setFlashClient(boolean flashClient) {
+<span class="nc" id="L424">        this.flashClient = flashClient;</span>
+<span class="nc" id="L425">    }</span>
+
+    @Override
+    public int getMajorXMPPVersion() {
+<span class="nc" id="L429">        return majorVersion;</span>
+    }
+
+    @Override
+    public int getMinorXMPPVersion() {
+<span class="nc" id="L434">        return minorVersion;</span>
+    }
+
+    @Override
+    public void setXMPPVersion(int majorVersion, int minorVersion) {
+<span class="nc" id="L439">        this.majorVersion = majorVersion;</span>
+<span class="nc" id="L440">        this.minorVersion = minorVersion;</span>
+<span class="nc" id="L441">    }</span>
+
+    @Override
+    public boolean isCompressed() {
+<span class="nc" id="L445">        return ioSession.getFilterChain().contains(COMPRESSION_FILTER_NAME);</span>
+    }
+
+    @Override
+    public CompressionPolicy getCompressionPolicy() {
+<span class="nc" id="L450">        return compressionPolicy;</span>
+    }
+
+    @Override
+    public void setCompressionPolicy(CompressionPolicy compressionPolicy) {
+<span class="nc" id="L455">        this.compressionPolicy = compressionPolicy;</span>
+<span class="nc" id="L456">    }</span>
+
+    @Override
+    public TLSPolicy getTlsPolicy() {
+<span class="nc" id="L460">        return tlsPolicy;</span>
+    }
+
+    @Override
+    public void setTlsPolicy(TLSPolicy tlsPolicy) {
+<span class="nc" id="L465">        this.tlsPolicy = tlsPolicy;</span>
+<span class="nc" id="L466">    }</span>
+
+    @Override
+    public String toString() {
+<span class="nc" id="L470">        return super.toString() + &quot; MINA Session: &quot; + ioSession;</span>
+    }
+
+<span class="nc" id="L473">    private static class ThreadLocalEncoder extends ThreadLocal&lt;CharsetEncoder&gt; {</span>
+
+        @Override
+        protected CharsetEncoder initialValue() {
+<span class="nc" id="L477">            return StandardCharsets.UTF_8.newEncoder()</span>
+<span class="nc" id="L478">                .onMalformedInput(CodingErrorAction.REPORT)</span>
+<span class="nc" id="L479">                .onUnmappableCharacter(CodingErrorAction.REPORT);</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

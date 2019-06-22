@@ -1,0 +1,242 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>PEPServiceManager.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.pep</a> &gt; <span class="el_source">PEPServiceManager.java</span></div><h1>PEPServiceManager.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2004-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.jivesoftware.openfire.pep;
+
+import org.jivesoftware.database.DbConnectionManager;
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.pubsub.CollectionNode;
+import org.jivesoftware.openfire.pubsub.Node;
+import org.jivesoftware.openfire.pubsub.PubSubEngine;
+import org.jivesoftware.openfire.user.UserManager;
+import org.jivesoftware.util.CacheableOptional;
+import org.jivesoftware.util.cache.Cache;
+import org.jivesoftware.util.cache.CacheFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmpp.packet.IQ;
+import org.xmpp.packet.JID;
+
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.util.concurrent.locks.Lock;
+
+/**
+ * Manages the creation, persistence and removal of {@link PEPService}
+ * instances.
+ *
+ * @author Guus der Kinderen, guus.der.kinderen@gmail.com
+ *
+ */
+<span class="nc" id="L45">public class PEPServiceManager {</span>
+
+<span class="nc" id="L47">    public static final Logger Log = LoggerFactory</span>
+<span class="nc" id="L48">            .getLogger(PEPServiceManager.class);</span>
+
+    private final static String GET_PEP_SERVICE = &quot;SELECT DISTINCT serviceID FROM ofPubsubNode WHERE serviceID=?&quot;;
+
+    /**
+     * Cache of PEP services. Table, Key: bare JID (String); Value: PEPService
+     */
+<span class="nc" id="L55">    private final Cache&lt;String, CacheableOptional&lt;PEPService&gt;&gt; pepServices = CacheFactory</span>
+<span class="nc" id="L56">        .createLocalCache(&quot;PEPServiceManager&quot;);</span>
+
+<span class="nc" id="L58">    private PubSubEngine pubSubEngine = null;</span>
+
+    /**
+     * Retrieves a PEP service -- attempting first from memory, then from the
+     * database.
+     *
+     * @param jid
+     *            the JID of the user that owns the PEP service.
+     * @return the requested PEP service if found or null if not found.
+     */
+    public PEPService getPEPService(JID jid) {
+<span class="nc" id="L69">        return getPEPService( jid.toBareJID() );</span>
+    }
+
+    /**
+     * Retrieves a PEP service -- attempting first from memory, then from the
+     * database.
+     *
+     * @param jid
+     *            the bare JID of the user that owns the PEP service.
+     * @return the requested PEP service if found or null if not found.
+     */
+    public PEPService getPEPService(String jid) {
+        PEPService pepService;
+
+<span class="nc" id="L83">        final Lock lock = CacheFactory.getLock(jid, pepServices);</span>
+        try {
+<span class="nc" id="L85">            lock.lock();</span>
+<span class="nc bnc" id="L86" title="All 2 branches missed.">            if (pepServices.containsKey(jid)) {</span>
+                // lookup in cache
+<span class="nc" id="L88">                pepService = pepServices.get(jid).get();</span>
+            } else {
+                // lookup in database.
+<span class="nc" id="L91">                pepService = loadPEPServiceFromDB(jid);</span>
+
+                // always add to the cache, even if it doesn't exist. This will
+                // prevent future database lookups.
+<span class="nc" id="L95">                pepServices.put(jid, CacheableOptional.of(pepService));</span>
+            }
+        } finally {
+<span class="nc" id="L98">            lock.unlock();</span>
+<span class="nc" id="L99">        }</span>
+
+<span class="nc" id="L101">        return pepService;</span>
+    }
+
+    public PEPService create(JID owner) {
+        // Return an error if the packet is from an anonymous, unregistered user
+        // or remote user
+<span class="nc bnc" id="L107" title="All 2 branches missed.">        if (!XMPPServer.getInstance().isLocal(owner)</span>
+<span class="nc bnc" id="L108" title="All 2 branches missed.">                || !UserManager.getInstance().isRegisteredUser(owner.getNode())) {</span>
+<span class="nc" id="L109">            throw new IllegalArgumentException(</span>
+                    &quot;Request must be initiated by a local, registered user, but is not: &quot;
+                            + owner);
+        }
+
+        PEPService pepService;
+<span class="nc" id="L115">        final String bareJID = owner.toBareJID();</span>
+<span class="nc" id="L116">        final Lock lock = CacheFactory.getLock(owner, pepServices);</span>
+        try {
+<span class="nc" id="L118">            lock.lock();</span>
+
+<span class="nc" id="L120">            pepService = pepServices.get(bareJID).get();</span>
+<span class="nc bnc" id="L121" title="All 2 branches missed.">            if (pepService == null) {</span>
+<span class="nc" id="L122">                pepService = new PEPService(XMPPServer.getInstance(), bareJID);</span>
+<span class="nc" id="L123">                pepServices.put(bareJID, CacheableOptional.of(pepService));</span>
+
+<span class="nc bnc" id="L125" title="All 2 branches missed.">                if (Log.isDebugEnabled()) {</span>
+<span class="nc" id="L126">                    Log.debug(&quot;PEPService created for : &quot; + bareJID);</span>
+                }
+            }
+        } finally {
+<span class="nc" id="L130">            lock.unlock();</span>
+<span class="nc" id="L131">        }</span>
+
+<span class="nc" id="L133">        return pepService;</span>
+    }
+
+    /**
+     * Loads a PEP service from the database, if it exists.
+     *
+     * @param jid
+     *            the JID of the owner of the PEP service.
+     * @return the loaded PEP service, or null if not found.
+     */
+    private PEPService loadPEPServiceFromDB(String jid) {
+<span class="nc" id="L144">        PEPService pepService = null;</span>
+
+<span class="nc" id="L146">        Connection con = null;</span>
+<span class="nc" id="L147">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L148">        ResultSet rs = null;</span>
+        try {
+<span class="nc" id="L150">            con = DbConnectionManager.getConnection();</span>
+            // Get all PEP services
+<span class="nc" id="L152">            pstmt = con.prepareStatement(GET_PEP_SERVICE);</span>
+<span class="nc" id="L153">            pstmt.setString(1, jid);</span>
+<span class="nc" id="L154">            rs = pstmt.executeQuery();</span>
+            // Restore old PEPServices
+<span class="nc bnc" id="L156" title="All 2 branches missed.">            while (rs.next()) {</span>
+<span class="nc" id="L157">                String serviceID = rs.getString(1);</span>
+
+                // Create a new PEPService
+<span class="nc" id="L160">                pepService = new PEPService(XMPPServer.getInstance(), serviceID);</span>
+<span class="nc" id="L161">                pepServices.put(serviceID, CacheableOptional.of(pepService));</span>
+<span class="nc" id="L162">                pubSubEngine.start(pepService);</span>
+
+<span class="nc bnc" id="L164" title="All 2 branches missed.">                if (Log.isDebugEnabled()) {</span>
+<span class="nc" id="L165">                    Log.debug(&quot;PEP: Restored service for &quot; + serviceID</span>
+                            + &quot; from the database.&quot;);
+                }
+<span class="nc" id="L168">            }</span>
+<span class="nc" id="L169">        } catch (SQLException sqle) {</span>
+<span class="nc" id="L170">            Log.error(sqle.getMessage(), sqle);</span>
+        } finally {
+<span class="nc" id="L172">            DbConnectionManager.closeConnection(rs, pstmt, con);</span>
+<span class="nc" id="L173">        }</span>
+
+<span class="nc" id="L175">        return pepService;</span>
+    }
+
+    /**
+     * Deletes the {@link PEPService} belonging to the specified owner.
+     *
+     * @param owner
+     *            The JID of the owner of the service to be deleted.
+     */
+    public void remove(JID owner) {
+        PEPService service;
+
+<span class="nc" id="L187">        final Lock lock = CacheFactory.getLock(owner, pepServices);</span>
+        try {
+<span class="nc" id="L189">            lock.lock();</span>
+<span class="nc" id="L190">            service = pepServices.remove(owner.toBareJID()).get();</span>
+        } finally {
+<span class="nc" id="L192">            lock.unlock();</span>
+<span class="nc" id="L193">        }</span>
+
+<span class="nc bnc" id="L195" title="All 2 branches missed.">        if (service == null) {</span>
+<span class="nc" id="L196">            return;</span>
+        }
+
+        // Delete the user's PEP nodes from memory and the database.
+<span class="nc" id="L200">        CollectionNode rootNode = service.getRootCollectionNode();</span>
+<span class="nc bnc" id="L201" title="All 2 branches missed.">        for (final Node node : service.getNodes()) {</span>
+<span class="nc bnc" id="L202" title="All 2 branches missed.">            if (rootNode.isChildNode(node)) {</span>
+<span class="nc" id="L203">                node.delete();</span>
+            }
+<span class="nc" id="L205">        }</span>
+<span class="nc" id="L206">        rootNode.delete();</span>
+<span class="nc" id="L207">    }</span>
+
+    public void start(PEPService pepService) {
+<span class="nc" id="L210">        pubSubEngine.start(pepService);</span>
+<span class="nc" id="L211">    }</span>
+
+    public void start() {
+<span class="nc" id="L214">        pubSubEngine = new PubSubEngine(XMPPServer.getInstance()</span>
+<span class="nc" id="L215">                .getPacketRouter());</span>
+<span class="nc" id="L216">    }</span>
+
+    public void stop() {
+
+<span class="nc bnc" id="L220" title="All 2 branches missed.">        for (final CacheableOptional&lt;PEPService&gt; service : pepServices.values()) {</span>
+<span class="nc bnc" id="L221" title="All 2 branches missed.">            if (service.isPresent()) {</span>
+<span class="nc" id="L222">                pubSubEngine.shutdown(service.get());</span>
+            }
+<span class="nc" id="L224">        }</span>
+
+<span class="nc" id="L226">        pubSubEngine = null;</span>
+<span class="nc" id="L227">    }</span>
+
+    public void process(PEPService service, IQ iq) {
+<span class="nc" id="L230">        pubSubEngine.process(service, iq);</span>
+<span class="nc" id="L231">    }</span>
+
+    public boolean hasCachedService(JID owner) {
+<span class="nc bnc" id="L234" title="All 2 branches missed.">        return pepServices.get(owner.toBareJID()) != null;</span>
+    }
+
+    // mimics Shutdown, without killing the timer.
+    public void unload(PEPService service) {
+<span class="nc" id="L239">        pubSubEngine.shutdown(service);</span>
+<span class="nc" id="L240">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

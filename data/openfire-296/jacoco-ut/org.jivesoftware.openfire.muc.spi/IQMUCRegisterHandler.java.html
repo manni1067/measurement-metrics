@@ -1,0 +1,225 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>IQMUCRegisterHandler.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.muc.spi</a> &gt; <span class="el_source">IQMUCRegisterHandler.java</span></div><h1>IQMUCRegisterHandler.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2004-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.muc.spi;
+
+import java.util.ArrayList;
+import java.util.List;
+
+import org.dom4j.DocumentHelper;
+import org.dom4j.Element;
+import org.dom4j.QName;
+import org.jivesoftware.openfire.muc.ConflictException;
+import org.jivesoftware.openfire.muc.ForbiddenException;
+import org.jivesoftware.openfire.muc.MUCRole;
+import org.jivesoftware.openfire.muc.MUCRoom;
+import org.jivesoftware.openfire.muc.MultiUserChatService;
+import org.jivesoftware.util.ElementUtil;
+import org.jivesoftware.util.LocaleUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmpp.forms.DataForm;
+import org.xmpp.forms.FormField;
+import org.xmpp.packet.IQ;
+import org.xmpp.packet.PacketError;
+import org.xmpp.packet.Presence;
+
+/**
+ * This class is responsible for handling packets with namespace jabber:iq:register that were
+ * sent to the MUC service.  MultiUserChatServer will receive all the IQ packets and if the
+ * namespace of the IQ is jabber:iq:register then this class will handle the packet.
+ * 
+ * @author Gaston Dombiak
+ */
+class IQMUCRegisterHandler {
+
+<span class="nc" id="L49">    private static final Logger Log = LoggerFactory.getLogger(IQMUCRegisterHandler.class);</span>
+
+    private static final Element probeResult;
+    
+    static {
+        // Create the registration form of the room which contains information
+        // such as: first name, last name and  nickname.
+<span class="nc" id="L56">        final DataForm registrationForm = new DataForm(DataForm.Type.form);</span>
+<span class="nc" id="L57">        registrationForm.setTitle(LocaleUtils.getLocalizedString(&quot;muc.form.reg.title&quot;));</span>
+<span class="nc" id="L58">        registrationForm.addInstruction(LocaleUtils</span>
+<span class="nc" id="L59">                .getLocalizedString(&quot;muc.form.reg.instruction&quot;));</span>
+
+<span class="nc" id="L61">        final FormField fieldForm = registrationForm.addField();</span>
+<span class="nc" id="L62">        fieldForm.setVariable(&quot;FORM_TYPE&quot;);</span>
+<span class="nc" id="L63">        fieldForm.setType(FormField.Type.hidden);</span>
+<span class="nc" id="L64">        fieldForm.addValue(&quot;http://jabber.org/protocol/muc#register&quot;);</span>
+
+<span class="nc" id="L66">        final FormField fieldReg = registrationForm.addField();</span>
+<span class="nc" id="L67">        fieldReg.setVariable(&quot;muc#register_first&quot;);</span>
+<span class="nc" id="L68">        fieldReg.setType(FormField.Type.text_single);</span>
+<span class="nc" id="L69">        fieldReg.setLabel(LocaleUtils.getLocalizedString(&quot;muc.form.reg.first-name&quot;));</span>
+<span class="nc" id="L70">        fieldReg.setRequired(true);</span>
+
+<span class="nc" id="L72">        final FormField fieldLast = registrationForm.addField();</span>
+<span class="nc" id="L73">        fieldLast.setVariable(&quot;muc#register_last&quot;);</span>
+<span class="nc" id="L74">        fieldLast.setType(FormField.Type.text_single);</span>
+<span class="nc" id="L75">        fieldLast.setLabel(LocaleUtils.getLocalizedString(&quot;muc.form.reg.last-name&quot;));</span>
+<span class="nc" id="L76">        fieldLast.setRequired(true);</span>
+
+<span class="nc" id="L78">        final FormField fieldNick = registrationForm.addField();</span>
+<span class="nc" id="L79">        fieldNick.setVariable(&quot;muc#register_roomnick&quot;);</span>
+<span class="nc" id="L80">        fieldNick.setType(FormField.Type.text_single);</span>
+<span class="nc" id="L81">        fieldNick.setLabel(LocaleUtils.getLocalizedString(&quot;muc.form.reg.nickname&quot;));</span>
+<span class="nc" id="L82">        fieldNick.setRequired(true);</span>
+
+<span class="nc" id="L84">        final FormField fieldUrl = registrationForm.addField();</span>
+<span class="nc" id="L85">        fieldUrl.setVariable(&quot;muc#register_url&quot;);</span>
+<span class="nc" id="L86">        fieldUrl.setType(FormField.Type.text_single);</span>
+<span class="nc" id="L87">        fieldUrl.setLabel(LocaleUtils.getLocalizedString(&quot;muc.form.reg.url&quot;));</span>
+
+<span class="nc" id="L89">        final FormField fieldMail = registrationForm.addField();</span>
+<span class="nc" id="L90">        fieldMail.setVariable(&quot;muc#register_email&quot;);</span>
+<span class="nc" id="L91">        fieldMail.setType(FormField.Type.text_single);</span>
+<span class="nc" id="L92">        fieldMail.setLabel(LocaleUtils.getLocalizedString(&quot;muc.form.reg.email&quot;));</span>
+
+<span class="nc" id="L94">        final FormField fieldFaq = registrationForm.addField();</span>
+<span class="nc" id="L95">        fieldFaq.setVariable(&quot;muc#register_faqentry&quot;);</span>
+<span class="nc" id="L96">        fieldFaq.setType(FormField.Type.text_single);</span>
+<span class="nc" id="L97">        fieldFaq.setLabel(LocaleUtils.getLocalizedString(&quot;muc.form.reg.faqentry&quot;));</span>
+
+        // Create the probeResult and add the registration form
+<span class="nc" id="L100">        probeResult = DocumentHelper.createElement(QName.get(&quot;query&quot;, &quot;jabber:iq:register&quot;));</span>
+<span class="nc" id="L101">        probeResult.add(registrationForm.getElement());</span>
+<span class="nc" id="L102">    }</span>
+    
+    private final MultiUserChatService mucService;
+
+<span class="nc" id="L106">    public IQMUCRegisterHandler(MultiUserChatService mucService) {</span>
+<span class="nc" id="L107">        this.mucService = mucService;</span>
+<span class="nc" id="L108">    }</span>
+
+    public IQ handleIQ(IQ packet) {
+<span class="nc" id="L111">        IQ reply = null;</span>
+        // Get the target room
+<span class="nc" id="L113">        MUCRoom room = null;</span>
+<span class="nc" id="L114">        String name = packet.getTo().getNode();</span>
+<span class="nc bnc" id="L115" title="All 2 branches missed.">        if (name != null) {</span>
+<span class="nc" id="L116">            room = mucService.getChatRoom(name);</span>
+        }
+<span class="nc bnc" id="L118" title="All 2 branches missed.">        if (room == null) {</span>
+            // The room doesn't exist so answer a NOT_FOUND error
+<span class="nc" id="L120">            reply = IQ.createResultIQ(packet);</span>
+<span class="nc" id="L121">            reply.setChildElement(packet.getChildElement().createCopy());</span>
+<span class="nc" id="L122">            reply.setError(PacketError.Condition.item_not_found);</span>
+<span class="nc" id="L123">            return reply;</span>
+        }
+<span class="nc bnc" id="L125" title="All 2 branches missed.">        else if (!room.isRegistrationEnabled() ||</span>
+<span class="nc bnc" id="L126" title="All 2 branches missed.">                 (packet.getFrom() != null &amp;&amp; </span>
+<span class="nc bnc" id="L127" title="All 2 branches missed.">                  MUCRole.Affiliation.outcast == room.getAffiliation(packet.getFrom().asBareJID()))) {</span>
+            // The room does not accept users to register or
+            // the user is an outcast and is not allowed to register
+<span class="nc" id="L130">            reply = IQ.createResultIQ(packet);</span>
+<span class="nc" id="L131">            reply.setChildElement(packet.getChildElement().createCopy());</span>
+<span class="nc" id="L132">            reply.setError(PacketError.Condition.not_allowed);</span>
+<span class="nc" id="L133">            return reply;</span>
+        }
+
+<span class="nc bnc" id="L136" title="All 2 branches missed.">        if (IQ.Type.get == packet.getType()) {</span>
+<span class="nc" id="L137">            reply = IQ.createResultIQ(packet);</span>
+<span class="nc" id="L138">            String nickname = room.getReservedNickname(packet.getFrom());</span>
+<span class="nc" id="L139">            Element currentRegistration = probeResult.createCopy();</span>
+<span class="nc bnc" id="L140" title="All 2 branches missed.">            if (nickname != null) {</span>
+                // The user is already registered with the room so answer a completed form
+<span class="nc" id="L142">                ElementUtil.setProperty(currentRegistration, &quot;query.registered&quot;, null);</span>
+<span class="nc" id="L143">                currentRegistration.addElement(&quot;username&quot;).addText(nickname);</span>
+
+<span class="nc" id="L145">                Element form = currentRegistration.element(QName.get(&quot;x&quot;, &quot;jabber:x:data&quot;));</span>
+<span class="nc" id="L146">                currentRegistration.remove(form);</span>
+//                @SuppressWarnings(&quot;unchecked&quot;)
+//				Iterator&lt;Element&gt; fields = form.elementIterator(&quot;field&quot;);
+//
+//                Element field;
+//                while (fields.hasNext()) {
+//                    field = fields.next();
+//                    if (&quot;muc#register_roomnick&quot;.equals(field.attributeValue(&quot;var&quot;))) {
+//                        field.addElement(&quot;value&quot;).addText(nickname);
+//                    }
+//                }
+<span class="nc" id="L157">                reply.setChildElement(currentRegistration);</span>
+<span class="nc" id="L158">            }</span>
+            else {
+                // The user is not registered with the room so answer an empty form
+<span class="nc" id="L161">                reply.setChildElement(currentRegistration);</span>
+            }
+<span class="nc" id="L163">        }</span>
+<span class="nc bnc" id="L164" title="All 2 branches missed.">        else if (IQ.Type.set ==  packet.getType()) {</span>
+            try {
+                // Keep a registry of the updated presences
+<span class="nc" id="L167">                List&lt;Presence&gt; presences = new ArrayList&lt;&gt;();</span>
+
+<span class="nc" id="L169">                reply = IQ.createResultIQ(packet);</span>
+<span class="nc" id="L170">                Element iq = packet.getChildElement();</span>
+
+<span class="nc bnc" id="L172" title="All 2 branches missed.">                if (ElementUtil.includesProperty(iq, &quot;query.remove&quot;)) {</span>
+                    // The user is deleting his registration
+<span class="nc" id="L174">                    presences.addAll(room.addNone(packet.getFrom(), room.getRole()));</span>
+                }
+                else {
+                    // The user is trying to register with a room
+<span class="nc" id="L178">                    Element formElement = iq.element(&quot;x&quot;);</span>
+                    // Check if a form was used to provide the registration info
+<span class="nc bnc" id="L180" title="All 2 branches missed.">                    if (formElement != null) {</span>
+                        // Get the sent form
+<span class="nc" id="L182">                        final DataForm registrationForm = new DataForm(formElement);</span>
+                        // Get the desired nickname sent in the form
+<span class="nc" id="L184">                        List&lt;String&gt; values = registrationForm.getField(&quot;muc#register_roomnick&quot;)</span>
+<span class="nc" id="L185">                                .getValues();</span>
+<span class="nc bnc" id="L186" title="All 2 branches missed.">                        String nickname = (!values.isEmpty() ? values.get(0) : null);</span>
+
+                        // TODO The rest of the fields of the form are ignored. If we have a
+                        // requirement in the future where we need those fields we'll have to change
+                        // MUCRoom.addMember in order to receive a RegistrationInfo (new class)
+
+                        // Add the new member to the members list
+<span class="nc" id="L193">                        presences.addAll(room.addMember(packet.getFrom(),</span>
+                                nickname,
+<span class="nc" id="L195">                                room.getRole()));</span>
+<span class="nc" id="L196">                    }</span>
+                    else {
+<span class="nc" id="L198">                        reply.setChildElement(packet.getChildElement().createCopy());</span>
+<span class="nc" id="L199">                        reply.setError(PacketError.Condition.bad_request);</span>
+                    }
+                }
+                // Send the updated presences to the room occupants
+<span class="nc bnc" id="L203" title="All 2 branches missed.">                for (Presence presence : presences) {</span>
+<span class="nc" id="L204">                    room.send(presence);</span>
+<span class="nc" id="L205">                }</span>
+
+            }
+<span class="nc" id="L208">            catch (ForbiddenException e) {</span>
+<span class="nc" id="L209">                reply = IQ.createResultIQ(packet);</span>
+<span class="nc" id="L210">                reply.setChildElement(packet.getChildElement().createCopy());</span>
+<span class="nc" id="L211">                reply.setError(PacketError.Condition.forbidden);</span>
+            }
+<span class="nc" id="L213">            catch (ConflictException e) {</span>
+<span class="nc" id="L214">                reply = IQ.createResultIQ(packet);</span>
+<span class="nc" id="L215">                reply.setChildElement(packet.getChildElement().createCopy());</span>
+<span class="nc" id="L216">                reply.setError(PacketError.Condition.conflict);</span>
+            }
+<span class="nc" id="L218">            catch (Exception e) {</span>
+<span class="nc" id="L219">                Log.error(e.getMessage(), e);</span>
+<span class="nc" id="L220">            }</span>
+        }
+<span class="nc" id="L222">        return reply;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

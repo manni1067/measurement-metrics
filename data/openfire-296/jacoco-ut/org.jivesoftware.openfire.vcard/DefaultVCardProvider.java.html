@@ -1,0 +1,197 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>DefaultVCardProvider.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.vcard</a> &gt; <span class="el_source">DefaultVCardProvider.java</span></div><h1>DefaultVCardProvider.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2004-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.vcard;
+
+import java.io.StringReader;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.LinkedBlockingQueue;
+
+import org.dom4j.Element;
+import org.dom4j.io.SAXReader;
+import org.jivesoftware.database.DbConnectionManager;
+import org.jivesoftware.util.AlreadyExistsException;
+import org.jivesoftware.util.JiveGlobals;
+import org.jivesoftware.util.NotFoundException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Default implementation of the VCardProvider interface, which reads and writes data
+ * from the {@code ofVCard} database table.
+ *
+ * @author Gaston Dombiak
+ */
+public class DefaultVCardProvider implements VCardProvider {
+
+<span class="nc" id="L44">    private static final Logger Log = LoggerFactory.getLogger(DefaultVCardProvider.class);</span>
+
+    private static final String MUTEX_SUFFIX = &quot; dvcp&quot;;
+    
+    private static final String LOAD_PROPERTIES =
+        &quot;SELECT vcard FROM ofVCard WHERE username=?&quot;;
+    private static final String DELETE_PROPERTIES =
+        &quot;DELETE FROM ofVCard WHERE username=?&quot;;
+    private static final String UPDATE_PROPERTIES =
+        &quot;UPDATE ofVCard SET vcard=? WHERE username=?&quot;;
+    private static final String INSERT_PROPERTY =
+        &quot;INSERT INTO ofVCard (username, vcard) VALUES (?, ?)&quot;;
+
+    private static final int POOL_SIZE = 10;
+    /**
+     * Pool of SAX Readers. SAXReader is not thread safe so we need to have a pool of readers.
+     */
+<span class="nc" id="L61">    private BlockingQueue&lt;SAXReader&gt; xmlReaders = new LinkedBlockingQueue&lt;&gt;(POOL_SIZE);</span>
+
+
+    public DefaultVCardProvider() {
+<span class="nc" id="L65">        super();</span>
+        // Initialize the pool of sax readers
+<span class="nc bnc" id="L67" title="All 2 branches missed.">        for (int i=0; i&lt;POOL_SIZE; i++) {</span>
+<span class="nc" id="L68">            SAXReader xmlReader = new SAXReader();</span>
+<span class="nc" id="L69">            xmlReader.setEncoding(&quot;UTF-8&quot;);</span>
+<span class="nc" id="L70">            xmlReaders.add(xmlReader);</span>
+        }
+<span class="nc" id="L72">    }</span>
+
+    @Override
+    public Element loadVCard(String username) {
+<span class="nc" id="L76">        synchronized ((username + MUTEX_SUFFIX).intern()) {</span>
+<span class="nc" id="L77">            Connection con = null;</span>
+<span class="nc" id="L78">            PreparedStatement pstmt = null;</span>
+<span class="nc" id="L79">            ResultSet rs = null;</span>
+<span class="nc" id="L80">            Element vCardElement = null;</span>
+<span class="nc" id="L81">            SAXReader xmlReader = null;</span>
+            try {
+                // Get a sax reader from the pool
+<span class="nc" id="L84">                xmlReader = xmlReaders.take();</span>
+<span class="nc" id="L85">                con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L86">                pstmt = con.prepareStatement(LOAD_PROPERTIES);</span>
+<span class="nc" id="L87">                pstmt.setString(1, username);</span>
+<span class="nc" id="L88">                rs = pstmt.executeQuery();</span>
+<span class="nc bnc" id="L89" title="All 2 branches missed.">                while (rs.next()) {</span>
+<span class="nc" id="L90">                    vCardElement =</span>
+<span class="nc" id="L91">                            xmlReader.read(new StringReader(rs.getString(1))).getRootElement();</span>
+                }
+            }
+<span class="nc" id="L94">            catch (Exception e) {</span>
+<span class="nc" id="L95">                Log.error(&quot;Error loading vCard of username: &quot; + username, e);</span>
+            }
+            finally {
+                // Return the sax reader to the pool
+<span class="nc bnc" id="L99" title="All 6 branches missed.">                if (xmlReader != null) {</span>
+<span class="nc" id="L100">                    xmlReaders.add(xmlReader);</span>
+                }
+<span class="nc" id="L102">                DbConnectionManager.closeConnection(rs, pstmt, con);</span>
+<span class="nc" id="L103">            }</span>
+
+<span class="nc bnc" id="L105" title="All 2 branches missed.">            if ( JiveGlobals.getBooleanProperty( PhotoResizer.PROPERTY_RESIZE_ON_LOAD, PhotoResizer.PROPERTY_RESIZE_ON_LOAD_DEFAULT ) )</span>
+            {
+<span class="nc" id="L107">                PhotoResizer.resizeAvatar( vCardElement );</span>
+            }
+
+<span class="nc" id="L110">            return vCardElement;</span>
+<span class="nc" id="L111">        }</span>
+    }
+
+    @Override
+    public Element createVCard(String username, Element vCardElement) throws AlreadyExistsException {
+<span class="nc bnc" id="L116" title="All 2 branches missed.">        if (loadVCard(username) != null) {</span>
+            // The user already has a vCard
+<span class="nc" id="L118">            throw new AlreadyExistsException(&quot;Username &quot; + username + &quot; already has a vCard&quot;);</span>
+        }
+
+<span class="nc bnc" id="L121" title="All 2 branches missed.">        if ( JiveGlobals.getBooleanProperty( PhotoResizer.PROPERTY_RESIZE_ON_CREATE, PhotoResizer.PROPERTY_RESIZE_ON_CREATE_DEFAULT ) )</span>
+        {
+<span class="nc" id="L123">            PhotoResizer.resizeAvatar( vCardElement );</span>
+        }
+
+<span class="nc" id="L126">        Connection con = null;</span>
+<span class="nc" id="L127">        PreparedStatement pstmt = null;</span>
+        try {
+<span class="nc" id="L129">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L130">            pstmt = con.prepareStatement(INSERT_PROPERTY);</span>
+<span class="nc" id="L131">            pstmt.setString(1, username);</span>
+<span class="nc" id="L132">            pstmt.setString(2, vCardElement.asXML());</span>
+<span class="nc" id="L133">            pstmt.executeUpdate();</span>
+        }
+<span class="nc" id="L135">        catch (SQLException e) {</span>
+<span class="nc" id="L136">            Log.error(&quot;Error creating vCard for username: &quot; + username, e);</span>
+        }
+        finally {
+<span class="nc" id="L139">            DbConnectionManager.closeConnection(pstmt, con);</span>
+<span class="nc" id="L140">        }</span>
+<span class="nc" id="L141">        return vCardElement;</span>
+    }
+
+    @Override
+    public Element updateVCard(String username, Element vCardElement) throws NotFoundException {
+<span class="nc bnc" id="L146" title="All 2 branches missed.">        if (loadVCard(username) == null) {</span>
+            // The user does not have a vCard
+<span class="nc" id="L148">            throw new NotFoundException(&quot;Username &quot; + username + &quot; does not have a vCard&quot;);</span>
+        }
+
+<span class="nc bnc" id="L151" title="All 2 branches missed.">        if ( JiveGlobals.getBooleanProperty( PhotoResizer.PROPERTY_RESIZE_ON_CREATE, PhotoResizer.PROPERTY_RESIZE_ON_CREATE_DEFAULT ) )</span>
+        {
+<span class="nc" id="L153">            PhotoResizer.resizeAvatar( vCardElement );</span>
+        }
+
+<span class="nc" id="L156">        Connection con = null;</span>
+<span class="nc" id="L157">        PreparedStatement pstmt = null;</span>
+        try {
+<span class="nc" id="L159">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L160">            pstmt = con.prepareStatement(UPDATE_PROPERTIES);</span>
+<span class="nc" id="L161">            pstmt.setString(1, vCardElement.asXML());</span>
+<span class="nc" id="L162">            pstmt.setString(2, username);</span>
+<span class="nc" id="L163">            pstmt.executeUpdate();</span>
+        }
+<span class="nc" id="L165">        catch (SQLException e) {</span>
+<span class="nc" id="L166">            Log.error(&quot;Error updating vCard of username: &quot; + username, e);</span>
+        }
+        finally {
+<span class="nc" id="L169">            DbConnectionManager.closeConnection(pstmt, con);</span>
+<span class="nc" id="L170">        }</span>
+<span class="nc" id="L171">        return vCardElement;</span>
+    }
+
+    @Override
+    public void deleteVCard(String username) {
+<span class="nc" id="L176">        Connection con = null;</span>
+<span class="nc" id="L177">        PreparedStatement pstmt = null;</span>
+        try {
+<span class="nc" id="L179">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L180">            pstmt = con.prepareStatement(DELETE_PROPERTIES);</span>
+<span class="nc" id="L181">            pstmt.setString(1, username);</span>
+<span class="nc" id="L182">            pstmt.executeUpdate();</span>
+        }
+<span class="nc" id="L184">        catch (SQLException e) {</span>
+<span class="nc" id="L185">            Log.error(&quot;Error deleting vCard of username: &quot; + username, e);</span>
+        }
+        finally {
+<span class="nc" id="L188">            DbConnectionManager.closeConnection(pstmt, con);</span>
+<span class="nc" id="L189">        }</span>
+<span class="nc" id="L190">    }</span>
+
+    @Override
+    public boolean isReadOnly() {
+<span class="nc" id="L194">        return false;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

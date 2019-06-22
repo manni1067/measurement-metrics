@@ -1,0 +1,151 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>SecurityAuditManager.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.security</a> &gt; <span class="el_source">SecurityAuditManager.java</span></div><h1>SecurityAuditManager.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.jivesoftware.openfire.security;
+
+import java.util.Date;
+import java.util.List;
+import org.jivesoftware.util.SystemProperty;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * The SecurityAuditManager manages the SecurityAuditProvider configured for this server, and provides
+ * a proper conduit for making security log entries and looking them up.  Ideally there is no reason
+ * for outside classes to interact directly with a provider.
+ *
+ * The provider can be specified in system properties by adding:
+ *
+ * &lt;ul&gt;
+ * &lt;li&gt;{@code provider.securityAudit.className = my.security.audit.provider}&lt;/li&gt;
+ * &lt;/ul&gt;
+ *
+ * @author Daniel Henninger
+ */
+public class SecurityAuditManager {
+
+<span class="fc" id="L39">    public static final SystemProperty&lt;Class&gt; AUDIT_PROVIDER = SystemProperty.Builder.ofType(Class.class)</span>
+<span class="fc" id="L40">        .setKey(&quot;provider.securityAudit.className&quot;)</span>
+<span class="fc" id="L41">        .setBaseClass(SecurityAuditProvider.class)</span>
+<span class="fc" id="L42">        .setDefaultValue(DefaultSecurityAuditProvider.class)</span>
+<span class="fc" id="L43">        .addListener(SecurityAuditManager::initProvider)</span>
+<span class="fc" id="L44">        .setDynamic(true)</span>
+<span class="fc" id="L45">        .build();</span>
+
+
+<span class="fc" id="L48">    private static final Logger Log = LoggerFactory.getLogger(SecurityAuditManager.class);</span>
+
+    // Wrap this guy up so we can mock out the SecurityAuditManager class.
+<span class="nc" id="L51">    private static class SecurityAuditManagerContainer {</span>
+<span class="nc" id="L52">        private static SecurityAuditManager instance = new SecurityAuditManager();</span>
+    }
+
+    /**
+     * Returns the currently-installed SecurityAuditProvider. &lt;b&gt;Warning:&lt;/b&gt; in virtually all
+     * cases the security audit provider should not be used directly. Instead, the appropriate
+     * methods in SecurityAuditManager should be called. Direct access to the security audit
+     * provider is only provided for special-case logic.
+     *
+     * @return the current SecurityAuditProvider.
+     */
+    public static SecurityAuditProvider getSecurityAuditProvider() {
+<span class="nc" id="L64">        return SecurityAuditManagerContainer.instance.provider;</span>
+    }
+
+    /**
+     * Returns a singleton instance of SecurityAuditManager.
+     *
+     * @return a SecurityAuditManager instance.
+     */
+    public static SecurityAuditManager getInstance() {
+<span class="nc" id="L73">        return SecurityAuditManagerContainer.instance;</span>
+    }
+
+    private static SecurityAuditProvider provider;
+
+    /**
+     * Constructs a SecurityAuditManager, setting up the provider, and a listener.
+     */
+<span class="nc" id="L81">    private SecurityAuditManager() {</span>
+        // Load an security audit provider.
+<span class="nc" id="L83">        initProvider(AUDIT_PROVIDER.getValue());</span>
+<span class="nc" id="L84">    }</span>
+
+    /**
+     * Initializes the server's security audit provider, based on configuration and defaults to
+     * DefaultSecurityAuditProvider if the specified provider is not valid or not specified.
+     */
+    private static void initProvider(final Class clazz) {
+<span class="nc bnc" id="L91" title="All 4 branches missed.">        if (provider == null || !clazz.equals(provider.getClass())) {</span>
+            try {
+<span class="nc" id="L93">                provider = (SecurityAuditProvider) clazz.newInstance();</span>
+            }
+<span class="nc" id="L95">            catch (Exception e) {</span>
+<span class="nc" id="L96">                Log.error(&quot;Error loading security audit provider: &quot; + clazz.getName(), e);</span>
+<span class="nc" id="L97">                provider = new DefaultSecurityAuditProvider();</span>
+<span class="nc" id="L98">            }</span>
+        }
+<span class="nc" id="L100">    }</span>
+
+    /**
+     * Records a security event in the audit logs.
+     *
+     * @param username Username of user who performed the security event.
+     * @param summary Short description of the event, similar to a subject.
+     * @param details Detailed description of the event, can be null if not desired.
+     */
+    public void logEvent(String username, String summary, String details) {
+<span class="nc" id="L110">        provider.logEvent(username, summary, details);</span>
+<span class="nc" id="L111">    }</span>
+
+    /**
+     * Retrieves security events that have occurred, filtered by the parameters passed.
+     * The events will be in order of most recent to least recent.
+     *
+     * Any parameters that are left null are to be ignored.  In other words, if username is null,
+     * then no specific username is being searched for.
+     *
+     * @param username Username of user to look up.  Can be null for no username filtering.
+     * @param skipEvents Number of events to skip past (typically for paging).  Can be null for first page.
+     * @param numEvents Number of events to retrieve.  Can be null for &quot;all&quot; events.
+     * @param startTime Oldest date of range of events to retrieve.  Can be null for forever.
+     * @param endTime Most recent date of range of events to retrieve.  Can be null for &quot;now&quot;.
+     * @return Array of security events.
+     * @throws AuditWriteOnlyException if provider can not be read from.
+     */
+    public List&lt;SecurityAuditEvent&gt; getEvents(String username, Integer skipEvents, Integer numEvents, Date startTime, Date endTime) throws AuditWriteOnlyException {
+<span class="nc bnc" id="L129" title="All 2 branches missed.">        if (provider.isWriteOnly()) {</span>
+<span class="nc" id="L130">            throw new AuditWriteOnlyException();</span>
+        }
+<span class="nc" id="L132">        return provider.getEvents(username, skipEvents, numEvents, startTime, endTime);</span>
+    }
+
+    /**
+     * Retrieves a specific event by ID in the form of a SecurityAuditEvent.
+     *
+     * @param msgID ID number of event to retrieve.
+     * @return SecurityAuditEvent object with information from retrieved event.
+     * @throws EventNotFoundException if event was not found.
+     * @throws AuditWriteOnlyException if provider can not be read from.
+     */
+    public SecurityAuditEvent getEvent(Integer msgID) throws EventNotFoundException, AuditWriteOnlyException {
+<span class="nc bnc" id="L144" title="All 2 branches missed.">        if (provider.isWriteOnly()) {</span>
+<span class="nc" id="L145">            throw new AuditWriteOnlyException();</span>
+        }
+<span class="nc" id="L147">        return provider.getEvent(msgID);</span>
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

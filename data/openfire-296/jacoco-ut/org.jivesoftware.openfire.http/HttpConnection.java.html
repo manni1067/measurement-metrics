@@ -1,0 +1,176 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>HttpConnection.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.http</a> &gt; <span class="el_source">HttpConnection.java</span></div><h1>HttpConnection.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.http;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import javax.servlet.AsyncContext;
+import java.io.IOException;
+import java.net.InetAddress;
+import java.net.UnknownHostException;
+import java.security.cert.X509Certificate;
+
+/**
+ * Represents one HTTP connection with a client using the HTTP Binding service. The client will wait
+ * on a response until the server forwards a message to it or the wait time on the
+ * session timeout.
+ *
+ * @author Alexander Wenckus
+ */
+public class HttpConnection {
+
+<span class="nc" id="L37">    private static final Logger Log = LoggerFactory.getLogger(HttpConnection.class);</span>
+
+    private final long requestId;
+
+    private HttpSession session;
+    private boolean isClosed;
+
+    private final AsyncContext context;
+
+    /**
+     * Constructs an HTTP Connection.
+     *
+     * @param requestId the ID which uniquely identifies this request.
+     * @param context execution context of the servlet request that created this instance.
+     */
+<span class="nc" id="L52">    public HttpConnection(long requestId, AsyncContext context) {</span>
+<span class="nc" id="L53">        this.requestId = requestId;</span>
+<span class="nc" id="L54">        this.context = context;</span>
+<span class="nc" id="L55">    }</span>
+
+    /**
+     * The connection should be closed without delivering a stanza to the requestor.
+     */
+    public void close() {
+<span class="nc" id="L61">        synchronized (this) {</span>
+<span class="nc bnc" id="L62" title="All 2 branches missed.">            if (isClosed) {</span>
+<span class="nc" id="L63">                return;</span>
+            }
+<span class="nc" id="L65">        }</span>
+
+        try {
+<span class="nc" id="L68">            deliverBody(null, true);</span>
+        }
+<span class="nc" id="L70">        catch (HttpConnectionClosedException | IOException e) {</span>
+<span class="nc" id="L71">            Log.warn(&quot;Unexpected exception occurred while trying to close an HttpException.&quot;, e);</span>
+<span class="nc" id="L72">        }</span>
+<span class="nc" id="L73">    }</span>
+
+    /**
+     * Returns true if this connection has been closed, either a response was delivered to the
+     * client or the server closed the connection abruptly.
+     *
+     * @return true if this connection has been closed.
+     */
+    public synchronized boolean isClosed() {
+<span class="nc" id="L82">        return isClosed;</span>
+    }
+
+    /**
+     * Returns true if this connection is using HTTPS.
+     *
+     * @return true if this connection is using HTTPS.
+     */
+    public boolean isSecure() {
+<span class="nc" id="L91">        return context.getRequest().isSecure();</span>
+    }
+
+    /**
+     * Delivers content to the client. The content should be valid XMPP wrapped inside of a body.
+     * A &lt;i&gt;null&lt;/i&gt; value for body indicates that the connection should be closed and the client
+     * sent an empty body.
+     *
+     * @param body the XMPP content to be forwarded to the client inside of a body tag.
+     * @param async when false, this method blocks until the data has been delivered to the client.
+     *
+     * @throws HttpConnectionClosedException when this connection to the client has already received
+     * a deliverable to forward to the client
+     * @throws IOException if an input or output exception occurred
+     */
+    public void deliverBody(String body, boolean async) throws HttpConnectionClosedException, IOException {
+        // We only want to use this function once so we will close it when the body is delivered.
+<span class="nc" id="L108">        synchronized (this) {</span>
+<span class="nc bnc" id="L109" title="All 2 branches missed.">            if (isClosed) {</span>
+<span class="nc" id="L110">                throw new HttpConnectionClosedException(&quot;The http connection is no longer &quot; +</span>
+                        &quot;available to deliver content&quot;);
+            }
+<span class="nc" id="L113">            isClosed = true;</span>
+<span class="nc" id="L114">        }</span>
+
+<span class="nc bnc" id="L116" title="All 2 branches missed.">        if (body == null) {</span>
+<span class="nc" id="L117">            body = getSession().createEmptyBody(false);</span>
+        }
+<span class="nc" id="L119">        HttpBindServlet.respond(getSession(), this.context, body, async);</span>
+<span class="nc" id="L120">    }</span>
+
+    /**
+     * Returns the ID which uniquely identifies this connection.
+     *
+     * @return the ID which uniquely identifies this connection.
+     */
+    public long getRequestId() {
+<span class="nc" id="L128">        return requestId;</span>
+    }
+
+    /**
+     * Set the session that this connection belongs to.
+     *
+     * @param session the session that this connection belongs to.
+     */
+    void setSession(HttpSession session) {
+<span class="nc" id="L137">        this.session = session;</span>
+<span class="nc" id="L138">    }</span>
+
+    /**
+     * Returns the session that this connection belongs to.
+     *
+     * @return the session that this connection belongs to.
+     */
+    public HttpSession getSession() {
+<span class="nc" id="L146">        return session;</span>
+    }
+
+    /**
+     * Returns the Internet Protocol (IP) address of the client
+     * or last proxy that sent the request.
+     *
+     * @return IP address of the remote peer
+     * @throws UnknownHostException if no IP address for the peer could be found,
+     */
+    public InetAddress getRemoteAddr() throws UnknownHostException
+    {
+<span class="nc" id="L158">        return InetAddress.getByName(context.getRequest().getRemoteAddr());</span>
+    }
+
+    /**
+     * Returns the peer certificates for this connection. 
+     * 
+     * @return the peer certificates for this connection or null.
+     */
+    public X509Certificate[] getPeerCertificates() {
+<span class="nc" id="L167">        return (X509Certificate[]) context.getRequest().getAttribute(&quot;javax.servlet.request.X509Certificate&quot;);</span>
+    }
+
+    @Override
+    public String toString() {
+<span class="nc bnc" id="L172" title="All 2 branches missed.">        return (session != null ? session.toString() : &quot;[Anonymous]&quot;)</span>
+<span class="nc" id="L173">                + &quot; rid: &quot; + this.getRequestId();</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

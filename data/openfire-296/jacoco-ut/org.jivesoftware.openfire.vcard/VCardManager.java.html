@@ -1,0 +1,309 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>VCardManager.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.vcard</a> &gt; <span class="el_source">VCardManager.java</span></div><h1>VCardManager.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2004-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.vcard;
+
+import java.util.Collections;
+import java.util.Iterator;
+import java.util.Map;
+import java.util.StringTokenizer;
+
+import org.dom4j.Element;
+import org.dom4j.tree.DefaultElement;
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.container.BasicModule;
+import org.jivesoftware.openfire.disco.ServerFeaturesProvider;
+import org.jivesoftware.openfire.event.UserEventAdapter;
+import org.jivesoftware.openfire.event.UserEventDispatcher;
+import org.jivesoftware.openfire.user.User;
+import org.jivesoftware.util.AlreadyExistsException;
+import org.jivesoftware.util.NotFoundException;
+import org.jivesoftware.util.PropertyEventDispatcher;
+import org.jivesoftware.util.PropertyEventListener;
+import org.jivesoftware.util.SystemProperty;
+import org.jivesoftware.util.cache.Cache;
+import org.jivesoftware.util.cache.CacheFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Manages VCard information for users.
+ *
+ * @author Matt Tucker
+ */
+public class VCardManager extends BasicModule implements ServerFeaturesProvider {
+
+<span class="nc" id="L49">    public static final SystemProperty&lt;Class&gt; VCARD_PROVIDER = SystemProperty.Builder.ofType(Class.class)</span>
+<span class="nc" id="L50">        .setKey(&quot;provider.vcard.className&quot;)</span>
+<span class="nc" id="L51">        .setBaseClass(VCardProvider.class)</span>
+<span class="nc" id="L52">        .setDefaultValue(DefaultVCardProvider.class)</span>
+<span class="nc" id="L53">        .addListener(VCardManager::initProvider)</span>
+<span class="nc" id="L54">        .setDynamic(true)</span>
+<span class="nc" id="L55">        .build();</span>
+
+<span class="nc" id="L57">    private static final Logger Log = LoggerFactory.getLogger(VCardManager.class);</span>
+
+    private static VCardProvider provider;
+    private static VCardManager instance;
+
+    private EventHandler eventHandler;
+
+    private Cache&lt;String, DefaultElement&gt; vcardCache;
+    public static VCardManager getInstance() {
+<span class="nc" id="L66">        return instance;</span>
+    }
+
+    /**
+     * Returns the currently-installed VCardProvider. &lt;b&gt;Warning:&lt;/b&gt; in virtually all
+     * cases the vcard provider should not be used directly. Instead, the appropriate
+     * methods in VCardManager should be called. Direct access to the vcard provider is
+     * only provided for special-case logic.
+     *
+     * @return the current VCardProvider.
+     */
+    public static VCardProvider getProvider() {
+<span class="nc" id="L78">        return instance.provider;</span>
+    }
+
+    public VCardManager() {
+<span class="nc" id="L82">        super(&quot;VCard Manager&quot;);</span>
+<span class="nc" id="L83">        String cacheName = &quot;VCard&quot;;</span>
+<span class="nc" id="L84">        vcardCache = CacheFactory.createCache(cacheName);</span>
+<span class="nc" id="L85">        this.eventHandler = new EventHandler();</span>
+
+        // Keeps the cache updated in case the vCard action was not performed by VCardManager
+<span class="nc" id="L88">        VCardEventDispatcher.addListener(new VCardListener() {</span>
+            @Override
+            public void vCardCreated(String username, Element vCard) {
+                // Since the vCard could be created by the provider, add it to the cache.
+<span class="nc" id="L92">                vcardCache.put(username, (DefaultElement) vCard);</span>
+<span class="nc" id="L93">            }</span>
+
+            @Override
+            public void vCardUpdated(String username, Element vCard) {
+                // Since the vCard could be updated by the provider, update it to the cache.
+<span class="nc" id="L98">                vcardCache.put(username, (DefaultElement) vCard);</span>
+<span class="nc" id="L99">            }</span>
+
+            @Override
+            public void vCardDeleted(String username, Element vCard) {
+                // Since the vCard could be delated by the provider, remove it to the cache.
+<span class="nc" id="L104">                vcardCache.remove(username);</span>
+<span class="nc" id="L105">            }</span>
+        });
+<span class="nc" id="L107">    }</span>
+
+    /**
+     * Returns the user's vCard information for a given vcard property name. If the property
+     * has no defined text then an empty string will be returned. However, if the property
+     * does not exist then a {@code null} value will be answered. Advanced user systems can
+     * use vCard information to link to user directory information or store other relevant
+     * user information.
+     * &lt;p&gt;
+     * Note that many elements in the vCard may have the same path so the returned value in that
+     * case will be the first found element. For instance, &quot;ADR:STREET&quot; may be present in
+     * many addresses of the user. Use {@link #getVCard(String)} to get the whole vCard of
+     * the user.&lt;/p&gt;
+     *
+     * @param username The username of the user to return his vCard property.
+     * @param name     The name of the vcard property to retrieve encoded with ':' to denote
+     *                 the path.
+     * @return The vCard value found
+     */
+    public String getVCardProperty(String username, String name) {
+<span class="nc" id="L127">        String answer = null;</span>
+<span class="nc" id="L128">        Element vCardElement = getOrLoadVCard(username);</span>
+<span class="nc bnc" id="L129" title="All 2 branches missed.">        if (vCardElement != null) {</span>
+            // A vCard was found for this user so now look for the correct element
+<span class="nc" id="L131">            Element subElement = null;</span>
+<span class="nc" id="L132">            StringTokenizer tokenizer = new StringTokenizer(name, &quot;:&quot;);</span>
+<span class="nc bnc" id="L133" title="All 2 branches missed.">            while (tokenizer.hasMoreTokens()) {</span>
+<span class="nc" id="L134">                String tok = tokenizer.nextToken();</span>
+<span class="nc bnc" id="L135" title="All 2 branches missed.">                if (subElement == null) {</span>
+<span class="nc" id="L136">                    subElement = vCardElement.element(tok);</span>
+                }
+                else {
+<span class="nc" id="L139">                    subElement = subElement.element(tok);</span>
+                }
+<span class="nc bnc" id="L141" title="All 2 branches missed.">                if (subElement == null) {</span>
+<span class="nc" id="L142">                    break;</span>
+                }
+<span class="nc" id="L144">            }</span>
+<span class="nc bnc" id="L145" title="All 2 branches missed.">            if (subElement != null) {</span>
+<span class="nc" id="L146">                answer = subElement.getTextTrim();</span>
+            }
+        }
+<span class="nc" id="L149">        return answer;</span>
+    }
+
+    /**
+     * Sets the user's vCard information. The new vCard information will be persistent. Advanced
+     * user systems can use vCard information to link to user directory information or store
+     * other relevant user information.
+     *
+     * @param username     The username of the user to set his new vCard.
+     * @param vCardElement The DOM element sent by the user as his new vCard.
+     * @throws Exception if an error occurred while storing the new vCard.
+     */
+    public void setVCard(String username, Element vCardElement) throws Exception {
+<span class="nc" id="L162">        boolean created = false;</span>
+<span class="nc" id="L163">        boolean updated = false;</span>
+
+<span class="nc bnc" id="L165" title="All 2 branches missed.">        if (provider.isReadOnly()) {</span>
+<span class="nc" id="L166">            throw new UnsupportedOperationException(&quot;VCard provider is read-only.&quot;);</span>
+        }
+<span class="nc" id="L168">        Element oldVCard = getOrLoadVCard(username);</span>
+<span class="nc" id="L169">        Element newvCard = null;</span>
+        // See if we need to update the vCard or insert a new one.
+<span class="nc bnc" id="L171" title="All 2 branches missed.">        if (oldVCard != null) {</span>
+            // Only update the vCard in the database if the vCard has changed.
+<span class="nc bnc" id="L173" title="All 2 branches missed.">            if (!oldVCard.equals(vCardElement)) {</span>
+                try {
+<span class="nc" id="L175">                    newvCard = provider.updateVCard(username, vCardElement);</span>
+<span class="nc" id="L176">                    vcardCache.put(username, (DefaultElement) newvCard);</span>
+<span class="nc" id="L177">                    updated = true;</span>
+                }
+<span class="nc" id="L179">                catch (NotFoundException e) {</span>
+<span class="nc" id="L180">                    Log.warn(&quot;Tried to update a vCard that does not exist&quot;, e);</span>
+<span class="nc" id="L181">                    newvCard = provider.createVCard(username, vCardElement);</span>
+<span class="nc" id="L182">                    vcardCache.put(username, (DefaultElement) newvCard);</span>
+<span class="nc" id="L183">                    created = true;</span>
+<span class="nc" id="L184">                }</span>
+            }
+        }
+        else {
+            try {
+<span class="nc" id="L189">                newvCard = provider.createVCard(username, vCardElement);</span>
+<span class="nc" id="L190">                vcardCache.put(username, (DefaultElement) newvCard);</span>
+<span class="nc" id="L191">                created = true;</span>
+            }
+<span class="nc" id="L193">            catch (AlreadyExistsException e) {</span>
+<span class="nc" id="L194">                Log.warn(&quot;Tried to create a vCard when one already exist&quot;, e);</span>
+<span class="nc" id="L195">                newvCard = provider.updateVCard(username, vCardElement);</span>
+<span class="nc" id="L196">                vcardCache.put(username, (DefaultElement) newvCard);</span>
+<span class="nc" id="L197">                updated = true;</span>
+<span class="nc" id="L198">            }</span>
+        }
+        // Dispatch vCard events
+<span class="nc bnc" id="L201" title="All 2 branches missed.">        if (created) {</span>
+            // Alert listeners that a new vCard has been created
+<span class="nc" id="L203">            VCardEventDispatcher.dispatchVCardCreated(username, newvCard);</span>
+<span class="nc bnc" id="L204" title="All 2 branches missed.">        } else if (updated) {</span>
+            // Alert listeners that a vCard has been updated
+<span class="nc" id="L206">            VCardEventDispatcher.dispatchVCardUpdated(username, newvCard);</span>
+        }
+<span class="nc" id="L208">    }</span>
+
+    /**
+     * Deletes the user's vCard from the user account.
+     *
+     * @param username The username of the user to delete his vCard.
+     * @throws UnsupportedOperationException If the provider is read-only and the data
+     *         cannot be deleted, this exception is thrown
+     */
+    public void deleteVCard(String username) {
+<span class="nc bnc" id="L218" title="All 2 branches missed.">        if (provider.isReadOnly()) {</span>
+<span class="nc" id="L219">            throw new UnsupportedOperationException(&quot;VCard provider is read-only.&quot;);</span>
+        }
+<span class="nc" id="L221">        Element oldVCard = getOrLoadVCard(username);</span>
+<span class="nc bnc" id="L222" title="All 2 branches missed.">        if (oldVCard != null) {</span>
+<span class="nc" id="L223">            vcardCache.remove(username);</span>
+            // Delete the property from the DB if it was present in memory
+<span class="nc" id="L225">            provider.deleteVCard(username);</span>
+            // Alert listeners that a vCard has been deleted
+<span class="nc" id="L227">            VCardEventDispatcher.dispatchVCardDeleted(username, oldVCard);</span>
+        }
+<span class="nc" id="L229">    }</span>
+
+    /**
+     * Returns the vCard of a given user or null if none was defined before. Changes to the
+     * returned vCard will not be stored in the database. Use the returned vCard as a
+     * read-only vCard.
+     *
+     * @param username Username (not full JID) whose vCard to retrieve.
+     * @return the vCard of a given user.
+     */
+    public Element getVCard(String username) {
+<span class="nc" id="L240">        Element vCardElement = getOrLoadVCard(username);</span>
+<span class="nc bnc" id="L241" title="All 2 branches missed.">        return vCardElement == null ? null : vCardElement.createCopy();</span>
+    }
+
+    private Element getOrLoadVCard(String username) {
+<span class="nc" id="L245">        Element vCardElement = vcardCache.get(username);</span>
+<span class="nc bnc" id="L246" title="All 2 branches missed.">        if (vCardElement == null) {</span>
+<span class="nc" id="L247">            vCardElement = provider.loadVCard(username);</span>
+<span class="nc bnc" id="L248" title="All 2 branches missed.">            if (vCardElement != null) {</span>
+<span class="nc" id="L249">                vcardCache.put(username, (DefaultElement) vCardElement);</span>
+            }
+        }
+<span class="nc" id="L252">        return vCardElement;</span>
+    }
+
+    @Override
+    public void initialize(XMPPServer server) {
+<span class="nc" id="L257">        instance = this;</span>
+
+<span class="nc" id="L259">        initProvider(VCARD_PROVIDER.getValue());</span>
+
+<span class="nc" id="L261">    }</span>
+
+    private static void initProvider(final Class clazz) {
+        try {
+<span class="nc" id="L265">            provider = (VCardProvider) clazz.newInstance();</span>
+        }
+<span class="nc" id="L267">        catch (Exception e) {</span>
+<span class="nc" id="L268">            Log.error(&quot;Error loading vcard provider: &quot; + clazz.getName(), e);</span>
+<span class="nc" id="L269">            provider = new DefaultVCardProvider();</span>
+<span class="nc" id="L270">        }</span>
+<span class="nc" id="L271">    }</span>
+
+    @Override
+    public void start() {
+        // Add this module as a user event listener so we can delete
+        // all user properties when a user is deleted
+<span class="nc bnc" id="L277" title="All 2 branches missed.">        if (!provider.isReadOnly()) {</span>
+<span class="nc" id="L278">            UserEventDispatcher.addListener(eventHandler);</span>
+        }
+<span class="nc" id="L280">    }</span>
+
+    @Override
+    public void stop() {
+        // Remove this module as a user event listener
+<span class="nc" id="L285">        UserEventDispatcher.removeListener(eventHandler);</span>
+<span class="nc" id="L286">    }</span>
+
+    /**
+     * Resets the manager state. The cache where loaded vCards are stored will be flushed.
+     */
+    public void reset() {
+<span class="nc" id="L292">        vcardCache.clear();</span>
+<span class="nc" id="L293">    }</span>
+
+    @Override
+    public Iterator&lt;String&gt; getFeatures() {
+<span class="nc" id="L297">        return Collections.singleton(&quot;vcard-temp&quot;).iterator();</span>
+    }
+
+<span class="nc" id="L300">    private class EventHandler extends UserEventAdapter {</span>
+        @Override
+        public void userDeleting(User user, Map params) {
+            try {
+<span class="nc" id="L304">                deleteVCard(user.getUsername());</span>
+<span class="nc" id="L305">            } catch (UnsupportedOperationException ue) { /* Do Nothing */ }</span>
+<span class="nc" id="L306">        }</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

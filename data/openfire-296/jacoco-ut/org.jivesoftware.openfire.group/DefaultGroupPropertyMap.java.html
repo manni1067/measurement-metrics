@@ -1,0 +1,572 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>DefaultGroupPropertyMap.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.group</a> &gt; <span class="el_source">DefaultGroupPropertyMap.java</span></div><h1>DefaultGroupPropertyMap.java</h1><pre class="source lang-java linenums">package org.jivesoftware.openfire.group;
+
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.SQLException;
+import java.util.AbstractSet;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.Map;
+import java.util.Map.Entry;
+import java.util.Set;
+
+import org.jivesoftware.database.DbConnectionManager;
+import org.jivesoftware.openfire.event.GroupEventDispatcher;
+import org.jivesoftware.util.PersistableMap;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Default implementation of a writable {@link Map} to manage group properties.
+ * Updates made to the elements in this map will also be applied to the database.
+ * Note this implementation assumes group property changes will be relatively
+ * infrequent and therefore does not try to optimize database I/O for performance.
+ * Each call to a {@link Map} mutator method (direct or indirect via {@link Iterator})
+ * will result in a corresponding synchronous update to the database.
+ * 
+ * @param &lt;K&gt; Property key
+ * @param &lt;V&gt; Property value
+ */
+
+public class DefaultGroupPropertyMap&lt;K,V&gt; extends PersistableMap&lt;K,V&gt; {
+
+    private static final long serialVersionUID = 3128889631577167040L;
+<span class="nc" id="L36">    private static final Logger logger = LoggerFactory.getLogger(DefaultGroupPropertyMap.class);</span>
+
+    // moved from {@link Group} as these are specific to the default provider
+    private static final String DELETE_PROPERTY =
+            &quot;DELETE FROM ofGroupProp WHERE groupName=? AND name=?&quot;;
+    private static final String DELETE_ALL_PROPERTIES =
+            &quot;DELETE FROM ofGroupProp WHERE groupName=?&quot;;
+    private static final String UPDATE_PROPERTY =
+        &quot;UPDATE ofGroupProp SET propValue=? WHERE name=? AND groupName=?&quot;;
+    private static final String INSERT_PROPERTY =
+        &quot;INSERT INTO ofGroupProp (groupName, name, propValue) VALUES (?, ?, ?)&quot;;
+
+    private Group group;
+    
+    /**
+     * Group properties map constructor; requires associated {@link Group} instance
+     * @param group The group that owns these properties
+     */
+<span class="nc" id="L54">    public DefaultGroupPropertyMap(Group group) {</span>
+<span class="nc" id="L55">        this.group = group;</span>
+<span class="nc" id="L56">    }</span>
+    
+    /**
+     * Custom method to put properties into the map, optionally without
+     * triggering persistence. This is used when the map is being 
+     * initially loaded from the database.
+     * 
+     * @param key The property name
+     * @param value The property value
+     * @param persist True if the changes should be persisted to the database
+     * @return The original value or null if the property did not exist
+     */
+    @Override
+    public V put(K key, V value, boolean persist) {
+<span class="nc" id="L70">        V originalValue = super.put(key, value);</span>
+        // we only support persistence for &lt;String, String&gt;
+<span class="nc bnc" id="L72" title="All 6 branches missed.">        if (persist &amp;&amp; key instanceof String &amp;&amp; value instanceof String) {</span>
+<span class="nc bnc" id="L73" title="All 2 branches missed.">            if (logger.isDebugEnabled())</span>
+<span class="nc" id="L74">                logger.debug(&quot;Persisting group property [&quot; + key + &quot;]: &quot; + value);</span>
+<span class="nc bnc" id="L75" title="All 2 branches missed.">            if (originalValue instanceof String) { // existing property		</span>
+<span class="nc" id="L76">                updateProperty((String)key, (String)value, (String)originalValue);</span>
+            } else {
+<span class="nc" id="L78">                insertProperty((String)key, (String)value);</span>
+            }
+        }
+<span class="nc" id="L81">        return originalValue;</span>
+    }
+
+    @Override
+    public V put(K key, V value) {
+<span class="nc bnc" id="L86" title="All 2 branches missed.">        if (value == null) { // treat null value as &quot;remove&quot;</span>
+<span class="nc" id="L87">            return remove(key);</span>
+        } else {
+<span class="nc" id="L89">            return put(key, value, true);</span>
+        }
+    }
+    
+    @Override
+    public V remove(Object key) {
+<span class="nc" id="L95">        V result = super.remove(key);</span>
+<span class="nc bnc" id="L96" title="All 2 branches missed.">        if (key instanceof String) {</span>
+<span class="nc" id="L97">            deleteProperty((String)key);</span>
+        }
+<span class="nc" id="L99">        return result;</span>
+    }
+
+    @Override
+    public void clear() {
+<span class="nc" id="L104">        super.clear();</span>
+<span class="nc" id="L105">        deleteAllProperties();</span>
+<span class="nc" id="L106">    }</span>
+
+    @Override
+    public Set&lt;K&gt; keySet() {
+        // custom class needed here to handle key.remove()
+<span class="nc" id="L111">        return new PersistenceAwareKeySet&lt;K&gt;(super.keySet());</span>
+    }
+
+    @Override
+    public Collection&lt;V&gt; values() {
+        // custom class needed here to suppress value.remove()
+<span class="nc" id="L117">        return Collections.unmodifiableCollection(super.values());</span>
+    }
+
+    @Override
+    public Set&lt;Entry&lt;K, V&gt;&gt; entrySet() {
+        // custom class needed here to handle entrySet mutators
+<span class="nc" id="L123">        return new PersistenceAwareEntrySet&lt;Entry&lt;K,V&gt;&gt;(super.entrySet());</span>
+    }
+
+    /**
+     * Persistence-aware {@link Set} for group property keys. This class returns
+     * a custom iterator that can handle property removal.
+     */
+    private class PersistenceAwareKeySet&lt;E&gt; extends AbstractSet&lt;K&gt; {
+
+        private Set&lt;K&gt; delegate;
+        
+        /**
+         * Sole constructor; requires wrapped {@link Set} for delegation
+         * @param delegate A collection of keys from the map
+         */
+<span class="nc" id="L138">        public PersistenceAwareKeySet(Set&lt;K&gt; delegate) {</span>
+<span class="nc" id="L139">            this.delegate = delegate;</span>
+<span class="nc" id="L140">        }</span>
+
+        @Override
+        public Iterator&lt;K&gt; iterator() {
+<span class="nc" id="L144">            return new KeyIterator&lt;E&gt;(delegate.iterator());</span>
+        }
+
+        @Override
+        public int size() {
+<span class="nc" id="L149">            return delegate.size();</span>
+        }
+    }
+
+    /**
+     * This iterator updates the database when a property key is removed.
+     */
+    private class KeyIterator&lt;E&gt; implements Iterator&lt;K&gt; {
+
+        private Iterator&lt;K&gt; delegate;
+        private K current;
+        
+        /**
+         * Sole constructor; requires wrapped {@link Iterator} for delegation
+         * @param delegate An iterator for all the keys from the map
+         */
+<span class="nc" id="L165">        public KeyIterator(Iterator&lt;K&gt; delegate) {</span>
+<span class="nc" id="L166">            this.delegate = delegate;</span>
+<span class="nc" id="L167">        }</span>
+        
+        /**
+         * Delegated to corresponding method in the backing {@link Iterator}
+         */
+        @Override
+        public boolean hasNext() {
+<span class="nc" id="L174">            return delegate.hasNext();</span>
+        }
+
+        /**
+         * Delegated to corresponding method in the backing {@link Iterator}
+         */
+        @Override
+        public K next() {
+<span class="nc" id="L182">            current = delegate.next();</span>
+<span class="nc" id="L183">            return current;</span>
+        }
+
+        /**
+         * Removes the property corresponding to the current key from
+         * the underlying map. Also applies update to the database.
+         */
+        @Override
+        public void remove() {
+<span class="nc" id="L192">            delegate.remove();</span>
+<span class="nc bnc" id="L193" title="All 2 branches missed.">            if (current instanceof String) {</span>
+<span class="nc" id="L194">                deleteProperty((String)current);</span>
+            }
+<span class="nc" id="L196">            current = null;</span>
+<span class="nc" id="L197">        }</span>
+    }
+    
+    /**
+     * Persistence-aware {@link Set} for group properties (as {@link Map.Entry})
+     */
+    private class PersistenceAwareEntrySet&lt;E&gt; implements Set&lt;Entry&lt;K, V&gt;&gt; {
+
+        private Set&lt;Entry&lt;K, V&gt;&gt; delegate;
+        
+        /**
+         * Sole constructor; requires wrapped {@link Set} for delegation
+         * @param delegate A collection of entries ({@link Map.Entry}) from the map
+         */
+<span class="nc" id="L211">        public PersistenceAwareEntrySet(Set&lt;Entry&lt;K, V&gt;&gt; delegate) {</span>
+<span class="nc" id="L212">            this.delegate = delegate;</span>
+<span class="nc" id="L213">        }</span>
+
+        /**
+         * Returns a custom iterator for the entries in the backing map
+         */
+        @Override
+        public Iterator&lt;Entry&lt;K, V&gt;&gt; iterator() {
+<span class="nc" id="L220">            return new EntryIterator&lt;Entry&lt;K,V&gt;&gt;(delegate.iterator());</span>
+        }
+
+        /**
+         * Removes the given key from the backing map, and applies the
+         * corresponding update to the database.
+         * 
+         * @param o A {@link Map.Entry} within this set
+         * @return True if the set contained the given key
+         */
+        @Override
+        public boolean remove(Object o) {
+<span class="nc" id="L232">            boolean propertyExists = delegate.remove(o);</span>
+<span class="nc bnc" id="L233" title="All 2 branches missed.">            if (propertyExists) {</span>
+<span class="nc" id="L234">                deleteProperty((String)((Entry&lt;K,V&gt;)o).getKey());</span>
+            }
+<span class="nc" id="L236">            return propertyExists;</span>
+        }
+
+        /**
+         * Removes all the elements in the set, and applies the
+         * corresponding update to the database.
+         */
+        @Override
+        public void clear() {
+<span class="nc" id="L245">            delegate.clear();</span>
+<span class="nc" id="L246">            deleteAllProperties();</span>
+<span class="nc" id="L247">        }</span>
+
+        // these methods are problematic (and not really necessary),
+        // so they are not implemented
+        
+        /**
+         * @throws UnsupportedOperationException
+         */
+        @Override
+        public boolean removeAll(Collection&lt;?&gt; c) {
+<span class="nc" id="L257">            throw new UnsupportedOperationException();</span>
+        }
+
+        /**
+         * @throws UnsupportedOperationException
+         */
+        @Override
+        public boolean retainAll(Collection&lt;?&gt; c) {
+<span class="nc" id="L265">            throw new UnsupportedOperationException();</span>
+        }
+        
+        // per docs for {@link Map.entrySet}, these methods are not supported
+
+        /**
+         * @throws UnsupportedOperationException
+         */
+        @Override
+        public boolean add(Entry&lt;K, V&gt; o) {
+<span class="nc" id="L275">            return delegate.add(o);</span>
+        }
+
+        /**
+         * @throws UnsupportedOperationException
+         */
+        @Override
+        public boolean addAll(Collection&lt;? extends Entry&lt;K, V&gt;&gt; c) {
+<span class="nc" id="L283">            return delegate.addAll(c);</span>
+        }
+
+        // remaining {@link Set} methods can be delegated safely
+        
+        /**
+         * Delegated to corresponding method in the backing {@link Set}
+         */
+        @Override
+        public int size() {
+<span class="nc" id="L293">            return delegate.size();</span>
+        }
+
+        /**
+         * Delegated to corresponding method in the backing {@link Set}
+         */
+        @Override
+        public boolean isEmpty() {
+<span class="nc" id="L301">            return delegate.isEmpty();</span>
+        }
+
+        /**
+         * Delegated to corresponding method in the backing {@link Set}
+         */
+        @Override
+        public boolean contains(Object o) {
+<span class="nc" id="L309">            return delegate.contains(o);</span>
+        }
+
+        /**
+         * Delegated to corresponding method in the backing {@link Set}
+         */
+        @Override
+        public Object[] toArray() {
+<span class="nc" id="L317">            return delegate.toArray();</span>
+        }
+
+        /**
+         * Delegated to corresponding method in the backing {@link Set}
+         */
+        @Override
+        public &lt;T&gt; T[] toArray(T[] a) {
+<span class="nc" id="L325">            return delegate.toArray(a);</span>
+        }
+
+        /**
+         * Delegated to corresponding method in the backing {@link Set}
+         */
+        @Override
+        public boolean containsAll(Collection&lt;?&gt; c) {
+<span class="nc" id="L333">            return delegate.containsAll(c);</span>
+        }
+
+        /**
+         * Delegated to corresponding method in the backing {@link Set}
+         */
+        public boolean equals(Object o) {
+<span class="nc" id="L340">            return delegate.equals(o);</span>
+        }
+
+        /**
+         * Delegated to corresponding method in the backing {@link Set}
+         */
+        public int hashCode() {
+<span class="nc" id="L347">            return delegate.hashCode();</span>
+        }
+    }
+
+    /**
+     * Remove group property from the database when the {@link Iterator.remove}
+     * method is invoked via the {@link Map.entrySet} set
+     */
+    private class EntryIterator&lt;E&gt; implements Iterator&lt;Entry&lt;K, V&gt;&gt; {
+
+        private Iterator&lt;Entry&lt;K,V&gt;&gt; delegate;
+        private EntryWrapper&lt;E&gt; current;
+        
+        /**
+         * Sole constructor; requires wrapped {@link Iterator} for delegation
+         * @param delegate An iterator for all the keys from the map
+         */
+<span class="nc" id="L364">        public EntryIterator(Iterator&lt;Entry&lt;K,V&gt;&gt; delegate) {</span>
+<span class="nc" id="L365">            this.delegate = delegate;</span>
+<span class="nc" id="L366">        }</span>
+        /**
+         * Delegated to corresponding method in the backing {@link Iterator}
+         */
+        @Override
+        public boolean hasNext() {
+<span class="nc" id="L372">            return delegate.hasNext();</span>
+        }
+
+        /**
+         * Delegated to corresponding method in the backing {@link Iterator}
+         */
+        @Override
+        public Entry&lt;K,V&gt; next() {
+<span class="nc" id="L380">            current = new EntryWrapper&lt;&gt;(delegate.next());</span>
+<span class="nc" id="L381">            return current;</span>
+        }
+
+        /**
+         * Removes the property corresponding to the current key from
+         * the underlying map. Also applies update to the database.
+         */
+        @Override
+        public void remove() {
+<span class="nc" id="L390">            delegate.remove();</span>
+<span class="nc" id="L391">            K key = current.getKey();</span>
+<span class="nc bnc" id="L392" title="All 2 branches missed.">            if (key instanceof String) {</span>
+<span class="nc" id="L393">                deleteProperty((String)key);</span>
+            }
+<span class="nc" id="L395">            current = null;</span>
+<span class="nc" id="L396">        }</span>
+    }
+    
+    /**
+     * Update the database when a group property is updated via {@link Map.Entry.setValue}
+     */
+    private class EntryWrapper&lt;E&gt; implements Entry&lt;K,V&gt; {
+        private Entry&lt;K,V&gt; delegate;
+
+        /**
+         * Sole constructor; requires wrapped {@link Map.Entry} for delegation
+         * @param delegate The corresponding entry from the map
+         */
+<span class="nc" id="L409">        public EntryWrapper(Entry&lt;K,V&gt; delegate) {</span>
+<span class="nc" id="L410">            this.delegate = delegate;</span>
+<span class="nc" id="L411">        }</span>
+        
+        /**
+         * Delegated to corresponding method in the backing {@link Map.Entry}
+         */
+        @Override
+        public K getKey() {
+<span class="nc" id="L418">            return delegate.getKey();</span>
+        }
+        
+        /**
+         * Delegated to corresponding method in the backing {@link Map.Entry}
+         */
+        @Override
+        public V getValue() {
+<span class="nc" id="L426">            return delegate.getValue();</span>
+        }
+        
+        /**
+         * Set the value of the property corresponding to this entry. This
+         * method also updates the database as needed depending on the new
+         * property value. A null value will cause the property to be deleted
+         * from the database.
+         * 
+         * @param value The new property value
+         * @return The old value of the corresponding property
+         */
+        @Override
+        public V setValue(V value) {
+<span class="nc" id="L440">            V oldValue = delegate.setValue(value);</span>
+<span class="nc" id="L441">            K key = delegate.getKey();</span>
+<span class="nc bnc" id="L442" title="All 2 branches missed.">            if (key instanceof String) {</span>
+<span class="nc bnc" id="L443" title="All 2 branches missed.">                if (value instanceof String) {</span>
+<span class="nc bnc" id="L444" title="All 2 branches missed.">                    if (oldValue == null) {</span>
+<span class="nc" id="L445">                        insertProperty((String) key, (String) value);</span>
+<span class="nc bnc" id="L446" title="All 2 branches missed.">                    } else if (!value.equals(oldValue)) {</span>
+<span class="nc" id="L447">                        updateProperty((String)key,(String)value, (String)oldValue);</span>
+                    }
+                } else {
+<span class="nc" id="L450">                    deleteProperty((String)key);</span>
+                }
+            }
+<span class="nc" id="L453">            return oldValue;</span>
+        }
+    }
+
+    /**
+     * Persist a new group property to the database for the current group
+     * 
+     * @param key Property name
+     * @param value Property value
+     */
+    private synchronized void insertProperty(String key, String value) {
+<span class="nc" id="L464">        Connection con = null;</span>
+<span class="nc" id="L465">        PreparedStatement pstmt = null;</span>
+        try {
+<span class="nc" id="L467">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L468">            pstmt = con.prepareStatement(INSERT_PROPERTY);</span>
+<span class="nc" id="L469">            pstmt.setString(1, group.getName());</span>
+<span class="nc" id="L470">            pstmt.setString(2, key);</span>
+<span class="nc" id="L471">            pstmt.setString(3, value);</span>
+<span class="nc" id="L472">            pstmt.executeUpdate();</span>
+        }
+<span class="nc" id="L474">        catch (SQLException e) {</span>
+<span class="nc" id="L475">            logger.error(e.getMessage(), e);</span>
+        }
+        finally {
+<span class="nc" id="L478">            DbConnectionManager.closeConnection(pstmt, con);</span>
+<span class="nc" id="L479">        }</span>
+<span class="nc" id="L480">        Map&lt;String, Object&gt; event = new HashMap&lt;&gt;();</span>
+<span class="nc" id="L481">        event.put(&quot;propertyKey&quot;, key);</span>
+<span class="nc" id="L482">        event.put(&quot;type&quot;, &quot;propertyAdded&quot;);</span>
+<span class="nc" id="L483">        GroupEventDispatcher.dispatchEvent(group,</span>
+                GroupEventDispatcher.EventType.group_modified, event);
+<span class="nc" id="L485">    }</span>
+
+    /**
+     * Update the value of an existing group property for the current group
+     * 
+     * @param key Property name
+     * @param value Property value
+     * @param originalValue Original property value
+     */
+    private synchronized void updateProperty(String key, String value, String originalValue) {
+<span class="nc" id="L495">        Connection con = null;</span>
+<span class="nc" id="L496">        PreparedStatement pstmt = null;</span>
+        try {
+<span class="nc" id="L498">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L499">            pstmt = con.prepareStatement(UPDATE_PROPERTY);</span>
+<span class="nc" id="L500">            pstmt.setString(1, value);</span>
+<span class="nc" id="L501">            pstmt.setString(2, key);</span>
+<span class="nc" id="L502">            pstmt.setString(3, group.getName());</span>
+<span class="nc" id="L503">            pstmt.executeUpdate();</span>
+        }
+<span class="nc" id="L505">        catch (SQLException e) {</span>
+<span class="nc" id="L506">            logger.error(e.getMessage(), e);</span>
+        }
+        finally {
+<span class="nc" id="L509">            DbConnectionManager.closeConnection(pstmt, con);</span>
+<span class="nc" id="L510">        }</span>
+<span class="nc" id="L511">        Map&lt;String, Object&gt; event = new HashMap&lt;&gt;();</span>
+<span class="nc" id="L512">        event.put(&quot;propertyKey&quot;, key);</span>
+<span class="nc" id="L513">        event.put(&quot;type&quot;, &quot;propertyModified&quot;);</span>
+<span class="nc" id="L514">        event.put(&quot;originalValue&quot;, originalValue);</span>
+<span class="nc" id="L515">        GroupEventDispatcher.dispatchEvent(group,</span>
+                GroupEventDispatcher.EventType.group_modified, event);
+<span class="nc" id="L517">    }</span>
+
+    /**
+     * Delete a group property from the database for the current group
+     * 
+     * @param key Property name
+     */
+    private synchronized void deleteProperty(String key) {
+<span class="nc" id="L525">        Connection con = null;</span>
+<span class="nc" id="L526">        PreparedStatement pstmt = null;</span>
+        try {
+<span class="nc" id="L528">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L529">            pstmt = con.prepareStatement(DELETE_PROPERTY);</span>
+<span class="nc" id="L530">            pstmt.setString(1, group.getName());</span>
+<span class="nc" id="L531">            pstmt.setString(2, key);</span>
+<span class="nc" id="L532">            pstmt.executeUpdate();</span>
+        }
+<span class="nc" id="L534">        catch (SQLException e) {</span>
+<span class="nc" id="L535">            logger.error(e.getMessage(), e);</span>
+        }
+        finally {
+<span class="nc" id="L538">            DbConnectionManager.closeConnection(pstmt, con);</span>
+<span class="nc" id="L539">        }</span>
+<span class="nc" id="L540">        Map&lt;String, Object&gt; event = new HashMap&lt;&gt;();</span>
+<span class="nc" id="L541">        event.put(&quot;type&quot;, &quot;propertyDeleted&quot;);</span>
+<span class="nc" id="L542">        event.put(&quot;propertyKey&quot;, key);</span>
+<span class="nc" id="L543">        GroupEventDispatcher.dispatchEvent(group,</span>
+            GroupEventDispatcher.EventType.group_modified, event);
+<span class="nc" id="L545">    }</span>
+
+    /**
+     * Delete all properties from the database for the current group
+     */
+    private synchronized void deleteAllProperties() {
+<span class="nc" id="L551">        Connection con = null;</span>
+<span class="nc" id="L552">        PreparedStatement pstmt = null;</span>
+        try {
+<span class="nc" id="L554">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L555">            pstmt = con.prepareStatement(DELETE_ALL_PROPERTIES);</span>
+<span class="nc" id="L556">            pstmt.setString(1, group.getName());</span>
+<span class="nc" id="L557">            pstmt.executeUpdate();</span>
+        }
+<span class="nc" id="L559">        catch (SQLException e) {</span>
+<span class="nc" id="L560">            logger.error(e.getMessage(), e);</span>
+        }
+        finally {
+<span class="nc" id="L563">            DbConnectionManager.closeConnection(pstmt, con);</span>
+<span class="nc" id="L564">        }</span>
+<span class="nc" id="L565">        Map&lt;String, Object&gt; event = new HashMap&lt;&gt;();</span>
+<span class="nc" id="L566">        event.put(&quot;type&quot;, &quot;propertyDeleted&quot;);</span>
+<span class="nc" id="L567">        event.put(&quot;propertyKey&quot;, &quot;*&quot;);</span>
+<span class="nc" id="L568">        GroupEventDispatcher.dispatchEvent(group,</span>
+            GroupEventDispatcher.EventType.group_modified, event);
+<span class="nc" id="L570">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

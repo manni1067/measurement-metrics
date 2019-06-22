@@ -1,0 +1,355 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>ConnectionMultiplexerManager.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.multiplex</a> &gt; <span class="el_source">ConnectionMultiplexerManager.java</span></div><h1>ConnectionMultiplexerManager.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.multiplex;
+
+import java.net.UnknownHostException;
+import java.util.Collection;
+import java.util.List;
+import java.util.Map;
+import java.util.Random;
+import java.util.TimerTask;
+import java.util.concurrent.ConcurrentHashMap;
+
+import org.jivesoftware.openfire.Connection;
+import org.jivesoftware.openfire.SessionManager;
+import org.jivesoftware.openfire.StreamID;
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.event.SessionEventDispatcher;
+import org.jivesoftware.openfire.event.SessionEventListener;
+import org.jivesoftware.openfire.session.ConnectionMultiplexerSession;
+import org.jivesoftware.openfire.session.LocalClientSession;
+import org.jivesoftware.openfire.session.Session;
+import org.jivesoftware.util.JiveConstants;
+import org.jivesoftware.util.JiveGlobals;
+import org.jivesoftware.util.TaskEngine;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * A ConnectionMultiplexerManager is responsible for keeping track of the connected
+ * Connection Managers and the sessions that were established with the Connection
+ * Managers. Moreover, a ConnectionMultiplexerManager is able to create, get and close
+ * client sessions based on Connection requests.
+ *
+ * @author Gaston Dombiak
+ */
+public class ConnectionMultiplexerManager implements SessionEventListener {
+
+<span class="nc" id="L52">    private static final Logger Log = LoggerFactory.getLogger(ConnectionMultiplexerManager.class);</span>
+
+<span class="nc" id="L54">    private static final ConnectionMultiplexerManager instance = new ConnectionMultiplexerManager();</span>
+
+    /**
+     * Pseudo-random number generator object for use with getMultiplexerSession(String).
+     */
+<span class="nc" id="L59">    private static Random randGen = new Random();</span>
+
+    static {
+        // Add the unique instance of this class as a session listener. We need to react
+        // when sessions are closed so we can clean up the registry of client sessions.
+<span class="nc" id="L64">        SessionEventDispatcher.addListener(instance);</span>
+<span class="nc" id="L65">    }</span>
+
+    /**
+     * Map that keeps track of connection managers and hosted connections.
+     * Key: stream ID; Value: Domain of connection manager hosting connection
+     */
+<span class="nc" id="L71">    private Map&lt;StreamID, String&gt; streamIDs = new ConcurrentHashMap&lt;&gt;();</span>
+    /**
+     * Map that keeps track of connection managers and hosted sessions.
+     * Key: Domain of connection manager; Value: Map with Key: stream ID; Value: Client session
+     */
+<span class="nc" id="L76">    private Map&lt;String, Map&lt;StreamID, LocalClientSession&gt;&gt; sessionsByManager =</span>
+            new ConcurrentHashMap&lt;&gt;();
+
+    private SessionManager sessionManager;
+
+    /**
+     * Returns the unique instance of this class.
+     *
+     * @return the unique instance of this class.
+     */
+    public static ConnectionMultiplexerManager getInstance() {
+<span class="nc" id="L87">        return instance;</span>
+    }
+
+    /**
+     * Returns the default secret key that connection managers should present while trying to
+     * establish a new connection.
+     *
+     * @return the default secret key that connection managers should present while trying to
+     *         establish a new connection.
+     */
+    public static String getDefaultSecret() {
+<span class="nc" id="L98">        return JiveGlobals.getProperty(&quot;xmpp.multiplex.defaultSecret&quot;);</span>
+    }
+
+    /**
+     * Sets the default secret key that connection managers should present while trying to
+     * establish a new connection.
+     *
+     * @param defaultSecret the default secret key that connection managers should present
+     *        while trying to establish a new connection.
+     */
+    public static void setDefaultSecret(String defaultSecret) {
+<span class="nc" id="L109">        JiveGlobals.setProperty(&quot;xmpp.multiplex.defaultSecret&quot;, defaultSecret);</span>
+<span class="nc" id="L110">    }</span>
+
+<span class="nc" id="L112">    private ConnectionMultiplexerManager() {</span>
+<span class="nc" id="L113">        sessionManager = XMPPServer.getInstance().getSessionManager();</span>
+        // Start thread that will send heartbeats to Connection Managers every 30 seconds
+        // to keep connections open.
+<span class="nc" id="L116">        TimerTask heartbeatTask = new TimerTask() {</span>
+            @Override
+            public void run() {
+                try {
+<span class="nc bnc" id="L120" title="All 2 branches missed.">                    for (ConnectionMultiplexerSession session : sessionManager.getConnectionMultiplexerSessions()) {</span>
+<span class="nc" id="L121">                        session.deliverRawText(&quot; &quot;);</span>
+<span class="nc" id="L122">                    }</span>
+                }
+<span class="nc" id="L124">                catch(Exception e) {</span>
+<span class="nc" id="L125">                    Log.error(e.getMessage(), e);</span>
+<span class="nc" id="L126">                }</span>
+<span class="nc" id="L127">            }</span>
+        };
+<span class="nc" id="L129">        TaskEngine.getInstance().schedule(heartbeatTask, 30*JiveConstants.SECOND, 30*JiveConstants.SECOND);</span>
+<span class="nc" id="L130">    }</span>
+
+    /**
+     * Creates a new client session that was established to the specified connection manager.
+     * The new session will not be findable through its stream ID.
+     *
+     * @param connectionManagerDomain the connection manager that is handling the connection
+     *        of the session.
+     * @param streamID the stream ID created by the connection manager for the new session.
+     * @param hostName the address's hostname of the client or null if using old connection manager.
+     * @param hostAddress the textual representation of the address of the client or null if using old CM.
+     * @return true if a session was created or false if the client should disconnect.
+     */
+    public boolean createClientSession(String connectionManagerDomain, StreamID streamID, String hostName, String hostAddress) {
+<span class="nc" id="L144">        Connection connection = new ClientSessionConnection(connectionManagerDomain, hostName, hostAddress);</span>
+        // Check if client is allowed to connect from the specified IP address. Ignore the checking if connection
+        // manager is old version and is not passing client's address
+<span class="nc" id="L147">        byte[] address = null;</span>
+        try {
+<span class="nc" id="L149">            address = connection.getAddress();</span>
+<span class="nc" id="L150">        } catch (UnknownHostException e) {</span>
+            // Ignore
+<span class="nc" id="L152">        }</span>
+<span class="nc bnc" id="L153" title="All 4 branches missed.">        if (address == null || LocalClientSession.isAllowed(connection)) {</span>
+            LocalClientSession session =
+<span class="nc" id="L155">                    SessionManager.getInstance().createClientSession(connection, streamID);</span>
+            // Register that this streamID belongs to the specified connection manager
+<span class="nc" id="L157">            streamIDs.put(streamID, connectionManagerDomain);</span>
+            // Register which sessions are being hosted by the speicifed connection manager
+<span class="nc" id="L159">            Map&lt;StreamID, LocalClientSession&gt; sessions = sessionsByManager.get(connectionManagerDomain);</span>
+<span class="nc bnc" id="L160" title="All 2 branches missed.">            if (sessions == null) {</span>
+<span class="nc" id="L161">                synchronized (connectionManagerDomain.intern()) {</span>
+<span class="nc" id="L162">                    sessions = sessionsByManager.get(connectionManagerDomain);</span>
+<span class="nc bnc" id="L163" title="All 2 branches missed.">                    if (sessions == null) {</span>
+<span class="nc" id="L164">                        sessions = new ConcurrentHashMap&lt;&gt;();</span>
+<span class="nc" id="L165">                        sessionsByManager.put(connectionManagerDomain, sessions);</span>
+                    }
+<span class="nc" id="L167">                }</span>
+            }
+<span class="nc" id="L169">            sessions.put(streamID, session);</span>
+<span class="nc" id="L170">            return true;</span>
+        }
+<span class="nc" id="L172">        return false;</span>
+    }
+
+    /**
+     * Closes an existing client session that was established through a connection manager.
+     *
+     * @param connectionManagerDomain the connection manager that is handling the connection
+     *        of the session.
+     * @param streamID the stream ID created by the connection manager for the session.
+     */
+    public void closeClientSession(String connectionManagerDomain, StreamID streamID) {
+<span class="nc" id="L183">        Map&lt;StreamID, LocalClientSession&gt; sessions = sessionsByManager.get(connectionManagerDomain);</span>
+<span class="nc bnc" id="L184" title="All 2 branches missed.">        if (sessions != null) {</span>
+<span class="nc" id="L185">            Session session = sessions.remove(streamID);</span>
+<span class="nc bnc" id="L186" title="All 2 branches missed.">            if (session != null) {</span>
+<span class="nc" id="L187">                Log.debug( &quot;Closing session: {}&quot;, session );</span>
+<span class="nc" id="L188">                session.close();</span>
+            }
+        }
+<span class="nc" id="L191">    }</span>
+
+    /**
+     * A connection manager has become available. Clients can now connect to the server through
+     * the connection manager.
+     *
+     * @param connectionManagerName the connection manager that has become available.
+     */
+    public void multiplexerAvailable(String connectionManagerName) {
+        // Add a new entry in the list of available managers. Here is where we are going to store
+        // which clients were connected through which connection manager
+<span class="nc" id="L202">        Map&lt;StreamID, LocalClientSession&gt; sessions = sessionsByManager.get(connectionManagerName);</span>
+<span class="nc bnc" id="L203" title="All 2 branches missed.">        if (sessions == null) {</span>
+<span class="nc" id="L204">            synchronized (connectionManagerName.intern()) {</span>
+<span class="nc" id="L205">                sessions = sessionsByManager.get(connectionManagerName);</span>
+<span class="nc bnc" id="L206" title="All 2 branches missed.">                if (sessions == null) {</span>
+<span class="nc" id="L207">                    sessions = new ConcurrentHashMap&lt;&gt;();</span>
+<span class="nc" id="L208">                    sessionsByManager.put(connectionManagerName, sessions);</span>
+                }
+<span class="nc" id="L210">            }</span>
+        }
+<span class="nc" id="L212">    }</span>
+
+    /**
+     * A connection manager has gone unavailable. Close client sessions that were established
+     * to the specified connection manager.
+     *
+     * @param connectionManagerName the connection manager that is no longer available.
+     */
+    public void multiplexerUnavailable(String connectionManagerName) {
+        // Remove the connection manager and the hosted sessions
+<span class="nc" id="L222">        Map&lt;StreamID, LocalClientSession&gt; sessions = sessionsByManager.remove(connectionManagerName);</span>
+<span class="nc bnc" id="L223" title="All 2 branches missed.">        if (sessions != null) {</span>
+<span class="nc bnc" id="L224" title="All 2 branches missed.">            for (StreamID streamID : sessions.keySet()) {</span>
+                // Remove inverse track of connection manager hosting streamIDs
+<span class="nc" id="L226">                streamIDs.remove(streamID);</span>
+                // Close the session
+<span class="nc" id="L228">                sessions.get(streamID).close();</span>
+<span class="nc" id="L229">            }</span>
+        }
+<span class="nc" id="L231">    }</span>
+
+    /**
+     * Returns the ClientSession with the specified stream ID that is being hosted by the
+     * specified connection manager.
+     *
+     * @param connectionManagerDomain the connection manager that is handling the connection
+     *        of the session.
+     * @param streamID the stream ID created by the connection manager for the session.
+     * @return the ClientSession with the specified stream ID.
+     */
+    public LocalClientSession getClientSession(String connectionManagerDomain, StreamID streamID) {
+<span class="nc" id="L243">        Map&lt;StreamID, LocalClientSession&gt; sessions = sessionsByManager.get(connectionManagerDomain);</span>
+<span class="nc bnc" id="L244" title="All 2 branches missed.">        if (sessions != null) {</span>
+<span class="nc" id="L245">            return sessions.get(streamID);</span>
+        }
+<span class="nc" id="L247">        return null;</span>
+    }
+
+    /**
+     * Returns a {@link ConnectionMultiplexerSession} for the specified connection manager
+     * domain or {@code null} if none was found. If a StreamID is passed in, the same connection
+     * will always be used for that StreamID. Otherwise, if the connection manager has many
+     * connections established with the server then one of them will be selected randomly.
+     *
+     * @param connectionManagerDomain the domain of the connection manager to get a session.
+     * @param streamID if provided, the same connection will always be used for a given streamID
+     * @return a session to the specified connection manager domain or null if none was found.
+     */
+    public ConnectionMultiplexerSession getMultiplexerSession(String connectionManagerDomain,StreamID streamID) {
+<span class="nc" id="L261">        List&lt;ConnectionMultiplexerSession&gt; sessions =</span>
+<span class="nc" id="L262">                sessionManager.getConnectionMultiplexerSessions(connectionManagerDomain);</span>
+<span class="nc bnc" id="L263" title="All 2 branches missed.">        if (sessions.isEmpty()) {</span>
+<span class="nc" id="L264">            return null;</span>
+        }
+<span class="nc bnc" id="L266" title="All 2 branches missed.">        else if (sessions.size() == 1) {</span>
+<span class="nc" id="L267">            return sessions.get(0);</span>
+        }
+<span class="nc bnc" id="L269" title="All 2 branches missed.">        else if (streamID != null) {</span>
+            // Always use the same connection for a given streamID
+<span class="nc" id="L271">            int connectionIndex = Math.abs(streamID.hashCode()) % sessions.size();</span>
+<span class="nc" id="L272">            return sessions.get(connectionIndex);</span>
+        } else {
+            // Pick a random session so we can distribute traffic evenly
+<span class="nc" id="L275">            return sessions.get(randGen.nextInt(sessions.size()));</span>
+        }
+    }
+
+    /**
+     * Returns a {@link ConnectionMultiplexerSession} for the specified connection manager
+     * domain or {@code null} if none was found. In case the connection manager has many
+     * connections established with the server then one of them will be selected randomly.
+     *
+     * @param connectionManagerDomain the domain of the connection manager to get a session.
+     * @return a session to the specified connection manager domain or null if none was found.
+     */
+    public ConnectionMultiplexerSession getMultiplexerSession(String connectionManagerDomain) {
+<span class="nc" id="L288">        return getMultiplexerSession(connectionManagerDomain,null);</span>
+    }
+
+
+    /**
+     * Returns the names of the connected connection managers to this server.
+     *
+     * @return the names of the connected connection managers to this server.
+     */
+    public Collection&lt;String&gt; getMultiplexers() {
+<span class="nc" id="L298">        return sessionsByManager.keySet();</span>
+    }
+
+    /**
+     * Returns the number of connected clients to a specific connection manager.
+     *
+     * @param managerName the name of the connection manager.
+     * @return the number of connected clients to a specific connection manager.
+     */
+    public int getNumConnectedClients(String managerName) {
+<span class="nc" id="L308">        Map&lt;StreamID, LocalClientSession&gt; clients = sessionsByManager.get(managerName);</span>
+<span class="nc bnc" id="L309" title="All 2 branches missed.">        if (clients == null) {</span>
+<span class="nc" id="L310">            return 0;</span>
+        }
+        else {
+<span class="nc" id="L313">            return clients.size();</span>
+        }
+    }
+
+    @Override
+    public void anonymousSessionCreated(Session session) {
+        // Do nothing.
+<span class="nc" id="L320">    }</span>
+
+    @Override
+    public void anonymousSessionDestroyed(Session session) {
+<span class="nc" id="L324">        removeSession(session);</span>
+<span class="nc" id="L325">    }</span>
+
+    @Override
+    public void sessionCreated(Session session) {
+        // Do nothing.
+<span class="nc" id="L330">    }</span>
+
+    @Override
+    public void sessionDestroyed(Session session) {
+<span class="nc" id="L334">        removeSession(session);</span>
+<span class="nc" id="L335">    }</span>
+
+    @Override
+    public void resourceBound(Session session) {
+        // Do nothing.
+<span class="nc" id="L340">    }</span>
+
+    private void removeSession(Session session) {
+        // Remove trace indicating that a connection manager is hosting a connection
+<span class="nc" id="L344">        StreamID streamID = session.getStreamID();</span>
+<span class="nc" id="L345">        String connectionManagerDomain = streamIDs.remove(streamID);</span>
+        // Remove trace indicating that a connection manager is hosting a session
+<span class="nc bnc" id="L347" title="All 2 branches missed.">        if (connectionManagerDomain != null) {</span>
+<span class="nc" id="L348">            Map&lt;StreamID, LocalClientSession&gt; sessions = sessionsByManager.get(connectionManagerDomain);</span>
+<span class="nc bnc" id="L349" title="All 2 branches missed.">            if (sessions != null) {</span>
+<span class="nc" id="L350">                sessions.remove(streamID);</span>
+            }
+        }
+<span class="nc" id="L353">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

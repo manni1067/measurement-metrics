@@ -1,0 +1,485 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>IQRegisterHandler.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.handler</a> &gt; <span class="el_source">IQRegisterHandler.java</span></div><h1>IQRegisterHandler.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.handler;
+
+import gnu.inet.encoding.Stringprep;
+import gnu.inet.encoding.StringprepException;
+
+import java.util.Collections;
+import java.util.Iterator;
+import java.util.List;
+
+import org.dom4j.DocumentHelper;
+import org.dom4j.Element;
+import org.dom4j.QName;
+import org.jivesoftware.openfire.IQHandlerInfo;
+import org.jivesoftware.openfire.PacketException;
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.auth.UnauthorizedException;
+import org.jivesoftware.openfire.disco.ServerFeaturesProvider;
+import org.jivesoftware.openfire.group.GroupManager;
+import org.jivesoftware.openfire.roster.RosterManager;
+import org.jivesoftware.openfire.session.ClientSession;
+import org.jivesoftware.openfire.session.Session;
+import org.jivesoftware.openfire.user.User;
+import org.jivesoftware.openfire.user.UserAlreadyExistsException;
+import org.jivesoftware.openfire.user.UserManager;
+import org.jivesoftware.openfire.user.UserNotFoundException;
+import org.jivesoftware.util.JiveGlobals;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmpp.forms.DataForm;
+import org.xmpp.forms.FormField;
+import org.xmpp.packet.IQ;
+import org.xmpp.packet.JID;
+import org.xmpp.packet.PacketError;
+import org.xmpp.packet.StreamError;
+
+/**
+ * Implements the TYPE_IQ jabber:iq:register protocol (plain only). Clients
+ * use this protocol to register a user account with the server.
+ * A 'get' query runs a register probe to obtain the fields needed
+ * for registration. Return the registration form.
+ * A 'set' query attempts to create a new user account
+ * with information given in the registration form.
+ * &lt;h2&gt;Assumptions&lt;/h2&gt;
+ * This handler assumes that the request is addressed to the server.
+ * An appropriate TYPE_IQ tag matcher should be placed in front of this
+ * one to route TYPE_IQ requests not addressed to the server to
+ * another channel (probably for direct delivery to the recipient).
+ * &lt;h2&gt;Compatibility&lt;/h2&gt;
+ * The current behavior is designed to emulate jabberd1.4. However
+ * this behavior differs significantly from JEP-0078 (non-SASL registration).
+ * In particular, authentication (IQ-Auth) must return an error when a user
+ * request is made to an account that doesn't exist to trigger auto-registration
+ * (JEP-0078 explicitly recommends against this practice to prevent hackers
+ * from probing for legitimate accounts).
+ *
+ * @author Iain Shigeoka
+ */
+public class IQRegisterHandler extends IQHandler implements ServerFeaturesProvider {
+
+<span class="nc" id="L76">    private static final Logger Log = LoggerFactory.getLogger(IQRegisterHandler.class);</span>
+
+    private static boolean registrationEnabled;
+    private static boolean canChangePassword;
+    private static Element probeResult;
+
+    private UserManager userManager;
+    private RosterManager rosterManager;
+
+    private IQHandlerInfo info;
+
+    /**
+     * &lt;p&gt;Basic constructor does nothing.&lt;/p&gt;
+     */
+    public IQRegisterHandler() {
+<span class="nc" id="L91">        super(&quot;XMPP Registration Handler&quot;);</span>
+<span class="nc" id="L92">        info = new IQHandlerInfo(&quot;query&quot;, &quot;jabber:iq:register&quot;);</span>
+<span class="nc" id="L93">    }</span>
+
+    @Override
+    public void initialize(XMPPServer server) {
+<span class="nc" id="L97">        super.initialize(server);</span>
+<span class="nc" id="L98">        userManager = server.getUserManager();</span>
+<span class="nc" id="L99">        rosterManager = server.getRosterManager();</span>
+
+<span class="nc bnc" id="L101" title="All 2 branches missed.">        if (probeResult == null) {</span>
+            // Create the basic element of the probeResult which contains the basic registration
+            // information (e.g. username, passoword and email)
+<span class="nc" id="L104">            probeResult = DocumentHelper.createElement(QName.get(&quot;query&quot;, &quot;jabber:iq:register&quot;));</span>
+<span class="nc" id="L105">            probeResult.addElement(&quot;username&quot;);</span>
+<span class="nc" id="L106">            probeResult.addElement(&quot;password&quot;);</span>
+<span class="nc" id="L107">            probeResult.addElement(&quot;email&quot;);</span>
+<span class="nc" id="L108">            probeResult.addElement(&quot;name&quot;);</span>
+
+            // Create the registration form to include in the probeResult. The form will include
+            // the basic information plus name and visibility of name and email.
+            // TODO Future versions could allow plugin modules to add new fields to the form 
+<span class="nc" id="L113">            final DataForm registrationForm = new DataForm(DataForm.Type.form);</span>
+<span class="nc" id="L114">            registrationForm.setTitle(&quot;XMPP Client Registration&quot;);</span>
+<span class="nc" id="L115">            registrationForm.addInstruction(&quot;Please provide the following information&quot;);</span>
+
+<span class="nc" id="L117">            final FormField fieldForm = registrationForm.addField();</span>
+<span class="nc" id="L118">            fieldForm.setVariable(&quot;FORM_TYPE&quot;);</span>
+<span class="nc" id="L119">            fieldForm.setType(FormField.Type.hidden);</span>
+<span class="nc" id="L120">            fieldForm.addValue(&quot;jabber:iq:register&quot;);</span>
+
+<span class="nc" id="L122">            final FormField fieldUser = registrationForm.addField();</span>
+<span class="nc" id="L123">            fieldUser.setVariable(&quot;username&quot;);</span>
+<span class="nc" id="L124">            fieldUser.setType(FormField.Type.text_single);</span>
+<span class="nc" id="L125">            fieldUser.setLabel(&quot;Username&quot;);</span>
+<span class="nc" id="L126">            fieldUser.setRequired(true);</span>
+
+<span class="nc" id="L128">            final FormField fieldName = registrationForm.addField(); </span>
+<span class="nc" id="L129">            fieldName.setVariable(&quot;name&quot;);</span>
+<span class="nc" id="L130">            fieldName.setType(FormField.Type.text_single);</span>
+<span class="nc" id="L131">            fieldName.setLabel(&quot;Full name&quot;);</span>
+<span class="nc bnc" id="L132" title="All 2 branches missed.">            if (UserManager.getUserProvider().isNameRequired()) {</span>
+<span class="nc" id="L133">                fieldName.setRequired(true);</span>
+            }
+
+<span class="nc" id="L136">            final FormField fieldMail = registrationForm.addField();</span>
+<span class="nc" id="L137">            fieldMail.setVariable(&quot;email&quot;);</span>
+<span class="nc" id="L138">            fieldMail.setType(FormField.Type.text_single);</span>
+<span class="nc" id="L139">            fieldMail.setLabel(&quot;Email&quot;);</span>
+<span class="nc bnc" id="L140" title="All 2 branches missed.">            if (UserManager.getUserProvider().isEmailRequired()) {</span>
+<span class="nc" id="L141">                fieldMail.setRequired(true);</span>
+            }
+
+<span class="nc" id="L144">            final FormField fieldPwd = registrationForm.addField();</span>
+<span class="nc" id="L145">            fieldPwd.setVariable(&quot;password&quot;);</span>
+<span class="nc" id="L146">            fieldPwd.setType(FormField.Type.text_private);</span>
+<span class="nc" id="L147">            fieldPwd.setLabel(&quot;Password&quot;);</span>
+<span class="nc" id="L148">            fieldPwd.setRequired(true);</span>
+
+            // Add the registration form to the probe result.
+<span class="nc" id="L151">            probeResult.add(registrationForm.getElement());</span>
+        }
+        
+<span class="nc" id="L154">        JiveGlobals.migrateProperty(&quot;register.inband&quot;);</span>
+<span class="nc" id="L155">        JiveGlobals.migrateProperty(&quot;register.password&quot;);</span>
+        
+        // See if in-band registration should be enabled (default is true).
+<span class="nc" id="L158">        registrationEnabled = JiveGlobals.getBooleanProperty(&quot;register.inband&quot;, true);</span>
+        // See if users can change their passwords (default is true).
+<span class="nc" id="L160">        canChangePassword = JiveGlobals.getBooleanProperty(&quot;register.password&quot;, true);</span>
+<span class="nc" id="L161">    }</span>
+
+    @Override
+    public IQ handleIQ(IQ packet) throws PacketException, UnauthorizedException {
+<span class="nc" id="L165">        ClientSession session = sessionManager.getSession(packet.getFrom());</span>
+<span class="nc" id="L166">        IQ reply = null;</span>
+        // If no session was found then answer an error (if possible)
+<span class="nc bnc" id="L168" title="All 2 branches missed.">        if (session == null) {</span>
+<span class="nc" id="L169">            Log.error(&quot;Error during registration. Session not found in &quot; +</span>
+<span class="nc" id="L170">                    sessionManager.getPreAuthenticatedKeys() +</span>
+                    &quot; for key &quot; +
+<span class="nc" id="L172">                    packet.getFrom());</span>
+            // This error packet will probably won't make it through
+<span class="nc" id="L174">            reply = IQ.createResultIQ(packet);</span>
+<span class="nc" id="L175">            reply.setChildElement(packet.getChildElement().createCopy());</span>
+<span class="nc" id="L176">            reply.setError(PacketError.Condition.internal_server_error);</span>
+<span class="nc" id="L177">            return reply;</span>
+        }
+<span class="nc bnc" id="L179" title="All 2 branches missed.">        if (IQ.Type.get.equals(packet.getType())) {</span>
+            // If inband registration is not allowed, return an error.
+<span class="nc bnc" id="L181" title="All 2 branches missed.">            if (!registrationEnabled) {</span>
+<span class="nc" id="L182">                reply = IQ.createResultIQ(packet);</span>
+<span class="nc" id="L183">                reply.setChildElement(packet.getChildElement().createCopy());</span>
+<span class="nc" id="L184">                reply.setError(PacketError.Condition.forbidden);</span>
+            }
+            else {
+<span class="nc" id="L187">                reply = IQ.createResultIQ(packet);</span>
+<span class="nc bnc" id="L188" title="All 2 branches missed.">                if (session.getStatus() == Session.STATUS_AUTHENTICATED) {</span>
+                    try {
+<span class="nc" id="L190">                        User user = userManager.getUser(session.getUsername());</span>
+<span class="nc" id="L191">                        Element currentRegistration = probeResult.createCopy();</span>
+<span class="nc" id="L192">                        currentRegistration.addElement(&quot;registered&quot;);</span>
+<span class="nc" id="L193">                        currentRegistration.element(&quot;username&quot;).setText(user.getUsername());</span>
+<span class="nc" id="L194">                        currentRegistration.element(&quot;password&quot;).setText(&quot;&quot;);</span>
+<span class="nc" id="L195">                        currentRegistration.element(&quot;email&quot;)</span>
+<span class="nc bnc" id="L196" title="All 2 branches missed.">                                .setText(user.getEmail() == null ? &quot;&quot; : user.getEmail());</span>
+<span class="nc" id="L197">                        currentRegistration.element(&quot;name&quot;).setText(user.getName());</span>
+
+<span class="nc" id="L199">                        Element form = currentRegistration.element(QName.get(&quot;x&quot;, &quot;jabber:x:data&quot;));</span>
+<span class="nc" id="L200">                        Iterator fields = form.elementIterator(&quot;field&quot;);</span>
+                        Element field;
+<span class="nc bnc" id="L202" title="All 2 branches missed.">                        while (fields.hasNext()) {</span>
+<span class="nc" id="L203">                            field = (Element) fields.next();</span>
+<span class="nc bnc" id="L204" title="All 2 branches missed.">                            if (&quot;username&quot;.equals(field.attributeValue(&quot;var&quot;))) {</span>
+<span class="nc" id="L205">                                field.addElement(&quot;value&quot;).addText(user.getUsername());</span>
+                            }
+<span class="nc bnc" id="L207" title="All 2 branches missed.">                            else if (&quot;name&quot;.equals(field.attributeValue(&quot;var&quot;))) {</span>
+<span class="nc" id="L208">                                field.addElement(&quot;value&quot;).addText(user.getName());</span>
+                            }
+<span class="nc bnc" id="L210" title="All 2 branches missed.">                            else if (&quot;email&quot;.equals(field.attributeValue(&quot;var&quot;))) {</span>
+<span class="nc" id="L211">                                field.addElement(&quot;value&quot;)</span>
+<span class="nc bnc" id="L212" title="All 2 branches missed.">                                        .addText(user.getEmail() == null ? &quot;&quot; : user.getEmail());</span>
+                            }
+                        }
+<span class="nc" id="L215">                        reply.setChildElement(currentRegistration);</span>
+                    }
+<span class="nc" id="L217">                    catch (UserNotFoundException e) {</span>
+<span class="nc" id="L218">                        reply.setChildElement(probeResult.createCopy());</span>
+<span class="nc" id="L219">                    }</span>
+                }
+                else {
+                    // This is a workaround. Since we don't want to have an incorrect TO attribute
+                    // value we need to clean up the TO attribute. The TO attribute will contain an
+                    // incorrect value since we are setting a fake JID until the user actually
+                    // authenticates with the server.
+<span class="nc" id="L226">                    reply.setTo((JID) null);</span>
+<span class="nc" id="L227">                    reply.setChildElement(probeResult.createCopy());</span>
+                }
+            }
+        }
+<span class="nc bnc" id="L231" title="All 2 branches missed.">        else if (IQ.Type.set.equals(packet.getType())) {</span>
+            try {
+<span class="nc" id="L233">                Element iqElement = packet.getChildElement();</span>
+<span class="nc bnc" id="L234" title="All 2 branches missed.">                if (iqElement.element(&quot;remove&quot;) != null) {</span>
+                    // If inband registration is not allowed, return an error.
+<span class="nc bnc" id="L236" title="All 2 branches missed.">                    if (!registrationEnabled) {</span>
+<span class="nc" id="L237">                        reply = IQ.createResultIQ(packet);</span>
+<span class="nc" id="L238">                        reply.setChildElement(packet.getChildElement().createCopy());</span>
+<span class="nc" id="L239">                        reply.setError(PacketError.Condition.forbidden);</span>
+                    }
+                    else {
+<span class="nc bnc" id="L242" title="All 2 branches missed.">                        if (session.getStatus() == Session.STATUS_AUTHENTICATED) {</span>
+<span class="nc" id="L243">                            User user = userManager.getUser(session.getUsername());</span>
+                            // Delete the user
+<span class="nc" id="L245">                            userManager.deleteUser(user);</span>
+                            // Delete the roster of the user
+<span class="nc" id="L247">                            rosterManager.deleteRoster(session.getAddress());</span>
+                            // Delete the user from all the Groups
+<span class="nc" id="L249">                            GroupManager.getInstance().deleteUser(user);</span>
+
+<span class="nc" id="L251">                            reply = IQ.createResultIQ(packet);</span>
+<span class="nc" id="L252">                            session.process(reply);</span>
+                            // Take a quick nap so that the client can process the result
+<span class="nc" id="L254">                            Thread.sleep(10);</span>
+                            // Close the user's connection
+<span class="nc" id="L256">                            final StreamError error = new StreamError(StreamError.Condition.not_authorized);</span>
+<span class="nc bnc" id="L257" title="All 2 branches missed.">                            for (ClientSession sess : sessionManager.getSessions(user.getUsername()) )</span>
+                            {
+<span class="nc" id="L259">                                sess.deliverRawText(error.toXML());</span>
+<span class="nc" id="L260">                                sess.close();</span>
+<span class="nc" id="L261">                            }</span>
+                            // The reply has been sent so clean up the variable
+<span class="nc" id="L263">                            reply = null;</span>
+<span class="nc" id="L264">                        }</span>
+                        else {
+<span class="nc" id="L266">                            throw new UnauthorizedException();</span>
+                        }
+                    }
+                }
+                else {
+                    String username;
+<span class="nc" id="L272">                    String password = null;</span>
+<span class="nc" id="L273">                    String email = null;</span>
+<span class="nc" id="L274">                    String name = null;</span>
+                    User newUser;
+                    DataForm registrationForm;
+                    FormField field;
+
+<span class="nc" id="L279">                    Element formElement = iqElement.element(&quot;x&quot;);</span>
+                    // Check if a form was used to provide the registration info
+<span class="nc bnc" id="L281" title="All 2 branches missed.">                    if (formElement != null) {</span>
+                        // Get the sent form
+<span class="nc" id="L283">                        registrationForm = new DataForm(formElement);</span>
+                        // Get the username sent in the form
+<span class="nc" id="L285">                        List&lt;String&gt; values = registrationForm.getField(&quot;username&quot;).getValues();</span>
+<span class="nc bnc" id="L286" title="All 2 branches missed.">                        username = (!values.isEmpty() ? values.get(0) : &quot; &quot;);</span>
+                        // Get the password sent in the form
+<span class="nc" id="L288">                        field = registrationForm.getField(&quot;password&quot;);</span>
+<span class="nc bnc" id="L289" title="All 2 branches missed.">                        if (field != null) {</span>
+<span class="nc" id="L290">                            values = field.getValues();</span>
+<span class="nc bnc" id="L291" title="All 2 branches missed.">                            password = (!values.isEmpty() ? values.get(0) : &quot; &quot;);</span>
+                        }
+                        // Get the email sent in the form
+<span class="nc" id="L294">                        field = registrationForm.getField(&quot;email&quot;);</span>
+<span class="nc bnc" id="L295" title="All 2 branches missed.">                        if (field != null) {</span>
+<span class="nc" id="L296">                            values = field.getValues();</span>
+<span class="nc bnc" id="L297" title="All 2 branches missed.">                            email = (!values.isEmpty() ? values.get(0) : &quot; &quot;);</span>
+                        }
+                        // Get the name sent in the form
+<span class="nc" id="L300">                        field = registrationForm.getField(&quot;name&quot;);</span>
+<span class="nc bnc" id="L301" title="All 2 branches missed.">                        if (field != null) {</span>
+<span class="nc" id="L302">                            values = field.getValues();</span>
+<span class="nc bnc" id="L303" title="All 2 branches missed.">                            name = (!values.isEmpty() ? values.get(0) : &quot; &quot;);</span>
+                        }
+<span class="nc" id="L305">                    }</span>
+                    else {
+                        // Get the registration info from the query elements
+<span class="nc" id="L308">                        username = iqElement.elementText(&quot;username&quot;);</span>
+<span class="nc" id="L309">                        password = iqElement.elementText(&quot;password&quot;);</span>
+<span class="nc" id="L310">                        email = iqElement.elementText(&quot;email&quot;);</span>
+<span class="nc" id="L311">                        name = iqElement.elementText(&quot;name&quot;);</span>
+                    }
+<span class="nc bnc" id="L313" title="All 4 branches missed.">                    if (email != null &amp;&amp; email.matches(&quot;\\s*&quot;)) {</span>
+<span class="nc" id="L314">                        email = null;</span>
+                    }
+<span class="nc bnc" id="L316" title="All 4 branches missed.">                    if (name != null &amp;&amp; name.matches(&quot;\\s*&quot;)) {</span>
+<span class="nc" id="L317">                        name = null;</span>
+                    }
+                    
+                    // So that we can set a more informative error message back, lets test this for
+                    // stringprep validity now.
+<span class="nc bnc" id="L322" title="All 2 branches missed.">                    if (username != null) {</span>
+<span class="nc" id="L323">                        Stringprep.nodeprep(username);</span>
+                    }
+
+<span class="nc bnc" id="L326" title="All 2 branches missed.">                    if (session.getStatus() == Session.STATUS_AUTHENTICATED) {</span>
+                        // Flag that indicates if the user is *only* changing his password
+<span class="nc" id="L328">                        boolean onlyPassword = false;</span>
+<span class="nc bnc" id="L329" title="All 2 branches missed.">                        if (iqElement.elements().size() == 2 &amp;&amp;</span>
+<span class="nc bnc" id="L330" title="All 2 branches missed.">                                iqElement.element(&quot;username&quot;) != null &amp;&amp;</span>
+<span class="nc bnc" id="L331" title="All 2 branches missed.">                                iqElement.element(&quot;password&quot;) != null) {</span>
+<span class="nc" id="L332">                            onlyPassword = true;</span>
+                        }
+                        // If users are not allowed to change their password, return an error.
+<span class="nc bnc" id="L335" title="All 4 branches missed.">                        if (password != null &amp;&amp; !canChangePassword) {</span>
+<span class="nc" id="L336">                            reply = IQ.createResultIQ(packet);</span>
+<span class="nc" id="L337">                            reply.setChildElement(packet.getChildElement().createCopy());</span>
+<span class="nc" id="L338">                            reply.setError(PacketError.Condition.forbidden);</span>
+<span class="nc" id="L339">                            return reply;</span>
+                        }
+                        // If inband registration is not allowed, return an error.
+<span class="nc bnc" id="L342" title="All 4 branches missed.">                        else if (!onlyPassword &amp;&amp; !registrationEnabled) {</span>
+<span class="nc" id="L343">                            reply = IQ.createResultIQ(packet);</span>
+<span class="nc" id="L344">                            reply.setChildElement(packet.getChildElement().createCopy());</span>
+<span class="nc" id="L345">                            reply.setError(PacketError.Condition.forbidden);</span>
+<span class="nc" id="L346">                            return reply;</span>
+                        }
+                        else {
+<span class="nc" id="L349">                            User user = userManager.getUser(session.getUsername());</span>
+<span class="nc bnc" id="L350" title="All 2 branches missed.">                            if (user.getUsername().equalsIgnoreCase(username)) {</span>
+<span class="nc bnc" id="L351" title="All 4 branches missed.">                                if (password != null &amp;&amp; password.trim().length() &gt; 0) {</span>
+<span class="nc" id="L352">                                    user.setPassword(password);</span>
+                                }
+<span class="nc bnc" id="L354" title="All 2 branches missed.">                                if (!onlyPassword) {</span>
+<span class="nc" id="L355">                                    user.setEmail(email);</span>
+                                }
+<span class="nc" id="L357">                                newUser = user;</span>
+                            }
+<span class="nc bnc" id="L359" title="All 4 branches missed.">                            else if (password != null &amp;&amp; password.trim().length() &gt; 0) {</span>
+                                // An admin can create new accounts when logged in.
+<span class="nc" id="L361">                                newUser = userManager.createUser(username, password, null, email);</span>
+                            }
+                            else {
+                                // Deny registration of users with no password
+<span class="nc" id="L365">                                reply = IQ.createResultIQ(packet);</span>
+<span class="nc" id="L366">                                reply.setChildElement(packet.getChildElement().createCopy());</span>
+<span class="nc" id="L367">                                reply.setError(PacketError.Condition.not_acceptable);</span>
+<span class="nc" id="L368">                                return reply;</span>
+                            }
+                        }
+<span class="nc" id="L371">                    }</span>
+                    else {
+                        // If inband registration is not allowed, return an error.
+<span class="nc bnc" id="L374" title="All 2 branches missed.">                        if (!registrationEnabled) {</span>
+<span class="nc" id="L375">                            reply = IQ.createResultIQ(packet);</span>
+<span class="nc" id="L376">                            reply.setChildElement(packet.getChildElement().createCopy());</span>
+<span class="nc" id="L377">                            reply.setError(PacketError.Condition.forbidden);</span>
+<span class="nc" id="L378">                            return reply;</span>
+                        }
+                        // Inform the entity of failed registration if some required
+                        // information was not provided
+<span class="nc bnc" id="L382" title="All 4 branches missed.">                        else if (password == null || password.trim().length() == 0) {</span>
+<span class="nc" id="L383">                            reply = IQ.createResultIQ(packet);</span>
+<span class="nc" id="L384">                            reply.setChildElement(packet.getChildElement().createCopy());</span>
+<span class="nc" id="L385">                            reply.setError(PacketError.Condition.not_acceptable);</span>
+<span class="nc" id="L386">                            return reply;</span>
+                        }
+                        else {
+                            // Create the new account
+<span class="nc" id="L390">                            newUser = userManager.createUser(username, password, name, email);</span>
+                        }
+                    }
+                    // Set and save the extra user info (e.g. full name, etc.)
+<span class="nc bnc" id="L394" title="All 6 branches missed.">                    if (newUser != null &amp;&amp; name != null &amp;&amp; !name.equals(newUser.getName())) {</span>
+<span class="nc" id="L395">                        newUser.setName(name);</span>
+                    }
+
+<span class="nc" id="L398">                    reply = IQ.createResultIQ(packet);</span>
+                }
+            }
+<span class="nc" id="L401">            catch (UserAlreadyExistsException e) {</span>
+<span class="nc" id="L402">                reply = IQ.createResultIQ(packet);</span>
+<span class="nc" id="L403">                reply.setChildElement(packet.getChildElement().createCopy());</span>
+<span class="nc" id="L404">                reply.setError(PacketError.Condition.conflict);</span>
+            }
+<span class="nc" id="L406">            catch (UserNotFoundException e) {</span>
+<span class="nc" id="L407">                reply = IQ.createResultIQ(packet);</span>
+<span class="nc" id="L408">                reply.setChildElement(packet.getChildElement().createCopy());</span>
+<span class="nc" id="L409">                reply.setError(PacketError.Condition.bad_request);</span>
+            }
+<span class="nc" id="L411">            catch (StringprepException e) {</span>
+                // The specified username is not correct according to the stringprep specs
+<span class="nc" id="L413">                reply = IQ.createResultIQ(packet);</span>
+<span class="nc" id="L414">                reply.setChildElement(packet.getChildElement().createCopy());</span>
+<span class="nc" id="L415">                reply.setError(PacketError.Condition.jid_malformed);</span>
+            }
+<span class="nc" id="L417">            catch (IllegalArgumentException e) {</span>
+                // At least one of the fields passed in is not valid
+<span class="nc" id="L419">                reply = IQ.createResultIQ(packet);</span>
+<span class="nc" id="L420">                reply.setChildElement(packet.getChildElement().createCopy());</span>
+<span class="nc" id="L421">                reply.setError(PacketError.Condition.not_acceptable);</span>
+<span class="nc" id="L422">                Log.warn(e.getMessage(), e);</span>
+            }
+<span class="nc" id="L424">            catch (UnsupportedOperationException e) {</span>
+                // The User provider is read-only so this operation is not allowed
+<span class="nc" id="L426">                reply = IQ.createResultIQ(packet);</span>
+<span class="nc" id="L427">                reply.setChildElement(packet.getChildElement().createCopy());</span>
+<span class="nc" id="L428">                reply.setError(PacketError.Condition.not_allowed);</span>
+            }
+<span class="nc" id="L430">            catch (Exception e) {</span>
+                // Some unexpected error happened so return an internal_server_error
+<span class="nc" id="L432">                reply = IQ.createResultIQ(packet);</span>
+<span class="nc" id="L433">                reply.setChildElement(packet.getChildElement().createCopy());</span>
+<span class="nc" id="L434">                reply.setError(PacketError.Condition.internal_server_error);</span>
+<span class="nc" id="L435">                Log.error(e.getMessage(), e);</span>
+<span class="nc" id="L436">            }</span>
+        }
+<span class="nc bnc" id="L438" title="All 2 branches missed.">        if (reply != null) {</span>
+            // why is this done here instead of letting the iq handler do it?
+<span class="nc" id="L440">            session.process(reply);</span>
+        }
+<span class="nc" id="L442">        return null;</span>
+    }
+
+    public boolean isInbandRegEnabled()
+    {
+<span class="nc bnc" id="L447" title="All 4 branches missed.">        return registrationEnabled &amp;&amp; !UserManager.getUserProvider().isReadOnly();</span>
+    }
+
+    public void setInbandRegEnabled(boolean allowed)
+    {
+<span class="nc bnc" id="L452" title="All 4 branches missed.">        if ( allowed &amp;&amp; UserManager.getUserProvider().isReadOnly() )</span>
+        {
+<span class="nc" id="L454">            Log.warn( &quot;Enabling in-band registration has no effect, as the user provider for this system is read-only.&quot; );</span>
+        }
+<span class="nc" id="L456">        registrationEnabled = allowed;</span>
+<span class="nc bnc" id="L457" title="All 2 branches missed.">        JiveGlobals.setProperty(&quot;register.inband&quot;, registrationEnabled ? &quot;true&quot; : &quot;false&quot;);</span>
+<span class="nc" id="L458">    }</span>
+
+    public boolean canChangePassword()
+    {
+<span class="nc bnc" id="L462" title="All 4 branches missed.">        return canChangePassword &amp;&amp; !UserManager.getUserProvider().isReadOnly();</span>
+    }
+
+    public void setCanChangePassword(boolean allowed)
+    {
+<span class="nc bnc" id="L467" title="All 4 branches missed.">        if ( allowed &amp;&amp; UserManager.getUserProvider().isReadOnly() )</span>
+        {
+<span class="nc" id="L469">            Log.warn( &quot;Allowing password changes has no effect, as the user provider for this system is read-only.&quot; );</span>
+        }
+<span class="nc" id="L471">        canChangePassword = allowed;</span>
+<span class="nc bnc" id="L472" title="All 2 branches missed.">        JiveGlobals.setProperty(&quot;register.password&quot;, canChangePassword ? &quot;true&quot; : &quot;false&quot;);</span>
+<span class="nc" id="L473">    }</span>
+
+    @Override
+    public IQHandlerInfo getInfo() {
+<span class="nc" id="L477">        return info;</span>
+    }
+
+    @Override
+    public Iterator&lt;String&gt; getFeatures() {
+<span class="nc" id="L482">        return Collections.singleton(&quot;jabber:iq:register&quot;).iterator();</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

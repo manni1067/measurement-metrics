@@ -1,0 +1,296 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>JDBCGroupProvider.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.group</a> &gt; <span class="el_source">JDBCGroupProvider.java</span></div><h1>JDBCGroupProvider.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.group;
+
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.List;
+
+import org.jivesoftware.database.DbConnectionManager;
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.util.JiveGlobals;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmpp.packet.JID;
+
+/**
+ * The JDBC group provider allows you to use an external database to define the make up of groups.
+ * It is best used with the JDBCAuthProvider to provide integration between your external system and
+ * Openfire.  All data is treated as read-only so any set operations will result in an exception.
+ *
+ * To enable this provider, set the following in the system properties:
+ *
+ * &lt;ul&gt;
+ * &lt;li&gt;{@code provider.group.className = org.jivesoftware.openfire.group.JDBCGroupProvider}&lt;/li&gt;
+ * &lt;/ul&gt;
+ *
+ * Then you need to set your driver, connection string and SQL statements:
+ *
+ * &lt;ul&gt;
+ * &lt;li&gt;{@code jdbcProvider.driver = com.mysql.jdbc.Driver}&lt;/li&gt;
+ * &lt;li&gt;{@code jdbcProvider.connectionString = jdbc:mysql://localhost/dbname?user=username&amp;amp;password=secret}&lt;/li&gt;
+ * &lt;li&gt;{@code jdbcGroupProvider.groupCountSQL = SELECT count(*) FROM myGroups}&lt;/li&gt;
+ * &lt;li&gt;{@code jdbcGroupProvider.allGroupsSQL = SELECT groupName FROM myGroups}&lt;/li&gt;
+ * &lt;li&gt;{@code jdbcGroupProvider.userGroupsSQL = SELECT groupName FORM myGroupUsers WHERE username=?}&lt;/li&gt;
+ * &lt;li&gt;{@code jdbcGroupProvider.descriptionSQL = SELECT groupDescription FROM myGroups WHERE groupName=?}&lt;/li&gt;
+ * &lt;li&gt;{@code jdbcGroupProvider.loadMembersSQL = SELECT username FORM myGroupUsers WHERE groupName=? AND isAdmin='N'}&lt;/li&gt;
+ * &lt;li&gt;{@code jdbcGroupProvider.loadAdminsSQL = SELECT username FORM myGroupUsers WHERE groupName=? AND isAdmin='Y'}&lt;/li&gt;
+ * &lt;/ul&gt;
+ *
+ * In order to use the configured JDBC connection provider do not use a JDBC
+ * connection string, set the following property
+ *
+ * &lt;ul&gt;
+ * &lt;li&gt;{@code jdbcGroupProvider.useConnectionProvider = true}&lt;/li&gt;
+ * &lt;/ul&gt;
+ *
+ * @author David Snopek
+ */
+public class JDBCGroupProvider extends AbstractGroupProvider {
+
+<span class="nc" id="L70">    private static final Logger Log = LoggerFactory.getLogger(JDBCGroupProvider.class);</span>
+
+    private String connectionString;
+
+    private String groupCountSQL;
+    private String descriptionSQL;
+    private String allGroupsSQL;
+    private String userGroupsSQL;
+    private String loadMembersSQL;
+    private String loadAdminsSQL;
+    private boolean useConnectionProvider;
+
+<span class="nc" id="L82">    private XMPPServer server = XMPPServer.getInstance();  </span>
+
+    /**
+     * Constructor of the JDBCGroupProvider class.
+     */
+<span class="nc" id="L87">    public JDBCGroupProvider() {</span>
+        // Convert XML based provider setup to Database based
+<span class="nc" id="L89">        JiveGlobals.migrateProperty(&quot;jdbcProvider.driver&quot;);</span>
+<span class="nc" id="L90">        JiveGlobals.migrateProperty(&quot;jdbcProvider.connectionString&quot;);</span>
+<span class="nc" id="L91">        JiveGlobals.migrateProperty(&quot;jdbcGroupProvider.groupCountSQL&quot;);</span>
+<span class="nc" id="L92">        JiveGlobals.migrateProperty(&quot;jdbcGroupProvider.allGroupsSQL&quot;);</span>
+<span class="nc" id="L93">        JiveGlobals.migrateProperty(&quot;jdbcGroupProvider.userGroupsSQL&quot;);</span>
+<span class="nc" id="L94">        JiveGlobals.migrateProperty(&quot;jdbcGroupProvider.descriptionSQL&quot;);</span>
+<span class="nc" id="L95">        JiveGlobals.migrateProperty(&quot;jdbcGroupProvider.loadMembersSQL&quot;);</span>
+<span class="nc" id="L96">        JiveGlobals.migrateProperty(&quot;jdbcGroupProvider.loadAdminsSQL&quot;);</span>
+
+<span class="nc" id="L98">        useConnectionProvider = JiveGlobals.getBooleanProperty(&quot;jdbcGroupProvider.useConnectionProvider&quot;);</span>
+
+<span class="nc bnc" id="L100" title="All 2 branches missed.">        if (!useConnectionProvider) {</span>
+            // Load the JDBC driver and connection string.
+<span class="nc" id="L102">            String jdbcDriver = JiveGlobals.getProperty(&quot;jdbcProvider.driver&quot;);</span>
+            try {
+<span class="nc" id="L104">                Class.forName(jdbcDriver).newInstance();</span>
+            }
+<span class="nc" id="L106">            catch (Exception e) {</span>
+<span class="nc" id="L107">                Log.error(&quot;Unable to load JDBC driver: &quot; + jdbcDriver, e);</span>
+<span class="nc" id="L108">                return;</span>
+<span class="nc" id="L109">            }</span>
+<span class="nc" id="L110">            connectionString = JiveGlobals.getProperty(&quot;jdbcProvider.connectionString&quot;);</span>
+        }
+
+        // Load SQL statements
+<span class="nc" id="L114">        groupCountSQL = JiveGlobals.getProperty(&quot;jdbcGroupProvider.groupCountSQL&quot;);</span>
+<span class="nc" id="L115">        allGroupsSQL = JiveGlobals.getProperty(&quot;jdbcGroupProvider.allGroupsSQL&quot;);</span>
+<span class="nc" id="L116">        userGroupsSQL = JiveGlobals.getProperty(&quot;jdbcGroupProvider.userGroupsSQL&quot;);</span>
+<span class="nc" id="L117">        descriptionSQL = JiveGlobals.getProperty(&quot;jdbcGroupProvider.descriptionSQL&quot;);</span>
+<span class="nc" id="L118">        loadMembersSQL = JiveGlobals.getProperty(&quot;jdbcGroupProvider.loadMembersSQL&quot;);</span>
+<span class="nc" id="L119">        loadAdminsSQL = JiveGlobals.getProperty(&quot;jdbcGroupProvider.loadAdminsSQL&quot;);</span>
+<span class="nc" id="L120">    }</span>
+
+    private Connection getConnection() throws SQLException {
+<span class="nc bnc" id="L123" title="All 2 branches missed.">        if (useConnectionProvider)</span>
+<span class="nc" id="L124">            return DbConnectionManager.getConnection();</span>
+<span class="nc" id="L125">        return DriverManager.getConnection(connectionString);</span>
+    }
+
+    @Override
+    public Group getGroup(String name) throws GroupNotFoundException {
+<span class="nc" id="L130">        String description = null;</span>
+
+<span class="nc" id="L132">        Connection con = null;</span>
+<span class="nc" id="L133">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L134">        ResultSet rs = null;</span>
+        try {
+<span class="nc" id="L136">            con = getConnection();</span>
+<span class="nc" id="L137">            pstmt = con.prepareStatement(descriptionSQL);</span>
+<span class="nc" id="L138">            pstmt.setString(1, name);</span>
+<span class="nc" id="L139">            rs = pstmt.executeQuery();</span>
+<span class="nc bnc" id="L140" title="All 2 branches missed.">            if (!rs.next()) {</span>
+<span class="nc" id="L141">                throw new GroupNotFoundException(&quot;Group with name &quot;</span>
+                        + name + &quot; not found.&quot;);
+            }
+<span class="nc" id="L144">            description = rs.getString(1);</span>
+        }
+<span class="nc" id="L146">        catch (SQLException e) {</span>
+<span class="nc" id="L147">            Log.error(e.getMessage(), e);</span>
+        }
+        finally {
+<span class="nc" id="L150">            DbConnectionManager.closeConnection(rs, pstmt, con);</span>
+<span class="nc" id="L151">        }</span>
+<span class="nc" id="L152">        Collection&lt;JID&gt; members = getMembers(name, false);</span>
+<span class="nc" id="L153">        Collection&lt;JID&gt; administrators = getMembers(name, true);</span>
+<span class="nc" id="L154">        return new Group(name, description, members, administrators);</span>
+    }
+
+    private Collection&lt;JID&gt; getMembers(String groupName, boolean adminsOnly) {
+<span class="nc" id="L158">        List&lt;JID&gt; members = new ArrayList&lt;&gt;();</span>
+
+<span class="nc" id="L160">        Connection con = null;</span>
+<span class="nc" id="L161">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L162">        ResultSet rs = null;</span>
+        try {
+<span class="nc" id="L164">            con = getConnection();</span>
+<span class="nc bnc" id="L165" title="All 2 branches missed.">            if (adminsOnly) {</span>
+<span class="nc bnc" id="L166" title="All 2 branches missed.">                if (loadAdminsSQL == null) {</span>
+<span class="nc" id="L167">                    return members;</span>
+                }
+<span class="nc" id="L169">                pstmt = con.prepareStatement(loadAdminsSQL);</span>
+            }
+            else {
+<span class="nc" id="L172">                pstmt = con.prepareStatement(loadMembersSQL);</span>
+            }
+
+<span class="nc" id="L175">            pstmt.setString(1, groupName);</span>
+<span class="nc" id="L176">            rs = pstmt.executeQuery();</span>
+<span class="nc bnc" id="L177" title="All 2 branches missed.">            while (rs.next()) {</span>
+<span class="nc" id="L178">                String user = rs.getString(1);</span>
+<span class="nc bnc" id="L179" title="All 2 branches missed.">                if (user != null) {</span>
+                    JID userJID;
+<span class="nc bnc" id="L181" title="All 2 branches missed.">                    if (user.contains(&quot;@&quot;)) {</span>
+<span class="nc" id="L182">                        userJID = new JID(user);</span>
+                    }
+                    else {
+<span class="nc" id="L185">                        userJID = server.createJID(user, null); </span>
+                    }
+<span class="nc" id="L187">                    members.add(userJID);</span>
+                }
+<span class="nc" id="L189">            }</span>
+        }
+<span class="nc" id="L191">        catch (SQLException e) {</span>
+<span class="nc" id="L192">            Log.error(e.getMessage(), e);</span>
+        }
+        finally {
+<span class="nc" id="L195">            DbConnectionManager.closeConnection(rs, pstmt, con);</span>
+<span class="nc" id="L196">        }</span>
+<span class="nc" id="L197">        return members;</span>
+    }
+
+    @Override
+    public int getGroupCount() {
+<span class="nc" id="L202">        int count = 0;</span>
+<span class="nc" id="L203">        Connection con = null;</span>
+<span class="nc" id="L204">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L205">        ResultSet rs = null;</span>
+        try {
+<span class="nc" id="L207">            con = getConnection();</span>
+<span class="nc" id="L208">            pstmt = con.prepareStatement(groupCountSQL);</span>
+<span class="nc" id="L209">            rs = pstmt.executeQuery();</span>
+<span class="nc bnc" id="L210" title="All 2 branches missed.">            if (rs.next()) {</span>
+<span class="nc" id="L211">                count = rs.getInt(1);</span>
+            }
+        }
+<span class="nc" id="L214">        catch (SQLException e) {</span>
+<span class="nc" id="L215">            Log.error(e.getMessage(), e);</span>
+        }
+        finally {
+<span class="nc" id="L218">            DbConnectionManager.closeConnection(rs, pstmt, con);</span>
+<span class="nc" id="L219">        }</span>
+<span class="nc" id="L220">        return count;</span>
+    }
+
+    @Override
+    public Collection&lt;String&gt; getGroupNames() {
+<span class="nc" id="L225">        List&lt;String&gt; groupNames = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L226">        Connection con = null;</span>
+<span class="nc" id="L227">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L228">        ResultSet rs = null;</span>
+        try {
+<span class="nc" id="L230">            con = getConnection();</span>
+<span class="nc" id="L231">            pstmt = con.prepareStatement(allGroupsSQL);</span>
+<span class="nc" id="L232">            rs = pstmt.executeQuery();</span>
+<span class="nc bnc" id="L233" title="All 2 branches missed.">            while (rs.next()) {</span>
+<span class="nc" id="L234">                groupNames.add(rs.getString(1));</span>
+            }
+        }
+<span class="nc" id="L237">        catch (SQLException e) {</span>
+<span class="nc" id="L238">            Log.error(e.getMessage(), e);</span>
+        }
+        finally {
+<span class="nc" id="L241">            DbConnectionManager.closeConnection(rs, pstmt, con);</span>
+<span class="nc" id="L242">        }</span>
+<span class="nc" id="L243">        return groupNames;</span>
+    }
+
+    @Override
+    public Collection&lt;String&gt; getGroupNames(int start, int num) {
+<span class="nc" id="L248">        List&lt;String&gt; groupNames = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L249">        Connection con = null;</span>
+<span class="nc" id="L250">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L251">        ResultSet rs = null;</span>
+        try {
+<span class="nc" id="L253">            con = getConnection();</span>
+<span class="nc" id="L254">            pstmt = DbConnectionManager.createScrollablePreparedStatement(con, allGroupsSQL);</span>
+<span class="nc" id="L255">            rs = pstmt.executeQuery();</span>
+<span class="nc" id="L256">            DbConnectionManager.scrollResultSet(rs, start);</span>
+<span class="nc" id="L257">            int count = 0;</span>
+<span class="nc bnc" id="L258" title="All 4 branches missed.">            while (rs.next() &amp;&amp; count &lt; num) {</span>
+<span class="nc" id="L259">                groupNames.add(rs.getString(1));</span>
+<span class="nc" id="L260">                count++;</span>
+            }
+        }
+<span class="nc" id="L263">        catch (SQLException e) {</span>
+<span class="nc" id="L264">            Log.error(e.getMessage(), e);</span>
+        }
+        finally {
+<span class="nc" id="L267">            DbConnectionManager.closeConnection(rs, pstmt, con);</span>
+<span class="nc" id="L268">        }</span>
+<span class="nc" id="L269">        return groupNames;</span>
+    }
+
+    @Override
+    public Collection&lt;String&gt; getGroupNames(JID user) {
+<span class="nc" id="L274">        List&lt;String&gt; groupNames = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L275">        Connection con = null;</span>
+<span class="nc" id="L276">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L277">        ResultSet rs = null;</span>
+        try {
+<span class="nc" id="L279">            con = getConnection();</span>
+<span class="nc" id="L280">            pstmt = con.prepareStatement(userGroupsSQL);</span>
+<span class="nc bnc" id="L281" title="All 2 branches missed.">            pstmt.setString(1, server.isLocal(user) ? user.getNode() : user.toString());</span>
+<span class="nc" id="L282">            rs = pstmt.executeQuery();</span>
+<span class="nc bnc" id="L283" title="All 2 branches missed.">            while (rs.next()) {</span>
+<span class="nc" id="L284">                groupNames.add(rs.getString(1));</span>
+            }
+        }
+<span class="nc" id="L287">        catch (SQLException e) {</span>
+<span class="nc" id="L288">            Log.error(e.getMessage(), e);</span>
+        }
+        finally {
+<span class="nc" id="L291">            DbConnectionManager.closeConnection(rs, pstmt, con);</span>
+<span class="nc" id="L292">        }</span>
+<span class="nc" id="L293">        return groupNames;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

@@ -1,0 +1,793 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>IdentityStore.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.keystore</a> &gt; <span class="el_source">IdentityStore.java</span></div><h1>IdentityStore.java</h1><pre class="source lang-java linenums">package org.jivesoftware.openfire.keystore;
+
+import org.bouncycastle.operator.OperatorCreationException;
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.XMPPServerInfo;
+import org.jivesoftware.openfire.net.DNSUtil;
+import org.jivesoftware.util.CertificateManager;
+import org.jivesoftware.util.JiveGlobals;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import javax.net.ssl.KeyManagerFactory;
+import java.io.IOException;
+import java.security.*;
+import java.security.cert.Certificate;
+import java.security.cert.CertificateException;
+import java.security.cert.CertificateParsingException;
+import java.security.cert.X509Certificate;
+import java.util.*;
+import java.util.stream.Collectors;
+
+/**
+ * A wrapper class for a store of certificates, its metadata (password, location) and related functionality that is
+ * used to &lt;em&gt;provide&lt;/em&gt; credentials (that represent this Openfire instance), an &lt;em&gt;identity store&lt;/em&gt;
+ *
+ * An identity store should contain private keys, each associated with its certificate chain.
+ *
+ * Having the root certificate of the Certificate Authority that signed the certificates in this identity store should
+ * be in a corresponding trust store, although this is not strictly required. The reasoning here is that when you trust
+ * a Certificate Authority to verify your identity, you're likely to trust the same Certificate Authority to verify the
+ * identities of others.
+ *
+ * Note that in Java terminology, an identity store is commonly referred to as a 'key store', while the same name is
+ * also used to identify the generic certificate store. To have clear distinction between common denominator and each of
+ * the specific types, this implementation uses the terms &quot;certificate store&quot;, &quot;identity store&quot; and &quot;trust store&quot;.
+ *
+ * @author Guus der Kinderen, guus.der.kinderen@gmail.com
+ */
+public class IdentityStore extends CertificateStore
+{
+<span class="nc" id="L41">    private static final Logger Log = LoggerFactory.getLogger( IdentityStore.class );</span>
+
+    public IdentityStore( CertificateStoreConfiguration configuration, boolean createIfAbsent ) throws CertificateStoreConfigException
+    {
+<span class="nc" id="L45">        super( configuration, createIfAbsent );</span>
+
+        try
+        {
+            KeyManagerFactory keyManagerFactory;
+            try
+            {
+                // OF-1501: If multiple certificates are available, the 'NewSunX509' implementation in the SunJSSE
+                // provider makes the effort to pick a certificate with the appropriate key usage and prefers valid
+                // to expired certificates.
+<span class="nc" id="L55">                keyManagerFactory = KeyManagerFactory.getInstance( &quot;NewSunX509&quot; );</span>
+            }
+<span class="nc" id="L57">            catch ( NoSuchAlgorithmException e )</span>
+            {
+<span class="nc" id="L59">                Log.info( &quot;Unable to load the 'NewSunX509' KeyManager implementation. Will fall back to the default.&quot; );</span>
+<span class="nc" id="L60">                keyManagerFactory = KeyManagerFactory.getInstance( KeyManagerFactory.getDefaultAlgorithm() );</span>
+<span class="nc" id="L61">            }</span>
+
+<span class="nc" id="L63">            keyManagerFactory.init( this.getStore(), configuration.getPassword() );</span>
+        }
+<span class="nc" id="L65">        catch ( NoSuchAlgorithmException | UnrecoverableKeyException | KeyStoreException ex )</span>
+        {
+<span class="nc" id="L67">            throw new CertificateStoreConfigException( &quot;Unable to initialize identity store (a common cause: the password for a key is different from the password of the entire store).&quot;, ex );</span>
+<span class="nc" id="L68">        }</span>
+
+<span class="nc" id="L70">    }</span>
+
+    /**
+     * Creates a Certificate Signing Request based on the private key and certificate identified by the provided alias.
+     *
+     * When the alias does not identify a private key and/or certificate, this method will throw an exception.
+     *
+     * The certificate that is identified by the provided alias can be an unsigned certificate, but also a certificate
+     * that is already signed. The latter implies that the generated request is a request for certificate renewal.
+     *
+     * An invocation of this method does not change the state of the underlying store.
+     *
+     * @param alias An identifier for a private key / certificate in this store (cannot be null).
+     * @return A PEM-encoded Certificate Signing Request (never null).
+     * @throws CertificateStoreConfigException if there was a problem generating the CSR
+     */
+    public String generateCSR( String alias ) throws CertificateStoreConfigException
+    {
+        // Input validation
+<span class="nc bnc" id="L89" title="All 4 branches missed.">        if ( alias == null || alias.trim().isEmpty() )</span>
+        {
+<span class="nc" id="L91">            throw new IllegalArgumentException( &quot;Argument 'alias' cannot be null or an empty String.&quot; );</span>
+        }
+<span class="nc" id="L93">        alias = alias.trim();</span>
+
+        try
+        {
+<span class="nc bnc" id="L97" title="All 2 branches missed.">            if ( !store.containsAlias( alias ) ) {</span>
+<span class="nc" id="L98">                throw new CertificateStoreConfigException( &quot;Cannot generate CSR for alias '&quot;+ alias +&quot;': the alias does not exist in the store.&quot; );</span>
+            }
+
+<span class="nc" id="L101">            final Certificate certificate = store.getCertificate( alias );</span>
+<span class="nc bnc" id="L102" title="All 4 branches missed.">            if ( certificate == null || (!(certificate instanceof X509Certificate)))</span>
+            {
+<span class="nc" id="L104">                throw new CertificateStoreConfigException( &quot;Cannot generate CSR for alias '&quot;+ alias +&quot;': there is no corresponding certificate in the store, or it is not an X509 certificate.&quot; );</span>
+            }
+
+<span class="nc" id="L107">            final Key key = store.getKey( alias, configuration.getPassword() );</span>
+<span class="nc bnc" id="L108" title="All 4 branches missed.">            if ( key == null || (!(key instanceof PrivateKey) ) )</span>
+            {
+<span class="nc" id="L110">                throw new CertificateStoreConfigException( &quot;Cannot generate CSR for alias '&quot;+ alias +&quot;': there is no corresponding key in the store, or it is not a private key.&quot; );</span>
+            }
+
+<span class="nc" id="L113">            final String pemCSR = CertificateManager.createSigningRequest( (X509Certificate) certificate, (PrivateKey) key );</span>
+
+<span class="nc" id="L115">            return pemCSR;</span>
+        }
+<span class="nc" id="L117">        catch ( IOException | KeyStoreException | UnrecoverableKeyException | NoSuchAlgorithmException | OperatorCreationException | CertificateParsingException e )</span>
+        {
+<span class="nc" id="L119">            throw new CertificateStoreConfigException( &quot;Cannot generate CSR for alias '&quot;+ alias +&quot;'&quot;, e );</span>
+        }
+    }
+
+    /**
+     * Imports a certificate (and its chain) in this store.
+     *
+     * This method will fail when the provided certificate chain:
+     * &lt;ul&gt;
+     *     &lt;li&gt;does not match the domain of this XMPP service.&lt;/li&gt;
+     *     &lt;li&gt;is not a proper chain&lt;/li&gt;
+     * &lt;/ul&gt;
+     *
+     * This method will also fail when a corresponding private key is not already in this store (it is assumed that the
+     * CA reply follows a signing request based on a private key that was added to the store earlier).
+     *
+     * @param alias the certificate alias
+     * @param pemCertificates a PEM representation of the certificate or certificate chain (cannot be null or empty).
+     * @throws CertificateStoreConfigException if there was a problem installing the certificate
+     */
+    public void installCSRReply( String alias, String pemCertificates ) throws CertificateStoreConfigException
+    {
+        // Input validation
+<span class="nc bnc" id="L142" title="All 4 branches missed.">        if ( alias == null || alias.trim().isEmpty() )</span>
+        {
+<span class="nc" id="L144">            throw new IllegalArgumentException( &quot;Argument 'alias' cannot be null or an empty String.&quot; );</span>
+        }
+<span class="nc bnc" id="L146" title="All 4 branches missed.">        if ( pemCertificates == null || pemCertificates.trim().isEmpty() )</span>
+        {
+<span class="nc" id="L148">            throw new IllegalArgumentException( &quot;Argument 'pemCertificates' cannot be null or an empty String.&quot; );</span>
+        }
+<span class="nc" id="L150">        alias = alias.trim();</span>
+<span class="nc" id="L151">        pemCertificates = pemCertificates.trim();</span>
+
+        try
+        {
+            // From its PEM representation, parse the certificates.
+<span class="nc" id="L156">            final Collection&lt;X509Certificate&gt; certificates = CertificateManager.parseCertificates( pemCertificates );</span>
+<span class="nc bnc" id="L157" title="All 2 branches missed.">            if ( certificates.isEmpty() )</span>
+            {
+<span class="nc" id="L159">                throw new CertificateStoreConfigException( &quot;No certificate was found in the input.&quot; );</span>
+            }
+
+            // Note that PKCS#7 does not require a specific order for the certificates in the file - ordering is needed.
+<span class="nc" id="L163">            final List&lt;X509Certificate&gt; ordered = CertificateUtils.order( certificates );</span>
+
+            // Of the ordered chain, the first certificate should be for our domain.
+<span class="nc bnc" id="L166" title="All 2 branches missed.">            if ( !isForThisDomain( ordered.get( 0 ) ) )</span>
+            {
+<span class="nc" id="L168">                throw new CertificateStoreConfigException( &quot;The supplied certificate chain does not cover the domain of this XMPP service.&quot; );</span>
+            }
+
+            // This method is used to update a pre-existing entry in the store. Find out if this entry corresponds with the provided certificate chain.
+<span class="nc bnc" id="L172" title="All 2 branches missed.">            if ( !corresponds( alias, ordered ) ) {</span>
+<span class="nc" id="L173">                throw new IllegalArgumentException( &quot;The provided CSR reply does not match an existing certificate in the store under the provided alias '&quot; + alias + &quot;'.&quot; );</span>
+            }
+
+            // All appears to be in order. Update the existing entry in the store.
+<span class="nc" id="L177">            store.setKeyEntry( alias, store.getKey( alias, configuration.getPassword() ), configuration.getPassword(), ordered.toArray( new X509Certificate[ ordered.size() ] ) );</span>
+        }
+<span class="nc" id="L179">        catch ( RuntimeException | IOException | CertificateException | UnrecoverableKeyException | KeyStoreException | NoSuchAlgorithmException e )</span>
+        {
+<span class="nc" id="L181">            reload(); // reset state of the store.</span>
+<span class="nc" id="L182">            throw new CertificateStoreConfigException( &quot;Unable to install a singing reply into an identity store.&quot;, e );</span>
+<span class="nc" id="L183">        }</span>
+        // TODO notifiy listeners.
+<span class="nc" id="L185">    }</span>
+
+    protected boolean corresponds( String alias, List&lt;X509Certificate&gt; certificates ) throws KeyStoreException, UnrecoverableKeyException, NoSuchAlgorithmException
+    {
+<span class="nc bnc" id="L189" title="All 2 branches missed.">        if ( !store.containsAlias( alias ) ) {</span>
+<span class="nc" id="L190">            return false;</span>
+        }
+
+<span class="nc" id="L193">        final Key key = store.getKey( alias, configuration.getPassword() );</span>
+<span class="nc bnc" id="L194" title="All 2 branches missed.">        if ( key == null ) {</span>
+<span class="nc" id="L195">            return false;</span>
+        }
+
+<span class="nc bnc" id="L198" title="All 2 branches missed.">        if ( !(key instanceof PrivateKey)) {</span>
+<span class="nc" id="L199">            return false;</span>
+        }
+
+<span class="nc" id="L202">        final Certificate certificate = store.getCertificate( alias );</span>
+<span class="nc bnc" id="L203" title="All 2 branches missed.">        if ( certificate == null ) {</span>
+<span class="nc" id="L204">            return false;</span>
+        }
+
+<span class="nc bnc" id="L207" title="All 2 branches missed.">        if ( !(certificate instanceof X509Certificate) ) {</span>
+<span class="nc" id="L208">            return false;</span>
+        }
+
+<span class="nc" id="L211">        final X509Certificate x509Certificate = (X509Certificate) certificate;</span>
+
+        // First certificate in the chain should correspond with the certificate in the store
+<span class="nc bnc" id="L214" title="All 2 branches missed.">        if ( !x509Certificate.getPublicKey().equals(certificates.get(0).getPublicKey()) )</span>
+        {
+<span class="nc" id="L216">            return false;</span>
+        }
+
+<span class="nc" id="L219">        return true;</span>
+    }
+
+    /**
+     * Imports a certificate and the private key that was used to generate the certificate, replacing any previously
+     * installed entries for the same domain.
+     *
+     * This method will import the certificate and key in the store using a unique alias. This alias is returned.
+     *
+     * This method will fail when the provided certificate does not match the domain of this XMPP service.
+     *
+     * @param pemCertificates a PEM representation of the certificate or certificate chain (cannot be null or empty).
+     * @param pemPrivateKey   a PEM representation of the private key (cannot be null or empty).
+     * @param passPhrase      optional pass phrase (must be present if the private key is encrypted).
+     * @return The alias that was used (never null).
+     * @throws CertificateStoreConfigException if there was a problem replacing the certificate
+     */
+    public String replaceCertificate( String pemCertificates, String pemPrivateKey, String passPhrase ) throws CertificateStoreConfigException
+    {
+<span class="nc bnc" id="L238" title="All 4 branches missed.">        if ( pemCertificates == null || pemCertificates.trim().isEmpty() )</span>
+        {
+<span class="nc" id="L240">            throw new IllegalArgumentException( &quot;Argument 'pemCertificates' cannot be null or an empty String.&quot; );</span>
+        }
+<span class="nc bnc" id="L242" title="All 4 branches missed.">        if ( pemPrivateKey == null || pemPrivateKey.trim().isEmpty() )</span>
+        {
+<span class="nc" id="L244">            throw new IllegalArgumentException( &quot;Argument 'pemPrivateKey' cannot be null or an empty String.&quot; );</span>
+        }
+<span class="nc" id="L246">        pemCertificates = pemCertificates.trim();</span>
+
+        try
+        {
+            // From its PEM representation, parse the certificates.
+<span class="nc" id="L251">            final Collection&lt;X509Certificate&gt; certificates = CertificateManager.parseCertificates( pemCertificates );</span>
+<span class="nc bnc" id="L252" title="All 2 branches missed.">            if ( certificates.isEmpty() )</span>
+            {
+<span class="nc" id="L254">                throw new CertificateStoreConfigException( &quot;No certificate was found in the input.&quot; );</span>
+            }
+
+            // Note that PKCS#7 does not require a specific order for the certificates in the file - ordering is needed.
+<span class="nc" id="L258">            final List&lt;X509Certificate&gt; ordered = CertificateUtils.order( certificates );</span>
+
+            // Of the ordered chain, the first certificate should be for our domain.
+<span class="nc bnc" id="L261" title="All 2 branches missed.">            if ( !isForThisDomain( ordered.get( 0 ) ) )</span>
+            {
+<span class="nc" id="L263">                throw new CertificateStoreConfigException( &quot;The supplied certificate chain does not cover the domain of this XMPP service.&quot; );</span>
+            }
+
+            // From its PEM representation (and pass phrase), parse the private key.
+<span class="nc" id="L267">            final PrivateKey privateKey = CertificateManager.parsePrivateKey( pemPrivateKey, passPhrase );</span>
+
+            // All appears to be in order. Replace any entries in the store.
+<span class="nc" id="L270">            removeAllDomainEntries();</span>
+<span class="nc" id="L271">            final String alias = generateUniqueAlias();</span>
+<span class="nc" id="L272">            store.setKeyEntry( alias, privateKey, configuration.getPassword(), ordered.toArray( new X509Certificate[ ordered.size() ] ) );</span>
+
+<span class="nc" id="L274">            persist();</span>
+
+<span class="nc" id="L276">            Log.info( &quot;Replaced all private keys and corresponding certificate chains with a new private key and certificate chain.&quot; );</span>
+
+<span class="nc" id="L278">            return alias;</span>
+        }
+<span class="nc" id="L280">        catch ( CertificateException | KeyStoreException | IOException e )</span>
+        {
+<span class="nc" id="L282">            reload(); // reset state of the store.</span>
+<span class="nc" id="L283">            throw new CertificateStoreConfigException( &quot;Unable to install a certificate into an identity store.&quot;, e );</span>
+        }
+
+        // TODO Notify listeners that a new certificate has been replaced.
+    }
+
+
+    /**
+     * Imports a certificate and the private key that was used to generate the certificate.
+     *
+     * This method will import the certificate and key in the store using a unique alias. This alias is returned.
+     *
+     * This method will fail when the provided certificate does not match the domain of this XMPP service.
+     *
+     * @param pemCertificates a PEM representation of the certificate or certificate chain (cannot be null or empty).
+     * @param pemPrivateKey   a PEM representation of the private key (cannot be null or empty).
+     * @param passPhrase      optional pass phrase (must be present if the private key is encrypted).
+     * @return The alias that was used (never null).
+     * @throws CertificateStoreConfigException if there was a problem installing the certificate
+     */
+    public String installCertificate( String pemCertificates, String pemPrivateKey, String passPhrase ) throws CertificateStoreConfigException
+    {
+<span class="nc" id="L305">        final String alias = generateUniqueAlias();</span>
+
+        // Perform the installation using the generated alias.
+<span class="nc" id="L308">        installCertificate( alias, pemCertificates, pemPrivateKey, passPhrase );</span>
+
+<span class="nc" id="L310">        return alias;</span>
+    }
+
+    /**
+     * Imports a certificate and the private key that was used to generate the certificate.
+     *
+     * This method will fail when the provided certificate does not match the domain of this XMPP service, or when the
+     * provided alias refers to an existing entry.
+     *
+     * @param alias           the name (key) under which the certificate is to be stored in the store (cannot be null or empty).
+     * @param pemCertificates a PEM representation of the certificate or certificate chain (cannot be null or empty).
+     * @param pemPrivateKey   a PEM representation of the private key (cannot be null or empty).
+     * @param passPhrase      optional pass phrase (must be present if the private key is encrypted).
+     * @throws CertificateStoreConfigException if there was a problem installing the certificate
+     */
+    public void installCertificate( String alias, String pemCertificates, String pemPrivateKey, String passPhrase ) throws CertificateStoreConfigException
+    {
+        // Input validation
+<span class="nc bnc" id="L328" title="All 4 branches missed.">        if ( alias == null || alias.trim().isEmpty() )</span>
+        {
+<span class="nc" id="L330">            throw new IllegalArgumentException( &quot;Argument 'alias' cannot be null or an empty String.&quot; );</span>
+        }
+<span class="nc bnc" id="L332" title="All 4 branches missed.">        if ( pemCertificates == null || pemCertificates.trim().isEmpty() )</span>
+        {
+<span class="nc" id="L334">            throw new IllegalArgumentException( &quot;Argument 'pemCertificates' cannot be null or an empty String.&quot; );</span>
+        }
+<span class="nc bnc" id="L336" title="All 4 branches missed.">        if ( pemPrivateKey == null || pemPrivateKey.trim().isEmpty() )</span>
+        {
+<span class="nc" id="L338">            throw new IllegalArgumentException( &quot;Argument 'pemPrivateKey' cannot be null or an empty String.&quot; );</span>
+        }
+<span class="nc" id="L340">        alias = alias.trim();</span>
+<span class="nc" id="L341">        pemCertificates = pemCertificates.trim();</span>
+
+        // Check that there is a certificate for the specified alias
+        try
+        {
+<span class="nc bnc" id="L346" title="All 2 branches missed.">            if ( store.containsAlias( alias ) )</span>
+            {
+<span class="nc" id="L348">                throw new CertificateStoreConfigException( &quot;Certificate already exists for alias: &quot; + alias );</span>
+            }
+
+            // From its PEM representation, parse the certificates.
+<span class="nc" id="L352">            final Collection&lt;X509Certificate&gt; certificates = CertificateManager.parseCertificates( pemCertificates );</span>
+<span class="nc bnc" id="L353" title="All 2 branches missed.">            if ( certificates.isEmpty() )</span>
+            {
+<span class="nc" id="L355">                throw new CertificateStoreConfigException( &quot;No certificate was found in the input.&quot; );</span>
+            }
+
+            // Note that PKCS#7 does not require a specific order for the certificates in the file - ordering is needed.
+<span class="nc" id="L359">            final List&lt;X509Certificate&gt; ordered = CertificateUtils.order( certificates );</span>
+
+            // Of the ordered chain, the first certificate should be for our domain.
+<span class="nc bnc" id="L362" title="All 2 branches missed.">            if ( !isForThisDomain( ordered.get( 0 ) ) )</span>
+            {
+<span class="nc" id="L364">                throw new CertificateStoreConfigException( &quot;The supplied certificate chain does not cover the domain of this XMPP service.&quot; );</span>
+            }
+
+            // From its PEM representation (and pass phrase), parse the private key.
+<span class="nc" id="L368">            final PrivateKey privateKey = CertificateManager.parsePrivateKey( pemPrivateKey, passPhrase );</span>
+
+            // All appears to be in order. Install in the store.
+<span class="nc" id="L371">            store.setKeyEntry( alias, privateKey, configuration.getPassword(), ordered.toArray( new X509Certificate[ ordered.size() ] ) );</span>
+
+<span class="nc" id="L373">            persist();</span>
+
+<span class="nc" id="L375">            Log.info( &quot;Installed a new private key and corresponding certificate chain.&quot; );</span>
+
+        }
+<span class="nc" id="L378">        catch ( CertificateException | KeyStoreException | IOException e )</span>
+        {
+<span class="nc" id="L380">            reload(); // reset state of the store.</span>
+<span class="nc" id="L381">            throw new CertificateStoreConfigException( &quot;Unable to install a certificate into an identity store.&quot;, e );</span>
+<span class="nc" id="L382">        }</span>
+
+        // TODO Notify listeners that a new certificate has been added.
+<span class="nc" id="L385">    }</span>
+
+    /**
+     * Adds a self-signed certificate for the domain of this XMPP service when no certificate for the domain was found.
+     * @throws CertificateStoreConfigException if there was a problem creating the certificate
+     */
+    public synchronized void ensureDomainCertificate() throws CertificateStoreConfigException
+    {
+<span class="nc" id="L393">        Log.debug( &quot;Verifying that a domain certificate is available in this store.&quot; );</span>
+<span class="nc bnc" id="L394" title="All 2 branches missed.">        if ( !containsDomainCertificate() )</span>
+        {
+<span class="nc" id="L396">            Log.debug( &quot;Store does not contain a domain certificate. A self-signed certificate will be generated.&quot; );</span>
+<span class="nc" id="L397">            addSelfSignedDomainCertificate();</span>
+        }
+<span class="nc" id="L399">    }</span>
+
+    /**
+     * Adds a self-signed certificate for the domain of this XMPP service when no certificate for the domain (of the
+     * provided algorithm) was found.
+     *
+     * This method is a thread-safe equivalent of:
+     * &lt;pre&gt;
+     *   for ( String algorithm : algorithms ) {
+     *     if ( !containsDomainCertificate( algorithm ) ) {
+     *        addSelfSignedDomainCertificate( algorithm );
+     *     }
+     *   }
+     * &lt;/pre&gt;
+     *
+     * @param algorithms The algorithms for which to verify / add a domain certificate.
+     * @deprecated Unused as of Openfire 4.3.0. Use 'ensureDomainCertificate' instead. See OF-1599.
+     * @throws CertificateStoreConfigException if there was a problem creating the certificate
+     */
+    @Deprecated
+    public synchronized void ensureDomainCertificates( String... algorithms ) throws CertificateStoreConfigException
+    {
+<span class="nc bnc" id="L421" title="All 2 branches missed.">        for ( String algorithm : algorithms )</span>
+        {
+<span class="nc" id="L423">            Log.debug( &quot;Verifying that a domain certificate ({} algorithm) is available in this store.&quot;, algorithm);</span>
+<span class="nc bnc" id="L424" title="All 2 branches missed.">            if ( !containsDomainCertificate( algorithm ) )</span>
+            {
+<span class="nc" id="L426">                Log.debug( &quot;Store does not contain a domain certificate ({} algorithm). A self-signed certificate will be generated.&quot;, algorithm);</span>
+<span class="nc" id="L427">                addSelfSignedDomainCertificate( algorithm );</span>
+            }
+        }
+<span class="nc" id="L430">    }</span>
+
+    /**
+     * Checks if the store contains a certificate of a particular algorithm that matches the domain of this
+     * XMPP service. This method will not distinguish between self-signed and non-self-signed certificates.
+     * @return {@code true}  if the store contains a certificate of a particular algorithm that matches the domain of this XMPP service, otherwise {@code false}
+     * @throws CertificateStoreConfigException if there was a problem creating the certificate
+     */
+    @SuppressWarnings(&quot;deprecation&quot;)
+    public synchronized boolean containsDomainCertificate() throws CertificateStoreConfigException
+    {
+<span class="nc" id="L441">        return containsDomainCertificate( null );</span>
+    }
+
+    /**
+     * Checks if the store contains a certificate of a particular algorithm that matches the domain of this
+     * XMPP service. This method will not distinguish between self-signed and non-self-signed certificates.
+     *
+     * If the 'algorithm' parameter is used, then this method will evaluate only certificates that match that
+     * certificate.
+     *
+     * @param algorithm An optional algorithm constraint (eg: &quot;RSA&quot;). Can be null, cannot be empty.
+     * @return {@code true} if the store contains a certificate of a particular algorithm that matches the domain of this XMPP service, otherwise {@code false}
+     * @deprecated Unused as of Openfire 4.3.0. Use 'containsDomainCertificate' instead. See OF-1599.
+     * @throws CertificateStoreConfigException if there was a problem creating the certificate
+     */
+    @Deprecated
+    public synchronized boolean containsDomainCertificate( String algorithm ) throws CertificateStoreConfigException
+    {
+<span class="nc bnc" id="L459" title="All 4 branches missed.">        if ( algorithm != null &amp;&amp; algorithm.isEmpty() )</span>
+        {
+<span class="nc" id="L461">            throw new IllegalArgumentException( &quot;Argument 'algorithm' cannot be empty (but is allowed to be null).&quot; );</span>
+        }
+
+<span class="nc" id="L464">        final String domainName = XMPPServer.getInstance().getServerInfo().getXMPPDomain();</span>
+
+        try
+        {
+<span class="nc bnc" id="L468" title="All 2 branches missed.">            for ( final String alias : Collections.list( store.aliases() ) )</span>
+            {
+<span class="nc" id="L470">                final Certificate certificate = store.getCertificate( alias );</span>
+<span class="nc bnc" id="L471" title="All 2 branches missed.">                if ( !( certificate instanceof X509Certificate ) )</span>
+                {
+<span class="nc" id="L473">                    continue;</span>
+                }
+
+                // Filter on algorithm, if the algorithm argument is defined.
+<span class="nc bnc" id="L477" title="All 4 branches missed.">                if ( algorithm != null &amp;&amp; !certificate.getPublicKey().getAlgorithm().equalsIgnoreCase( algorithm ) )</span>
+                {
+<span class="nc" id="L479">                    continue;</span>
+                }
+
+<span class="nc bnc" id="L482" title="All 2 branches missed.">                for ( String identity : CertificateManager.getServerIdentities( (X509Certificate) certificate ) )</span>
+                {
+<span class="nc bnc" id="L484" title="All 2 branches missed.">                    if ( DNSUtil.isNameCoveredByPattern( domainName, identity ) )</span>
+                    {
+<span class="nc" id="L486">                        return true;</span>
+                    }
+<span class="nc" id="L488">                }</span>
+<span class="nc" id="L489">            }</span>
+<span class="nc" id="L490">            return false;</span>
+        }
+<span class="nc" id="L492">        catch ( KeyStoreException e )</span>
+        {
+<span class="nc" id="L494">            throw new CertificateStoreConfigException( &quot;An exception occurred while searching for &quot; + algorithm + &quot; certificates that match the Openfire domain.&quot;, e );</span>
+        }
+    }
+
+    /**
+     * Checks if the store contains a certificate of a particular algorithm that contains at least all of the identities
+     * of this server (which includes the XMPP domain name, but also its hostname, and XMPP addresses of components
+     * that are currently being hosted).
+     *
+     * This method will not distinguish between self-signed and non-self-signed certificates.
+     * @return {@code true} if the store contains a certificate of a particular algorithm that contains at least all of the identities of this server, otherwise {@code false}
+     * @throws CertificateStoreConfigException if there was a problem accessing the certificates
+     */
+    @SuppressWarnings(&quot;deprecation&quot;)
+    public synchronized boolean containsAllIdentityCertificate() throws CertificateStoreConfigException
+    {
+<span class="nc" id="L510">        return containsAllIdentityCertificate( null );</span>
+    }
+
+    /**
+     * Checks if the store contains a certificate of a particular algorithm that contains at least all of the identities
+     * of this server (which includes the XMPP domain name, but also its hostname, and XMPP addresses of components
+     * that are currently being hosted).
+     *
+     * This method will not distinguish between self-signed and non-self-signed certificates.
+     *
+     * If the 'algorithm' parameter is used, then this method will evaluate only certificates that match that
+     * certificate.
+     *
+     * @param algorithm An optional algorithm constraint (eg: &quot;RSA&quot;). Can be null, cannot be empty.
+     * @deprecated Unused as of Openfire 4.3.0. Use 'containsAllIdentityCertificate' instead. See OF-1599.
+     * @throws CertificateStoreConfigException if a self-signed certificate could not be created
+     * @return {{@code true} if a certiicate contains all identities for this server, otherwise {@code false}}
+     */
+    @Deprecated
+    public synchronized boolean containsAllIdentityCertificate( String algorithm ) throws CertificateStoreConfigException
+    {
+<span class="nc bnc" id="L531" title="All 4 branches missed.">        if ( algorithm != null &amp;&amp; algorithm.isEmpty() )</span>
+        {
+<span class="nc" id="L533">            throw new IllegalArgumentException( &quot;Argument 'algorithm' cannot be empty (but is allowed to be null).&quot; );</span>
+        }
+<span class="nc" id="L535">        final Collection&lt;String&gt; dns = CertificateManager.determineSubjectAlternateNameDnsNameValues();</span>
+
+        try
+        {
+<span class="nc bnc" id="L539" title="All 2 branches missed.">            for ( final String alias : Collections.list( store.aliases() ) )</span>
+            {
+<span class="nc" id="L541">                final Set&lt;String&gt; missingDns = new HashSet&lt;&gt;();</span>
+
+<span class="nc" id="L543">                final Certificate certificate = store.getCertificate( alias );</span>
+<span class="nc bnc" id="L544" title="All 2 branches missed.">                if ( !( certificate instanceof X509Certificate ) )</span>
+                {
+<span class="nc" id="L546">                    continue;</span>
+                }
+
+<span class="nc bnc" id="L549" title="All 4 branches missed.">                if ( algorithm != null &amp;&amp; !certificate.getPublicKey().getAlgorithm().equalsIgnoreCase( algorithm ) )</span>
+                {
+<span class="nc" id="L551">                    continue;</span>
+                }
+
+<span class="nc" id="L554">                final List&lt;String&gt; serverIdentities = CertificateManager.getServerIdentities( (X509Certificate) certificate );</span>
+
+                // Are all of our DNS names covered?
+<span class="nc bnc" id="L557" title="All 2 branches missed.">                for ( String dnsId : dns )</span>
+                {
+<span class="nc" id="L559">                    boolean found = false;</span>
+<span class="nc bnc" id="L560" title="All 2 branches missed.">                    for ( String identity : serverIdentities )</span>
+                    {
+<span class="nc bnc" id="L562" title="All 2 branches missed.">                        if ( DNSUtil.isNameCoveredByPattern( dnsId, identity ) )</span>
+                        {
+<span class="nc" id="L564">                            found = true;</span>
+<span class="nc" id="L565">                            break;</span>
+                        }
+<span class="nc" id="L567">                    }</span>
+
+<span class="nc bnc" id="L569" title="All 2 branches missed.">                    if ( !found )</span>
+                    {
+<span class="nc" id="L571">                        Log.info( &quot;Certificate with alias '{}' is missing DNS identity '{}'.&quot;, alias, dnsId );</span>
+<span class="nc" id="L572">                        missingDns.add( dnsId );</span>
+                    }
+<span class="nc" id="L574">                }</span>
+
+<span class="nc bnc" id="L576" title="All 2 branches missed.">                if ( missingDns.isEmpty() )</span>
+                {
+<span class="nc" id="L578">                    return true;</span>
+                }
+<span class="nc" id="L580">            }</span>
+<span class="nc" id="L581">            return false;</span>
+        }
+<span class="nc" id="L583">        catch ( KeyStoreException e )</span>
+        {
+<span class="nc bnc" id="L585" title="All 2 branches missed.">            throw new CertificateStoreConfigException( &quot;An exception occurred while searching for &quot; + ( algorithm == null ? &quot;&quot; : algorithm + &quot; &quot; )+ &quot;certificates that match the Openfire domain.&quot;, e );</span>
+        }
+    }
+
+    /**
+     * Populates the key store with a self-signed certificate for the domain of this XMPP service.
+     * @throws CertificateStoreConfigException if a self-signed certificate could not be created
+     */
+    @SuppressWarnings(&quot;deprecation&quot;)
+    public synchronized void addSelfSignedDomainCertificate() throws CertificateStoreConfigException
+    {
+<span class="nc" id="L596">        addSelfSignedDomainCertificate( null );</span>
+<span class="nc" id="L597">    }</span>
+
+    /**
+     * Populates the key store with a self-signed certificate for the domain of this XMPP service.
+     *
+     * If the 'algorithm' parameter is used, then this method will evaluate only certificates that match that
+     * certificate.
+     *
+     * @param algorithm An optional algorithm constraint (eg: &quot;RSA&quot;). Can be null, cannot be empty.
+     * @deprecated Unused as of Openfire 4.3.0. Use 'addSelfSignedDomainCertificate' instead. See OF-1599.
+     * @throws CertificateStoreConfigException if a self-signed certificate could not be created
+     */
+    @Deprecated
+    public synchronized void addSelfSignedDomainCertificate( String algorithm ) throws CertificateStoreConfigException
+    {
+<span class="nc bnc" id="L612" title="All 4 branches missed.">        if ( algorithm != null &amp;&amp; algorithm.isEmpty() )</span>
+        {
+<span class="nc" id="L614">            throw new IllegalArgumentException( &quot;Argument 'algorithm' cannot be empty (but is allowed to be null).&quot; );</span>
+        }
+
+        final int keySize;
+        final String signAlgorithm;
+
+<span class="nc bnc" id="L620" title="All 2 branches missed.">        if ( algorithm == null ) {</span>
+<span class="nc" id="L621">            algorithm = JiveGlobals.getProperty( &quot;cert.algorithm&quot;, &quot;RSA&quot; );</span>
+        }
+<span class="nc bnc" id="L623" title="All 10 branches missed.">        switch ( algorithm.toUpperCase() )</span>
+        {
+            case &quot;RSA&quot;:
+<span class="nc" id="L626">                keySize = JiveGlobals.getIntProperty( &quot;cert.rsa.keysize&quot;, 2048 );</span>
+<span class="nc" id="L627">                signAlgorithm = JiveGlobals.getProperty( &quot;cert.rsa.algorithm&quot;, &quot;SHA256WITHRSAENCRYPTION&quot; );</span>
+<span class="nc" id="L628">                break;</span>
+
+            case &quot;DSA&quot;:
+<span class="nc" id="L631">                keySize = JiveGlobals.getIntProperty( &quot;cert.dsa.keysize&quot;, 1024 );</span>
+<span class="nc" id="L632">                signAlgorithm = JiveGlobals.getProperty( &quot;cert.dsa.algorithm&quot;, &quot;SHA256withDSA&quot; );</span>
+<span class="nc" id="L633">                break;</span>
+
+            default:
+<span class="nc" id="L636">                throw new IllegalArgumentException( &quot;Unsupported algorithm '&quot; + algorithm + &quot;'. Use 'RSA' or 'DSA'.&quot; );</span>
+        }
+
+<span class="nc" id="L639">        final String name = XMPPServerInfo.XMPP_DOMAIN.getValue().toLowerCase();</span>
+<span class="nc" id="L640">        final String alias = name + &quot;_&quot; + algorithm.toLowerCase();</span>
+<span class="nc" id="L641">        final int validityInDays = JiveGlobals.getIntProperty( &quot;cert.validity-days&quot;, 5*365 );</span>
+<span class="nc" id="L642">        Set&lt;String&gt; sanDnsNames = CertificateManager.determineSubjectAlternateNameDnsNameValues();</span>
+
+        // OF-1605: Check if a wildcard entry is to be used to represent/replace any subdomains of the XMPP domain name.
+<span class="nc" id="L645">        final boolean useWildcard = JiveGlobals.getBooleanProperty( &quot;cert.wildcard&quot;, true );</span>
+<span class="nc bnc" id="L646" title="All 2 branches missed.">        if ( useWildcard )</span>
+        {
+<span class="nc" id="L648">            final String wildcard = &quot;*.&quot; + XMPPServer.getInstance().getServerInfo().getXMPPDomain();</span>
+
+            // Remove any names that match the wildcard.
+<span class="nc" id="L651">            sanDnsNames = sanDnsNames.stream()</span>
+<span class="nc bnc" id="L652" title="All 2 branches missed.">                .filter( sanDnsName -&gt; !DNSUtil.isNameCoveredByPattern( sanDnsName, wildcard )  )</span>
+<span class="nc" id="L653">                .collect( Collectors.toSet() );</span>
+
+            // Add the domain and wildcard entries.
+<span class="nc" id="L656">            sanDnsNames.add( XMPPServer.getInstance().getServerInfo().getXMPPDomain() );</span>
+<span class="nc" id="L657">            sanDnsNames.add( wildcard );</span>
+        }
+
+<span class="nc" id="L660">        Log.info( &quot;Generating a new private key and corresponding self-signed certificate for domain name '{}', using the {} algorithm (sign-algorithm: {} with a key size of {} bits). Certificate will be valid for {} days.&quot;, name, algorithm, signAlgorithm, keySize, validityInDays );</span>
+        // Generate public and private keys
+        try
+        {
+<span class="nc" id="L664">            final KeyPair keyPair = generateKeyPair( algorithm.toUpperCase(), keySize );</span>
+
+            // Create X509 certificate with keys and specified domain
+<span class="nc" id="L667">            final X509Certificate cert = CertificateManager.createX509V3Certificate( keyPair, validityInDays, name, name, name, signAlgorithm, sanDnsNames );</span>
+
+            // Store new certificate and private key in the key store
+<span class="nc" id="L670">            store.setKeyEntry( alias, keyPair.getPrivate(), configuration.getPassword(), new X509Certificate[]{cert} );</span>
+
+            // Persist the changes in the store to disk.
+<span class="nc" id="L673">            persist();</span>
+        }
+<span class="nc" id="L675">        catch ( CertificateStoreConfigException | IOException | GeneralSecurityException ex )</span>
+        {
+<span class="nc" id="L677">            reload(); // reset state of the store.</span>
+<span class="nc" id="L678">            throw new CertificateStoreConfigException( &quot;Unable to generate new self-signed &quot; + algorithm + &quot; certificate.&quot;, ex );</span>
+<span class="nc" id="L679">        }</span>
+
+        // TODO Notify listeners that a new certificate has been created
+<span class="nc" id="L682">    }</span>
+
+    /**
+     * Returns a new public &amp;amp; private key with the specified algorithm (e.g. DSA, RSA, etc.).
+     *
+     * @param algorithm DSA, RSA, etc.
+     * @param keySize the desired key size. This is an algorithm-specific metric, such as modulus length, specified in number of bits.
+     * @return a new public &amp;amp; private key with the specified algorithm (e.g. DSA, RSA, etc.).
+     * @throws GeneralSecurityException if the supplied algorithm does not have a key-pair generator
+     */
+    protected static synchronized KeyPair generateKeyPair( String algorithm, int keySize ) throws GeneralSecurityException
+    {
+        final KeyPairGenerator generator;
+<span class="nc bnc" id="L695" title="All 2 branches missed.">        if ( PROVIDER == null )</span>
+        {
+<span class="nc" id="L697">            generator = KeyPairGenerator.getInstance( algorithm );</span>
+        }
+        else
+        {
+<span class="nc" id="L701">            generator = KeyPairGenerator.getInstance( algorithm, PROVIDER );</span>
+        }
+<span class="nc" id="L703">        generator.initialize( keySize, new SecureRandom() );</span>
+<span class="nc" id="L704">        return generator.generateKeyPair();</span>
+    }
+
+    /**
+     * Verifies that the subject of the certificate matches the domain of this XMPP service.
+     *
+     * @param certificate The certificate to verify (cannot be null)
+     * @return true when the certificate subject is this domain, otherwise false.
+     */
+    public static boolean isForThisDomain( X509Certificate certificate )
+    {
+<span class="nc" id="L715">        final String domainName = XMPPServer.getInstance().getServerInfo().getXMPPDomain();</span>
+
+<span class="nc" id="L717">        final List&lt;String&gt; serverIdentities = CertificateManager.getServerIdentities( certificate );</span>
+<span class="nc bnc" id="L718" title="All 2 branches missed.">        for ( String identity : serverIdentities )</span>
+        {
+<span class="nc bnc" id="L720" title="All 2 branches missed.">            if ( DNSUtil.isNameCoveredByPattern( domainName, identity ) )</span>
+            {
+<span class="nc" id="L722">                return true;</span>
+            }
+<span class="nc" id="L724">        }</span>
+
+<span class="nc" id="L726">        Log.info( &quot;The supplied certificate chain does not cover the domain of this XMPP service ('&quot; + domainName + &quot;'). Instead, it covers &quot; + Arrays.toString( serverIdentities.toArray( new String[ serverIdentities.size() ] ) ) );</span>
+<span class="nc" id="L727">        return false;</span>
+    }
+
+    /**
+     * Generates an alias that is currently unused in this store.
+     *
+     * @return An alias (never null).
+     * @throws CertificateStoreConfigException if a unique alias could not be generated
+     */
+    protected synchronized String generateUniqueAlias() throws CertificateStoreConfigException
+    {
+<span class="nc" id="L738">        final String domain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();</span>
+<span class="nc" id="L739">        int index = 1;</span>
+<span class="nc" id="L740">        String alias = domain + &quot;_&quot; + index;</span>
+        try
+        {
+<span class="nc bnc" id="L743" title="All 2 branches missed.">            while ( store.containsAlias( alias ) )</span>
+            {
+<span class="nc" id="L745">                index = index + 1;</span>
+<span class="nc" id="L746">                alias = domain + &quot;_&quot; + index;</span>
+            }
+<span class="nc" id="L748">            return alias;</span>
+        }
+<span class="nc" id="L750">        catch ( KeyStoreException e )</span>
+        {
+<span class="nc" id="L752">            throw new CertificateStoreConfigException( &quot;Unable to generate a unique alias for this identity store.&quot;, e );</span>
+        }
+    }
+
+    /**
+     * Removes all entries that reflect the local domain.
+     *
+     * This method iterates over all entries, and removes those that match the domain of this server.
+     *
+     * Note that the changes are not persisted by this method (as it is expected to be used in tandem with an insert.
+     * @throws KeyStoreException if the key store could not be updated
+     */
+    protected synchronized void removeAllDomainEntries() throws KeyStoreException
+    {
+<span class="nc" id="L766">        final String domainName = XMPPServer.getInstance().getServerInfo().getXMPPDomain();</span>
+
+<span class="nc" id="L768">        final Set&lt;String&gt; toDelete = new HashSet&lt;&gt;();</span>
+<span class="nc bnc" id="L769" title="All 2 branches missed.">        for ( final String alias : Collections.list( store.aliases() ) )</span>
+        {
+<span class="nc" id="L771">            final Certificate certificate = store.getCertificate( alias );</span>
+<span class="nc bnc" id="L772" title="All 2 branches missed.">            if ( !( certificate instanceof X509Certificate ) )</span>
+            {
+<span class="nc" id="L774">                continue;</span>
+            }
+
+<span class="nc bnc" id="L777" title="All 2 branches missed.">            for ( String identity : CertificateManager.getServerIdentities( (X509Certificate) certificate ) )</span>
+            {
+<span class="nc bnc" id="L779" title="All 2 branches missed.">                if ( DNSUtil.isNameCoveredByPattern( domainName, identity ) )</span>
+                {
+<span class="nc" id="L781">                    toDelete.add( alias );</span>
+<span class="nc" id="L782">                    break;</span>
+                }
+<span class="nc" id="L784">            }</span>
+<span class="nc" id="L785">        }</span>
+
+<span class="nc bnc" id="L787" title="All 2 branches missed.">        for ( final String alias : toDelete )</span>
+        {
+<span class="nc" id="L789">            store.deleteEntry( alias );</span>
+<span class="nc" id="L790">        }</span>
+<span class="nc" id="L791">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

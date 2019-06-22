@@ -1,0 +1,220 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>ServerSocketReader.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.net</a> &gt; <span class="el_source">ServerSocketReader.java</span></div><h1>ServerSocketReader.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.net;
+
+import java.io.IOException;
+import java.net.Socket;
+import java.util.concurrent.ThreadPoolExecutor;
+
+import org.dom4j.Element;
+import org.jivesoftware.openfire.PacketRouter;
+import org.jivesoftware.openfire.RoutingTable;
+import org.jivesoftware.openfire.auth.UnauthorizedException;
+import org.jivesoftware.openfire.interceptor.PacketRejectedException;
+import org.jivesoftware.openfire.session.LocalIncomingServerSession;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmlpull.v1.XmlPullParserException;
+import org.xmpp.packet.IQ;
+import org.xmpp.packet.Message;
+import org.xmpp.packet.Packet;
+import org.xmpp.packet.Presence;
+import org.xmpp.packet.StreamError;
+
+/**
+ * A SocketReader specialized for server connections. This reader will be used when the open
+ * stream contains a jabber:server namespace. Server-to-server communication requires two
+ * TCP connections between the servers where one is used for sending packets whilst the other
+ * connection is used for receiving packets. The connection used for receiving packets will use
+ * a ServerSocketReader since the other connection will not receive packets.&lt;p&gt;
+ *
+ * The received packets will be routed using another thread to ensure that many received packets
+ * could be routed at the same time. To avoid creating new threads every time a packet is received
+ * each {@code ServerSocketReader} instance uses a {@link ThreadPoolExecutor}. By default the
+ * maximum number of threads that the executor may have is 50. However, this value may be modified
+ * by changing the property &lt;b&gt;xmpp.server.processing.max.threads&lt;/b&gt;.
+ *
+ * @author Gaston Dombiak
+ */
+public class ServerSocketReader extends SocketReader {
+
+<span class="nc" id="L55">    private static final Logger Log = LoggerFactory.getLogger(ServerSocketReader.class);</span>
+
+    public ServerSocketReader(PacketRouter router, RoutingTable routingTable, String serverName,
+            Socket socket, SocketConnection connection, boolean useBlockingMode, boolean directTLS) {
+<span class="nc" id="L59">        super(router, routingTable, serverName, socket, connection, useBlockingMode, directTLS);</span>
+<span class="nc" id="L60">    }</span>
+
+    /**
+     * Processes the packet in another thread if the packet has not been rejected.
+     *
+     * @param packet the received packet.
+     */
+    @Override
+    protected void processIQ(final IQ packet) throws UnauthorizedException {
+        try {
+<span class="nc" id="L70">            packetReceived(packet);</span>
+            try {
+<span class="nc" id="L72">                super.processIQ(packet);</span>
+            }
+<span class="nc" id="L74">            catch (UnauthorizedException e) {</span>
+<span class="nc" id="L75">                Log.error(&quot;Error processing packet&quot;, e);</span>
+<span class="nc" id="L76">            }</span>
+        }
+<span class="nc" id="L78">        catch (PacketRejectedException e) {</span>
+<span class="nc" id="L79">            Log.debug(&quot;IQ rejected: &quot; + packet.toXML(), e);</span>
+<span class="nc" id="L80">        }</span>
+<span class="nc" id="L81">    }</span>
+
+    /**
+     * Processes the packet in another thread if the packet has not been rejected.
+     *
+     * @param packet the received packet.
+     */
+    @Override
+    protected void processPresence(final Presence packet) throws UnauthorizedException {
+        try {
+<span class="nc" id="L91">            packetReceived(packet);</span>
+            try {
+<span class="nc" id="L93">                super.processPresence(packet);</span>
+            }
+<span class="nc" id="L95">            catch (UnauthorizedException e) {</span>
+<span class="nc" id="L96">                Log.error(&quot;Error processing packet&quot;, e);</span>
+<span class="nc" id="L97">            }</span>
+        }
+<span class="nc" id="L99">        catch (PacketRejectedException e) {</span>
+<span class="nc" id="L100">            Log.debug(&quot;Presence rejected: &quot; + packet.toXML(), e);</span>
+<span class="nc" id="L101">        }</span>
+<span class="nc" id="L102">    }</span>
+
+    /**
+     * Processes the packet in another thread if the packet has not been rejected.
+     *
+     * @param packet the received packet.
+     */
+    @Override
+    protected void processMessage(final Message packet) throws UnauthorizedException {
+        try {
+<span class="nc" id="L112">            packetReceived(packet);</span>
+            try {
+<span class="nc" id="L114">                ServerSocketReader.super.processMessage(packet);</span>
+            }
+<span class="nc" id="L116">            catch (UnauthorizedException e) {</span>
+<span class="nc" id="L117">                Log.error(&quot;Error processing packet&quot;, e);</span>
+<span class="nc" id="L118">            }</span>
+        }
+<span class="nc" id="L120">        catch (PacketRejectedException e) {</span>
+<span class="nc" id="L121">            Log.debug(&quot;Message rejected: &quot; + packet.toXML(), e);</span>
+<span class="nc" id="L122">        }</span>
+<span class="nc" id="L123">    }</span>
+
+    /**
+     * Remote servers may send subsequent db:result packets so we need to process them in order
+     * to validate new domains.
+     *
+     * @param doc the unknown DOM element that was received
+     * @return true if the packet is a db:result packet otherwise false.
+     */
+    @Override
+    protected boolean processUnknowPacket(Element doc) {
+        // Handle subsequent db:result packets
+<span class="nc bnc" id="L135" title="All 4 branches missed.">        if (&quot;db&quot;.equals(doc.getNamespacePrefix()) &amp;&amp; &quot;result&quot;.equals(doc.getName())) {</span>
+<span class="nc bnc" id="L136" title="All 2 branches missed.">            if (!((LocalIncomingServerSession) session).validateSubsequentDomain(doc)) {</span>
+<span class="nc" id="L137">                open = false;</span>
+            }
+<span class="nc" id="L139">            return true;</span>
+        }
+<span class="nc bnc" id="L141" title="All 4 branches missed.">        else if (&quot;db&quot;.equals(doc.getNamespacePrefix()) &amp;&amp; &quot;verify&quot;.equals(doc.getName())) {</span>
+            // The Receiving Server is reusing an existing connection for sending the
+            // Authoritative Server a request for verification of a key
+<span class="nc" id="L144">            ((LocalIncomingServerSession) session).verifyReceivedKey(doc);</span>
+<span class="nc" id="L145">            return true;</span>
+        }
+<span class="nc" id="L147">        return false;</span>
+    }
+
+    /**
+     * Make sure that the received packet has a TO and FROM values defined and that it was sent
+     * from a previously validated domain. If the packet does not matches any of the above
+     * conditions then a PacketRejectedException will be thrown.
+     *
+     * @param packet the received packet.
+     * @throws PacketRejectedException if the packet does not include a TO or FROM or if the packet
+     *                                 was sent from a domain that was not previously validated.
+     */
+    private void packetReceived(Packet packet) throws PacketRejectedException {
+<span class="nc bnc" id="L160" title="All 4 branches missed.">        if (packet.getTo() == null || packet.getFrom() == null) {</span>
+<span class="nc" id="L161">            Log.debug(&quot;Closing IncomingServerSession due to packet with no TO or FROM: &quot; +</span>
+<span class="nc" id="L162">                    packet.toXML());</span>
+            // Send a stream error saying that the packet includes no TO or FROM
+<span class="nc" id="L164">            StreamError error = new StreamError(StreamError.Condition.improper_addressing);</span>
+<span class="nc" id="L165">            connection.deliverRawText(error.toXML());</span>
+            // Close the underlying connection
+<span class="nc" id="L167">            connection.close();</span>
+<span class="nc" id="L168">            open = false;</span>
+<span class="nc" id="L169">            throw new PacketRejectedException(&quot;Packet with no TO or FROM attributes&quot;);</span>
+        }
+<span class="nc bnc" id="L171" title="All 2 branches missed.">        else if (!((LocalIncomingServerSession) session).isValidDomain(packet.getFrom().getDomain())) {</span>
+<span class="nc" id="L172">            Log.debug(&quot;Closing IncomingServerSession due to packet with invalid domain: &quot; +</span>
+<span class="nc" id="L173">                    packet.toXML());</span>
+            // Send a stream error saying that the packet includes an invalid FROM
+<span class="nc" id="L175">            StreamError error = new StreamError(StreamError.Condition.invalid_from);</span>
+<span class="nc" id="L176">            connection.deliverRawText(error.toXML());</span>
+            // Close the underlying connection
+<span class="nc" id="L178">            connection.close();</span>
+<span class="nc" id="L179">            open = false;</span>
+<span class="nc" id="L180">            throw new PacketRejectedException(&quot;Packet with no TO or FROM attributes&quot;);</span>
+        }
+<span class="nc" id="L182">    }</span>
+
+    @Override
+    protected void shutdown() {
+<span class="nc" id="L186">        super.shutdown();</span>
+<span class="nc" id="L187">    }</span>
+
+    @Override
+    boolean createSession(String namespace) throws UnauthorizedException, XmlPullParserException,
+            IOException {
+<span class="nc bnc" id="L192" title="All 2 branches missed.">        if (&quot;jabber:server&quot;.equals(namespace)) {</span>
+            // The connected client is a server so create an IncomingServerSession
+<span class="nc" id="L194">            session = LocalIncomingServerSession.createSession(serverName, reader, connection, directTLS);</span>
+<span class="nc" id="L195">            return true;</span>
+        }
+<span class="nc" id="L197">        return false;</span>
+    }
+
+    @Override
+    String getNamespace() {
+<span class="nc" id="L202">        return &quot;jabber:server&quot;;</span>
+    }
+
+    @Override
+    public String getExtraNamespaces() {
+<span class="nc" id="L207">        return &quot;xmlns:db=\&quot;jabber:server:dialback\&quot;&quot;;</span>
+    }
+
+    @Override
+    String getName() {
+<span class="nc" id="L212">        return &quot;Server SR - &quot; + hashCode();</span>
+    }
+
+    @Override
+    boolean validateHost() {
+<span class="nc" id="L217">        return true;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

@@ -1,0 +1,226 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>ComponentStanzaHandler.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.net</a> &gt; <span class="el_source">ComponentStanzaHandler.java</span></div><h1>ComponentStanzaHandler.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.net;
+
+import org.dom4j.Element;
+import org.jivesoftware.openfire.Connection;
+import org.jivesoftware.openfire.PacketRouter;
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.auth.UnauthorizedException;
+import org.jivesoftware.openfire.component.InternalComponentManager;
+import org.jivesoftware.openfire.session.ComponentSession;
+import org.jivesoftware.openfire.session.LocalComponentSession;
+import org.jivesoftware.openfire.session.Session;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmlpull.v1.XmlPullParser;
+import org.xmlpull.v1.XmlPullParserException;
+import org.xmpp.component.ComponentException;
+import org.xmpp.packet.IQ;
+import org.xmpp.packet.Message;
+import org.xmpp.packet.PacketError;
+import org.xmpp.packet.Presence;
+
+/**
+ * Handler of XML stanzas sent by external components connected directly to the server. Received packet will
+ * have their FROM attribute overriden to avoid spoofing.&lt;p&gt;
+ *
+ * This is an implementation of the XEP-114. In the future we will add support for XEP-225 now that
+ * we are using MINA things should be easier. Since we are now using MINA incoming traffic is handled
+ * by a set of worker threads.
+ *
+ * @author Gaston Dombiak
+ */
+public class ComponentStanzaHandler extends StanzaHandler {
+
+<span class="nc" id="L50">    private static final Logger Log = LoggerFactory.getLogger(ComponentStanzaHandler.class);</span>
+
+    public ComponentStanzaHandler(PacketRouter router, Connection connection) {
+<span class="nc" id="L53">        super(router, connection);</span>
+<span class="nc" id="L54">    }</span>
+
+    @Deprecated
+    public ComponentStanzaHandler(PacketRouter router, String serverName, Connection connection) {
+<span class="nc" id="L58">        super(router, connection);</span>
+<span class="nc" id="L59">    }</span>
+
+    @Override
+    boolean processUnknowPacket(Element doc) throws UnauthorizedException {
+<span class="nc" id="L63">        String tag = doc.getName();</span>
+<span class="nc bnc" id="L64" title="All 2 branches missed.">        if (&quot;handshake&quot;.equals(tag)) {</span>
+            // External component is trying to authenticate
+<span class="nc bnc" id="L66" title="All 2 branches missed.">            if (!((LocalComponentSession) session).authenticate(doc.getStringValue())) {</span>
+<span class="nc" id="L67">                Log.debug( &quot;Closing session that failed to authenticate: {}&quot;, session );</span>
+<span class="nc" id="L68">                session.close();</span>
+            }
+<span class="nc" id="L70">            return true;</span>
+<span class="nc bnc" id="L71" title="All 4 branches missed.">        } else if (&quot;error&quot;.equals(tag) &amp;&amp; &quot;stream&quot;.equals(doc.getNamespacePrefix())) {</span>
+<span class="nc" id="L72">            Log.debug( &quot;Closing session because of received stream error {}. Affected session: {}&quot;, doc.asXML(), session );</span>
+<span class="nc" id="L73">            session.close();</span>
+<span class="nc" id="L74">            return true;</span>
+<span class="nc bnc" id="L75" title="All 2 branches missed.">        } else if (&quot;bind&quot;.equals(tag)) {</span>
+            // Handle subsequent bind packets
+<span class="nc" id="L77">            LocalComponentSession componentSession = (LocalComponentSession) session;</span>
+            // Get the external component of this session
+<span class="nc" id="L79">            ComponentSession.ExternalComponent component = componentSession.getExternalComponent();</span>
+<span class="nc" id="L80">            String initialDomain = component.getInitialSubdomain();</span>
+<span class="nc" id="L81">            String extraDomain = doc.attributeValue(&quot;name&quot;);</span>
+<span class="nc" id="L82">            String allowMultiple = doc.attributeValue(&quot;allowMultiple&quot;);</span>
+<span class="nc bnc" id="L83" title="All 4 branches missed.">            if (extraDomain == null || &quot;&quot;.equals(extraDomain)) {</span>
+                // No new bind domain was specified so return a bad_request error
+<span class="nc" id="L85">                Element reply = doc.createCopy();</span>
+<span class="nc" id="L86">                reply.add(new PacketError(PacketError.Condition.bad_request).getElement());</span>
+<span class="nc" id="L87">                connection.deliverRawText(reply.asXML());</span>
+<span class="nc" id="L88">            }</span>
+<span class="nc bnc" id="L89" title="All 2 branches missed.">            else if (extraDomain.equals(initialDomain)) {</span>
+                // Component is binding initial domain that is already registered
+                // Send confirmation that the new domain has been registered
+<span class="nc" id="L92">                connection.deliverRawText(&quot;&lt;bind/&gt;&quot;);</span>
+            }
+<span class="nc bnc" id="L94" title="All 2 branches missed.">            else if (extraDomain.endsWith(initialDomain)) {</span>
+                // Only accept subdomains under the initial registered domain
+<span class="nc bnc" id="L96" title="All 4 branches missed.">                if (allowMultiple != null &amp;&amp; component.getSubdomains().contains(extraDomain)) {</span>
+                    // Domain already in use so return a conflict error
+<span class="nc" id="L98">                    Element reply = doc.createCopy();</span>
+<span class="nc" id="L99">                    reply.add(new PacketError(PacketError.Condition.conflict).getElement());</span>
+<span class="nc" id="L100">                    connection.deliverRawText(reply.asXML());</span>
+<span class="nc" id="L101">                }</span>
+                else {
+                    try {
+                        // Get the requested subdomain
+                        final String subdomain;
+<span class="nc" id="L106">                        int index = extraDomain.indexOf( XMPPServer.getInstance().getServerInfo().getXMPPDomain() );</span>
+<span class="nc bnc" id="L107" title="All 2 branches missed.">                        if (index &gt; -1) {</span>
+<span class="nc" id="L108">                            subdomain = extraDomain.substring(0, index -1);</span>
+                        } else {
+<span class="nc" id="L110">                            subdomain = extraDomain;</span>
+                        }
+<span class="nc" id="L112">                        InternalComponentManager.getInstance().addComponent(subdomain, component);</span>
+<span class="nc" id="L113">                        session.getConnection().registerCloseListener( handback -&gt; InternalComponentManager.getInstance().removeComponent( subdomain, (ComponentSession.ExternalComponent) handback ), component );</span>
+                        // Send confirmation that the new domain has been registered
+<span class="nc" id="L115">                        connection.deliverRawText(&quot;&lt;bind/&gt;&quot;);</span>
+                    }
+<span class="nc" id="L117">                    catch (ComponentException e) {</span>
+<span class="nc" id="L118">                        Log.error(&quot;Error binding extra domain: &quot; + extraDomain + &quot; to component: &quot; +</span>
+                                component, e);
+                        // Return internal server error
+<span class="nc" id="L121">                        Element reply = doc.createCopy();</span>
+<span class="nc" id="L122">                        reply.add(new PacketError(</span>
+<span class="nc" id="L123">                                PacketError.Condition.internal_server_error).getElement());</span>
+<span class="nc" id="L124">                        connection.deliverRawText(reply.asXML());</span>
+<span class="nc" id="L125">                    }</span>
+                }
+            }
+            else {
+                // Return forbidden error since we only allow subdomains of the intial domain
+                // to be used by the same external component
+<span class="nc" id="L131">                Element reply = doc.createCopy();</span>
+<span class="nc" id="L132">                reply.add(new PacketError(PacketError.Condition.forbidden).getElement());</span>
+<span class="nc" id="L133">                connection.deliverRawText(reply.asXML());</span>
+            }
+<span class="nc" id="L135">            return true;</span>
+        }
+<span class="nc" id="L137">        return false;</span>
+    }
+
+    @Override
+    protected void processIQ(IQ packet) throws UnauthorizedException {
+<span class="nc bnc" id="L142" title="All 2 branches missed.">        if (session.getStatus() != Session.STATUS_AUTHENTICATED) {</span>
+            // Session is not authenticated so return error
+<span class="nc" id="L144">            IQ reply = new IQ();</span>
+<span class="nc" id="L145">            reply.setChildElement(packet.getChildElement().createCopy());</span>
+<span class="nc" id="L146">            reply.setID(packet.getID());</span>
+<span class="nc" id="L147">            reply.setTo(packet.getFrom());</span>
+<span class="nc" id="L148">            reply.setFrom(packet.getTo());</span>
+<span class="nc" id="L149">            reply.setError(PacketError.Condition.not_authorized);</span>
+<span class="nc" id="L150">            session.process(reply);</span>
+<span class="nc" id="L151">            return;</span>
+        }
+        // Keep track of the component that sent an IQ get/set
+<span class="nc bnc" id="L154" title="All 4 branches missed.">        if (packet.getType() == IQ.Type.get || packet.getType() == IQ.Type.set) {</span>
+            // Handle subsequent bind packets
+<span class="nc" id="L156">            LocalComponentSession componentSession = (LocalComponentSession) session;</span>
+            // Get the external component of this session
+<span class="nc" id="L158">            LocalComponentSession.LocalExternalComponent component =</span>
+<span class="nc" id="L159">                    (LocalComponentSession.LocalExternalComponent) componentSession.getExternalComponent();</span>
+<span class="nc" id="L160">            component.track(packet);</span>
+        }
+<span class="nc" id="L162">        super.processIQ(packet);</span>
+<span class="nc" id="L163">    }</span>
+
+    @Override
+    protected void processPresence(Presence packet) throws UnauthorizedException {
+<span class="nc bnc" id="L167" title="All 2 branches missed.">        if (session.getStatus() != Session.STATUS_AUTHENTICATED) {</span>
+            // Session is not authenticated so return error
+<span class="nc" id="L169">            Presence reply = new Presence();</span>
+<span class="nc" id="L170">            reply.setID(packet.getID());</span>
+<span class="nc" id="L171">            reply.setTo(packet.getFrom());</span>
+<span class="nc" id="L172">            reply.setFrom(packet.getTo());</span>
+<span class="nc" id="L173">            reply.setError(PacketError.Condition.not_authorized);</span>
+<span class="nc" id="L174">            session.process(reply);</span>
+<span class="nc" id="L175">            return;</span>
+        }
+<span class="nc" id="L177">        super.processPresence(packet);</span>
+<span class="nc" id="L178">    }</span>
+
+    @Override
+    protected void processMessage(Message packet) throws UnauthorizedException {
+<span class="nc bnc" id="L182" title="All 2 branches missed.">        if (session.getStatus() != Session.STATUS_AUTHENTICATED) {</span>
+            // Session is not authenticated so return error
+<span class="nc" id="L184">            Message reply = new Message();</span>
+<span class="nc" id="L185">            reply.setID(packet.getID());</span>
+<span class="nc" id="L186">            reply.setTo(packet.getFrom());</span>
+<span class="nc" id="L187">            reply.setFrom(packet.getTo());</span>
+<span class="nc" id="L188">            reply.setError(PacketError.Condition.not_authorized);</span>
+<span class="nc" id="L189">            session.process(reply);</span>
+<span class="nc" id="L190">            return;</span>
+        }
+<span class="nc" id="L192">        super.processMessage(packet);</span>
+<span class="nc" id="L193">    }</span>
+
+    @Override
+    void startTLS() throws Exception {
+<span class="nc" id="L197">        connection.startTLS(false, false);</span>
+<span class="nc" id="L198">    }</span>
+
+    @Override
+    String getNamespace() {
+<span class="nc" id="L202">        return &quot;jabber:component:accept&quot;;</span>
+    }
+
+    @Override
+    boolean validateHost() {
+<span class="nc" id="L207">        return false;</span>
+    }
+
+    @Override
+    boolean validateJIDs() {
+<span class="nc" id="L212">        return false;</span>
+    }
+
+    @Override
+    boolean createSession(String namespace, String serverName, XmlPullParser xpp, Connection connection)
+            throws XmlPullParserException {
+<span class="nc bnc" id="L218" title="All 2 branches missed.">        if (getNamespace().equals(namespace)) {</span>
+            // The connected client is a connection manager so create a ConnectionMultiplexerSession
+<span class="nc" id="L220">            session = LocalComponentSession.createSession(serverName, xpp, connection);</span>
+<span class="nc" id="L221">            return true;</span>
+        }
+<span class="nc" id="L223">        return false;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

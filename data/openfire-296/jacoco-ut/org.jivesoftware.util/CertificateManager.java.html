@@ -1,0 +1,674 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>CertificateManager.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.util</a> &gt; <span class="el_source">CertificateManager.java</span></div><h1>CertificateManager.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.util;
+
+import org.bouncycastle.asn1.*;
+import org.bouncycastle.asn1.pkcs.PKCSObjectIdentifiers;
+import org.bouncycastle.asn1.pkcs.PrivateKeyInfo;
+import org.bouncycastle.asn1.x500.X500Name;
+import org.bouncycastle.asn1.x500.X500NameBuilder;
+import org.bouncycastle.asn1.x500.style.BCStyle;
+import org.bouncycastle.asn1.x509.Extension;
+import org.bouncycastle.asn1.x509.ExtensionsGenerator;
+import org.bouncycastle.asn1.x509.GeneralName;
+import org.bouncycastle.asn1.x509.GeneralNames;
+import org.bouncycastle.cert.CertException;
+import org.bouncycastle.cert.X509CertificateHolder;
+import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter;
+import org.bouncycastle.cert.jcajce.JcaX509ExtensionUtils;
+import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder;
+import org.bouncycastle.jce.provider.BouncyCastleProvider;
+import org.bouncycastle.openssl.*;
+import org.bouncycastle.openssl.jcajce.JcaMiscPEMGenerator;
+import org.bouncycastle.openssl.jcajce.JcaPEMKeyConverter;
+import org.bouncycastle.openssl.jcajce.JceOpenSSLPKCS8DecryptorProviderBuilder;
+import org.bouncycastle.openssl.jcajce.JcePEMDecryptorProviderBuilder;
+import org.bouncycastle.operator.ContentSigner;
+import org.bouncycastle.operator.ContentVerifierProvider;
+import org.bouncycastle.operator.InputDecryptorProvider;
+import org.bouncycastle.operator.OperatorCreationException;
+import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder;
+import org.bouncycastle.operator.jcajce.JcaContentVerifierProviderBuilder;
+import org.bouncycastle.pkcs.PKCS10CertificationRequest;
+import org.bouncycastle.pkcs.PKCS8EncryptedPrivateKeyInfo;
+import org.bouncycastle.pkcs.PKCSException;
+import org.bouncycastle.pkcs.jcajce.JcaPKCS10CertificationRequestBuilder;
+import org.bouncycastle.util.io.pem.PemObjectGenerator;
+import org.bouncycastle.util.io.pem.PemWriter;
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.disco.DiscoItem;
+import org.jivesoftware.openfire.keystore.CertificateStore;
+import org.jivesoftware.openfire.keystore.CertificateUtils;
+import org.jivesoftware.util.cert.CNCertificateIdentityMapping;
+import org.jivesoftware.util.cert.CertificateIdentityMapping;
+import org.jivesoftware.util.cert.SANCertificateIdentityMapping;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.io.*;
+import java.math.BigInteger;
+import java.nio.charset.StandardCharsets;
+import java.security.*;
+import java.security.cert.CertificateException;
+import java.security.cert.CertificateFactory;
+import java.security.cert.CertificateParsingException;
+import java.security.cert.X509Certificate;
+import java.util.*;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+/**
+ * Utility class that provides similar functionality to the keytool tool. Generated certificates
+ * conform to the XMPP spec where domains are kept in the subject alternative names extension.
+ *
+ * @author Gaston Dombiak
+ */
+<span class="nc" id="L81">public class CertificateManager {</span>
+
+<span class="fc" id="L83">    private static final Logger Log = LoggerFactory.getLogger( CertificateManager.class );</span>
+
+<span class="fc" id="L85">    private static Pattern valuesPattern = Pattern.compile(&quot;(?i)(=)([^,]*)&quot;);</span>
+
+<span class="fc" id="L87">    private static List&lt;CertificateEventListener&gt; listeners = new CopyOnWriteArrayList&lt;&gt;();</span>
+
+<span class="fc" id="L89">    private static List&lt;CertificateIdentityMapping&gt; serverCertMapping = new ArrayList&lt;&gt;();</span>
+    
+<span class="fc" id="L91">    private static List&lt;CertificateIdentityMapping&gt; clientCertMapping = new ArrayList&lt;&gt;();</span>
+    
+    static {
+
+<span class="pc bpc" id="L95" title="1 of 2 branches missed.">        if ( Security.getProvider( BouncyCastleProvider.PROVIDER_NAME ) == null )</span>
+        {
+<span class="nc" id="L97">            java.security.Security.addProvider( new BouncyCastleProvider() );</span>
+        }
+
+<span class="fc" id="L100">        String serverCertIdentityMapList = JiveGlobals.getProperty(&quot;provider.serverCertIdentityMap.classList&quot;);</span>
+<span class="pc bpc" id="L101" title="1 of 2 branches missed.">        if (serverCertIdentityMapList != null) {</span>
+<span class="nc" id="L102">            StringTokenizer st = new StringTokenizer(serverCertIdentityMapList, &quot; ,\t\n\r\f&quot;);</span>
+<span class="nc bnc" id="L103" title="All 2 branches missed.">            while (st.hasMoreTokens()) {</span>
+<span class="nc" id="L104">                String s_provider = st.nextToken();</span>
+                try {
+<span class="nc" id="L106">                    Class&lt;?&gt; c_provider = ClassUtils.forName(s_provider);</span>
+<span class="nc" id="L107">                    CertificateIdentityMapping provider =</span>
+<span class="nc" id="L108">                            (CertificateIdentityMapping)(c_provider.newInstance());</span>
+<span class="nc" id="L109">                    Log.debug(&quot;CertificateManager: Loaded server identity mapping &quot; + s_provider);</span>
+<span class="nc" id="L110">                    serverCertMapping.add(provider);</span>
+                }
+<span class="nc" id="L112">                catch (Exception e) {</span>
+<span class="nc" id="L113">                    Log.error(&quot;CertificateManager: Error loading CertificateIdentityMapping: &quot; + s_provider + &quot;\n&quot; + e);</span>
+<span class="nc" id="L114">                }</span>
+<span class="nc" id="L115">            }</span>
+        }
+        
+<span class="pc bpc" id="L118" title="1 of 2 branches missed.">        if (serverCertMapping.isEmpty()) {</span>
+<span class="fc" id="L119">            Log.debug(&quot;CertificateManager: No server CertificateIdentityMapping's found. Loading default mappings&quot;);</span>
+<span class="fc" id="L120">            serverCertMapping.add(new SANCertificateIdentityMapping());</span>
+<span class="fc" id="L121">            serverCertMapping.add(new CNCertificateIdentityMapping());   	</span>
+        }
+                
+<span class="fc" id="L124">        String clientCertMapList = JiveGlobals.getProperty(&quot;provider.clientCertIdentityMap.classList&quot;);</span>
+<span class="pc bpc" id="L125" title="1 of 2 branches missed.">        if (clientCertMapList != null) {</span>
+<span class="nc" id="L126">            StringTokenizer st = new StringTokenizer(clientCertMapList, &quot; ,\t\n\r\f&quot;);</span>
+<span class="nc bnc" id="L127" title="All 2 branches missed.">            while (st.hasMoreTokens()) {</span>
+<span class="nc" id="L128">                String s_provider = st.nextToken();</span>
+                try {
+<span class="nc" id="L130">                    Class&lt;?&gt; c_provider = ClassUtils.forName(s_provider);</span>
+<span class="nc" id="L131">                    CertificateIdentityMapping provider =</span>
+<span class="nc" id="L132">                            (CertificateIdentityMapping)(c_provider.newInstance());</span>
+<span class="nc" id="L133">                    Log.debug(&quot;CertificateManager: Loaded client identity mapping &quot; + s_provider);</span>
+<span class="nc" id="L134">                    clientCertMapping.add(provider);</span>
+                }
+<span class="nc" id="L136">                catch (Exception e) {</span>
+<span class="nc" id="L137">                    Log.error(&quot;CertificateManager: Error loading CertificateIdentityMapping: &quot; + s_provider + &quot;\n&quot; + e);</span>
+<span class="nc" id="L138">                }</span>
+<span class="nc" id="L139">            }</span>
+        }
+        
+<span class="pc bpc" id="L142" title="1 of 2 branches missed.">        if (clientCertMapping.isEmpty()) {</span>
+<span class="fc" id="L143">            Log.debug(&quot;CertificateManager: No client CertificateIdentityMapping's found. Loading default mappings&quot;);</span>
+<span class="fc" id="L144">            clientCertMapping.add(new CNCertificateIdentityMapping());</span>
+        }
+<span class="fc" id="L146">    }</span>
+
+
+    /**
+     * Returns the identities of the remote client as defined in the specified certificate. The
+     * identities are mapped by the classes in the &quot;provider.clientCertIdentityMap.classList&quot; property. 
+     * By default, the subjectDN of the certificate is used.
+     *
+     * @param x509Certificate the certificate the holds the identities of the remote server.
+     * @return the identities of the remote client as defined in the specified certificate.
+     */
+    public static List&lt;String&gt; getClientIdentities(X509Certificate x509Certificate) {
+        
+<span class="nc" id="L159">        List&lt;String&gt; names = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L160" title="All 2 branches missed.">        for (CertificateIdentityMapping mapping : clientCertMapping) {</span>
+<span class="nc" id="L161">            List&lt;String&gt; identities = mapping.mapIdentity(x509Certificate);</span>
+<span class="nc" id="L162">            Log.debug(&quot;CertificateManager: &quot; + mapping.name() + &quot; returned &quot; + identities.toString());</span>
+<span class="nc bnc" id="L163" title="All 2 branches missed.">            if (!identities.isEmpty()) {</span>
+<span class="nc" id="L164">                names.addAll(identities);</span>
+<span class="nc" id="L165">                break;</span>
+            }
+<span class="nc" id="L167">        }</span>
+
+<span class="nc" id="L169">        return names;</span>
+    }
+    
+    /**
+     * Returns the identities of the remote server as defined in the specified certificate. The
+     * identities are mapped by the classes in the &quot;provider.serverCertIdentityMap.classList&quot; property.
+     * By default, the identities are defined in the subjectDN of the certificate and it can also be 
+     * defined in the subjectAltName extensions of type &quot;xmpp&quot;. When the extension is being used then the
+     * identities defined in the extension are going to be returned. Otherwise, the value stored in
+     * the subjectDN is returned.
+     *
+     * @param x509Certificate the certificate the holds the identities of the remote server.
+     * @return the identities of the remote server as defined in the specified certificate.
+     */
+    public static List&lt;String&gt; getServerIdentities(X509Certificate x509Certificate) {
+        
+<span class="fc" id="L185">        List&lt;String&gt; names = new ArrayList&lt;&gt;();</span>
+<span class="pc bpc" id="L186" title="1 of 2 branches missed.">        for (CertificateIdentityMapping mapping : serverCertMapping) {</span>
+<span class="fc" id="L187">            List&lt;String&gt; identities = mapping.mapIdentity(x509Certificate);</span>
+<span class="fc" id="L188">            Log.debug(&quot;CertificateManager: &quot; + mapping.name() + &quot; returned &quot; + identities.toString());</span>
+<span class="fc bfc" id="L189" title="All 2 branches covered.">            if (!identities.isEmpty()) {</span>
+<span class="fc" id="L190">                names.addAll(identities);</span>
+<span class="fc" id="L191">                break;</span>
+            }
+<span class="fc" id="L193">        }</span>
+
+<span class="fc" id="L195">        return names;</span>
+    }
+
+    /**
+     * Returns true if the specified certificate is a self-signed certificate.
+     * @param certificate  the certificate to check
+     * @return true if the specified certificate is a self-signed certificate.
+     */
+    public static boolean isSelfSignedCertificate(X509Certificate certificate) {
+        try {
+<span class="nc" id="L205">            certificate.verify(certificate.getPublicKey());</span>
+<span class="nc" id="L206">            return true;</span>
+<span class="nc" id="L207">        } catch (GeneralSecurityException e) {</span>
+<span class="nc" id="L208">            return false;</span>
+        }
+    }
+
+    /**
+     * Returns true if the specified certificate is ready to be signed by a Certificate Authority. Self-signed
+     * certificates need to get their issuer information entered to be able to generate a Certificate
+     * Signing Request (CSR).
+     *
+     * @param certificate the certificate to check
+     * @return true if the specified certificate is ready to be signed by a Certificate Authority.
+     */
+    public static boolean isSigningRequestPending(X509Certificate certificate) {
+        // Verify that this is a self-signed certificate
+<span class="nc bnc" id="L222" title="All 2 branches missed.">        if (!isSelfSignedCertificate(certificate)) {</span>
+<span class="nc" id="L223">            return false;</span>
+        }
+        // Verify that the issuer information has been entered
+<span class="nc" id="L226">        Matcher matcher = valuesPattern.matcher(certificate.getIssuerDN().toString());</span>
+<span class="nc bnc" id="L227" title="All 4 branches missed.">        return matcher.find() &amp;&amp; matcher.find();</span>
+    }
+
+    /**
+     * Creates and returns the content of a new singing request for the specified certificate. Signing
+     * requests are required by Certificate Authorities as part of their signing process. The signing request
+     * contains information about the certificate issuer, subject DN, subject alternative names and public key.
+     * Private keys are not included. After the Certificate Authority verified and signed the certificate a new
+     * certificate is going to be returned.
+     *
+     * @param cert the certificate to create a signing request.
+     * @param privKey the private key of the certificate.
+     * @return the content of a new singing request for the specified certificate.
+     * @throws OperatorCreationException if there was a problem creating the CSR
+     * @throws IOException if there was a problem creating the CSR
+     * @throws CertificateParsingException if there was a problem creating the CSR
+     */
+    public static String createSigningRequest(X509Certificate cert, PrivateKey privKey) throws OperatorCreationException, IOException, CertificateParsingException
+    {
+<span class="nc" id="L246">        JcaPKCS10CertificationRequestBuilder csrBuilder = new JcaPKCS10CertificationRequestBuilder( //</span>
+<span class="nc" id="L247">                cert.getSubjectX500Principal(), //</span>
+<span class="nc" id="L248">                cert.getPublicKey() //</span>
+                );
+
+        // Add SubjectAlternativeNames (SANs)
+<span class="nc" id="L252">        final ASN1EncodableVector subjectAlternativeNames = new ASN1EncodableVector();</span>
+
+<span class="nc" id="L254">        final Collection&lt;List&lt;?&gt;&gt; certSans = cert.getSubjectAlternativeNames();</span>
+<span class="nc bnc" id="L255" title="All 2 branches missed.">        if ( certSans != null )</span>
+        {
+<span class="nc bnc" id="L257" title="All 2 branches missed.">            for ( final List&lt;?&gt; certSan : certSans )</span>
+            {
+<span class="nc" id="L259">                final int nameType = (Integer) certSan.get( 0 );</span>
+<span class="nc" id="L260">                final Object value = certSan.get( 1 ); // this is either a string, or a byte-array that represents the ASN.1 DER encoded form.</span>
+<span class="nc bnc" id="L261" title="All 4 branches missed.">                switch ( nameType )</span>
+                {
+                    case 0:
+                        // OtherName: search for &quot;id-on-xmppAddr&quot; or 'sRVName' or 'userPrincipalName'
+<span class="nc" id="L265">                        try ( final ASN1InputStream decoder = new ASN1InputStream( (byte[]) value ) )</span>
+                        {
+                            // By specification, OtherName instances must always be an ASN.1 Sequence.
+<span class="nc" id="L268">                            final ASN1Primitive object = decoder.readObject();</span>
+<span class="nc" id="L269">                            final ASN1Sequence otherNameSeq = (ASN1Sequence) object;</span>
+
+                            // By specification, an OtherName instance consists of:
+                            // - the type-id (which is an Object Identifier), followed by:
+                            // - a tagged value, of which the tag number is 0 (zero) and the value is defined by the type-id.
+<span class="nc" id="L274">                            final ASN1ObjectIdentifier typeId = (ASN1ObjectIdentifier) otherNameSeq.getObjectAt( 0 );</span>
+<span class="nc" id="L275">                            final ASN1TaggedObject taggedValue = (ASN1TaggedObject) otherNameSeq.getObjectAt( 1 );</span>
+
+<span class="nc" id="L277">                            final int tagNo = taggedValue.getTagNo();</span>
+<span class="nc bnc" id="L278" title="All 2 branches missed.">                            if ( tagNo != 0 )</span>
+                            {
+<span class="nc" id="L280">                                throw new IllegalArgumentException( &quot;subjectAltName 'otherName' sequence's second object is expected to be a tagged value of which the tag number is 0. The tag number that was detected: &quot; + tagNo );</span>
+                            }
+<span class="nc" id="L282">                            subjectAlternativeNames.add(</span>
+                                new DERTaggedObject( false,
+                                                     GeneralName.otherName,
+                                                     new DERSequence(
+                                                         new ASN1Encodable[] {
+                                                             typeId,
+                                                             taggedValue
+                                                         }
+                                                     )
+                                )
+                            );
+<span class="nc bnc" id="L293" title="All 8 branches missed.">                        }</span>
+<span class="nc" id="L294">                        catch ( Exception e )</span>
+                        {
+<span class="nc" id="L296">                            Log.warn( &quot;Unable to parse certificate SAN 'otherName' value&quot;, e );</span>
+<span class="nc" id="L297">                        }</span>
+<span class="nc" id="L298">                        break;</span>
+                    case 2:
+                        // DNS
+<span class="nc" id="L301">                        subjectAlternativeNames.add( new GeneralName( GeneralName.dNSName, (String) value ) );</span>
+<span class="nc" id="L302">                        break;</span>
+                    case 6:
+                        // URI
+<span class="nc" id="L305">                        subjectAlternativeNames.add( new GeneralName( GeneralName.uniformResourceIdentifier, (String) value ) );</span>
+<span class="nc" id="L306">                        break;</span>
+                    default:
+                        // Not applicable to XMPP, so silently ignore them
+                        break;
+                }
+
+<span class="nc" id="L312">            }</span>
+        }
+
+<span class="nc" id="L315">        final GeneralNames subjectAltNames = GeneralNames.getInstance(</span>
+            new DERSequence( subjectAlternativeNames )
+        );
+
+<span class="nc" id="L319">        final ExtensionsGenerator extGen = new ExtensionsGenerator();</span>
+<span class="nc" id="L320">        extGen.addExtension(Extension.subjectAlternativeName, false, subjectAltNames);</span>
+<span class="nc" id="L321">        csrBuilder.addAttribute( PKCSObjectIdentifiers.pkcs_9_at_extensionRequest, extGen.generate());</span>
+
+<span class="nc" id="L323">        String signatureAlgorithm = &quot;SHA256WITH&quot; + cert.getPublicKey().getAlgorithm();</span>
+
+<span class="nc" id="L325">        ContentSigner signer = new JcaContentSignerBuilder(signatureAlgorithm).build(privKey);</span>
+<span class="nc" id="L326">        PKCS10CertificationRequest csr = csrBuilder.build(signer);</span>
+
+<span class="nc" id="L328">        StringWriter string = new StringWriter();</span>
+<span class="nc" id="L329">        PemWriter pemWriter = new PemWriter(string);</span>
+
+<span class="nc" id="L331">        PemObjectGenerator objGen = new MiscPEMGenerator(csr);</span>
+<span class="nc" id="L332">        pemWriter.writeObject(objGen);</span>
+<span class="nc" id="L333">        pemWriter.close();</span>
+
+<span class="nc" id="L335">        return string.toString();</span>
+    }
+
+    /**
+     * Generates a PEM representation of the input argument.
+     *
+     * @param object the input argument (cannot be null).
+     * @return PEM representation of the input argument.
+     * @throws IOException When a PEM representation of the input could not be created.
+     */
+    public static String toPemRepresentation( Object object ) throws IOException
+    {
+<span class="nc" id="L347">        final StringWriter result = new StringWriter();</span>
+<span class="nc" id="L348">        try ( final PemWriter pemWriter = new PemWriter(result) )</span>
+        {
+<span class="nc" id="L350">            final PemObjectGenerator objGen = new JcaMiscPEMGenerator ( object );</span>
+<span class="nc" id="L351">            pemWriter.writeObject( objGen );</span>
+<span class="nc bnc" id="L352" title="All 8 branches missed.">        }</span>
+<span class="nc" id="L353">        return result.toString();</span>
+    }
+
+    public static PrivateKey parsePrivateKey(String pemRepresentation, String passPhrase) throws IOException {
+
+<span class="nc bnc" id="L358" title="All 4 branches missed.">        if (pemRepresentation == null || pemRepresentation.trim().isEmpty()) {</span>
+<span class="nc" id="L359">            throw new IllegalArgumentException(&quot;Argument 'pemRepresentation' cannot be null or an empty String.&quot;);</span>
+        }
+
+<span class="nc" id="L362">        ByteArrayInputStream input = new ByteArrayInputStream(pemRepresentation.getBytes(StandardCharsets.UTF_8));</span>
+<span class="nc" id="L363">        return parsePrivateKey(input, passPhrase);</span>
+    }
+
+    /**
+     * Parses a PrivateKey instance from a PEM representation.
+     *
+     * When the provided key is encrypted, the provided pass phrase is applied.
+     *
+     * @param pemRepresentation a PEM representation of a private key (cannot be null or empty)
+     * @param passPhrase optional pass phrase (must be present if the private key is encrypted).
+     * @return a PrivateKey instance (never null)
+     * @throws IOException if there was a problem parsing the key
+     */
+    public static PrivateKey parsePrivateKey(InputStream pemRepresentation, String passPhrase) throws IOException {
+
+<span class="pc bpc" id="L378" title="1 of 2 branches missed.">        if ( passPhrase == null ) {</span>
+<span class="nc" id="L379">            passPhrase = &quot;&quot;;</span>
+        }
+<span class="pc" id="L381">        try (Reader reader = new InputStreamReader(pemRepresentation); //</span>
+<span class="fc" id="L382">                PEMParser pemParser = new PEMParser(reader)) {</span>
+
+<span class="fc" id="L384">            final Object object = pemParser.readObject();</span>
+<span class="fc" id="L385">            final JcaPEMKeyConverter converter = new JcaPEMKeyConverter().setProvider( &quot;BC&quot; );</span>
+
+            final KeyPair kp;
+
+<span class="pc bpc" id="L389" title="1 of 2 branches missed.">            if ( object instanceof PEMEncryptedKeyPair )</span>
+            {
+                // Encrypted key - we will use provided password
+<span class="nc" id="L392">                final PEMDecryptorProvider decProv = new JcePEMDecryptorProviderBuilder().build( passPhrase.toCharArray() );</span>
+<span class="nc" id="L393">                kp = converter.getKeyPair( ( (PEMEncryptedKeyPair) object ).decryptKeyPair( decProv ) );</span>
+<span class="nc" id="L394">            }</span>
+<span class="pc bpc" id="L395" title="1 of 2 branches missed.">            else if ( object instanceof PKCS8EncryptedPrivateKeyInfo )</span>
+            {
+                // Encrypted key - we will use provided password
+                try
+                {
+<span class="nc" id="L400">                    final PKCS8EncryptedPrivateKeyInfo encryptedInfo = (PKCS8EncryptedPrivateKeyInfo) object;</span>
+<span class="nc" id="L401">                    final InputDecryptorProvider provider = new JceOpenSSLPKCS8DecryptorProviderBuilder().build( passPhrase.toCharArray() );</span>
+<span class="nc" id="L402">                    final PrivateKeyInfo privateKeyInfo = encryptedInfo.decryptPrivateKeyInfo( provider );</span>
+<span class="nc" id="L403">                    return converter.getPrivateKey( privateKeyInfo );</span>
+                }
+<span class="nc" id="L405">                catch ( PKCSException | OperatorCreationException e )</span>
+                {
+<span class="nc" id="L407">                    throw new IOException( &quot;Unable to decrypt private key.&quot;, e );</span>
+                }
+            }
+<span class="pc bpc" id="L410" title="1 of 2 branches missed.">            else if ( object instanceof PrivateKeyInfo )</span>
+            {
+<span class="nc" id="L412">                return converter.getPrivateKey( (PrivateKeyInfo) object );</span>
+            }
+            else
+            {
+                // Unencrypted key - no password needed
+<span class="fc" id="L417">                kp = converter.getKeyPair( (PEMKeyPair) object );</span>
+            }
+<span class="fc" id="L419">            return kp.getPrivate();</span>
+<span class="pc bpc" id="L420" title="28 of 32 branches missed.">        }</span>
+    }
+
+    public static Collection&lt;X509Certificate&gt; parseCertificates(String pemRepresentation) throws IOException,
+            CertificateException {
+
+        // The parser is very picky. We should trim each line of the input string.
+<span class="nc" id="L427">        final String pem = pemRepresentation //</span>
+<span class="nc" id="L428">                .replaceAll(&quot;(?m) +$&quot;, &quot;&quot;) // remove trailing whitespace</span>
+<span class="nc" id="L429">                .replaceAll(&quot;(?m)^ +&quot;, &quot;&quot;); // remove leading whitespace</span>
+
+<span class="nc" id="L431">        ByteArrayInputStream input = new ByteArrayInputStream(pem.getBytes(StandardCharsets.UTF_8));</span>
+<span class="nc" id="L432">        return parseCertificates(input);</span>
+    }
+
+    /**
+     * Parses a certificate chain from a PEM representation.
+     *
+     * @param pemRepresentation a PEM representation of a certificate or certificate chain (cannot be null or empty)
+     * @return A collection of certificates (possibly empty, but never null).
+     * @throws IOException never
+     * @throws CertificateException if there was a problem parsing certificates
+     */
+    @SuppressWarnings(&quot;unchecked&quot;)
+    public static Collection&lt;X509Certificate&gt; parseCertificates(InputStream pemRepresentation) throws IOException,
+            CertificateException {
+
+        CertificateFactory certificateFactory;
+        try {
+<span class="fc" id="L449">            certificateFactory = CertificateFactory.getInstance(&quot;X509&quot;, &quot;BC&quot;);</span>
+<span class="nc" id="L450">        } catch (NoSuchProviderException e) {</span>
+<span class="nc" id="L451">            certificateFactory = CertificateFactory.getInstance(&quot;X509&quot;);</span>
+<span class="fc" id="L452">        }</span>
+<span class="fc" id="L453">        return (Collection&lt;X509Certificate&gt;) certificateFactory.generateCertificates(pemRepresentation);</span>
+    }
+
+    /**
+     * Registers a listener to receive events.
+     *
+     * @param listener the listener.
+     */
+    public static void addListener(CertificateEventListener listener) {
+<span class="nc bnc" id="L462" title="All 2 branches missed.">        if (listener == null) {</span>
+<span class="nc" id="L463">            throw new NullPointerException();</span>
+        }
+<span class="nc" id="L465">        listeners.add( listener );</span>
+<span class="nc" id="L466">    }</span>
+
+    /**
+     * Unregisters a listener to receive events.
+     *
+     * @param listener the listener.
+     */
+    public static void removeListener(CertificateEventListener listener) {
+<span class="nc" id="L474">        listeners.remove( listener );</span>
+<span class="nc" id="L475">    }</span>
+
+    /**
+     * Notify listeners that a certificate store has been changed.
+     * @param store the store that has changed
+     */
+    public static void fireCertificateStoreChanged( CertificateStore store )
+    {
+<span class="nc bnc" id="L483" title="All 2 branches missed.">        for ( CertificateEventListener listener : listeners )</span>
+        {
+            try
+            {
+<span class="nc" id="L487">                listener.storeContentChanged( store );</span>
+            }
+<span class="nc" id="L489">            catch ( Exception e )</span>
+            {
+<span class="nc" id="L491">                Log.error( &quot;A listener threw an exception while processing a 'store changed' event.&quot;, e );</span>
+<span class="nc" id="L492">            }</span>
+<span class="nc" id="L493">        }</span>
+<span class="nc" id="L494">    }</span>
+
+    /**
+     * Orders certificates, starting from the entity to be validated and progressing back toward the CA root.
+     *
+     * This implementation matches &quot;issuers&quot; to &quot;subjects&quot; of certificates in such a way that &quot;issuer&quot; value of a
+     * certificate matches the &quot;subject&quot; value of the next certificate.
+     *
+     * When certificates are provided that do not belong to the same chain, a CertificateException is thrown.
+     *
+     * @param certificates an unordered collection of certificates (cannot be null).
+     * @return An ordered list of certificates (possibly empty, but never null).
+     * @deprecated Moved to CertificateUtils
+     * @throws CertificateException if there was a problem accessing the certificates
+     */
+    @Deprecated
+    public static List&lt;X509Certificate&gt; order( Collection&lt;X509Certificate&gt; certificates ) throws CertificateException
+    {
+<span class="nc" id="L512">        return CertificateUtils.order( certificates );</span>
+    }
+
+    /**
+     * Creates an X509 version3 certificate.
+     *
+     * @param kp           KeyPair that keeps the public and private keys for the new certificate.
+     * @param days       time to live
+     * @param issuerCommonName     Issuer CN string
+     * @param subjectCommonName    Subject CN string
+     * @param domain       Domain of the server.
+     * @param signAlgoritm Signature algorithm. This can be either a name or an OID.
+     * @return X509 V3 Certificate
+     * @throws GeneralSecurityException if there was a problem creating the certificate
+     * @throws IOException if there was a problem creating the certificate
+     */
+    public static synchronized X509Certificate createX509V3Certificate(KeyPair kp, int days, String issuerCommonName,
+                                                                        String subjectCommonName, String domain,
+                                                                        String signAlgoritm)
+            throws GeneralSecurityException, IOException {
+<span class="nc" id="L532">        return createX509V3Certificate( kp, days, issuerCommonName, subjectCommonName, domain, signAlgoritm, null );</span>
+    }
+
+    public static synchronized X509Certificate createX509V3Certificate(KeyPair kp, int days, String issuerCommonName,
+                                                                        String subjectCommonName, String domain,
+                                                                        String signAlgoritm, Set&lt;String&gt; sanDnsNames)
+            throws GeneralSecurityException, IOException {
+
+        // subjectDN
+<span class="fc" id="L541">        X500NameBuilder subjectBuilder = new X500NameBuilder();</span>
+<span class="fc" id="L542">        subjectBuilder.addRDN(BCStyle.CN, subjectCommonName);</span>
+
+        // issuerDN
+<span class="fc" id="L545">        X500NameBuilder issuerBuilder = new X500NameBuilder();</span>
+<span class="fc" id="L546">        issuerBuilder.addRDN(BCStyle.CN, issuerCommonName);</span>
+
+<span class="fc" id="L548">        return createX509V3Certificate(kp, days, issuerBuilder, subjectBuilder, domain, signAlgoritm, sanDnsNames);</span>
+    }
+
+    /**
+     * Creates an X509 version3 certificate.
+     *
+     * @param kp           KeyPair that keeps the public and private keys for the new certificate.
+     * @param days       time to live
+     * @param issuerBuilder     IssuerDN builder
+     * @param subjectBuilder    SubjectDN builder
+     * @param domain       Domain of the server.
+     * @param signAlgoritm Signature algorithm. This can be either a name or an OID.
+     * @return X509 V3 Certificate
+     * @throws GeneralSecurityException if there was a problem creating the certificate
+     * @throws IOException if there was a problem creating the certificate
+     */
+    public static synchronized X509Certificate createX509V3Certificate(KeyPair kp, int days, X500NameBuilder issuerBuilder,
+            X500NameBuilder subjectBuilder, String domain, String signAlgoritm ) throws GeneralSecurityException, IOException
+    {
+<span class="nc" id="L567">        return createX509V3Certificate( kp, days, issuerBuilder, subjectBuilder, domain, signAlgoritm, null );</span>
+    }
+
+    public static synchronized X509Certificate createX509V3Certificate(KeyPair kp, int days, X500NameBuilder issuerBuilder,
+            X500NameBuilder subjectBuilder, String domain, String signAlgoritm, Set&lt;String&gt; sanDnsNames ) throws GeneralSecurityException, IOException {
+<span class="fc" id="L572">        PublicKey pubKey = kp.getPublic();</span>
+<span class="fc" id="L573">        PrivateKey privKey = kp.getPrivate();</span>
+
+<span class="fc" id="L575">        byte[] serno = new byte[8];</span>
+<span class="fc" id="L576">        SecureRandom random = SecureRandom.getInstance(&quot;SHA1PRNG&quot;);</span>
+<span class="fc" id="L577">        random.setSeed((new Date().getTime()));</span>
+<span class="fc" id="L578">        random.nextBytes(serno);</span>
+<span class="fc" id="L579">        BigInteger serial = (new java.math.BigInteger(serno)).abs();</span>
+
+<span class="fc" id="L581">        X500Name issuerDN = issuerBuilder.build();</span>
+<span class="fc" id="L582">        X500Name subjectDN = subjectBuilder.build();</span>
+
+        // builder
+<span class="fc" id="L585">        JcaX509v3CertificateBuilder certBuilder = new JcaX509v3CertificateBuilder( //</span>
+                issuerDN, //
+                serial, //
+                new Date(), //
+<span class="fc" id="L589">                new Date(System.currentTimeMillis() + days * (1000L * 60 * 60 * 24)), //</span>
+                subjectDN, //
+                pubKey //
+                );
+
+        // add subjectAlternativeName extension that includes all relevant names.
+<span class="fc" id="L595">        final GeneralNames subjectAlternativeNames = getSubjectAlternativeNames( sanDnsNames );</span>
+
+<span class="pc bpc" id="L597" title="1 of 2 branches missed.">        final boolean critical = subjectDN.getRDNs().length == 0;</span>
+<span class="fc" id="L598">        certBuilder.addExtension(Extension.subjectAlternativeName, critical, subjectAlternativeNames);</span>
+
+        // add keyIdentifiers extensions
+<span class="fc" id="L601">        JcaX509ExtensionUtils utils = new JcaX509ExtensionUtils();</span>
+<span class="fc" id="L602">        certBuilder.addExtension(Extension.subjectKeyIdentifier, false, utils.createSubjectKeyIdentifier(pubKey));</span>
+<span class="fc" id="L603">        certBuilder.addExtension(Extension.authorityKeyIdentifier, false, utils.createAuthorityKeyIdentifier(pubKey));</span>
+
+        try {
+            // build the certificate
+<span class="fc" id="L607">            ContentSigner signer = new JcaContentSignerBuilder(signAlgoritm).build(privKey);</span>
+<span class="fc" id="L608">            X509CertificateHolder cert = certBuilder.build(signer);</span>
+
+            // verify the validity
+<span class="pc bpc" id="L611" title="1 of 2 branches missed.">            if (!cert.isValidOn(new Date())) {</span>
+<span class="nc" id="L612">                throw new GeneralSecurityException(&quot;Certificate validity not valid&quot;);</span>
+            }
+
+            // verify the signature (self-signed)
+<span class="fc" id="L616">            ContentVerifierProvider verifierProvider = new JcaContentVerifierProviderBuilder().build(pubKey);</span>
+<span class="pc bpc" id="L617" title="1 of 2 branches missed.">            if (!cert.isSignatureValid(verifierProvider)) {</span>
+<span class="nc" id="L618">                throw new GeneralSecurityException(&quot;Certificate signature not valid&quot;);</span>
+            }
+
+<span class="fc" id="L621">            return new JcaX509CertificateConverter().getCertificate(cert);</span>
+
+<span class="nc" id="L623">        } catch (OperatorCreationException | CertException e) {</span>
+<span class="nc" id="L624">            throw new GeneralSecurityException(e);</span>
+        }
+    }
+
+    protected static GeneralNames getSubjectAlternativeNames( Set&lt;String&gt; sanDnsNames )
+    {
+<span class="fc" id="L630">        final ASN1EncodableVector subjectAlternativeNames = new ASN1EncodableVector();</span>
+<span class="pc bpc" id="L631" title="1 of 2 branches missed.">        if ( sanDnsNames != null )</span>
+        {
+<span class="fc bfc" id="L633" title="All 2 branches covered.">            for ( final String dnsNameValue : sanDnsNames )</span>
+            {
+<span class="fc" id="L635">                subjectAlternativeNames.add(</span>
+                    new GeneralName( GeneralName.dNSName, dnsNameValue )
+                );
+<span class="fc" id="L638">            }</span>
+        }
+
+<span class="fc" id="L641">        return GeneralNames.getInstance(</span>
+            new DERSequence( subjectAlternativeNames )
+        );
+    }
+
+    /**
+     * Finds all values that aught to be added as a Subject Alternate Name of the dnsName type to a certificate that
+     * identifies this XMPP server.
+     *
+     * @return A set of names, possibly empty, never null.
+     */
+    public static Set&lt;String&gt; determineSubjectAlternateNameDnsNameValues()
+    {
+<span class="nc" id="L654">        final HashSet&lt;String&gt; result = new HashSet&lt;&gt;();</span>
+
+        // Add the XMPP domain name itself.
+<span class="nc" id="L657">        result.add( XMPPServer.getInstance().getServerInfo().getXMPPDomain() );</span>
+
+        // The fully qualified domain name of the server
+<span class="nc" id="L660">        result.add( XMPPServer.getInstance().getServerInfo().getHostname() );</span>
+
+<span class="nc bnc" id="L662" title="All 2 branches missed.">        if ( XMPPServer.getInstance().getIQDiscoItemsHandler() != null ) // When we're not in setup any longer...</span>
+        {
+            // Add the name of each of the domain level item nodes as reported by service discovery.
+<span class="nc bnc" id="L665" title="All 2 branches missed.">            for ( final DiscoItem item : XMPPServer.getInstance().getIQDiscoItemsHandler().getServerItems() )</span>
+            {
+<span class="nc" id="L667">                result.add( item.getJID().toBareJID() );</span>
+<span class="nc" id="L668">            }</span>
+        }
+
+<span class="nc" id="L671">        return result;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

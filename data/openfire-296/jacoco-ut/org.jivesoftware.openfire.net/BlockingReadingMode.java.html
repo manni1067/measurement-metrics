@@ -1,0 +1,235 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>BlockingReadingMode.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.net</a> &gt; <span class="el_source">BlockingReadingMode.java</span></div><h1>BlockingReadingMode.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.net;
+
+import java.io.EOFException;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.net.Socket;
+import java.net.SocketException;
+import java.nio.channels.AsynchronousCloseException;
+
+import org.dom4j.Element;
+import org.jivesoftware.util.LocaleUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmlpull.v1.XmlPullParser;
+import org.xmlpull.v1.XmlPullParserException;
+
+import com.jcraft.jzlib.JZlib;
+import com.jcraft.jzlib.ZInputStream;
+
+/**
+ * Process incoming packets using a blocking model. Once a session has been created
+ * an endless loop is used to process incoming packets. Packets are processed
+ * sequentially.
+ *
+ * @author Gaston Dombiak
+ */
+class BlockingReadingMode extends SocketReadingMode {
+
+<span class="nc" id="L46">    private static final Logger Log = LoggerFactory.getLogger(BlockingReadingMode.class);</span>
+
+    public BlockingReadingMode(Socket socket, SocketReader socketReader) {
+<span class="nc" id="L49">        super(socket, socketReader);</span>
+<span class="nc" id="L50">    }</span>
+
+    /**
+     * A dedicated thread loop for reading the stream and sending incoming
+     * packets to the appropriate router.
+     */
+    @Override
+    public void run() {
+        try {
+            final InputStream inputStream;
+<span class="nc bnc" id="L60" title="All 2 branches missed.">            if (socketReader.directTLS ) {</span>
+<span class="nc" id="L61">                inputStream = socketReader.connection.getTLSStreamHandler().getInputStream();</span>
+            } else {
+<span class="nc" id="L63">                inputStream = socket.getInputStream();</span>
+            }
+<span class="nc" id="L65">            socketReader.reader.getXPPParser().setInput(new InputStreamReader(</span>
+<span class="nc" id="L66">                    ServerTrafficCounter.wrapInputStream(inputStream), CHARSET));</span>
+
+            // Read in the opening tag and prepare for packet stream
+            try {
+<span class="nc" id="L70">                socketReader.createSession();</span>
+            }
+<span class="nc" id="L72">            catch (IOException e) {</span>
+<span class="nc" id="L73">                Log.debug(&quot;Error creating session&quot;, e);</span>
+<span class="nc" id="L74">                throw e;</span>
+<span class="nc" id="L75">            }</span>
+
+            // Read the packet stream until it ends
+<span class="nc bnc" id="L78" title="All 2 branches missed.">            if (socketReader.session != null) {</span>
+<span class="nc" id="L79">                readStream();</span>
+            }
+
+        }
+<span class="nc" id="L83">        catch (EOFException eof) {</span>
+            // Normal disconnect
+        }
+<span class="nc" id="L86">        catch (SocketException se) {</span>
+            // The socket was closed. The server may close the connection for several
+            // reasons (e.g. user requested to remove his account). Do nothing here.
+        }
+<span class="nc" id="L90">        catch (AsynchronousCloseException ace) {</span>
+            // The socket was closed.
+        }
+<span class="nc" id="L93">        catch (XmlPullParserException ie) {</span>
+            // It is normal for clients to abruptly cut a connection
+            // rather than closing the stream document. Since this is
+            // normal behavior, we won't log it as an error.
+            // Log.error(LocaleUtils.getLocalizedString(&quot;admin.disconnect&quot;),ie);
+        }
+<span class="nc" id="L99">        catch (Exception e) {</span>
+<span class="nc bnc" id="L100" title="All 2 branches missed.">            if (socketReader.session != null) {</span>
+<span class="nc" id="L101">                Log.warn(LocaleUtils.getLocalizedString(&quot;admin.error.stream&quot;) + &quot;. Session: &quot; +</span>
+                        socketReader.session, e);
+            }
+        }
+        finally {
+<span class="nc bnc" id="L106" title="All 14 branches missed.">            if (socketReader.session != null) {</span>
+<span class="nc bnc" id="L107" title="All 14 branches missed.">                if (Log.isDebugEnabled()) {</span>
+<span class="nc" id="L108">                    Log.debug(&quot;Logging off &quot; + socketReader.session.getAddress() + &quot; on &quot; + socketReader.connection);</span>
+                }
+                try {
+<span class="nc" id="L111">                    Log.debug( &quot;Closing session: {}&quot;, socketReader.session );</span>
+<span class="nc" id="L112">                    socketReader.session.close();</span>
+                }
+<span class="nc" id="L114">                catch (Exception e) {</span>
+<span class="nc" id="L115">                    Log.warn(LocaleUtils.getLocalizedString(&quot;admin.error.connection&quot;) + socket.toString());</span>
+<span class="nc" id="L116">                }</span>
+            }
+            else {
+                // Close and release the created connection
+<span class="nc" id="L120">                socketReader.connection.close();</span>
+<span class="nc" id="L121">                Log.debug(LocaleUtils.getLocalizedString(&quot;admin.error.connection&quot;) + socket.toString());</span>
+            }
+<span class="nc" id="L123">            socketReader.shutdown();</span>
+<span class="nc" id="L124">        }</span>
+<span class="nc" id="L125">    }</span>
+
+    /**
+     * Read the incoming stream until it ends.
+     */
+    private void readStream() throws Exception {
+<span class="nc" id="L131">        socketReader.open = true;</span>
+<span class="nc bnc" id="L132" title="All 2 branches missed.">        while (socketReader.open) {</span>
+<span class="nc" id="L133">            Element doc = socketReader.reader.parseDocument().getRootElement();</span>
+<span class="nc bnc" id="L134" title="All 2 branches missed.">            if (doc == null) {</span>
+                // Stop reading the stream since the client has sent an end of
+                // stream element and probably closed the connection.
+<span class="nc" id="L137">                return;</span>
+            }
+<span class="nc" id="L139">            String tag = doc.getName();</span>
+<span class="nc bnc" id="L140" title="All 2 branches missed.">            if (&quot;starttls&quot;.equals(tag)) {</span>
+                // Negotiate TLS
+<span class="nc bnc" id="L142" title="All 2 branches missed.">                if (negotiateTLS()) {</span>
+<span class="nc" id="L143">                    tlsNegotiated();</span>
+                }
+                else {
+<span class="nc" id="L146">                    socketReader.open = false;</span>
+<span class="nc" id="L147">                    socketReader.session = null;</span>
+                }
+            }
+<span class="nc bnc" id="L150" title="All 2 branches missed.">            else if (&quot;auth&quot;.equals(tag)) {</span>
+                // User is trying to authenticate using SASL
+<span class="nc bnc" id="L152" title="All 2 branches missed.">                if (authenticateClient(doc)) {</span>
+                    // SASL authentication was successful so open a new stream and offer
+                    // resource binding and session establishment (to client sessions only)
+<span class="nc" id="L155">                    saslSuccessful();</span>
+                }
+<span class="nc bnc" id="L157" title="All 2 branches missed.">                else if (socketReader.connection.isClosed()) {</span>
+<span class="nc" id="L158">                    socketReader.open = false;</span>
+<span class="nc" id="L159">                    socketReader.session = null;</span>
+                }
+            }
+<span class="nc bnc" id="L162" title="All 2 branches missed.">            else if (&quot;compress&quot;.equals(tag))</span>
+            {
+                // Client is trying to initiate compression
+<span class="nc bnc" id="L165" title="All 2 branches missed.">                if (compressClient(doc)) {</span>
+                    // Compression was successful so open a new stream and offer
+                    // resource binding and session establishment (to client sessions only)
+<span class="nc" id="L168">                    compressionSuccessful();</span>
+                }
+            }
+            else {
+<span class="nc" id="L172">                socketReader.process(doc);</span>
+            }
+<span class="nc" id="L174">        }</span>
+<span class="nc" id="L175">    }</span>
+
+    @Override
+    protected void tlsNegotiated() throws XmlPullParserException, IOException {
+<span class="nc" id="L179">        XmlPullParser xpp = socketReader.reader.getXPPParser();</span>
+        // Reset the parser to use the new reader
+<span class="nc" id="L181">        xpp.setInput(new InputStreamReader(</span>
+<span class="nc" id="L182">                socketReader.connection.getTLSStreamHandler().getInputStream(), CHARSET));</span>
+        // Skip new stream element
+<span class="nc bnc" id="L184" title="All 2 branches missed.">        for (int eventType = xpp.getEventType(); eventType != XmlPullParser.START_TAG;) {</span>
+<span class="nc" id="L185">            eventType = xpp.next();</span>
+        }
+<span class="nc" id="L187">        super.tlsNegotiated();</span>
+<span class="nc" id="L188">    }</span>
+
+    @Override
+    protected void saslSuccessful() throws XmlPullParserException, IOException {
+<span class="nc" id="L192">        MXParser xpp = socketReader.reader.getXPPParser();</span>
+        // Reset the parser since a new stream header has been sent from the client
+<span class="nc" id="L194">        xpp.resetInput();</span>
+
+        // Skip the opening stream sent by the client
+<span class="nc bnc" id="L197" title="All 2 branches missed.">        for (int eventType = xpp.getEventType(); eventType != XmlPullParser.START_TAG;) {</span>
+<span class="nc" id="L198">            eventType = xpp.next();</span>
+        }
+<span class="nc" id="L200">        super.saslSuccessful();</span>
+<span class="nc" id="L201">    }</span>
+
+    @Override
+    protected boolean compressClient(Element doc) throws XmlPullParserException, IOException {
+<span class="nc" id="L205">        boolean answer = super.compressClient(doc);</span>
+<span class="nc bnc" id="L206" title="All 2 branches missed.">        if (answer) {</span>
+<span class="nc" id="L207">            XmlPullParser xpp = socketReader.reader.getXPPParser();</span>
+            // Reset the parser since a new stream header has been sent from the client
+<span class="nc bnc" id="L209" title="All 2 branches missed.">            if (socketReader.connection.getTLSStreamHandler() == null) {</span>
+<span class="nc" id="L210">                ZInputStream in = new ZInputStream(</span>
+<span class="nc" id="L211">                        ServerTrafficCounter.wrapInputStream(socket.getInputStream()));</span>
+<span class="nc" id="L212">                in.setFlushMode(JZlib.Z_PARTIAL_FLUSH);</span>
+<span class="nc" id="L213">                xpp.setInput(new InputStreamReader(in, CHARSET));</span>
+<span class="nc" id="L214">            }</span>
+            else {
+<span class="nc" id="L216">                ZInputStream in = new ZInputStream(</span>
+<span class="nc" id="L217">                        socketReader.connection.getTLSStreamHandler().getInputStream());</span>
+<span class="nc" id="L218">                in.setFlushMode(JZlib.Z_PARTIAL_FLUSH);</span>
+<span class="nc" id="L219">                xpp.setInput(new InputStreamReader(in, CHARSET));</span>
+            }
+        }
+<span class="nc" id="L222">        return answer;</span>
+    }
+
+    @Override
+    protected void compressionSuccessful() throws XmlPullParserException, IOException {
+<span class="nc" id="L227">        XmlPullParser xpp = socketReader.reader.getXPPParser();</span>
+        // Skip the opening stream sent by the client
+<span class="nc bnc" id="L229" title="All 2 branches missed.">        for (int eventType = xpp.getEventType(); eventType != XmlPullParser.START_TAG;) {</span>
+<span class="nc" id="L230">            eventType = xpp.next();</span>
+        }
+<span class="nc" id="L232">        super.compressionSuccessful();</span>
+<span class="nc" id="L233">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

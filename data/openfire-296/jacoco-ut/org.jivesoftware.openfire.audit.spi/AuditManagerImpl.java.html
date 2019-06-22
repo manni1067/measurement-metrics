@@ -1,0 +1,411 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>AuditManagerImpl.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.audit.spi</a> &gt; <span class="el_source">AuditManagerImpl.java</span></div><h1>AuditManagerImpl.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.audit.spi;
+
+import org.jivesoftware.util.JiveGlobals;
+import org.jivesoftware.util.PropertyEventDispatcher;
+import org.jivesoftware.util.PropertyEventListener;
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.audit.AuditManager;
+import org.jivesoftware.openfire.audit.Auditor;
+import org.jivesoftware.openfire.container.BasicModule;
+import org.jivesoftware.openfire.interceptor.InterceptorManager;
+import org.jivesoftware.openfire.interceptor.PacketInterceptor;
+import org.jivesoftware.openfire.session.Session;
+import org.xmpp.packet.JID;
+import org.xmpp.packet.Packet;
+
+import java.io.File;
+import java.util.*;
+
+/**
+ * Implementation of the AuditManager interface.
+ */
+public class AuditManagerImpl extends BasicModule implements AuditManager, PropertyEventListener {
+
+    private boolean enabled;
+    private boolean auditMessage;
+    private boolean auditPresence;
+    private boolean auditIQ;
+    private boolean auditXPath;
+<span class="nc" id="L45">    private List&lt;String&gt; xpath = new LinkedList&lt;&gt;();</span>
+<span class="nc" id="L46">    private AuditorImpl auditor = null;</span>
+    /**
+     * Max size in bytes that all audit log files may have. When the limit is reached
+     * oldest audit log files will be removed until total size is under the limit.
+     */
+    private int maxTotalSize;
+    /**
+     * Max size in bytes that each audit log file may have. Once the limit has been
+     * reached a new audit file will be created.
+     */
+    private int maxFileSize;
+    /**
+     * Max number of days to keep audit information. Once the limit has been reached
+     * audit files that contain information that exceed the limit will be deleted.
+     */
+    private int maxDays;
+    private int logTimeout;
+    private String logDir;
+<span class="nc" id="L64">    private Collection&lt;String&gt; ignoreList = new ArrayList&lt;&gt;();</span>
+    private static final int MAX_TOTAL_SIZE = 1000;
+    private static final int MAX_FILE_SIZE = 10;
+    private static final int MAX_DAYS = -1;
+    private static final int DEFAULT_LOG_TIMEOUT = 120000;
+    private AuditorInterceptor interceptor;
+
+    public AuditManagerImpl() {
+<span class="nc" id="L72">        super(&quot;Audit Manager&quot;);</span>
+<span class="nc" id="L73">    }</span>
+
+    @Override
+    public boolean isEnabled() {
+<span class="nc" id="L77">        return enabled;</span>
+    }
+
+    @Override
+    public void setEnabled(boolean enabled) {
+<span class="nc" id="L82">        this.enabled = enabled;</span>
+<span class="nc bnc" id="L83" title="All 2 branches missed.">        JiveGlobals.setProperty(&quot;xmpp.audit.active&quot;, enabled ? &quot;true&quot; : &quot;false&quot;);</span>
+<span class="nc" id="L84">        processEnabled(enabled);</span>
+<span class="nc" id="L85">    }</span>
+
+    @Override
+    public Auditor getAuditor() {
+<span class="nc bnc" id="L89" title="All 2 branches missed.">        if (auditor == null) {</span>
+<span class="nc" id="L90">            throw new IllegalStateException(&quot;Must initialize audit manager first&quot;);</span>
+        }
+<span class="nc" id="L92">        return auditor;</span>
+    }
+
+    @Override
+    public int getMaxTotalSize() {
+<span class="nc" id="L97">        return maxTotalSize;</span>
+    }
+
+    @Override
+    public void setMaxTotalSize(int size) {
+<span class="nc" id="L102">        maxTotalSize = size;</span>
+<span class="nc" id="L103">        auditor.setMaxValues(maxTotalSize, maxFileSize, maxDays);</span>
+<span class="nc" id="L104">        JiveGlobals.setProperty(&quot;xmpp.audit.totalsize&quot;, Integer.toString(size));</span>
+<span class="nc" id="L105">    }</span>
+
+    @Override
+    public int getMaxFileSize() {
+<span class="nc" id="L109">        return maxFileSize;</span>
+    }
+
+    @Override
+    public void setMaxFileSize(int size) {
+<span class="nc" id="L114">        maxFileSize = size;</span>
+<span class="nc" id="L115">        auditor.setMaxValues(maxTotalSize, maxFileSize, maxDays);</span>
+<span class="nc" id="L116">        JiveGlobals.setProperty(&quot;xmpp.audit.filesize&quot;, Integer.toString(size));</span>
+<span class="nc" id="L117">    }</span>
+
+    @Override
+    public int getMaxDays() {
+<span class="nc" id="L121">        return maxDays;</span>
+    }
+
+    @Override
+    public void setMaxDays(int count) {
+<span class="nc" id="L126">        maxDays = validateMaxDays(count);</span>
+<span class="nc" id="L127">        auditor.setMaxValues(maxTotalSize, maxFileSize, maxDays);</span>
+<span class="nc" id="L128">        JiveGlobals.setProperty(&quot;xmpp.audit.days&quot;, Integer.toString(count));</span>
+<span class="nc" id="L129">    }</span>
+
+    @Override
+    public int getLogTimeout() {
+<span class="nc" id="L133">        return logTimeout;</span>
+    }
+
+    @Override
+    public void setLogTimeout(int logTimeout) {
+<span class="nc" id="L138">        this.logTimeout = logTimeout;</span>
+<span class="nc" id="L139">        auditor.setLogTimeout(logTimeout);</span>
+<span class="nc" id="L140">        JiveGlobals.setProperty(&quot;xmpp.audit.logtimeout&quot;, Integer.toString(logTimeout));</span>
+<span class="nc" id="L141">    }</span>
+
+    @Override
+    public String getLogDir() {
+<span class="nc" id="L145">        return logDir;</span>
+    }
+
+    @Override
+    public void setLogDir(String logDir) {
+<span class="nc" id="L150">        this.logDir = logDir;</span>
+<span class="nc" id="L151">        auditor.setLogDir(logDir);</span>
+<span class="nc" id="L152">        JiveGlobals.setProperty(&quot;xmpp.audit.logdir&quot;, logDir);</span>
+<span class="nc" id="L153">    }</span>
+
+    @Override
+    public boolean isAuditMessage() {
+<span class="nc" id="L157">        return auditMessage;</span>
+    }
+
+    @Override
+    public void setAuditMessage(boolean auditMessage) {
+<span class="nc" id="L162">        this.auditMessage = auditMessage;</span>
+<span class="nc bnc" id="L163" title="All 2 branches missed.">        JiveGlobals.setProperty(&quot;xmpp.audit.message&quot;, auditMessage ? &quot;true&quot; : &quot;false&quot;);</span>
+<span class="nc" id="L164">    }</span>
+
+    @Override
+    public boolean isAuditPresence() {
+<span class="nc" id="L168">        return auditPresence;</span>
+    }
+
+    @Override
+    public void setAuditPresence(boolean auditPresence) {
+<span class="nc" id="L173">        this.auditPresence = auditPresence;</span>
+<span class="nc bnc" id="L174" title="All 2 branches missed.">        JiveGlobals.setProperty(&quot;xmpp.audit.presence&quot;, auditPresence ? &quot;true&quot; : &quot;false&quot;);</span>
+<span class="nc" id="L175">    }</span>
+
+    @Override
+    public boolean isAuditIQ() {
+<span class="nc" id="L179">        return auditIQ;</span>
+    }
+
+    @Override
+    public void setAuditIQ(boolean auditIQ) {
+<span class="nc" id="L184">        this.auditIQ = auditIQ;</span>
+<span class="nc" id="L185">        JiveGlobals.setProperty(&quot;xmpp.audit.iq&quot;, Boolean.toString(auditIQ));</span>
+<span class="nc" id="L186">    }</span>
+
+    @Override
+    public boolean isAuditXPath() {
+<span class="nc" id="L190">        return auditXPath;</span>
+    }
+
+    @Override
+    public void setAuditXPath(boolean auditXPath) {
+<span class="nc" id="L195">        this.auditXPath = auditXPath;</span>
+<span class="nc" id="L196">        JiveGlobals.setProperty(&quot;xmpp.audit.xpath&quot;, Boolean.toString(auditXPath));</span>
+<span class="nc" id="L197">    }</span>
+
+    @Override
+    public void addXPath(String xpathExpression) {
+<span class="nc" id="L201">        xpath.add(xpathExpression);</span>
+<span class="nc" id="L202">        saveXPath();</span>
+<span class="nc" id="L203">    }</span>
+
+    @Override
+    public void removeXPath(String xpathExpression) {
+<span class="nc" id="L207">        xpath.remove(xpathExpression);</span>
+<span class="nc" id="L208">        saveXPath();</span>
+<span class="nc" id="L209">    }</span>
+
+    private void saveXPath() {
+        // TODO: save XPath values!
+        //String[] filters = new String[xpath.size()];
+        //filters = (String[]) xpath.toArray(filters); 
+<span class="nc" id="L215">    }</span>
+
+    @Override
+    public Iterator getXPathFilters() {
+<span class="nc" id="L219">        return xpath.iterator();</span>
+    }
+
+    @Override
+    public void setIgnoreList(Collection&lt;String&gt; usernames) {
+<span class="nc bnc" id="L224" title="All 2 branches missed.">        if (ignoreList.equals(usernames)) {</span>
+<span class="nc" id="L225">            return;</span>
+        }
+<span class="nc" id="L227">        ignoreList = usernames;</span>
+        // Encode the collection
+<span class="nc" id="L229">        StringBuilder ignoreString = new StringBuilder();</span>
+<span class="nc bnc" id="L230" title="All 2 branches missed.">        for (String username : ignoreList) {</span>
+<span class="nc bnc" id="L231" title="All 2 branches missed.">            if (ignoreString.length() == 0) {</span>
+<span class="nc" id="L232">                ignoreString.append(username);</span>
+            }
+            else {
+<span class="nc" id="L235">                ignoreString.append(',').append(username);</span>
+            }
+<span class="nc" id="L237">        }</span>
+<span class="nc" id="L238">        JiveGlobals.setProperty(&quot;xmpp.audit.ignore&quot;, ignoreString.toString());</span>
+<span class="nc" id="L239">    }</span>
+
+    @Override
+    public Collection&lt;String&gt; getIgnoreList() {
+<span class="nc" id="L243">        return Collections.unmodifiableCollection(ignoreList);</span>
+    }
+
+    // #########################################################################
+    // Basic module methods
+    // #########################################################################
+
+    @Override
+    public void initialize(XMPPServer server) {
+<span class="nc" id="L252">        super.initialize(server);</span>
+<span class="nc" id="L253">        enabled = JiveGlobals.getBooleanProperty(&quot;xmpp.audit.active&quot;);</span>
+<span class="nc" id="L254">        auditMessage = JiveGlobals.getBooleanProperty(&quot;xmpp.audit.message&quot;);</span>
+<span class="nc" id="L255">        auditPresence = JiveGlobals.getBooleanProperty(&quot;xmpp.audit.presence&quot;);</span>
+<span class="nc" id="L256">        auditIQ = JiveGlobals.getBooleanProperty(&quot;xmpp.audit.iq&quot;);</span>
+<span class="nc" id="L257">        auditXPath = JiveGlobals.getBooleanProperty(&quot;xmpp.audit.xpath&quot;);</span>
+        // TODO: load xpath values!
+//        String[] filters = context.getProperties(&quot;xmpp.audit.filter.xpath&quot;);
+//        for (int i = 0; i &lt; filters.length; i++) {
+//            xpath.add(filters[i]);
+//        }
+<span class="nc" id="L263">        maxTotalSize = JiveGlobals.getIntProperty(&quot;xmpp.audit.totalsize&quot;, MAX_TOTAL_SIZE);</span>
+<span class="nc" id="L264">        maxFileSize = JiveGlobals.getIntProperty(&quot;xmpp.audit.filesize&quot;, MAX_FILE_SIZE);</span>
+<span class="nc" id="L265">        maxDays = JiveGlobals.getIntProperty(&quot;xmpp.audit.days&quot;, MAX_DAYS);</span>
+<span class="nc" id="L266">        logTimeout = JiveGlobals.getIntProperty(&quot;xmpp.audit.logtimeout&quot;, DEFAULT_LOG_TIMEOUT);</span>
+<span class="nc" id="L267">        logDir = JiveGlobals.getProperty(&quot;xmpp.audit.logdir&quot;, JiveGlobals.getHomeDirectory() +</span>
+                File.separator + &quot;logs&quot;);
+<span class="nc" id="L269">        processIgnoreString(JiveGlobals.getProperty(&quot;xmpp.audit.ignore&quot;, &quot;&quot;));</span>
+
+<span class="nc" id="L271">        auditor = new AuditorImpl(this);</span>
+<span class="nc" id="L272">        auditor.setMaxValues(maxTotalSize, maxFileSize, maxDays);</span>
+<span class="nc" id="L273">        auditor.setLogDir(logDir);</span>
+<span class="nc" id="L274">        auditor.setLogTimeout(logTimeout);</span>
+
+<span class="nc" id="L276">        interceptor = new AuditorInterceptor();</span>
+<span class="nc" id="L277">        processEnabled(enabled);</span>
+<span class="nc" id="L278">        PropertyEventDispatcher.addListener(this);</span>
+<span class="nc" id="L279">    }</span>
+
+    private void processIgnoreString(String ignoreString) {
+<span class="nc" id="L282">        ignoreList.clear();</span>
+        // Decode the ignore list
+<span class="nc" id="L284">        StringTokenizer tokenizer = new StringTokenizer(ignoreString, &quot;,&quot;);</span>
+<span class="nc bnc" id="L285" title="All 2 branches missed.">        while (tokenizer.hasMoreTokens()) {</span>
+<span class="nc" id="L286">            String username = tokenizer.nextToken().trim();</span>
+<span class="nc" id="L287">            ignoreList.add(username);</span>
+<span class="nc" id="L288">        }</span>
+<span class="nc" id="L289">    }</span>
+    
+    private void processEnabled(boolean enabled) {
+        // Add or remove the auditor interceptor depending on the enabled status
+<span class="nc bnc" id="L293" title="All 2 branches missed.">        if (enabled) {</span>
+<span class="nc" id="L294">            InterceptorManager.getInstance().addInterceptor(interceptor);</span>
+        } else {
+<span class="nc" id="L296">            InterceptorManager.getInstance().removeInterceptor(interceptor);</span>
+        }
+<span class="nc" id="L298">    }</span>
+
+    private int validateMaxDays(int count) {
+<span class="nc bnc" id="L301" title="All 2 branches missed.">        if (count &lt; -1) {</span>
+<span class="nc" id="L302">            count = -1;</span>
+        }
+<span class="nc bnc" id="L304" title="All 2 branches missed.">        if (count == 0) {</span>
+<span class="nc" id="L305">            count = 1;</span>
+        }
+<span class="nc" id="L307">        return count;</span>
+    }
+    
+    @Override
+    public void stop() {
+<span class="nc bnc" id="L312" title="All 2 branches missed.">        if (auditor != null) {</span>
+<span class="nc" id="L313">            auditor.stop();</span>
+        }
+<span class="nc" id="L315">    }</span>
+
+    @Override
+    public void propertySet(String property, Map&lt;String, Object&gt; params) {
+<span class="nc" id="L319">        final Object val = params.get(&quot;value&quot;);</span>
+<span class="nc bnc" id="L320" title="All 2 branches missed.">        if (!( val instanceof String ))</span>
+        {
+<span class="nc" id="L322">            return;</span>
+        }
+<span class="nc" id="L324">        String value = (String) val;</span>
+<span class="nc bnc" id="L325" title="All 46 branches missed.">        switch (property) {</span>
+            case &quot;xmpp.audit.active&quot;:
+<span class="nc" id="L327">                enabled = Boolean.parseBoolean(value);</span>
+<span class="nc" id="L328">                processEnabled(enabled);</span>
+<span class="nc" id="L329">                break;</span>
+            case &quot;xmpp.audit.message&quot;:
+<span class="nc" id="L331">                auditMessage = Boolean.parseBoolean(value);</span>
+<span class="nc" id="L332">                break;</span>
+            case &quot;xmpp.audit.presence&quot;:
+<span class="nc" id="L334">                auditPresence = Boolean.parseBoolean(value);</span>
+<span class="nc" id="L335">                break;</span>
+            case &quot;xmpp.audit.iq&quot;:
+<span class="nc" id="L337">                auditIQ = Boolean.parseBoolean(value);</span>
+<span class="nc" id="L338">                break;</span>
+            case &quot;xmpp.audit.xpath&quot;:
+<span class="nc" id="L340">                auditXPath = Boolean.parseBoolean(value);</span>
+<span class="nc" id="L341">                break;</span>
+            case &quot;xmpp.audit.totalsize&quot;:
+<span class="nc" id="L343">                maxTotalSize = parseIntegerOrDefault(value, MAX_TOTAL_SIZE);</span>
+<span class="nc" id="L344">                auditor.setMaxValues(maxTotalSize, maxFileSize, maxDays);</span>
+<span class="nc" id="L345">                break;</span>
+            case &quot;xmpp.audit.filesize&quot;:
+<span class="nc" id="L347">                maxFileSize = parseIntegerOrDefault(value, MAX_FILE_SIZE);</span>
+<span class="nc" id="L348">                auditor.setMaxValues(maxTotalSize, maxFileSize, maxDays);</span>
+<span class="nc" id="L349">                break;</span>
+            case &quot;xmpp.audit.days&quot;:
+<span class="nc" id="L351">                maxDays = validateMaxDays(parseIntegerOrDefault(value, MAX_DAYS));</span>
+<span class="nc" id="L352">                auditor.setMaxValues(maxTotalSize, maxFileSize, maxDays);</span>
+<span class="nc" id="L353">                break;</span>
+            case &quot;xmpp.audit.logtimeout&quot;:
+<span class="nc" id="L355">                logTimeout = parseIntegerOrDefault(value, DEFAULT_LOG_TIMEOUT);</span>
+<span class="nc" id="L356">                auditor.setLogTimeout(logTimeout);</span>
+<span class="nc" id="L357">                break;</span>
+            case &quot;xmpp.audit.logdir&quot;:
+<span class="nc" id="L359">                File d = null;</span>
+<span class="nc bnc" id="L360" title="All 4 branches missed.">                if (value != null &amp;&amp; !&quot;&quot;.equals(value.trim())) {</span>
+<span class="nc" id="L361">                    d = new File(value);</span>
+                }
+<span class="nc bnc" id="L363" title="All 8 branches missed.">                logDir = (d == null || !d.exists() || !d.canRead() || !d.canWrite() || !d</span>
+<span class="nc bnc" id="L364" title="All 2 branches missed.">                        .isDirectory()) ? JiveGlobals.getHomeDirectory()</span>
+                        + File.separator + &quot;logs&quot; : value;
+<span class="nc" id="L366">                auditor.setLogDir(logDir);</span>
+<span class="nc" id="L367">                break;</span>
+            case &quot;xmpp.audit.ignore&quot;:
+<span class="nc" id="L369">                processIgnoreString(value);</span>
+                break;
+        }
+<span class="nc" id="L372">    }</span>
+
+    private int parseIntegerOrDefault(String intValue, int defaultValue) {
+        try {
+<span class="nc" id="L376">            return Integer.parseInt(intValue);</span>
+<span class="nc" id="L377">        } catch (NumberFormatException nfe) {</span>
+<span class="nc" id="L378">            return defaultValue;</span>
+        }
+    }
+    
+    @Override
+    public void propertyDeleted(String property, Map&lt;String, Object&gt; params) {
+<span class="nc" id="L384">        propertySet(property, Collections.&lt;String, Object&gt;emptyMap());</span>
+<span class="nc" id="L385">    }</span>
+
+    @Override
+    public void xmlPropertySet(String property, Map&lt;String, Object&gt; params) {
+<span class="nc" id="L389">    }</span>
+
+    @Override
+    public void xmlPropertyDeleted(String property, Map&lt;String, Object&gt; params) {
+<span class="nc" id="L393">    }    </span>
+    
+<span class="nc" id="L395">    private class AuditorInterceptor implements PacketInterceptor {</span>
+
+        @Override
+        public void interceptPacket(Packet packet, Session session, boolean read, boolean processed) {
+<span class="nc bnc" id="L399" title="All 2 branches missed.">            if (!processed) {</span>
+                // Ignore packets sent or received by users that are present in the ignore list
+<span class="nc" id="L401">                JID from = packet.getFrom();</span>
+<span class="nc" id="L402">                JID to = packet.getTo();</span>
+<span class="nc bnc" id="L403" title="All 6 branches missed.">                if ((from == null || !ignoreList.contains(from.getNode())) &amp;&amp;</span>
+<span class="nc bnc" id="L404" title="All 2 branches missed.">                        (to == null || !ignoreList.contains(to.getNode()))) {</span>
+<span class="nc" id="L405">                    auditor.audit(packet, session);</span>
+                }
+            }
+<span class="nc" id="L408">        }</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

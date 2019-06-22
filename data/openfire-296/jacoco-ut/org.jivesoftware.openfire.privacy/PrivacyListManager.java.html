@@ -1,0 +1,279 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>PrivacyListManager.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.privacy</a> &gt; <span class="el_source">PrivacyListManager.java</span></div><h1>PrivacyListManager.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2004-2009 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.privacy;
+
+import org.dom4j.Element;
+import org.jivesoftware.util.cache.Cache;
+import org.jivesoftware.util.cache.CacheFactory;
+
+import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * A Privacy list manager creates, gets, updates and removes privacy lists. Loaded lists
+ * are kept in memory using a cache that will keep them at most for 6 hours.
+ *
+ * @author Gaston Dombiak
+ */
+public class PrivacyListManager {
+<span class="nc" id="L36">    private static final Logger logger = LoggerFactory.getLogger(PrivacyListManager.class);</span>
+
+<span class="nc" id="L38">    private static final PrivacyListManager instance = new PrivacyListManager();</span>
+    private static Cache&lt;String, PrivacyList&gt; listsCache;
+
+<span class="nc" id="L41">    private PrivacyListProvider provider = PrivacyListProvider.getInstance();</span>
+
+<span class="nc" id="L43">    private List&lt;PrivacyListEventListener&gt; listeners = new CopyOnWriteArrayList&lt;&gt;();</span>
+
+    private static final String MUTEX_SUFFIX = &quot; prv&quot;;
+    
+    static {
+<span class="nc" id="L48">        PrivacyListEventListener eventListener = new PrivacyListEventListener() {</span>
+            @Override
+            public void privacyListCreated(PrivacyList list) {
+                // Do nothing
+<span class="nc" id="L52">            }</span>
+
+            @Override
+            public void privacyListDeleting(String listName) {
+                // Do nothing
+<span class="nc" id="L57">            }</span>
+
+            @Override
+            public void privacyListModified(PrivacyList list) {
+                // Set object again in cache. This is done so that other cluster nodes
+                // get refreshed with latest version of the object
+<span class="nc" id="L63">                listsCache.put(getCacheKey(list.getUserJID().getNode(), list.getName()), list);</span>
+<span class="nc" id="L64">            }</span>
+        };
+<span class="nc" id="L66">        instance.addListener(eventListener);</span>
+<span class="nc" id="L67">    }</span>
+
+    /**
+     * Returns the unique instance of this class.
+     *
+     * @return the unique instance of this class.
+     */
+    public static PrivacyListManager getInstance() {
+<span class="nc" id="L75">        return instance;</span>
+    }
+
+<span class="nc" id="L78">    private PrivacyListManager() {</span>
+        // Create the cache of privacy lists
+<span class="nc" id="L80">        String cacheName = &quot;Privacy Lists&quot;;</span>
+<span class="nc" id="L81">        listsCache = CacheFactory.createCache(cacheName);</span>
+<span class="nc" id="L82">    }</span>
+
+    /**
+     * Creates a new privacy list for the specified user.
+     *
+     * @param username the username of the list owner.
+     * @param listName the name of the new privacy list.
+     * @param listElement the XML that specifies the list and its items.
+     * @return the newly created PrivacyList.
+     */
+    public PrivacyList createPrivacyList(String username, String listName, Element listElement) {
+        // Create new list
+<span class="nc" id="L94">        PrivacyList list = new PrivacyList(username, listName, false, listElement);</span>
+        // Add new list to cache
+<span class="nc" id="L96">        listsCache.put(getCacheKey(username, listName), list);</span>
+        // Save new  list to database
+<span class="nc" id="L98">        provider.createPrivacyList(username, list);</span>
+        // Trigger event that a new privacy list has been created
+<span class="nc bnc" id="L100" title="All 2 branches missed.">        for (PrivacyListEventListener listener : listeners) {</span>
+            try {
+<span class="nc" id="L102">                listener.privacyListCreated(list);   </span>
+<span class="nc" id="L103">            } catch (Exception e) {</span>
+<span class="nc" id="L104">                logger.warn(&quot;An exception occurred while dispatching a 'privacyListCreated' event!&quot;, e);</span>
+<span class="nc" id="L105">            }</span>
+<span class="nc" id="L106">        }</span>
+<span class="nc" id="L107">        return list;</span>
+    }
+
+    /**
+     * Deletes an existing privacy list of a user. If the privacy list being deleted was
+     * the default list then the user will end up with no default list. Therefore, the user
+     * will have to set a new default list.
+     *
+     * @param username the username of the list owner.
+     * @param listName the name of the list being deleted.
+     */
+    public void deletePrivacyList(String username, String listName) {
+        // Trigger event that a privacy list is being deleted
+<span class="nc bnc" id="L120" title="All 2 branches missed.">        for (PrivacyListEventListener listener : listeners) {</span>
+            try {
+<span class="nc" id="L122">                listener.privacyListDeleting(listName);</span>
+<span class="nc" id="L123">            } catch (Exception e) {</span>
+<span class="nc" id="L124">                logger.warn(&quot;An exception occurred while dispatching a 'privacyListDeleting' event!&quot;, e);</span>
+<span class="nc" id="L125">            }</span>
+<span class="nc" id="L126">        }</span>
+        // Remove the list from the cache
+<span class="nc" id="L128">        listsCache.remove(getCacheKey(username, listName));</span>
+        // Delete the privacy list from the DB
+<span class="nc" id="L130">        provider.deletePrivacyList(username, listName);</span>
+        // Check if deleted list was the default list
+<span class="nc" id="L132">        PrivacyList defaultList = listsCache.get(getDefaultCacheKey(username));</span>
+<span class="nc bnc" id="L133" title="All 4 branches missed.">        if (defaultList != null &amp;&amp; listName.equals(defaultList.getName())) {</span>
+<span class="nc" id="L134">            listsCache.remove(getDefaultCacheKey(username));</span>
+        }
+<span class="nc" id="L136">    }</span>
+
+    /**
+     * Deletes all privacy lists of a user. This may be necessary when a user is being
+     * deleted from the system.
+     *
+     * @param username the username of the list owner.
+     */
+    public void deletePrivacyLists(String username) {
+<span class="nc bnc" id="L145" title="All 2 branches missed.">        for (String listName : provider.getPrivacyLists(username).keySet()) {</span>
+            // Remove the list from the cache
+<span class="nc" id="L147">            listsCache.remove(getCacheKey(username, listName));</span>
+            // Trigger event that a privacy list is being deleted
+<span class="nc bnc" id="L149" title="All 2 branches missed.">            for (PrivacyListEventListener listener : listeners) {</span>
+                try {
+<span class="nc" id="L151">                    listener.privacyListDeleting(listName);</span>
+<span class="nc" id="L152">                } catch (Exception e) {</span>
+<span class="nc" id="L153">                    logger.warn(&quot;An exception occurred while dispatching a 'privacyListDeleting' event!&quot;, e);</span>
+<span class="nc" id="L154">                }</span>
+<span class="nc" id="L155">            }</span>
+<span class="nc" id="L156">        }</span>
+        // Delete user privacy lists from the DB
+<span class="nc" id="L158">        provider.deletePrivacyLists(username);</span>
+<span class="nc" id="L159">    }</span>
+
+    /**
+     * Returns the default privacy list of the specified user or {@code null} if
+     * none was found.
+     *
+     * @param username the name of the user to get his default list.
+     * @return the default privacy list of the specified user or {@code null} if
+     *         none was found.
+     */
+    public PrivacyList getDefaultPrivacyList(String username) {
+        // Check if we have the default list in the cache
+<span class="nc" id="L171">        String cacheKey = getDefaultCacheKey(username);</span>
+<span class="nc" id="L172">        PrivacyList list = listsCache.get(cacheKey);</span>
+<span class="nc bnc" id="L173" title="All 2 branches missed.">        if (list == null) {</span>
+<span class="nc" id="L174">            synchronized ((username + MUTEX_SUFFIX).intern()) {</span>
+<span class="nc" id="L175">                list = listsCache.get(cacheKey);</span>
+<span class="nc bnc" id="L176" title="All 2 branches missed.">                if (list == null) {</span>
+                    // Load default list from the database
+<span class="nc" id="L178">                    list = provider.loadDefaultPrivacyList(username);</span>
+<span class="nc bnc" id="L179" title="All 2 branches missed.">                    if (list != null) {</span>
+<span class="nc" id="L180">                        listsCache.put(cacheKey, list);</span>
+                    }
+                }
+<span class="nc" id="L183">            }</span>
+        }
+<span class="nc" id="L185">        return list;</span>
+    }
+
+    /**
+     * Returns a specific privacy list of the specified user or {@code null} if
+     * none was found.
+     *
+     * @param username the name of the user to get his privacy list.
+     * @param listName the name of the list to get.
+     * @return a privacy list of the specified user or {@code null} if
+     *         none was found.
+     */
+    public PrivacyList getPrivacyList(String username, String listName) {
+        // Check if we have a list in the cache
+<span class="nc" id="L199">        String cacheKey = getCacheKey(username, listName);</span>
+<span class="nc" id="L200">        PrivacyList list = listsCache.get(cacheKey);</span>
+<span class="nc bnc" id="L201" title="All 2 branches missed.">        if (list == null) {</span>
+            // Load the list from the database
+<span class="nc" id="L203">            list = provider.loadPrivacyList(username, listName);</span>
+<span class="nc bnc" id="L204" title="All 2 branches missed.">            if (list != null) {</span>
+<span class="nc" id="L205">                listsCache.put(cacheKey, list);</span>
+            }
+        }
+<span class="nc" id="L208">        return list;</span>
+    }
+
+    /**
+     * Sets a given privacy list as the new default list of the user.
+     *
+     * @param username the name of the user that is setting a new default list.
+     * @param newDefault the new default privacy list.
+     * @param oldDefault the previous privacy list or {@code null} if no default list existed.
+     */
+    public void changeDefaultList(String username, PrivacyList newDefault, PrivacyList oldDefault) {
+        // TODO Analyze concurrency issues when other resource may log in while doing this change
+<span class="nc bnc" id="L220" title="All 2 branches missed.">        if (oldDefault != null) {</span>
+            // Update old default list to become just another list
+<span class="nc" id="L222">            oldDefault.setDefaultList(false);</span>
+<span class="nc" id="L223">            provider.updatePrivacyList(username, oldDefault);</span>
+        }
+        // Update new list to become the default
+<span class="nc" id="L226">        newDefault.setDefaultList(true);</span>
+        // Set new default list in the cache
+<span class="nc" id="L228">        listsCache.put(getDefaultCacheKey(username), newDefault);</span>
+        // Update both lists in the database
+<span class="nc" id="L230">        provider.updatePrivacyList(username, newDefault);</span>
+<span class="nc" id="L231">    }</span>
+
+    /**
+     * Registers a listener to receive events when a privacy list is created, updated or deleted.
+     *
+     * @param listener the listener.
+     */
+    public void addListener(PrivacyListEventListener listener) {
+<span class="nc bnc" id="L239" title="All 2 branches missed.">        if (listener == null) {</span>
+<span class="nc" id="L240">            throw new NullPointerException();</span>
+        }
+<span class="nc" id="L242">        listeners.add(listener);</span>
+<span class="nc" id="L243">    }</span>
+
+    /**
+     * Unregisters a listener to receive events.
+     *
+     * @param listener the listener.
+     */
+    public void removeListener(PrivacyListEventListener listener) {
+<span class="nc" id="L251">        listeners.remove(listener);</span>
+<span class="nc" id="L252">    }</span>
+
+    /**
+     * Returns the key to use to locate a privacy list in the cache.
+     */
+    private static String getCacheKey(String username, String listName) {
+<span class="nc" id="L258">        return username + listName;</span>
+    }
+
+    /**
+     * Returns the key to use to locate default privacy lists in the cache.
+     */
+    private static String getDefaultCacheKey(String username) {
+<span class="nc" id="L265">        return getCacheKey(username, &quot;__d_e_f_a_u_l_t__&quot;);</span>
+    }
+
+    void dispatchModifiedEvent(PrivacyList privacyList) {
+        // Trigger event that a privacy list has been modified
+<span class="nc bnc" id="L270" title="All 2 branches missed.">        for (PrivacyListEventListener listener : listeners) {</span>
+            try {
+<span class="nc" id="L272">                listener.privacyListModified(privacyList); </span>
+<span class="nc" id="L273">            } catch (Exception e) {</span>
+<span class="nc" id="L274">                logger.warn(&quot;An exception occurred while dispatching a 'privacyListModified' event!&quot;, e);   </span>
+<span class="nc" id="L275">            }</span>
+<span class="nc" id="L276">        }</span>
+<span class="nc" id="L277">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

@@ -1,0 +1,1349 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>JiveGlobals.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.util</a> &gt; <span class="el_source">JiveGlobals.java</span></div><h1>JiveGlobals.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2004-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.util;
+
+import java.io.File;
+import java.io.IOException;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.SQLException;
+import java.text.DateFormat;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Map.Entry;
+import java.util.SortedSet;
+import java.util.TimeZone;
+import java.util.TimerTask;
+import java.util.TreeSet;
+
+import org.apache.commons.lang3.StringUtils;
+import org.jivesoftware.database.DbConnectionManager;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Controls Jive properties. Jive properties are only meant to be set and retrieved
+ * by core Jive classes. Some properties may be stored in XML format while others in the
+ * database.&lt;p&gt;
+ *
+ * When starting up the application this class needs to be configured so that the initial
+ * configuration of the application may be loaded from the configuration file. The configuration
+ * file holds properties stored in XML format, database configuration and user authentication
+ * configuration. Use {@link #setHomeDirectory(String)} and {@link #setConfigName(String)} for
+ * setting the home directory and path to the configuration file.&lt;p&gt;
+ *
+ * XML property names must be in the form &lt;code&gt;prop.name&lt;/code&gt; - parts of the name must
+ * be separated by &quot;.&quot;. The value can be any valid String, including strings with line breaks.
+ */
+<span class="nc" id="L58">public class JiveGlobals {</span>
+
+<span class="fc" id="L60">    private static final Logger Log = LoggerFactory.getLogger(JiveGlobals.class);</span>
+
+<span class="fc" id="L62">    private static String JIVE_CONFIG_FILENAME = &quot;conf&quot; + File.separator + &quot;openfire.xml&quot;;</span>
+    
+<span class="fc" id="L64">    private static final String JIVE_SECURITY_FILENAME = &quot;conf&quot; + File.separator + &quot;security.xml&quot;;</span>
+    private static final String ENCRYPTED_PROPERTY_NAME_PREFIX = &quot;encrypt.&quot;;
+    private static final String ENCRYPTED_PROPERTY_NAMES = ENCRYPTED_PROPERTY_NAME_PREFIX + &quot;property.name&quot;;
+    private static final String ENCRYPTION_ALGORITHM = ENCRYPTED_PROPERTY_NAME_PREFIX + &quot;algorithm&quot;;
+    private static final String ENCRYPTION_KEY_CURRENT = ENCRYPTED_PROPERTY_NAME_PREFIX + &quot;key.current&quot;;
+    private static final String ENCRYPTION_KEY_NEW = ENCRYPTED_PROPERTY_NAME_PREFIX + &quot;key.new&quot;;
+    private static final String ENCRYPTION_KEY_OLD = ENCRYPTED_PROPERTY_NAME_PREFIX + &quot;key.old&quot;;
+    private static final String ENCRYPTION_ALGORITHM_AES = &quot;AES&quot;;
+    private static final String ENCRYPTION_ALGORITHM_BLOWFISH = &quot;Blowfish&quot;;
+
+    /**
+     * Location of the jiveHome directory. All configuration files should be
+     * located here.
+     */
+<span class="fc" id="L78">    private static String home = null;</span>
+
+<span class="fc" id="L80">    private static boolean failedLoading = false;</span>
+
+<span class="fc" id="L82">    private static XMLProperties openfireProperties = null;</span>
+<span class="fc" id="L83">    private static XMLProperties securityProperties = null;</span>
+<span class="fc" id="L84">    private static JiveProperties properties = null;</span>
+
+<span class="fc" id="L86">    private static Locale locale = null;</span>
+<span class="fc" id="L87">    private static TimeZone timeZone = null;</span>
+<span class="fc" id="L88">    private static DateFormat dateFormat = null;</span>
+<span class="fc" id="L89">    private static DateFormat dateTimeFormat = null;</span>
+<span class="fc" id="L90">    private static DateFormat timeFormat = null;</span>
+    
+<span class="fc" id="L92">    private static Encryptor propertyEncryptor = null;</span>
+<span class="fc" id="L93">    private static Encryptor propertyEncryptorNew = null;</span>
+<span class="fc" id="L94">    private static String currentKey = null;</span>
+
+    /**
+     * Returns the global Locale used by Jive. A locale specifies language
+     * and country codes, and is used for internationalization. The default
+     * locale is system dependent - Locale.getDefault().
+     *
+     * @return the global locale used by Jive.
+     */
+    public static Locale getLocale() {
+<span class="fc bfc" id="L104" title="All 2 branches covered.">        if (locale == null) {</span>
+<span class="pc bpc" id="L105" title="1 of 2 branches missed.">            if (openfireProperties != null) {</span>
+                String [] localeArray;
+<span class="fc" id="L107">                String localeProperty = openfireProperties.getProperty(&quot;locale&quot;);</span>
+<span class="pc bpc" id="L108" title="1 of 2 branches missed.">                if (localeProperty != null) {</span>
+<span class="nc" id="L109">                    localeArray = localeProperty.split(&quot;_&quot;);</span>
+                }
+                else {
+<span class="fc" id="L112">                    localeArray = new String[] {&quot;&quot;, &quot;&quot;};</span>
+                }
+
+<span class="fc" id="L115">                String language = localeArray[0];</span>
+<span class="pc bpc" id="L116" title="1 of 2 branches missed.">                if (language == null) {</span>
+<span class="nc" id="L117">                    language = &quot;&quot;;</span>
+                }
+<span class="fc" id="L119">                String country = &quot;&quot;;</span>
+<span class="pc bpc" id="L120" title="1 of 2 branches missed.">                if (localeArray.length == 2) {</span>
+<span class="fc" id="L121">                    country = localeArray[1];</span>
+                }
+                // If no locale info is specified, return the system default Locale.
+<span class="pc bpc" id="L124" title="2 of 4 branches missed.">                if (language.equals(&quot;&quot;) &amp;&amp; country.equals(&quot;&quot;)) {</span>
+<span class="fc" id="L125">                    locale = Locale.getDefault();</span>
+                }
+                else {
+<span class="nc" id="L128">                    locale = new Locale(language, country);</span>
+                }
+<span class="fc" id="L130">            }</span>
+            else {
+<span class="nc" id="L132">                return Locale.getDefault();</span>
+            }
+        }
+<span class="fc" id="L135">        return locale;</span>
+    }
+
+    /**
+     * Sets the global locale used by Jive. A locale specifies language
+     * and country codes, and is used for formatting dates and numbers.
+     * The default locale is Locale.US.
+     *
+     * @param newLocale the global Locale for Jive.
+     */
+    public static void setLocale(Locale newLocale) {
+<span class="fc" id="L146">        locale = newLocale;</span>
+        // Save values to Jive properties.
+<span class="fc" id="L148">        setXMLProperty(&quot;locale&quot;, locale.toString());</span>
+
+        // Reset the date formatter objects
+<span class="fc" id="L151">        timeFormat = null;</span>
+<span class="fc" id="L152">        dateFormat = null;</span>
+<span class="fc" id="L153">        dateTimeFormat = null;</span>
+<span class="fc" id="L154">    }</span>
+
+    /**
+     * Returns the global TimeZone used by Jive. The default is the VM's
+     * default time zone.
+     *
+     * @return the global time zone used by Jive.
+     */
+    public static TimeZone getTimeZone() {
+<span class="nc bnc" id="L163" title="All 2 branches missed.">        if (timeZone == null) {</span>
+<span class="nc bnc" id="L164" title="All 2 branches missed.">            if (properties != null) {</span>
+<span class="nc" id="L165">                String timeZoneID = properties.get(&quot;locale.timeZone&quot;);</span>
+<span class="nc bnc" id="L166" title="All 2 branches missed.">                if (timeZoneID == null) {</span>
+<span class="nc" id="L167">                    timeZone = TimeZone.getDefault();</span>
+                }
+                else {
+<span class="nc" id="L170">                    timeZone = TimeZone.getTimeZone(timeZoneID);</span>
+                }
+<span class="nc" id="L172">            }</span>
+            else {
+<span class="nc" id="L174">                return TimeZone.getDefault();</span>
+            }
+        }
+<span class="nc" id="L177">        return timeZone;</span>
+    }
+
+    /**
+     * Sets the global time zone used by Jive. The default time zone is the VM's
+     * time zone.
+     *
+     * @param newTimeZone Time zone to set.
+     */
+    public static void setTimeZone(TimeZone newTimeZone) {
+<span class="nc" id="L187">        timeZone = newTimeZone;</span>
+<span class="nc bnc" id="L188" title="All 2 branches missed.">        if (timeFormat != null) {</span>
+<span class="nc" id="L189">            timeFormat.setTimeZone(timeZone);</span>
+        }
+<span class="nc bnc" id="L191" title="All 2 branches missed.">        if (dateFormat != null) {</span>
+<span class="nc" id="L192">            dateFormat.setTimeZone(timeZone);</span>
+        }
+<span class="nc bnc" id="L194" title="All 2 branches missed.">        if (dateTimeFormat != null) {</span>
+<span class="nc" id="L195">            dateTimeFormat.setTimeZone(timeZone);</span>
+        }
+<span class="nc" id="L197">        setProperty(&quot;locale.timeZone&quot;, timeZone.getID());</span>
+<span class="nc" id="L198">    }</span>
+
+    /**
+     * Formats a Date object to return a time using the global locale.
+     *
+     * @param date the Date to format.
+     * @return a String representing the time.
+     */
+    public static String formatTime(Date date) {
+<span class="nc bnc" id="L207" title="All 2 branches missed.">        if (timeFormat == null) {</span>
+<span class="nc bnc" id="L208" title="All 2 branches missed.">            if (properties != null) {</span>
+<span class="nc" id="L209">                timeFormat = DateFormat.getTimeInstance(DateFormat.SHORT, getLocale());</span>
+<span class="nc" id="L210">                timeFormat.setTimeZone(getTimeZone());</span>
+            }
+            else {
+<span class="nc" id="L213">                DateFormat instance = DateFormat.getTimeInstance(DateFormat.SHORT, getLocale());</span>
+<span class="nc" id="L214">                instance.setTimeZone(getTimeZone());</span>
+<span class="nc" id="L215">                return instance.format(date);</span>
+            }
+        }
+<span class="nc" id="L218">        return timeFormat.format(date);</span>
+    }
+
+    /**
+     * Formats a Date object to return a date using the global locale.
+     *
+     * @param date the Date to format.
+     * @return a String representing the date.
+     */
+    public static String formatDate(Date date) {
+<span class="nc bnc" id="L228" title="All 2 branches missed.">        if (dateFormat == null) {</span>
+<span class="nc bnc" id="L229" title="All 2 branches missed.">            if (properties != null) {</span>
+<span class="nc" id="L230">                dateFormat = DateFormat.getDateInstance(DateFormat.MEDIUM, getLocale());</span>
+<span class="nc" id="L231">                dateFormat.setTimeZone(getTimeZone());</span>
+            }
+            else {
+<span class="nc" id="L234">                DateFormat instance = DateFormat.getDateInstance(DateFormat.MEDIUM, getLocale());</span>
+<span class="nc" id="L235">                instance.setTimeZone(getTimeZone());</span>
+<span class="nc" id="L236">                return instance.format(date);</span>
+            }
+        }
+<span class="nc" id="L239">        return dateFormat.format(date);</span>
+    }
+
+    /**
+     * Formats a Date object to return a date and time using the global locale.
+     *
+     * @param date the Date to format.
+     * @return a String representing the date and time.
+     */
+    public static String formatDateTime(Date date) {
+<span class="nc bnc" id="L249" title="All 2 branches missed.">        if (dateTimeFormat == null) {</span>
+<span class="nc bnc" id="L250" title="All 2 branches missed.">            if (properties != null) {</span>
+<span class="nc" id="L251">                dateTimeFormat = DateFormat.getDateTimeInstance(DateFormat.MEDIUM,</span>
+<span class="nc" id="L252">                        DateFormat.MEDIUM, getLocale());</span>
+<span class="nc" id="L253">                dateTimeFormat.setTimeZone(getTimeZone());</span>
+            }
+            else {
+<span class="nc" id="L256">                DateFormat instance = DateFormat.getDateTimeInstance(DateFormat.MEDIUM,</span>
+<span class="nc" id="L257">                        DateFormat.MEDIUM, getLocale());</span>
+<span class="nc" id="L258">                instance.setTimeZone(getTimeZone());</span>
+<span class="nc" id="L259">                return instance.format(date);</span>
+            }
+        }
+<span class="nc" id="L262">        return dateTimeFormat.format(date);</span>
+    }
+
+    /**
+     * Returns the location of the &lt;code&gt;home&lt;/code&gt; directory.
+     *
+     * @return the location of the home dir.
+     */
+    public static String getHomeDirectory() {
+<span class="nc bnc" id="L271" title="All 2 branches missed.">        if (openfireProperties == null) {</span>
+<span class="nc" id="L272">            loadOpenfireProperties();</span>
+        }
+<span class="nc" id="L274">        return home;</span>
+    }
+
+    /**
+     * Sets the location of the &lt;code&gt;home&lt;/code&gt; directory. The directory must exist and the
+     * user running the application must have read and write permissions over the specified
+     * directory.
+     *
+     * @param pathname the location of the home dir.
+     */
+    public static void setHomeDirectory(String pathname) {
+<span class="fc" id="L285">        File mh = new File(pathname);</span>
+        // Do a permission check on the new home directory
+<span class="pc bpc" id="L287" title="1 of 2 branches missed.">        if (!mh.exists()) {</span>
+<span class="nc" id="L288">            Log.error(&quot;Error - the specified home directory does not exist (&quot; + pathname + &quot;)&quot;);</span>
+        }
+<span class="pc bpc" id="L290" title="2 of 4 branches missed.">        else if (!mh.canRead() || !mh.canWrite()) {</span>
+<span class="nc" id="L291">                Log.error(&quot;Error - the user running this application can not read &quot; +</span>
+                        &quot;and write to the specified home directory (&quot; + pathname + &quot;). &quot; +
+                        &quot;Please grant the executing user read and write permissions.&quot;);
+        }
+        else {
+<span class="fc" id="L296">            home = pathname;</span>
+        }
+<span class="fc" id="L298">    }</span>
+
+    /**
+     * Returns a local property. Local properties are stored in the file defined in
+     * {@code JIVE_CONFIG_FILENAME} that exists in the {@code home} directory.
+     * Properties are always specified as &quot;foo.bar.prop&quot;, which would map to
+     * the following entry in the XML file:
+     * &lt;pre&gt;
+     * &amp;lt;foo&amp;gt;
+     *     &amp;lt;bar&amp;gt;
+     *         &amp;lt;prop&amp;gt;some value&amp;lt;/prop&amp;gt;
+     *     &amp;lt;/bar&amp;gt;
+     * &amp;lt;/foo&amp;gt;
+     * &lt;/pre&gt;
+     *
+     * @param name the name of the property to return.
+     * @return the property value specified by name.
+     */
+    public static String getXMLProperty(String name) {
+<span class="pc bpc" id="L317" title="1 of 2 branches missed.">        if (openfireProperties == null) {</span>
+<span class="nc" id="L318">            loadOpenfireProperties();</span>
+        }
+<span class="fc" id="L320">        return openfireProperties.getProperty(name);</span>
+    }
+
+    /**
+     * Returns a local property. Local properties are stored in the file defined in
+     * {@code JIVE_CONFIG_FILENAME} that exists in the {@code home} directory.
+     * Properties are always specified as &quot;foo.bar.prop&quot;, which would map to
+     * the following entry in the XML file:
+     * &lt;pre&gt;
+     * &amp;lt;foo&amp;gt;
+     *     &amp;lt;bar&amp;gt;
+     *         &amp;lt;prop&amp;gt;some value&amp;lt;/prop&amp;gt;
+     *     &amp;lt;/bar&amp;gt;
+     * &amp;lt;/foo&amp;gt;
+     * &lt;/pre&gt;
+     *
+     * If the specified property can't be found, the {@code defaultValue} will be returned.
+     *
+     * @param name the name of the property to return.
+     * @param defaultValue the default value for the property.
+     * @return the property value specified by name.
+     */
+    public static String getXMLProperty(String name, String defaultValue) {
+<span class="pc bpc" id="L343" title="1 of 2 branches missed.">        if (openfireProperties == null) {</span>
+<span class="nc" id="L344">            loadOpenfireProperties();</span>
+        }
+
+<span class="fc" id="L347">        String value = openfireProperties.getProperty(name);</span>
+<span class="pc bpc" id="L348" title="1 of 2 branches missed.">        if (value == null) {</span>
+<span class="fc" id="L349">            value = defaultValue;</span>
+        }
+<span class="fc" id="L351">        return value;</span>
+    }
+
+    /**
+     * Returns an integer value local property. Local properties are stored in the file defined in
+     * {@code JIVE_CONFIG_FILENAME} that exists in the {@code home} directory.
+     * Properties are always specified as &quot;foo.bar.prop&quot;, which would map to
+     * the following entry in the XML file:
+     * &lt;pre&gt;
+     * &amp;lt;foo&amp;gt;
+     *     &amp;lt;bar&amp;gt;
+     *         &amp;lt;prop&amp;gt;some value&amp;lt;/prop&amp;gt;
+     *     &amp;lt;/bar&amp;gt;
+     * &amp;lt;/foo&amp;gt;
+     * &lt;/pre&gt;
+     *
+     * If the specified property can't be found, or if the value is not a number, the
+     * {@code defaultValue} will be returned.
+     *
+     * @param name the name of the property to return.
+     * @param defaultValue value returned if the property could not be loaded or was not
+     *      a number.
+     * @return the property value specified by name or {@code defaultValue}.
+     */
+    public static int getXMLProperty(String name, int defaultValue) {
+<span class="fc" id="L376">        String value = getXMLProperty(name);</span>
+<span class="fc bfc" id="L377" title="All 2 branches covered.">        if (value != null) {</span>
+            try {
+<span class="fc" id="L379">                return Integer.parseInt(value);</span>
+            }
+<span class="nc" id="L381">            catch (NumberFormatException nfe) {</span>
+                // Ignore.
+            }
+        }
+<span class="fc" id="L385">        return defaultValue;</span>
+    }
+
+    /**
+     * Returns a boolean value local property. Local properties are stored in the
+     * file defined in {@code JIVE_CONFIG_FILENAME} that exists in the {@code home}
+     * directory. Properties are always specified as &quot;foo.bar.prop&quot;, which would map to
+     * the following entry in the XML file:
+     * &lt;pre&gt;
+     * &amp;lt;foo&amp;gt;
+     *     &amp;lt;bar&amp;gt;
+     *         &amp;lt;prop&amp;gt;some value&amp;lt;/prop&amp;gt;
+     *     &amp;lt;/bar&amp;gt;
+     * &amp;lt;/foo&amp;gt;
+     * &lt;/pre&gt;
+     *
+     * If the specified property can't be found, the {@code defaultValue} will be returned.
+     * If the property is found, it will be parsed using {@link Boolean#valueOf(String)}.  
+     *
+     * @param name the name of the property to return.
+     * @param defaultValue value returned if the property could not be loaded or was not
+     *      a number.
+     * @return the property value specified by name or {@code defaultValue}.
+     */
+    public static boolean getXMLProperty(String name, boolean defaultValue) {
+<span class="fc" id="L410">        String value = getXMLProperty(name);</span>
+<span class="pc bpc" id="L411" title="1 of 2 branches missed.">        if (value != null) {</span>
+<span class="nc" id="L412">            return Boolean.valueOf(value);</span>
+        }
+<span class="fc" id="L414">        return defaultValue;</span>
+    }
+
+    /**
+     * Sets a local property. If the property doesn't already exists, a new
+     * one will be created. Local properties are stored in the file defined in
+     * {@code JIVE_CONFIG_FILENAME} that exists in the {@code home} directory.
+     * Properties are always specified as &quot;foo.bar.prop&quot;, which would map to
+     * the following entry in the XML file:
+     * &lt;pre&gt;
+     * &amp;lt;foo&amp;gt;
+     *     &amp;lt;bar&amp;gt;
+     *         &amp;lt;prop&amp;gt;some value&amp;lt;/prop&amp;gt;
+     *     &amp;lt;/bar&amp;gt;
+     * &amp;lt;/foo&amp;gt;
+     * &lt;/pre&gt;
+     *
+     * @param name  the name of the property being set.
+     * @param value the value of the property being set.
+     * @return {@code true} if the property was correctly saved to file, otherwise {@code false}
+     */
+    public static boolean setXMLProperty(String name, String value) {
+<span class="fc bfc" id="L436" title="All 2 branches covered.">        if (openfireProperties == null) {</span>
+<span class="fc" id="L437">            loadOpenfireProperties();</span>
+        }
+<span class="fc" id="L439">        return openfireProperties.setProperty(name, value);</span>
+    }
+
+    /**
+     * Sets multiple local properties at once. If a property doesn't already exists, a new
+     * one will be created. Local properties are stored in the file defined in
+     * {@code JIVE_CONFIG_FILENAME} that exists in the {@code home} directory.
+     * Properties are always specified as &quot;foo.bar.prop&quot;, which would map to
+     * the following entry in the XML file:
+     * &lt;pre&gt;
+     * &amp;lt;foo&amp;gt;
+     *     &amp;lt;bar&amp;gt;
+     *         &amp;lt;prop&amp;gt;some value&amp;lt;/prop&amp;gt;
+     *     &amp;lt;/bar&amp;gt;
+     * &amp;lt;/foo&amp;gt;
+     * &lt;/pre&gt;
+     *
+     * @param propertyMap a map of properties, keyed on property name.
+     */
+    public static void setXMLProperties(Map&lt;String, String&gt; propertyMap) {
+<span class="nc bnc" id="L459" title="All 2 branches missed.">        if (openfireProperties == null) {</span>
+<span class="nc" id="L460">            loadOpenfireProperties();</span>
+        }
+<span class="nc" id="L462">        openfireProperties.setProperties(propertyMap);</span>
+<span class="nc" id="L463">    }</span>
+
+    /**
+     * Return all immediate children property values of a parent local property as a list of strings,
+     * or an empty list if there are no children. For example, given
+     * the properties {@code X.Y.A}, {@code X.Y.B}, {@code X.Y.C} and {@code X.Y.C.D}, then
+     * the immediate child properties of {@code X.Y} are {@code A}, {@code B}, and
+     * {@code C} (the value of {@code C.D} would not be returned using this method).&lt;p&gt;
+     *
+     * Local properties are stored in the file defined in {@code JIVE_CONFIG_FILENAME} that exists
+     * in the {@code home} directory. Properties are always specified as &quot;foo.bar.prop&quot;,
+     * which would map to the following entry in the XML file:
+     * &lt;pre&gt;
+     * &amp;lt;foo&amp;gt;
+     *     &amp;lt;bar&amp;gt;
+     *         &amp;lt;prop&amp;gt;some value&amp;lt;/prop&amp;gt;
+     *     &amp;lt;/bar&amp;gt;
+     * &amp;lt;/foo&amp;gt;
+     * &lt;/pre&gt;
+     *
+     *
+     * @param parent the name of the parent property to return the children for.
+     * @return all child property values for the given parent.
+     */
+    public static List getXMLProperties(String parent) {
+<span class="nc bnc" id="L488" title="All 2 branches missed.">        if (openfireProperties == null) {</span>
+<span class="nc" id="L489">            loadOpenfireProperties();</span>
+        }
+
+<span class="nc" id="L492">        String[] propNames = openfireProperties.getChildrenProperties(parent);</span>
+<span class="nc" id="L493">        List&lt;String&gt; values = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L494" title="All 2 branches missed.">        for (String propName : propNames) {</span>
+<span class="nc" id="L495">            String value = getXMLProperty(parent + &quot;.&quot; + propName);</span>
+<span class="nc bnc" id="L496" title="All 2 branches missed.">            if (value != null) {</span>
+<span class="nc" id="L497">                values.add(value);</span>
+            }
+        }
+<span class="nc" id="L500">        return values;</span>
+    }
+
+    /**
+     * Return all property names as a list of strings, or an empty list if jiveHome has not been loaded.
+     *
+     * @return all child property for the given parent.
+     */
+    public static List&lt;String&gt; getXMLPropertyNames() {
+<span class="pc bpc" id="L509" title="1 of 2 branches missed.">        if (openfireProperties == null) {</span>
+<span class="nc" id="L510">            loadOpenfireProperties();</span>
+        }
+<span class="fc" id="L512">        return openfireProperties.getAllPropertyNames();</span>
+    }
+
+    /**
+     * Deletes a locale property. If the property doesn't exist, the method
+     * does nothing.
+     *
+     * @param name the name of the property to delete.
+     */
+    public static void deleteXMLProperty(String name) {
+<span class="pc bpc" id="L522" title="1 of 2 branches missed.">        if (openfireProperties == null) {</span>
+<span class="nc" id="L523">            loadOpenfireProperties();</span>
+        }
+<span class="fc" id="L525">        openfireProperties.deleteProperty(name);</span>
+<span class="fc" id="L526">    }</span>
+
+    /**
+     * Returns a Jive property.
+     *
+     * @param name the name of the property to return.
+     * @return the property value specified by name.
+     */
+    public static String getProperty(String name) {
+<span class="pc bpc" id="L535" title="1 of 2 branches missed.">        if (properties == null) {</span>
+<span class="nc bnc" id="L536" title="All 2 branches missed.">            if (isSetupMode()) {</span>
+<span class="nc" id="L537">                return null;</span>
+            }
+<span class="nc" id="L539">            properties = JiveProperties.getInstance();</span>
+        }
+<span class="fc" id="L541">        return properties.get(name);</span>
+    }
+
+    /**
+     * Returns a Jive property. If the specified property doesn't exist, the
+     * {@code defaultValue} will be returned.
+     *
+     * @param name the name of the property to return.
+     * @param defaultValue value returned if the property doesn't exist.
+     * @return the property value specified by name.
+     */
+    public static String getProperty(String name, String defaultValue) {
+<span class="pc bpc" id="L553" title="1 of 2 branches missed.">        if (properties == null) {</span>
+<span class="nc bnc" id="L554" title="All 2 branches missed.">            if (isSetupMode()) {</span>
+<span class="nc" id="L555">                return defaultValue;</span>
+            }
+<span class="nc" id="L557">            properties = JiveProperties.getInstance();</span>
+        }
+<span class="fc" id="L559">        String value = properties.get(name);</span>
+<span class="pc bpc" id="L560" title="1 of 2 branches missed.">        if (value != null) {</span>
+<span class="nc" id="L561">            return value;</span>
+        }
+        else {
+<span class="fc" id="L564">            return defaultValue;</span>
+        }
+    }
+
+    /**
+     * Returns an enum constant Jive property. If the specified property doesn't exist, or if it's value cannot be parsed
+     * as an enum constant, the {@code defaultValue} will be returned.
+     *
+     * @param name the name of the property to return.
+     * @param enumType the {@code Class} object of the enum type from which to return a constant.
+     * @param defaultValue value returned if the property doesn't exist or it's value could not be parsed.
+     * @param &lt;E&gt; The enum type whose constant is to be returned.
+     * @return the property value (as an enum constant) or {@code defaultValue}.
+     */
+    public static &lt;E extends Enum&lt;E&gt;&gt; E getEnumProperty( String name, Class&lt;E&gt; enumType, E defaultValue )
+    {
+<span class="nc" id="L580">        String value = getProperty( name );</span>
+<span class="nc bnc" id="L581" title="All 2 branches missed.">        if ( value != null )</span>
+        {
+            try
+            {
+<span class="nc" id="L585">                return E.valueOf( enumType, value );</span>
+            }
+<span class="nc" id="L587">            catch ( IllegalArgumentException e )</span>
+            {
+                // Ignore
+            }
+        }
+<span class="nc" id="L592">        return defaultValue;</span>
+    }
+
+    /**
+     * Returns an integer value Jive property. If the specified property doesn't exist, the
+     * {@code defaultValue} will be returned.
+     *
+     * @param name the name of the property to return.
+     * @param defaultValue value returned if the property doesn't exist or was not
+     *      a number.
+     * @return the property value specified by name or {@code defaultValue}.
+     */
+    public static int getIntProperty(String name, int defaultValue) {
+<span class="fc" id="L605">        String value = getProperty(name);</span>
+<span class="pc bpc" id="L606" title="1 of 2 branches missed.">        if (value != null) {</span>
+            try {
+<span class="nc" id="L608">                return Integer.parseInt(value);</span>
+            }
+<span class="nc" id="L610">            catch (NumberFormatException nfe) {</span>
+                // Ignore.
+            }
+        }
+<span class="fc" id="L614">        return defaultValue;</span>
+    }
+
+    /**
+     * Returns a long value Jive property. If the specified property doesn't exist, the
+     * {@code defaultValue} will be returned.
+     *
+     * @param name the name of the property to return.
+     * @param defaultValue value returned if the property doesn't exist or was not
+     *      a number.
+     * @return the property value specified by name or {@code defaultValue}.
+     */
+    public static long getLongProperty(String name, long defaultValue) {
+<span class="fc" id="L627">        String value = getProperty(name);</span>
+<span class="pc bpc" id="L628" title="1 of 2 branches missed.">        if (value != null) {</span>
+            try {
+<span class="nc" id="L630">                return Long.parseLong(value);</span>
+            }
+<span class="nc" id="L632">            catch (NumberFormatException nfe) {</span>
+                // Ignore.
+            }
+        }
+<span class="fc" id="L636">        return defaultValue;</span>
+    }
+
+    /**
+     * Returns a boolean value Jive property.
+     *
+     * @param name the name of the property to return.
+     * @return true if the property value exists and is set to {@code &quot;true&quot;} (ignoring case).
+     *      Otherwise {@code false} is returned.
+     */
+    public static boolean getBooleanProperty(String name) {
+<span class="fc" id="L647">        return Boolean.valueOf(getProperty(name));</span>
+    }
+
+    /**
+     * Returns a boolean value Jive property. If the property doesn't exist, the {@code defaultValue}
+     * will be returned.
+     *
+     * If the specified property can't be found, or if the value is not a number, the
+     * {@code defaultValue} will be returned.
+     *
+     * @param name the name of the property to return.
+     * @param defaultValue value returned if the property doesn't exist.
+     * @return true if the property value exists and is set to {@code &quot;true&quot;} (ignoring case).
+     *      Otherwise {@code false} is returned.
+     */
+    public static boolean getBooleanProperty(String name, boolean defaultValue) {
+<span class="fc" id="L663">        String value = getProperty(name);</span>
+<span class="pc bpc" id="L664" title="1 of 2 branches missed.">        if (value != null) {</span>
+<span class="nc" id="L665">            return Boolean.valueOf(value);</span>
+        }
+        else {
+<span class="fc" id="L668">            return defaultValue;</span>
+        }
+    }
+
+    /**
+     * Return all immediate children property names of a parent Jive property as a list of strings,
+     * or an empty list if there are no children. For example, given
+     * the properties {@code X.Y.A}, {@code X.Y.B}, {@code X.Y.C} and {@code X.Y.C.D}, then
+     * the immediate child properties of {@code X.Y} are {@code A}, {@code B}, and
+     * {@code C} ({@code C.D} would not be returned using this method).&lt;p&gt;
+     *
+     * @param parent Parent &quot;node&quot; to find the children of.
+     * @return a List of all immediate children property names (Strings).
+     */
+    public static List&lt;String&gt; getPropertyNames(String parent) {
+<span class="nc bnc" id="L683" title="All 2 branches missed.">        if (properties == null) {</span>
+<span class="nc bnc" id="L684" title="All 2 branches missed.">            if (isSetupMode()) {</span>
+<span class="nc" id="L685">                return new ArrayList&lt;&gt;();</span>
+            }
+<span class="nc" id="L687">            properties = JiveProperties.getInstance();</span>
+        }
+<span class="nc" id="L689">        return new ArrayList&lt;&gt;(properties.getChildrenNames(parent));</span>
+    }
+
+    /**
+     * Return all immediate children property values of a parent Jive property as a list of strings,
+     * or an empty list if there are no children. For example, given
+     * the properties {@code X.Y.A}, {@code X.Y.B}, {@code X.Y.C} and {@code X.Y.C.D}, then
+     * the immediate child properties of {@code X.Y} are {@code X.Y.A}, {@code X.Y.B}, and
+     * {@code X.Y.C} (the value of {@code X.Y.C.D} would not be returned using this method).&lt;p&gt;
+     *
+     * @param parent the name of the parent property to return the children for.
+     * @return all child property values for the given parent.
+     */
+    public static List&lt;String&gt; getProperties( String parent )
+    {
+<span class="nc" id="L704">        return getListProperty( parent, new ArrayList&lt;&gt;() );</span>
+    }
+
+    /**
+     * Return all immediate children property values of a parent Jive property as a list of strings, or an default list
+     * if the property does not exist.
+     *
+     * This implementation ignores child property values that are empty (these are excluded from the result). When all
+     * child properties are empty, an empty collection (and explicitly not the default values) is returned. This allows
+     * a property to override a default non-empty collection with an empty one.
+     *
+     * The child properties that are evaluated in this method are the same child properties as those used by
+     * {@link #getProperties(String)}.
+     *
+     * @param parent        the name of the parent property to return the children for.
+     * @param defaultValues values returned if the property doesn't exist.
+     * @return all child property values for the given parent.
+     */
+    public static List&lt;String&gt; getListProperty( String parent, List&lt;String&gt; defaultValues )
+    {
+<span class="nc bnc" id="L724" title="All 2 branches missed.">        if ( properties == null )</span>
+        {
+<span class="nc bnc" id="L726" title="All 2 branches missed.">            if ( isSetupMode() )</span>
+            {
+<span class="nc" id="L728">                return defaultValues;</span>
+            }
+<span class="nc" id="L730">            properties = JiveProperties.getInstance();</span>
+        }
+
+        // Check for a legacy, comma separated value.
+<span class="nc" id="L734">        final String legacyValue = JiveGlobals.getProperty( parent );</span>
+
+        // Ensure that properties are ordered.
+<span class="nc" id="L737">        final SortedSet&lt;String&gt; propertyNames = new TreeSet&lt;&gt;( properties.getChildrenNames( parent ) );</span>
+
+<span class="nc bnc" id="L739" title="All 2 branches missed.">        if ( propertyNames.isEmpty() )</span>
+        {
+<span class="nc bnc" id="L741" title="All 2 branches missed.">            if ( legacyValue != null )</span>
+            {
+<span class="nc" id="L743">                Log.info( &quot;Retrieving a list from property '{}' which is stored in a comma-separated format. Consider using child properties instead, via JiveGlobals.setProperty( String value, List&lt;String&gt; values )&quot;, parent );</span>
+<span class="nc" id="L744">                return Arrays.asList( legacyValue.split( &quot;\\s*,\\s*&quot; ) );</span>
+            }
+
+            // When there are no child properties, return the default values.
+<span class="nc" id="L748">            return defaultValues;</span>
+        }
+<span class="nc bnc" id="L750" title="All 2 branches missed.">        else if ( legacyValue != null )</span>
+        {
+            // Raise a warning if two competing sets of data are detected.
+<span class="nc" id="L753">            Log.warn( &quot;Retrieving a list from property '{}' which is stored using child properties, but also in a legacy format! The data that is in the legacy format (the text value of property '{}') is not returned by this call! Its child property values are used instead. Consider removing the text value of the parent property.&quot;, parent, parent );</span>
+        }
+
+        // When there are child properties, return its non-null, non-empty values (which might be an empty collection).
+<span class="nc" id="L757">        final List&lt;String&gt; values = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L758" title="All 2 branches missed.">        for ( String propertyName : propertyNames )</span>
+        {
+<span class="nc" id="L760">            final String value = getProperty( propertyName );</span>
+<span class="nc bnc" id="L761" title="All 4 branches missed.">            if ( value != null &amp;&amp; !value.isEmpty())</span>
+            {
+<span class="nc" id="L763">                values.add( value );</span>
+            }
+<span class="nc" id="L765">        }</span>
+
+<span class="nc" id="L767">        return values;</span>
+    }
+
+    /**
+     * Returns all Jive property names.
+     *
+     * @return a List of all property names (Strings).
+     */
+    public static List&lt;String&gt; getPropertyNames() {
+<span class="fc bfc" id="L776" title="All 2 branches covered.">        if (properties == null) {</span>
+<span class="pc bpc" id="L777" title="1 of 2 branches missed.">            if (isSetupMode()) {</span>
+<span class="nc" id="L778">                return new ArrayList&lt;&gt;();</span>
+            }
+<span class="fc" id="L780">            properties = JiveProperties.getInstance();</span>
+        }
+<span class="fc" id="L782">        return new ArrayList&lt;&gt;(properties.getPropertyNames());</span>
+    }
+
+    /**
+     * Sets a Jive property. If the property doesn't already exists, a new
+     * one will be created.
+     *
+     * @param name the name of the property being set.
+     * @param value the value of the property being set.
+     */
+    public static void setProperty(String name, String value) {
+<span class="fc" id="L793">        setProperty(name, value, false);</span>
+<span class="fc" id="L794">    }</span>
+
+    /**
+     * Sets a Jive property. If the property doesn't already exists, a new
+     * one will be created.
+     *
+     * @param name the name of the property being set.
+     * @param value the value of the property being set.
+     * @param encrypt {@code true} to encrypt the property in the database, other {@code false}
+     */
+    public static void setProperty(String name, String value, boolean encrypt) {
+<span class="pc bpc" id="L805" title="1 of 2 branches missed.">        if (properties == null) {</span>
+<span class="nc bnc" id="L806" title="All 2 branches missed.">            if (isSetupMode()) {</span>
+<span class="nc" id="L807">                return;</span>
+            }
+<span class="nc" id="L809">            properties = JiveProperties.getInstance();</span>
+        }
+<span class="fc" id="L811">        properties.put(name, value, encrypt);</span>
+<span class="fc" id="L812">    }</span>
+
+    /**
+     * Sets a Jive property with a list of values. If the property doesn't already exists, a new one will be created.
+     * Empty or null values in the collection are ignored.
+     *
+     * Each value is stored as a direct child property of the property name provided as an argument to this method. When
+     * this method is used, all previous children of the property will be deleted.
+     *
+     * When the provided value is null, any previously stored collection will be removed. If it is an empty collection
+     * (or a collection that consists of null and empty values onlu), it is stored as an empty collection
+     * (represented by a child property that has an empty value).
+     *
+     * The naming convention used by this method to define child properties is subject to change, and should not be
+     * depended on.
+     *
+     * This method differs from {@link #setProperties(Map)}, which is used to set multiple properties. This method sets
+     * one property with multiple values.
+     *
+     * @param name   the name of the property being set.
+     * @param values the values of the property.
+     */
+    public static void setProperty( String name, List&lt;String&gt; values )
+    {
+<span class="nc bnc" id="L836" title="All 2 branches missed.">        if ( properties == null )</span>
+        {
+<span class="nc bnc" id="L838" title="All 2 branches missed.">            if ( isSetupMode() )</span>
+            {
+<span class="nc" id="L840">                return;</span>
+            }
+<span class="nc" id="L842">            properties = JiveProperties.getInstance();</span>
+        }
+
+<span class="nc" id="L845">        final List&lt;String&gt; existing = getProperties( name );</span>
+<span class="nc bnc" id="L846" title="All 4 branches missed.">        if ( existing != null &amp;&amp; existing.equals( values ) )</span>
+        {
+            // no change.
+<span class="nc" id="L849">            return;</span>
+        }
+
+<span class="nc" id="L852">        properties.remove( name );</span>
+<span class="nc bnc" id="L853" title="All 2 branches missed.">        if ( values != null )</span>
+        {
+<span class="nc" id="L855">            int i = 1;</span>
+<span class="nc bnc" id="L856" title="All 2 branches missed.">            for ( final String value : values )</span>
+            {
+<span class="nc bnc" id="L858" title="All 4 branches missed.">                if ( value != null &amp;&amp; !value.isEmpty() )</span>
+                {
+<span class="nc" id="L860">                    final String childName = name + &quot;.&quot; + String.format(&quot;%05d&quot;, i++ );</span>
+<span class="nc" id="L861">                    properties.put( childName, value );</span>
+                }
+<span class="nc" id="L863">            }</span>
+
+            // When no non-null, non-empty values are stored, store one to denote an empty collection.
+<span class="nc bnc" id="L866" title="All 2 branches missed.">            if ( i == 1 )</span>
+            {
+<span class="nc" id="L868">                properties.put( name + &quot;.00001&quot;, &quot;&quot; );</span>
+            }
+
+            // The put's above will have generated events for each child property. Now, generate an event for the parent.
+<span class="nc" id="L872">            final Map&lt;String, Object&gt; params = new HashMap&lt;&gt;();</span>
+<span class="nc" id="L873">            params.put(&quot;value&quot;, values);</span>
+<span class="nc" id="L874">            PropertyEventDispatcher.dispatchEvent(name, PropertyEventDispatcher.EventType.property_set, params);</span>
+        }
+<span class="nc" id="L876">    }</span>
+
+    /**
+     * Sets multiple Jive properties at once. If a property doesn't already exists, a new one will be created.
+     *
+     * This method differs from {@link #setProperty(String, List)}, which is used to one property with multiple
+     * values. This method sets multiple properties, each with one value.
+     *
+     * @param propertyMap a map of properties, keyed on property name.
+     */
+    public static void setProperties(Map&lt;String, String&gt; propertyMap) {
+<span class="nc bnc" id="L887" title="All 2 branches missed.">        if (properties == null) {</span>
+<span class="nc bnc" id="L888" title="All 2 branches missed.">            if (isSetupMode()) {</span>
+<span class="nc" id="L889">                return;</span>
+            }
+<span class="nc" id="L891">            properties = JiveProperties.getInstance();</span>
+        }
+
+<span class="nc" id="L894">        properties.putAll(propertyMap);</span>
+<span class="nc" id="L895">    }</span>
+
+    /**
+     * Deletes a Jive property. If the property doesn't exist, the method
+     * does nothing. All children of the property will be deleted as well.
+     *
+     * @param name the name of the property to delete.
+     */
+    public static void deleteProperty(String name) {
+<span class="pc bpc" id="L904" title="1 of 2 branches missed.">        if (properties == null) {</span>
+<span class="nc bnc" id="L905" title="All 2 branches missed.">            if (isSetupMode()) {</span>
+<span class="nc" id="L906">                return;</span>
+            }
+<span class="nc" id="L908">            properties = JiveProperties.getInstance();</span>
+        }
+<span class="fc" id="L910">        properties.remove(name);</span>
+<span class="fc" id="L911">        clearXMLPropertyEncryptionEntry(name);</span>
+<span class="fc" id="L912">    }</span>
+
+    static void clearXMLPropertyEncryptionEntry(String name) {
+<span class="pc bpc" id="L915" title="1 of 2 branches missed.">        if (isSetupMode()) {</span>
+<span class="nc" id="L916">            return;</span>
+        }
+<span class="pc bpc" id="L918" title="1 of 2 branches missed.">        if (securityProperties == null) {</span>
+<span class="nc" id="L919">            loadSecurityProperties();</span>
+        }
+<span class="pc bpc" id="L921" title="1 of 2 branches missed.">        if (openfireProperties == null) {</span>
+<span class="nc" id="L922">            loadOpenfireProperties();</span>
+        }
+        // Note; only remove the encryption indicator from XML file if the (encrypted) property is not also defined in the XML file
+<span class="pc bpc" id="L925" title="3 of 4 branches missed.">        if (JiveGlobals.isXMLPropertyEncrypted(name) &amp;&amp; openfireProperties.getProperty(name) == null) {</span>
+<span class="nc" id="L926">            securityProperties.removeFromList(ENCRYPTED_PROPERTY_NAMES, name);</span>
+        }
+<span class="fc" id="L928">    }</span>
+
+    /**
+     * Convenience routine to migrate an XML property into the database
+     * storage method.  Will check for the XML property being null before
+     * migrating.
+     *
+     * @param name the name of the property to migrate.
+     */
+    public static void migrateProperty(String name) {
+<span class="pc bpc" id="L938" title="1 of 2 branches missed.">        if (isSetupMode()) {</span>
+<span class="nc" id="L939">            return;</span>
+        }
+<span class="pc bpc" id="L941" title="1 of 2 branches missed.">        if (openfireProperties == null) {</span>
+<span class="nc" id="L942">            loadOpenfireProperties();</span>
+        }
+<span class="fc" id="L944">        openfireProperties.migrateProperty(name);</span>
+<span class="fc" id="L945">    }</span>
+
+    /**
+     * Convenience routine to migrate a tree of XML propertis into the database
+     * storage method.
+     *
+     * @param name the name of the base property to migrate.
+     */
+    public static void migratePropertyTree(String name) {
+<span class="nc bnc" id="L954" title="All 2 branches missed.">        if (isSetupMode()) {</span>
+<span class="nc" id="L955">            return;</span>
+        }
+<span class="nc bnc" id="L957" title="All 2 branches missed.">        if (openfireProperties == null) {</span>
+<span class="nc" id="L958">            loadOpenfireProperties();</span>
+        }
+
+<span class="nc" id="L961">        final String[] children = openfireProperties.getChildrenProperties( name );</span>
+<span class="nc bnc" id="L962" title="All 2 branches missed.">        if ( children != null )</span>
+        {
+<span class="nc bnc" id="L964" title="All 2 branches missed.">            for ( final String child : children )</span>
+            {
+<span class="nc" id="L966">                migratePropertyTree( name + &quot;.&quot; + child );</span>
+            }
+        }
+<span class="nc" id="L969">        openfireProperties.migrateProperty(name);</span>
+<span class="nc" id="L970">    }</span>
+    
+    /**
+     * Flags certain properties as being sensitive, based on
+     * property naming conventions. Values for matching property
+     * names are hidden from the Openfire console.
+     * 
+     * @param name The name of the property
+     * @return True if the property is considered sensitive, otherwise false
+     */
+    public static boolean isPropertySensitive(String name) {
+        
+<span class="nc bnc" id="L982" title="All 2 branches missed.">        return name != null &amp;&amp; (</span>
+<span class="nc bnc" id="L983" title="All 2 branches missed.">            name.toLowerCase().contains(&quot;passwd&quot;) ||</span>
+<span class="nc bnc" id="L984" title="All 2 branches missed.">                name.toLowerCase().contains(&quot;password&quot;) ||</span>
+<span class="nc bnc" id="L985" title="All 2 branches missed.">                name.toLowerCase().contains(&quot;cookiekey&quot;));</span>
+    }
+
+
+    /**
+     * Determines whether an XML property is configured for encryption.
+     *
+     * @param name
+     *            The name of the property
+     * @return {@code true} if the property is stored using encryption, otherwise {@code false}
+     */
+    public static boolean isXMLPropertyEncrypted(final String name) {
+<span class="fc bfc" id="L997" title="All 2 branches covered.">        if (securityProperties == null) {</span>
+<span class="fc" id="L998">            loadSecurityProperties();</span>
+        }
+<span class="pc bpc" id="L1000" title="1 of 2 branches missed.">        return name != null &amp;&amp;</span>
+<span class="pc bpc" id="L1001" title="1 of 2 branches missed.">                !name.startsWith(JiveGlobals.ENCRYPTED_PROPERTY_NAME_PREFIX) &amp;&amp;</span>
+<span class="pc bpc" id="L1002" title="1 of 2 branches missed.">                securityProperties.getProperties(JiveGlobals.ENCRYPTED_PROPERTY_NAMES, true).contains(name);</span>
+
+    }
+
+    /**
+     * Determines whether a property is configured for encryption.
+     * 
+     * @param name
+     *            The name of the property
+     * @return {@code true} if the property is stored using encryption, otherwise {@code false}
+     */
+    public static boolean isPropertyEncrypted(String name) {
+<span class="pc bpc" id="L1014" title="1 of 2 branches missed.">        if (properties == null) {</span>
+<span class="nc bnc" id="L1015" title="All 2 branches missed.">            if (isSetupMode()) {</span>
+<span class="nc" id="L1016">                return false;</span>
+            }
+<span class="nc" id="L1018">            properties = JiveProperties.getInstance();</span>
+        }
+<span class="fc" id="L1020">        return properties.isEncrypted(name);</span>
+    }
+
+    /**
+     * Set the encryption status for the given property.
+     * 
+     * @param name The name of the property
+     * @param encrypt True to encrypt the property, false to decrypt
+     * @return True if the property's encryption status changed, otherwise false
+     */
+    public static boolean setPropertyEncrypted(String name, boolean encrypt) {
+<span class="pc bpc" id="L1031" title="1 of 2 branches missed.">        if (properties == null) {</span>
+<span class="nc bnc" id="L1032" title="All 2 branches missed.">            if (isSetupMode()) {</span>
+<span class="nc" id="L1033">                return false;</span>
+            }
+<span class="nc" id="L1035">            properties = JiveProperties.getInstance();</span>
+        }
+<span class="fc" id="L1037">        return properties.setPropertyEncrypted(name, encrypt);</span>
+    }
+
+    /**
+     * Fetches the property encryptor.
+     * 
+     * @param useNewEncryptor Should use the new encryptor
+     * @return The property encryptor
+     */
+    public static Encryptor getPropertyEncryptor(boolean useNewEncryptor) {
+<span class="pc bpc" id="L1047" title="1 of 2 branches missed.">        if (securityProperties == null) {</span>
+<span class="nc" id="L1048">            loadSecurityProperties();</span>
+        }
+<span class="fc bfc" id="L1050" title="All 2 branches covered.">        if (propertyEncryptor == null) {</span>
+<span class="fc" id="L1051">            String algorithm = securityProperties.getProperty(ENCRYPTION_ALGORITHM);</span>
+<span class="fc" id="L1052">            propertyEncryptor = getEncryptor(algorithm, currentKey);</span>
+<span class="fc" id="L1053">            propertyEncryptorNew = propertyEncryptor;</span>
+        }
+<span class="fc bfc" id="L1055" title="All 2 branches covered.">        return useNewEncryptor ? propertyEncryptorNew : propertyEncryptor;</span>
+    }
+
+    /**
+     * Fetches the current property encryptor.
+     *
+     * @return The current property encryptor
+     */
+    public static Encryptor getPropertyEncryptor() {
+<span class="nc" id="L1064">        return getPropertyEncryptor(false);</span>
+    }
+    
+    /**
+     * This method is called early during the setup process to
+     * set the algorithm for encrypting property values 
+     * @param alg the algorithm used to encrypt properties
+     */
+    public static void setupPropertyEncryptionAlgorithm(String alg) {
+        // Get the old secret key and encryption type
+<span class="nc" id="L1074">        String oldAlg = securityProperties.getProperty(ENCRYPTION_ALGORITHM);</span>
+<span class="nc" id="L1075">        String oldKey = getCurrentKey();</span>
+<span class="nc bnc" id="L1076" title="All 8 branches missed.">        if (StringUtils.isNotEmpty(alg) &amp;&amp; !oldAlg.equals(alg) &amp;&amp; (StringUtils.isNotEmpty(oldKey) || propertyEncryptor != null)) {</span>
+            // update encrypted properties
+<span class="nc" id="L1078">            updateEncryptionProperties(alg, oldKey);</span>
+        }
+        // Set the new algorithm
+<span class="nc bnc" id="L1081" title="All 2 branches missed.">        if (ENCRYPTION_ALGORITHM_AES.equalsIgnoreCase(alg)) {</span>
+<span class="nc" id="L1082">            securityProperties.setProperty(ENCRYPTION_ALGORITHM, ENCRYPTION_ALGORITHM_AES);</span>
+        } else {
+<span class="nc" id="L1084">            securityProperties.setProperty(ENCRYPTION_ALGORITHM, ENCRYPTION_ALGORITHM_BLOWFISH);</span>
+        }
+<span class="nc" id="L1086">    }</span>
+    
+    /**
+     * This method is called early during the setup process to
+     * set a custom key for encrypting property values
+     * @param key the key used to encrypt properties
+     */
+    public static void setupPropertyEncryptionKey(String key) {
+        // Get the old secret key and encryption type
+<span class="nc" id="L1095">        String oldAlg = securityProperties.getProperty(ENCRYPTION_ALGORITHM);</span>
+<span class="nc" id="L1096">        String oldKey = getCurrentKey();</span>
+<span class="nc bnc" id="L1097" title="All 10 branches missed.">        if ((StringUtils.isNotEmpty(oldKey) || propertyEncryptor != null) &amp;&amp; StringUtils.isNotEmpty(key) &amp;&amp; !key.equals(oldKey) &amp;&amp; StringUtils.isNotEmpty(oldAlg)) {</span>
+            // update encrypted properties
+<span class="nc" id="L1099">            updateEncryptionProperties(oldAlg, key);</span>
+        }
+        // Set the new key
+<span class="nc" id="L1102">        securityProperties.setProperty(ENCRYPTION_KEY_CURRENT, new AesEncryptor().encrypt(key));</span>
+<span class="nc bnc" id="L1103" title="All 2 branches missed.">        currentKey = key == &quot;&quot; ? null : key;</span>
+<span class="nc" id="L1104">        propertyEncryptorNew = getEncryptor(oldAlg, key);</span>
+<span class="nc" id="L1105">        propertyEncryptor = propertyEncryptorNew;</span>
+<span class="nc" id="L1106">    }</span>
+
+    /**
+     * Get current encryptor key.
+     *
+     */
+    private static String getCurrentKey() {
+<span class="nc" id="L1113">        String encryptedKey = securityProperties.getProperty(ENCRYPTION_KEY_CURRENT);</span>
+<span class="nc" id="L1114">        String key = null;</span>
+<span class="nc bnc" id="L1115" title="All 2 branches missed.">        if (StringUtils.isNotEmpty(encryptedKey)) {</span>
+<span class="nc" id="L1116">            key = new AesEncryptor().decrypt(encryptedKey);</span>
+        }
+<span class="nc" id="L1118">        return key;</span>
+    }
+
+    /**
+     * Get current encryptor according to alg and key.
+     *
+     * @param alg algorithm type
+     * @param key encryptor key
+     */
+    private static Encryptor getEncryptor(String alg, String key) {
+        Encryptor encryptor;
+<span class="pc bpc" id="L1129" title="1 of 2 branches missed.">        if (ENCRYPTION_ALGORITHM_AES.equalsIgnoreCase(alg)) {</span>
+<span class="nc" id="L1130">            encryptor = new AesEncryptor(key);</span>
+        } else {
+<span class="fc" id="L1132">            encryptor = new Blowfish(key);</span>
+        }
+<span class="fc" id="L1134">        return encryptor;</span>
+    }
+
+    /**
+     * Re-encrypted with a new key and new algorithm configuration
+     * 
+     * @param newAlg new algorithm type
+     * @param newKey new encryptor key
+     */
+    private static void updateEncryptionProperties(String newAlg, String newKey) {
+        // load DB properties using the current key
+<span class="nc bnc" id="L1145" title="All 2 branches missed.">        if(properties == null) {</span>
+<span class="nc" id="L1146">            properties = JiveProperties.getInstance();</span>
+        }
+        //create the new encryptor
+<span class="nc bnc" id="L1149" title="All 2 branches missed.">        currentKey = newKey.isEmpty() ? null : newKey;</span>
+<span class="nc" id="L1150">        propertyEncryptorNew = getEncryptor(newAlg, newKey);</span>
+        
+        // Use new key to update configuration properties
+<span class="nc" id="L1153">        Iterator&lt;Entry&lt;String, String&gt;&gt; iterator = properties.entrySet().iterator();</span>
+        Entry&lt;String, String&gt; entry;
+        String name;
+<span class="nc bnc" id="L1156" title="All 2 branches missed.">        while(iterator.hasNext()){</span>
+<span class="nc" id="L1157">            entry = iterator.next();</span>
+<span class="nc" id="L1158">            name = entry.getKey();</span>
+            // only need to update the encrypted ones
+<span class="nc bnc" id="L1160" title="All 2 branches missed.">            if (isPropertyEncrypted(name)) {</span>
+<span class="nc" id="L1161">                properties.put(name, entry.getValue());</span>
+            }
+        }
+        // Update encryption properties to XML, using new encryption key
+<span class="nc bnc" id="L1165" title="All 2 branches missed.">        for (String propertyName : securityProperties.getProperties(ENCRYPTED_PROPERTY_NAMES, true)) {</span>
+<span class="nc" id="L1166">            String xmlProperty = getXMLProperty(propertyName);</span>
+            // update xml prop
+<span class="nc bnc" id="L1168" title="All 2 branches missed.">            if(StringUtils.isNotEmpty(xmlProperty)){</span>
+<span class="nc" id="L1169">                Log.info(&quot;Updating encrypted value for &quot; + propertyName);</span>
+<span class="nc" id="L1170">                setXMLProperty(propertyName, xmlProperty);</span>
+            }
+<span class="nc" id="L1172">        }</span>
+        // Two encryptors are now the same
+<span class="nc" id="L1174">        propertyEncryptor = propertyEncryptorNew;</span>
+<span class="nc" id="L1175">    }</span>
+
+   /**
+    * Allows the name of the local config file name to be changed. The
+    * default is &quot;openfire.xml&quot;.
+    *
+    * @param configName the name of the config file.
+    */
+    public static void setConfigName(String configName) {
+<span class="nc" id="L1184">        JIVE_CONFIG_FILENAME = configName;</span>
+<span class="nc" id="L1185">    }</span>
+
+    /**
+     * Returns the name of the local config file.
+     *
+     * @return the name of the config file.
+     */
+    static String getConfigName() {
+<span class="fc" id="L1193">        return JIVE_CONFIG_FILENAME;</span>
+    }
+
+    /**
+     * Returns true if in setup mode. A false value means that setup has been completed
+     * or that a connection to the database was possible to properties stored in the
+     * database can be retrieved now. The latter means that once the database settings
+     * during the setup was done a connection to the database should be available thus
+     * properties stored from a previous setup will be available.
+     *
+     * @return true if in setup mode.
+     */
+    private static boolean isSetupMode() {
+<span class="pc bpc" id="L1206" title="1 of 2 branches missed.">        if (Boolean.valueOf(JiveGlobals.getXMLProperty(&quot;setup&quot;))) {</span>
+<span class="fc" id="L1207">            return false;</span>
+        }
+        // Check if the DB configuration is done
+<span class="nc bnc" id="L1210" title="All 2 branches missed.">        if (DbConnectionManager.getConnectionProvider() == null) {</span>
+            // DB setup is still not completed so setup is needed
+<span class="nc" id="L1212">            return true;</span>
+        }
+<span class="nc" id="L1214">        Connection con = null;</span>
+<span class="nc" id="L1215">        PreparedStatement pstmt = null;</span>
+        try {
+<span class="nc" id="L1217">            con = DbConnectionManager.getConnection();</span>
+            // Properties can now be loaded from DB so consider setup done
+        }
+<span class="nc" id="L1220">        catch (SQLException e) {</span>
+            // Properties cannot be loaded from DB so do not consider setup done
+<span class="nc" id="L1222">            return true;</span>
+        }
+        finally {
+<span class="nc" id="L1225">            DbConnectionManager.closeConnection(pstmt, con);</span>
+<span class="nc" id="L1226">        }</span>
+<span class="nc" id="L1227">        return false;</span>
+    }
+
+    /**
+     * Loads Openfire properties if necessary. Property loading must be done lazily so
+     * that we give outside classes a chance to set {@code home}.
+     */
+    private synchronized static void loadOpenfireProperties() {
+<span class="pc bpc" id="L1235" title="1 of 2 branches missed.">        if (openfireProperties == null) {</span>
+            // If home is null then log that the application will not work correctly
+<span class="pc bpc" id="L1237" title="3 of 4 branches missed.">            if (home == null &amp;&amp; !failedLoading) {</span>
+<span class="nc" id="L1238">                failedLoading = true;</span>
+<span class="nc" id="L1239">                System.err.println(&quot;Critical Error! The home directory has not been configured, \n&quot; +</span>
+                    &quot;which will prevent the application from working correctly.\n\n&quot;);
+            }
+            // Create a manager with the full path to the Openfire config file.
+            else {
+                try {
+<span class="fc" id="L1245">                    openfireProperties = new XMLProperties(home + File.separator + getConfigName());</span>
+                }
+<span class="nc" id="L1247">                catch (IOException ioe) {</span>
+<span class="nc" id="L1248">                    Log.error(ioe.getMessage());</span>
+<span class="nc" id="L1249">                    failedLoading = true;</span>
+<span class="fc" id="L1250">                }</span>
+            }
+            // create a default/empty XML properties set (helpful for unit testing)
+<span class="pc bpc" id="L1253" title="1 of 2 branches missed.">            if (openfireProperties == null) {</span>
+                try { 
+<span class="nc" id="L1255">                    openfireProperties = new XMLProperties();</span>
+<span class="nc" id="L1256">                } catch (IOException e) {</span>
+<span class="nc" id="L1257">                    Log.error(&quot;Failed to setup default openfire properties&quot;, e);</span>
+<span class="nc" id="L1258">                }            	</span>
+            }
+        }
+<span class="fc" id="L1261">    }</span>
+
+    /**
+     * Lazy-loads the security configuration properties.
+     */
+    private synchronized static void loadSecurityProperties() {
+        
+<span class="pc bpc" id="L1268" title="1 of 2 branches missed.">        if (securityProperties == null) {</span>
+            // If home is null then log that the application will not work correctly
+<span class="pc bpc" id="L1270" title="3 of 4 branches missed.">            if (home == null &amp;&amp; !failedLoading) {</span>
+<span class="nc" id="L1271">                failedLoading = true;</span>
+<span class="nc" id="L1272">                System.err.println(&quot;Critical Error! The home directory has not been configured, \n&quot; +</span>
+                    &quot;which will prevent the application from working correctly.\n\n&quot;);
+            }
+            // Create a manager with the full path to the security XML file.
+            else {
+                try {
+<span class="nc" id="L1278">                    securityProperties = new XMLProperties(home + File.separator + JIVE_SECURITY_FILENAME);</span>
+<span class="nc" id="L1279">                    setupPropertyEncryption();</span>
+<span class="nc" id="L1280">                    TaskEngine.getInstance().schedule(new TimerTask() {</span>
+                        @Override
+                        public void run() {
+                            // Migrate all secure XML properties into the database automatically
+<span class="nc bnc" id="L1284" title="All 2 branches missed.">                            for (String propertyName : securityProperties.getAllPropertyNames()) {</span>
+<span class="nc bnc" id="L1285" title="All 2 branches missed.">                                if (!propertyName.startsWith(ENCRYPTED_PROPERTY_NAME_PREFIX)) {</span>
+<span class="nc" id="L1286">                                    setPropertyEncrypted(propertyName, true);</span>
+<span class="nc" id="L1287">                                    securityProperties.migrateProperty(propertyName);</span>
+                                }
+<span class="nc" id="L1289">                            }</span>
+<span class="nc" id="L1290">                        }</span>
+                    }, 1000);
+                }
+<span class="fc" id="L1293">                catch (IOException ioe) {</span>
+<span class="fc" id="L1294">                    Log.error(ioe.getMessage());</span>
+<span class="fc" id="L1295">                    failedLoading = true;</span>
+<span class="nc" id="L1296">                }</span>
+            }
+            // create a default/empty XML properties set (helpful for unit testing)
+<span class="pc bpc" id="L1299" title="1 of 2 branches missed.">            if (securityProperties == null) {</span>
+                try { 
+<span class="fc" id="L1301">                    securityProperties = new XMLProperties();</span>
+<span class="nc" id="L1302">                } catch (IOException e) {</span>
+<span class="nc" id="L1303">                    Log.error(&quot;Failed to setup default security properties&quot;, e);</span>
+<span class="fc" id="L1304">                }            	</span>
+            }
+        }
+<span class="fc" id="L1307">    }</span>
+    
+    /**
+     * Setup the property encryption key, rewriting encrypted values as appropriate
+     */
+    private static void setupPropertyEncryption() {
+        
+        // get/set the current encryption key
+<span class="nc" id="L1315">        currentKey = getCurrentKey();</span>
+        
+        // check to see if a new key has been defined
+<span class="nc" id="L1318">        String newKey = securityProperties.getProperty(ENCRYPTION_KEY_NEW, false);</span>
+<span class="nc bnc" id="L1319" title="All 2 branches missed.">        if (newKey != null) {</span>
+            
+<span class="nc" id="L1321">            Log.info(&quot;Detected new encryption key; updating encrypted properties&quot;);</span>
+
+            // if a new key has been provided, check to see if the old key matches 
+            // the current key, otherwise log an error and ignore the new key
+<span class="nc" id="L1325">            String oldKey = securityProperties.getProperty(ENCRYPTION_KEY_OLD);</span>
+<span class="nc bnc" id="L1326" title="All 2 branches missed.">            if (oldKey == null) {</span>
+<span class="nc bnc" id="L1327" title="All 2 branches missed.">                if (currentKey != null) {</span>
+<span class="nc" id="L1328">                    Log.warn(&quot;Old encryption key was not provided; ignoring new encryption key&quot;);</span>
+<span class="nc" id="L1329">                    return;</span>
+                }
+            } else {
+<span class="nc bnc" id="L1332" title="All 2 branches missed.">                if (!oldKey.equals(currentKey)) {</span>
+<span class="nc" id="L1333">                    Log.warn(&quot;Old encryption key does not match current encryption key; ignoring new encryption key&quot;);</span>
+<span class="nc" id="L1334">                    return;</span>
+                }
+            }
+
+<span class="nc" id="L1338">            String oldAlg = securityProperties.getProperty(ENCRYPTION_ALGORITHM);</span>
+<span class="nc" id="L1339">            updateEncryptionProperties(oldAlg, newKey);</span>
+            
+<span class="nc" id="L1341">            securityProperties.deleteProperty(ENCRYPTION_KEY_NEW);</span>
+<span class="nc" id="L1342">            securityProperties.deleteProperty(ENCRYPTION_KEY_OLD);</span>
+        }
+    
+        // (re)write the encryption key to the security XML file
+<span class="nc" id="L1346">        securityProperties.setProperty(ENCRYPTION_KEY_CURRENT, new AesEncryptor().encrypt(currentKey));</span>
+<span class="nc" id="L1347">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

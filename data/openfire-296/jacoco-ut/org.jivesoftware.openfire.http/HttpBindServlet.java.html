@@ -1,0 +1,433 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>HttpBindServlet.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.http</a> &gt; <span class="el_source">HttpBindServlet.java</span></div><h1>HttpBindServlet.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.http;
+
+import org.apache.commons.text.StringEscapeUtils;
+import org.dom4j.DocumentHelper;
+import org.dom4j.Element;
+import org.dom4j.QName;
+import org.jivesoftware.openfire.auth.UnauthorizedException;
+import org.jivesoftware.util.JiveGlobals;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import javax.servlet.*;
+import javax.servlet.http.HttpServlet;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
+import java.io.*;
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
+import java.util.Date;
+
+/**
+ * Servlet which handles requests to the HTTP binding service. It determines if there is currently
+ * an {@link HttpSession} related to the connection or if one needs to be created and then passes it
+ * off to the {@link HttpBindManager} for processing of the client request and formulating of the
+ * response.
+ *
+ * @author Alexander Wenckus
+ */
+public class HttpBindServlet extends HttpServlet {
+    
+<span class="nc" id="L47">    private static final Logger Log = LoggerFactory.getLogger(HttpBindServlet.class);</span>
+
+    private HttpSessionManager sessionManager;
+    private HttpBindManager boshManager;
+
+<span class="nc" id="L52">    public HttpBindServlet() {</span>
+<span class="nc" id="L53">    }</span>
+
+
+    @Override
+    public void init(ServletConfig servletConfig) throws ServletException {
+<span class="nc" id="L58">        super.init(servletConfig);</span>
+<span class="nc" id="L59">        boshManager = HttpBindManager.getInstance();</span>
+<span class="nc" id="L60">        sessionManager = boshManager.getSessionManager();</span>
+<span class="nc" id="L61">        sessionManager.start();</span>
+<span class="nc" id="L62">    }</span>
+
+
+    @Override
+    public void destroy() {
+<span class="nc" id="L67">        super.destroy();</span>
+<span class="nc" id="L68">        sessionManager.stop();</span>
+<span class="nc" id="L69">    }</span>
+
+    @Override
+    protected void service(HttpServletRequest request, HttpServletResponse response)
+            throws ServletException, IOException {
+        // add CORS headers for all HTTP responses (errors, etc.)
+<span class="nc bnc" id="L75" title="All 2 branches missed.">        if (boshManager.isCORSEnabled())</span>
+        {
+<span class="nc bnc" id="L77" title="All 2 branches missed.">            if (boshManager.isAllOriginsAllowed()) {</span>
+                // Set the Access-Control-Allow-Origin header to * to allow all Origin to do the CORS
+<span class="nc" id="L79">                response.setHeader(&quot;Access-Control-Allow-Origin&quot;, HttpBindManager.HTTP_BIND_CORS_ALLOW_ORIGIN_DEFAULT);</span>
+            } else {
+                // Get the Origin header from the request and check if it is in the allowed Origin Map.
+                // If it is allowed write it back to the Access-Control-Allow-Origin header of the respond.
+<span class="nc" id="L83">                final String origin = request.getHeader(&quot;Origin&quot;);</span>
+<span class="nc bnc" id="L84" title="All 2 branches missed.">                if (boshManager.isThisOriginAllowed(origin)) {</span>
+<span class="nc" id="L85">                    response.setHeader(&quot;Access-Control-Allow-Origin&quot;, origin);</span>
+                }
+            }
+<span class="nc" id="L88">            response.setHeader(&quot;Access-Control-Allow-Methods&quot;, HttpBindManager.HTTP_BIND_CORS_ALLOW_METHODS_DEFAULT);</span>
+<span class="nc" id="L89">            response.setHeader(&quot;Access-Control-Allow-Headers&quot;, HttpBindManager.HTTP_BIND_CORS_ALLOW_HEADERS_DEFAULT);</span>
+<span class="nc" id="L90">            response.setHeader(&quot;Access-Control-Max-Age&quot;, HttpBindManager.HTTP_BIND_CORS_MAX_AGE_DEFAULT);</span>
+        }
+<span class="nc" id="L92">        super.service(request, response);</span>
+<span class="nc" id="L93">    }</span>
+
+    @Override
+    protected void doGet(HttpServletRequest request, HttpServletResponse response)
+            throws ServletException, IOException
+    {
+<span class="nc" id="L99">        final AsyncContext context = request.startAsync();</span>
+
+<span class="nc" id="L101">        boolean isScriptSyntaxEnabled = boshManager.isScriptSyntaxEnabled();</span>
+                
+<span class="nc bnc" id="L103" title="All 2 branches missed.">        if(!isScriptSyntaxEnabled) {</span>
+<span class="nc" id="L104">            sendLegacyError(context, BoshBindingError.itemNotFound);</span>
+<span class="nc" id="L105">            return;</span>
+        }
+
+<span class="nc" id="L108">        String queryString = request.getQueryString();</span>
+<span class="nc bnc" id="L109" title="All 4 branches missed.">        if (queryString == null || &quot;&quot;.equals(queryString)) {</span>
+<span class="nc" id="L110">            sendLegacyError(context, BoshBindingError.badRequest);</span>
+<span class="nc" id="L111">            return;</span>
+<span class="nc bnc" id="L112" title="All 2 branches missed.">        } else if (&quot;isBoshAvailable&quot;.equals(queryString)) {</span>
+<span class="nc" id="L113">            response.setStatus(HttpServletResponse.SC_OK);</span>
+<span class="nc" id="L114">            context.complete();</span>
+<span class="nc" id="L115">            return;</span>
+        }
+<span class="nc" id="L117">        queryString = URLDecoder.decode(queryString, &quot;UTF-8&quot;);</span>
+
+<span class="nc" id="L119">        processContent(context, queryString);</span>
+<span class="nc" id="L120">    }</span>
+
+    @Override
+    protected void doPost(HttpServletRequest request, HttpServletResponse response)
+            throws ServletException, IOException {
+<span class="nc" id="L125">        final AsyncContext context = request.startAsync();</span>
+
+        // Asynchronously reads the POSTed input, then triggers #processContent.
+        try {
+<span class="nc" id="L129">            request.getInputStream().setReadListener(new ReadListenerImpl(context));</span>
+<span class="nc" id="L130">        } catch (IllegalStateException e) {</span>
+<span class="nc" id="L131">            Log.warn(&quot;Error when setting read listener&quot;, e);</span>
+<span class="nc" id="L132">            context.complete();</span>
+<span class="nc" id="L133">        }</span>
+<span class="nc" id="L134">    }</span>
+
+    protected void processContent(AsyncContext context, String content)
+            throws IOException {
+<span class="nc" id="L138">        final String remoteAddress = getRemoteAddress(context);</span>
+
+        final HttpBindBody body;
+        try {
+<span class="nc" id="L142">            body = HttpBindBody.from( content );</span>
+<span class="nc" id="L143">        } catch (Exception ex) {</span>
+<span class="nc" id="L144">            Log.warn(&quot;Error parsing request data from [&quot; + remoteAddress + &quot;]&quot;, ex);</span>
+<span class="nc" id="L145">            sendLegacyError(context, BoshBindingError.badRequest);</span>
+<span class="nc" id="L146">            return;</span>
+<span class="nc" id="L147">        }</span>
+
+<span class="nc" id="L149">        final Long rid = body.getRid();</span>
+<span class="nc bnc" id="L150" title="All 4 branches missed.">        if (rid == null || rid &lt;= 0) {</span>
+<span class="nc" id="L151">            Log.info(&quot;Root element 'body' does not contain a valid RID attribute value in parsed request data from [&quot; + remoteAddress + &quot;]&quot;);</span>
+<span class="nc" id="L152">            sendLegacyError(context, BoshBindingError.badRequest, &quot;Body-element is missing a RID (Request ID) value, or the provided value is a non-positive integer.&quot;);</span>
+<span class="nc" id="L153">            return;</span>
+        }
+
+        // Process the parsed document.
+<span class="nc bnc" id="L157" title="All 2 branches missed.">        if (body.getSid() == null) {</span>
+            // When there's no Session ID, this should be a request to create a new session. If there's additional content,
+            // something is wrong.
+<span class="nc bnc" id="L160" title="All 2 branches missed.">            if (!body.isEmpty()) {</span>
+                // invalid session request; missing sid
+<span class="nc" id="L162">                Log.info(&quot;Root element 'body' does not contain a SID attribute value in parsed request data from [&quot; + remoteAddress + &quot;]&quot;);</span>
+<span class="nc" id="L163">                sendLegacyError(context, BoshBindingError.badRequest);</span>
+<span class="nc" id="L164">                return;</span>
+            }
+
+            // We have a new session
+<span class="nc" id="L168">            createNewSession(context, body);</span>
+        }
+        else {
+            // When there exists a Session ID, new data for an existing session is being provided.
+<span class="nc" id="L172">            handleSessionRequest(context, body);</span>
+        }
+<span class="nc" id="L174">    }</span>
+
+    protected void createNewSession(AsyncContext context, HttpBindBody body)
+            throws IOException
+    {
+<span class="nc" id="L179">        final long rid = body.getRid();</span>
+
+        try {
+<span class="nc" id="L182">            final HttpConnection connection = new HttpConnection(rid, context);</span>
+
+<span class="nc" id="L184">            SessionEventDispatcher.dispatchEvent( null, SessionEventDispatcher.EventType.pre_session_created, connection, context );</span>
+
+<span class="nc" id="L186">            connection.setSession(sessionManager.createSession(body, connection));</span>
+<span class="nc bnc" id="L187" title="All 2 branches missed.">            if (JiveGlobals.getBooleanProperty(&quot;log.httpbind.enabled&quot;, false)) {</span>
+<span class="nc" id="L188">                Log.info(&quot;HTTP RECV(&quot; + connection.getSession().getStreamID().getID() + &quot;): &quot; + body.asXML());</span>
+            }
+
+<span class="nc" id="L191">            SessionEventDispatcher.dispatchEvent( connection.getSession(), SessionEventDispatcher.EventType.post_session_created, connection, context );</span>
+        }
+<span class="nc" id="L193">        catch (UnauthorizedException | HttpBindException e) {</span>
+            // Server wasn't initialized yet.
+<span class="nc" id="L195">            sendLegacyError(context, BoshBindingError.internalServerError, &quot;Server has not finished initialization.&quot; );</span>
+<span class="nc" id="L196">        }</span>
+<span class="nc" id="L197">    }</span>
+
+    private void handleSessionRequest(AsyncContext context, HttpBindBody body)
+            throws IOException
+    {
+<span class="nc" id="L202">        final String sid = body.getSid();</span>
+<span class="nc bnc" id="L203" title="All 2 branches missed.">        if (JiveGlobals.getBooleanProperty(&quot;log.httpbind.enabled&quot;, false)) {</span>
+<span class="nc" id="L204">            Log.info(&quot;HTTP RECV(&quot; + sid + &quot;): &quot; + body.asXML());</span>
+        }
+
+<span class="nc" id="L207">        HttpSession session = sessionManager.getSession(sid);</span>
+<span class="nc bnc" id="L208" title="All 2 branches missed.">        if (session == null) {</span>
+<span class="nc bnc" id="L209" title="All 2 branches missed.">            if (Log.isDebugEnabled()) {</span>
+<span class="nc" id="L210">                Log.debug(&quot;Client provided invalid session: &quot; + sid + &quot;. [&quot; +</span>
+<span class="nc" id="L211">                    context.getRequest().getRemoteAddr() + &quot;]&quot;);</span>
+            }
+<span class="nc" id="L213">            sendLegacyError(context, BoshBindingError.itemNotFound, &quot;Invalid SID value.&quot;);</span>
+<span class="nc" id="L214">            return;</span>
+        }
+
+<span class="nc" id="L217">        synchronized (session) {</span>
+            try {
+<span class="nc" id="L219">                session.forwardRequest(body, context);</span>
+            }
+<span class="nc" id="L221">            catch (HttpBindException e) {</span>
+<span class="nc" id="L222">                sendError(session, context, e.getBindingError());</span>
+            }
+<span class="nc" id="L224">            catch (HttpConnectionClosedException nc) {</span>
+<span class="nc" id="L225">                Log.error(&quot;Error sending packet to client.&quot;, nc);</span>
+<span class="nc" id="L226">                context.complete();</span>
+<span class="nc" id="L227">            }</span>
+<span class="nc" id="L228">        }</span>
+<span class="nc" id="L229">    }</span>
+
+    public static void respond(HttpSession session, AsyncContext context, String content, boolean async) throws IOException
+    {
+<span class="nc" id="L233">        final HttpServletResponse response = ((HttpServletResponse) context.getResponse());</span>
+<span class="nc" id="L234">        final HttpServletRequest request = ((HttpServletRequest) context.getRequest());</span>
+
+<span class="nc" id="L236">        response.setStatus(HttpServletResponse.SC_OK);</span>
+<span class="nc bnc" id="L237" title="All 2 branches missed.">        response.setContentType(&quot;GET&quot;.equals(request.getMethod()) ? &quot;text/javascript&quot; : &quot;text/xml&quot;);</span>
+<span class="nc" id="L238">        response.setCharacterEncoding(&quot;UTF-8&quot;);</span>
+
+<span class="nc bnc" id="L240" title="All 2 branches missed.">        if (&quot;GET&quot;.equals(request.getMethod())) {</span>
+<span class="nc bnc" id="L241" title="All 2 branches missed.">            if (JiveGlobals.getBooleanProperty(&quot;xmpp.httpbind.client.no-cache.enabled&quot;, true)) {</span>
+                // Prevent caching of responses
+<span class="nc" id="L243">                response.addHeader(&quot;Cache-Control&quot;, &quot;no-store&quot;);</span>
+<span class="nc" id="L244">                response.addHeader(&quot;Cache-Control&quot;, &quot;no-cache&quot;);</span>
+<span class="nc" id="L245">                response.addHeader(&quot;Pragma&quot;, &quot;no-cache&quot;);</span>
+            }
+<span class="nc" id="L247">            content = &quot;_BOSH_(\&quot;&quot; + StringEscapeUtils.escapeEcmaScript(content) + &quot;\&quot;)&quot;;</span>
+        }
+        
+<span class="nc bnc" id="L250" title="All 2 branches missed.">        if (JiveGlobals.getBooleanProperty(&quot;log.httpbind.enabled&quot;, false)) {</span>
+<span class="nc" id="L251">            Log.info(&quot;HTTP SENT(&quot; + session.getStreamID().getID() + &quot;): &quot; + content);</span>
+        }
+
+<span class="nc" id="L254">        final byte[] byteContent = content.getBytes(StandardCharsets.UTF_8);</span>
+        // BOSH communication should not use Chunked encoding.
+        // This is prevented by explicitly setting the Content-Length header.
+<span class="nc" id="L257">        response.setContentLength(byteContent.length);</span>
+
+<span class="nc bnc" id="L259" title="All 2 branches missed.">        if (async) {</span>
+<span class="nc" id="L260">            response.getOutputStream().setWriteListener(new WriteListenerImpl(context, byteContent));</span>
+        } else {
+<span class="nc" id="L262">            context.getResponse().getOutputStream().write(byteContent);</span>
+<span class="nc" id="L263">            context.getResponse().getOutputStream().flush();</span>
+<span class="nc" id="L264">            context.complete();</span>
+        }
+<span class="nc" id="L266">    }</span>
+
+    private void sendError(HttpSession session, AsyncContext context, BoshBindingError bindingError)
+            throws IOException
+    {
+<span class="nc bnc" id="L271" title="All 2 branches missed.">        if (JiveGlobals.getBooleanProperty(&quot;log.httpbind.enabled&quot;, false)) {</span>
+<span class="nc" id="L272">            Log.info(&quot;HTTP ERR(&quot; + session.getStreamID().getID() + &quot;): &quot; + bindingError.getErrorType().getType() + &quot;, &quot; + bindingError.getCondition() + &quot;.&quot;);</span>
+        }
+        try {
+<span class="nc bnc" id="L275" title="All 6 branches missed.">            if ((session.getMajorVersion() == 1 &amp;&amp; session.getMinorVersion() &gt;= 6) || session.getMajorVersion() &gt; 1)</span>
+            {
+<span class="nc" id="L277">                final String errorBody = createErrorBody(bindingError.getErrorType().getType(), bindingError.getCondition());</span>
+<span class="nc" id="L278">                respond(session, context, errorBody, true);</span>
+<span class="nc" id="L279">            } else {</span>
+<span class="nc" id="L280">                sendLegacyError(context, bindingError);</span>
+            }
+        }
+        finally {
+<span class="nc bnc" id="L284" title="All 4 branches missed.">            if (bindingError.getErrorType() == BoshBindingError.Type.terminate) {</span>
+<span class="nc" id="L285">                Log.debug( &quot;Closing session due to error: {}. Affected session: {}&quot;, bindingError, session );</span>
+<span class="nc" id="L286">                session.close();</span>
+            }
+<span class="nc" id="L288">        }</span>
+<span class="nc" id="L289">    }</span>
+
+    protected static void sendLegacyError(AsyncContext context, BoshBindingError error, String message)
+            throws IOException
+    {
+<span class="nc" id="L294">        final HttpServletResponse response = (HttpServletResponse) context.getResponse();</span>
+<span class="nc bnc" id="L295" title="All 4 branches missed.">        if (message == null || message.trim().length() == 0) {</span>
+<span class="nc" id="L296">            response.sendError(error.getLegacyErrorCode());</span>
+        } else {
+<span class="nc" id="L298">            response.sendError(error.getLegacyErrorCode(), message);</span>
+        }
+<span class="nc" id="L300">        context.complete();</span>
+<span class="nc" id="L301">    }</span>
+
+    protected static void sendLegacyError(AsyncContext context, BoshBindingError error)
+            throws IOException
+    {
+<span class="nc" id="L306">        sendLegacyError(context, error, null);</span>
+<span class="nc" id="L307">    }</span>
+
+    protected static String createErrorBody(String type, String condition) {
+<span class="nc" id="L310">        final Element body = DocumentHelper.createElement( QName.get( &quot;body&quot;, &quot;http://jabber.org/protocol/httpbind&quot; ) );</span>
+<span class="nc" id="L311">        body.addAttribute(&quot;type&quot;, type);</span>
+<span class="nc" id="L312">        body.addAttribute(&quot;condition&quot;, condition);</span>
+<span class="nc" id="L313">        return body.asXML();</span>
+    }
+
+    protected static String getRemoteAddress(AsyncContext context)
+    {
+<span class="nc" id="L318">        String remoteAddress = null;</span>
+<span class="nc bnc" id="L319" title="All 4 branches missed.">        if (context.getRequest() != null &amp;&amp; context.getRequest().getRemoteAddr() != null) {</span>
+<span class="nc" id="L320">            remoteAddress = context.getRequest().getRemoteAddr();</span>
+        }
+
+<span class="nc bnc" id="L323" title="All 4 branches missed.">        if (remoteAddress == null || remoteAddress.trim().length() == 0) {</span>
+<span class="nc" id="L324">            remoteAddress = &quot;&lt;UNKNOWN ADDRESS&gt;&quot;;</span>
+        }
+
+<span class="nc" id="L327">        return remoteAddress;</span>
+    }
+
+    class ReadListenerImpl implements ReadListener {
+
+        private final AsyncContext context;
+<span class="nc" id="L333">        private final ByteArrayOutputStream outStream = new ByteArrayOutputStream(1024);</span>
+        private final String remoteAddress;
+
+<span class="nc" id="L336">        ReadListenerImpl(AsyncContext context) {</span>
+<span class="nc" id="L337">            this.context = context;</span>
+<span class="nc" id="L338">            this.remoteAddress = getRemoteAddress(context);</span>
+<span class="nc" id="L339">        }</span>
+
+        @Override
+        public void onDataAvailable() throws IOException {
+<span class="nc bnc" id="L343" title="All 2 branches missed.">            if( Log.isTraceEnabled() ) {</span>
+<span class="nc" id="L344">                Log.trace(&quot;Data is available to be read from [&quot; + remoteAddress + &quot;]&quot;);</span>
+            }
+
+<span class="nc" id="L347">            final ServletInputStream inputStream = context.getRequest().getInputStream();</span>
+
+<span class="nc" id="L349">            byte b[] = new byte[1024];</span>
+            int length;
+<span class="nc bnc" id="L351" title="All 4 branches missed.">            while (inputStream.isReady() &amp;&amp; (length = inputStream.read(b)) != -1) {</span>
+<span class="nc" id="L352">                outStream.write(b, 0, length);</span>
+            }
+<span class="nc" id="L354">        }</span>
+
+        @Override
+        public void onAllDataRead() throws IOException {
+<span class="nc bnc" id="L358" title="All 2 branches missed.">            if( Log.isTraceEnabled() ) {</span>
+<span class="nc" id="L359">                Log.trace(&quot;All data has been read from [&quot; + remoteAddress + &quot;]&quot;);</span>
+            }
+<span class="nc" id="L361">            processContent(context, outStream.toString(StandardCharsets.UTF_8.name()));</span>
+<span class="nc" id="L362">        }</span>
+
+        @Override
+        public void onError(Throwable throwable) {
+<span class="nc bnc" id="L366" title="All 2 branches missed.">            if( Log.isWarnEnabled() ) {</span>
+<span class="nc" id="L367">                Log.warn(&quot;Error reading request data from [&quot; + remoteAddress + &quot;]&quot;, throwable);</span>
+            }
+            try {
+<span class="nc" id="L370">                sendLegacyError(context, BoshBindingError.badRequest);</span>
+<span class="nc" id="L371">            } catch (IOException ex) {</span>
+<span class="nc" id="L372">                Log.debug(&quot;Error while sending an error to [&quot;+remoteAddress +&quot;] in response to an earlier data-read failure.&quot;, ex);</span>
+<span class="nc" id="L373">            }</span>
+<span class="nc" id="L374">        }</span>
+    }
+
+    private static class WriteListenerImpl implements WriteListener {
+
+        private final AsyncContext context;
+        private final InputStream data;
+        private final String remoteAddress;
+
+<span class="nc" id="L383">        public WriteListenerImpl(AsyncContext context, byte[] data) {</span>
+<span class="nc" id="L384">            this.context = context;</span>
+<span class="nc" id="L385">            this.data = new ByteArrayInputStream( data );</span>
+<span class="nc" id="L386">            this.remoteAddress = getRemoteAddress(context);</span>
+<span class="nc" id="L387">        }</span>
+
+        @Override
+        public void onWritePossible() throws IOException {
+            // This method may be invoked multiple times and by different threads, e.g. when writing large byte arrays.
+            // Make sure a write/complete operation is only done, if no other write is pending, i.e. if isReady() == true
+            // Otherwise WritePendingException is thrown.
+<span class="nc bnc" id="L394" title="All 2 branches missed.">            if( Log.isTraceEnabled() ) {</span>
+<span class="nc" id="L395">                Log.trace(&quot;Data can be written to [&quot; + remoteAddress + &quot;]&quot;);</span>
+            }
+<span class="nc" id="L397">            synchronized ( context )</span>
+            {
+<span class="nc" id="L399">                final ServletOutputStream servletOutputStream = context.getResponse().getOutputStream();</span>
+<span class="nc bnc" id="L400" title="All 2 branches missed.">                while ( servletOutputStream.isReady() )</span>
+                {
+<span class="nc" id="L402">                    final byte[] buffer = new byte[8*1024];</span>
+<span class="nc" id="L403">                    final int len = data.read( buffer );</span>
+<span class="nc bnc" id="L404" title="All 2 branches missed.">                    if ( len &lt; 0 )</span>
+                    {
+                        // EOF - all done!
+<span class="nc" id="L407">                        context.complete();</span>
+<span class="nc" id="L408">                        return;</span>
+                    }
+
+                    // This is an async write, will never block.
+<span class="nc" id="L412">                    servletOutputStream.write( buffer, 0, len );</span>
+
+                    // When isReady() returns false for the next iteration, the
+                    // interface contract guarantees that onWritePossible() will
+                    // be called once a write is possible again.
+<span class="nc" id="L417">                }</span>
+<span class="nc" id="L418">            }</span>
+<span class="nc" id="L419">        }</span>
+
+        @Override
+        public void onError(Throwable throwable) {
+<span class="nc bnc" id="L423" title="All 2 branches missed.">            if( Log.isWarnEnabled() ) {</span>
+<span class="nc" id="L424">                Log.warn(&quot;Error writing response data to [&quot; + remoteAddress + &quot;]&quot;, throwable);</span>
+            }
+<span class="nc" id="L426">            synchronized ( context )</span>
+            {
+<span class="nc" id="L428">                context.complete();</span>
+<span class="nc" id="L429">            }</span>
+<span class="nc" id="L430">        }</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

@@ -1,0 +1,248 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>SaslServerPlainImpl.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.sasl</a> &gt; <span class="el_source">SaslServerPlainImpl.java</span></div><h1>SaslServerPlainImpl.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2004-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.sasl;
+
+
+import java.nio.charset.StandardCharsets;
+import java.util.Map;
+import java.util.StringTokenizer;
+import java.io.IOException;
+import javax.security.sasl.Sasl;
+import javax.security.sasl.SaslServer;
+import javax.security.sasl.SaslException;
+import javax.security.sasl.AuthorizeCallback;
+import javax.security.auth.callback.Callback;
+import javax.security.auth.callback.CallbackHandler;
+import javax.security.auth.callback.NameCallback;
+import javax.security.auth.callback.UnsupportedCallbackException;
+
+/**
+ * Implements the PLAIN server-side mechanism.
+ * (&lt;a href=&quot;http://www.ietf.org/rfc/rfc4616.txt&quot;&gt;RFC 4616&lt;/a&gt;)&lt;br&gt;
+ * &lt;p&gt;
+ * client ----- {authzid, authcid, password} -----&amp;gt; server
+ * &lt;/p&gt;
+ * Each paramater sent to the server is seperated by a null character
+ * The authorization ID (authzid) may be empty.
+ *
+ * @author Jay Kline
+ */
+
+public class SaslServerPlainImpl implements SaslServer {
+
+    private String principal;
+    private String username; //requested authorization identity
+    private String password;
+    private CallbackHandler cbh;
+    private boolean completed;
+    private boolean aborted;
+    private int counter;
+
+
+<span class="nc" id="L56">    public SaslServerPlainImpl(String protocol, String serverFqdn, Map props, CallbackHandler cbh) throws SaslException {</span>
+<span class="nc" id="L57">        this.cbh = cbh;</span>
+<span class="nc" id="L58">        this.completed = false;</span>
+<span class="nc" id="L59">        this.counter = 0;</span>
+<span class="nc" id="L60">    }</span>
+
+    /**
+     * Returns the IANA-registered mechanism name of this SASL server.
+     * (&quot;PLAIN&quot;).
+     * @return A non-null string representing the IANA-registered mechanism name.
+     */
+    @Override
+    public String getMechanismName() {
+<span class="nc" id="L69">        return &quot;PLAIN&quot;;</span>
+    }
+
+    /**
+     * Evaluates the response data and generates a challenge.
+     *
+     * If a response is received from the client during the authentication
+     * process, this method is called to prepare an appropriate next
+     * challenge to submit to the client. The challenge is null if the
+     * authentication has succeeded and no more challenge data is to be sent
+     * to the client. It is non-null if the authentication must be continued
+     * by sending a challenge to the client, or if the authentication has
+     * succeeded but challenge data needs to be processed by the client.
+     * {@code isComplete()} should be called
+     * after each call to {@code evaluateResponse()},to determine if any further
+     * response is needed from the client.
+     *
+     * @param response The non-null (but possibly empty) response sent
+     * by the client.
+     *
+     * @return The possibly null challenge to send to the client.
+     * It is null if the authentication has succeeded and there is
+     * no more challenge data to be sent to the client.
+     * @exception SaslException If an error occurred while processing
+     * the response or generating a challenge.
+     */
+    @Override
+    public byte[] evaluateResponse(byte[] response)
+        throws SaslException {
+<span class="nc bnc" id="L98" title="All 2 branches missed.">        if (completed) {</span>
+<span class="nc" id="L99">            throw new IllegalStateException(&quot;PLAIN authentication already completed&quot;);</span>
+        }
+<span class="nc bnc" id="L101" title="All 2 branches missed.">        if (aborted) {</span>
+<span class="nc" id="L102">            throw new IllegalStateException(&quot;PLAIN authentication previously aborted due to error&quot;);</span>
+        }
+        try {
+<span class="nc bnc" id="L105" title="All 2 branches missed.">            if(response.length != 0) {</span>
+<span class="nc" id="L106">                String data = new String(response, StandardCharsets.UTF_8);</span>
+<span class="nc" id="L107">                StringTokenizer tokens = new StringTokenizer(data, &quot;\0&quot;);</span>
+<span class="nc bnc" id="L108" title="All 2 branches missed.">                if (tokens.countTokens() &gt; 2) {</span>
+<span class="nc" id="L109">                    username = tokens.nextToken();</span>
+<span class="nc" id="L110">                    principal = tokens.nextToken();</span>
+                } else {
+<span class="nc" id="L112">                    username = tokens.nextToken();</span>
+<span class="nc" id="L113">                    principal = username;</span>
+                }
+<span class="nc" id="L115">                password = tokens.nextToken();</span>
+<span class="nc" id="L116">                NameCallback ncb = new NameCallback(&quot;PLAIN authentication ID: &quot;,principal);</span>
+<span class="nc" id="L117">                VerifyPasswordCallback vpcb = new VerifyPasswordCallback(password.toCharArray());</span>
+<span class="nc" id="L118">                cbh.handle(new Callback[]{ncb,vpcb});</span>
+
+<span class="nc bnc" id="L120" title="All 2 branches missed.">                if (vpcb.getVerified()) {</span>
+<span class="nc" id="L121">                    vpcb.clearPassword();</span>
+<span class="nc" id="L122">                    AuthorizeCallback acb = new AuthorizeCallback(principal,username);</span>
+<span class="nc" id="L123">                    cbh.handle(new Callback[]{acb});</span>
+<span class="nc bnc" id="L124" title="All 2 branches missed.">                    if(acb.isAuthorized()) {</span>
+<span class="nc" id="L125">                        username = acb.getAuthorizedID();</span>
+<span class="nc" id="L126">                        completed = true;</span>
+                    } else {
+<span class="nc" id="L128">                        completed = true;</span>
+<span class="nc" id="L129">                        username = null;</span>
+<span class="nc" id="L130">                        throw new SaslException(&quot;PLAIN: user not authorized: &quot;+principal);</span>
+                    }
+<span class="nc" id="L132">                } else {</span>
+<span class="nc" id="L133">                    throw new SaslException(&quot;PLAIN: user not authorized: &quot;+principal);</span>
+                }
+<span class="nc" id="L135">            } else {</span>
+                //Client gave no initial response
+<span class="nc bnc" id="L137" title="All 2 branches missed.">                if( counter++ &gt; 1 ) {</span>
+<span class="nc" id="L138">                    throw new SaslException(&quot;PLAIN expects a response&quot;);</span>
+                }
+<span class="nc" id="L140">                return null;</span>
+            }
+<span class="nc" id="L142">        } catch (UnsupportedCallbackException | IOException e) {</span>
+<span class="nc" id="L143">            aborted = true;</span>
+<span class="nc" id="L144">            throw new SaslException(&quot;PLAIN authentication failed for: &quot;+username, e);</span>
+<span class="nc" id="L145">        }</span>
+<span class="nc" id="L146">        return null;</span>
+    }
+
+   /**
+      * Determines whether the authentication exchange has completed.
+      * This method is typically called after each invocation of
+      * {@code evaluateResponse()} to determine whether the
+      * authentication has completed successfully or should be continued.
+      * @return true if the authentication exchange has completed; false otherwise.
+      */
+    @Override
+    public boolean isComplete() {
+<span class="nc" id="L158">        return completed;</span>
+    }
+
+    /**
+     * Reports the authorization ID in effect for the client of this
+     * session.
+     * This method can only be called if isComplete() returns true.
+     * @return The authorization ID of the client.
+     * @exception IllegalStateException if this authentication session has not completed
+     */
+    @Override
+    public String getAuthorizationID() {
+<span class="nc bnc" id="L170" title="All 2 branches missed.">        if(completed) {</span>
+<span class="nc" id="L171">            return username;</span>
+        } else {
+<span class="nc" id="L173">            throw new IllegalStateException(&quot;PLAIN authentication not completed&quot;);</span>
+        }
+    }
+
+
+    /**
+     * Unwraps a byte array received from the client. PLAIN supports no security layer.
+     * 
+     * @throws SaslException if attempted to use this method.
+     */
+    @Override
+    public byte[] unwrap(byte[] incoming, int offset, int len)
+        throws SaslException {
+<span class="nc bnc" id="L186" title="All 2 branches missed.">        if(completed) {</span>
+<span class="nc" id="L187">            throw new IllegalStateException(&quot;PLAIN does not support integrity or privacy&quot;);</span>
+        } else {
+<span class="nc" id="L189">            throw new IllegalStateException(&quot;PLAIN authentication not completed&quot;);</span>
+        }
+    }
+
+    /**
+     * Wraps a byte array to be sent to the client. PLAIN supports no security layer.
+     *
+     * @throws SaslException if attempted to use this method.
+     */
+    @Override
+    public byte[] wrap(byte[] outgoing, int offset, int len)
+        throws SaslException {
+<span class="nc bnc" id="L201" title="All 2 branches missed.">        if(completed) {</span>
+<span class="nc" id="L202">            throw new IllegalStateException(&quot;PLAIN does not support integrity or privacy&quot;);</span>
+        } else {
+<span class="nc" id="L204">            throw new IllegalStateException(&quot;PLAIN authentication not completed&quot;);</span>
+        }
+    }
+
+    /**
+     * Retrieves the negotiated property.
+     * This method can be called only after the authentication exchange has
+     * completed (i.e., when {@code isComplete()} returns true); otherwise, an
+     * {@code IllegalStateException} is thrown.
+     *
+     * @param propName the property
+     * @return The value of the negotiated property. If null, the property was
+     * not negotiated or is not applicable to this mechanism.
+     * @exception IllegalStateException if this authentication exchange has not completed
+     */
+
+    @Override
+    public Object getNegotiatedProperty(String propName) {
+<span class="nc bnc" id="L222" title="All 2 branches missed.">        if (completed) {</span>
+<span class="nc bnc" id="L223" title="All 2 branches missed.">            if (propName.equals(Sasl.QOP)) {</span>
+<span class="nc" id="L224">                return &quot;auth&quot;;</span>
+            } else {
+<span class="nc" id="L226">                return null;</span>
+            }
+        } else {
+<span class="nc" id="L229">            throw new IllegalStateException(&quot;PLAIN authentication not completed&quot;);</span>
+        }
+    }
+
+     /**
+      * Disposes of any system resources or security-sensitive information
+      * the SaslServer might be using. Invoking this method invalidates
+      * the SaslServer instance. This method is idempotent.
+      * @throws SaslException If a problem was encountered while disposing
+      * the resources.
+      */
+    @Override
+    public void dispose() throws SaslException {
+<span class="nc" id="L242">        password = null;</span>
+<span class="nc" id="L243">        username = null;</span>
+<span class="nc" id="L244">        principal = null;</span>
+<span class="nc" id="L245">        completed = false;</span>
+<span class="nc" id="L246">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

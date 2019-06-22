@@ -1,0 +1,302 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>CrowdGroupProvider.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.crowd</a> &gt; <span class="el_source">CrowdGroupProvider.java</span></div><h1>CrowdGroupProvider.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2012 Issa Gorissen &lt;issa-gorissen@usa.net&gt;. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.jivesoftware.openfire.crowd;
+
+import java.rmi.RemoteException;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.List;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
+
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.group.AbstractGroupProvider;
+import org.jivesoftware.openfire.group.Group;
+import org.jivesoftware.openfire.group.GroupNotFoundException;
+import org.jivesoftware.util.JiveGlobals;
+import org.jivesoftware.util.cache.Cache;
+import org.jivesoftware.util.cache.CacheFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmpp.packet.JID;
+
+
+/**
+ * Atlassian Crowd implementation of the GroupProvider. We do not permit
+ * modifications of groups from this provider - only read-only access.
+ */
+public class CrowdGroupProvider extends AbstractGroupProvider {
+<span class="nc" id="L45">    private static final Logger LOG = LoggerFactory.getLogger(CrowdGroupProvider.class);</span>
+    private static final int CACHE_TTL = 3600; // ttl in seconds - one hour
+    private static final String JIVE_CROWD_GROUPS_CACHE_TTL_SECS = &quot;crowd.groups.cache.ttl.seconds&quot;;
+    
+    private static final String GROUP_CACHE_NAME = &quot;crowdGroup&quot;;
+    private static final String GROUP_MEMBERSHIP_CACHE_NAME = &quot;crowdGroupMembership&quot;;
+    private static final String USER_MEMBERSHIP_CACHE_NAME = &quot;crowdUserMembership&quot;;
+
+<span class="nc" id="L53">    private static final ReentrantReadWriteLock lock = new ReentrantReadWriteLock();</span>
+<span class="nc" id="L54">    private static final ScheduledExecutorService crowdGroupSync = Executors.newSingleThreadScheduledExecutor();</span>
+<span class="nc" id="L55">    private static final CrowdManager manager = CrowdManager.getInstance();</span>
+
+<span class="nc" id="L57">    private static List&lt;String&gt; groups = new ArrayList&lt;&gt;();</span>
+    
+<span class="nc" id="L59">    private final XMPPServer server = XMPPServer.getInstance();</span>
+    
+    
+    static {
+<span class="nc" id="L63">        String propertyValue = JiveGlobals.getProperty(JIVE_CROWD_GROUPS_CACHE_TTL_SECS);</span>
+<span class="nc bnc" id="L64" title="All 4 branches missed.">        int ttl = (propertyValue == null || propertyValue.trim().length() == 0) ? CACHE_TTL : Integer.parseInt(propertyValue);</span>
+
+<span class="nc" id="L66">        crowdGroupSync.scheduleAtFixedRate(new GroupSynch(), 0, ttl, TimeUnit.SECONDS);</span>
+        
+<span class="nc" id="L68">        JiveGlobals.setProperty(JIVE_CROWD_GROUPS_CACHE_TTL_SECS, String.valueOf(ttl));</span>
+<span class="nc" id="L69">    }</span>
+    
+<span class="nc" id="L71">    public CrowdGroupProvider() {</span>
+<span class="nc" id="L72">        String propertyValue = JiveGlobals.getProperty(JIVE_CROWD_GROUPS_CACHE_TTL_SECS);</span>
+<span class="nc bnc" id="L73" title="All 4 branches missed.">        int ttl = (propertyValue == null || propertyValue.trim().length() == 0) ? CACHE_TTL : Integer.parseInt(propertyValue);</span>
+
+<span class="nc" id="L75">        Cache&lt;String, ArrayList&lt;JID&gt;&gt; groupMembershipCache = CacheFactory.createLocalCache(GROUP_MEMBERSHIP_CACHE_NAME);</span>
+<span class="nc" id="L76">        groupMembershipCache.setMaxCacheSize(-1);</span>
+<span class="nc" id="L77">        groupMembershipCache.setMaxLifetime(ttl * 1000); // msecs instead of sec - see Cache API</span>
+
+<span class="nc" id="L79">        Cache&lt;JID, ArrayList&lt;String&gt;&gt; userMembershipCache = CacheFactory.createLocalCache(USER_MEMBERSHIP_CACHE_NAME);</span>
+<span class="nc" id="L80">        userMembershipCache.setMaxCacheSize(-1);</span>
+<span class="nc" id="L81">        userMembershipCache.setMaxLifetime(ttl * 1000); // msecs instead of sec - see Cache API</span>
+        
+<span class="nc" id="L83">        Cache&lt;String, org.jivesoftware.openfire.crowd.jaxb.Group&gt; groupCache = CacheFactory.createLocalCache(GROUP_CACHE_NAME);</span>
+<span class="nc" id="L84">        groupCache.setMaxCacheSize(-1);</span>
+<span class="nc" id="L85">        groupCache.setMaxLifetime(ttl * 1000); // msecs instead of sec - see Cache API</span>
+<span class="nc" id="L86">    }</span>
+
+    @Override
+    public Group getGroup(String name) throws GroupNotFoundException {
+        try {
+<span class="nc" id="L91">            Cache&lt;String, org.jivesoftware.openfire.crowd.jaxb.Group&gt; groupCache = CacheFactory.createLocalCache(GROUP_CACHE_NAME);</span>
+<span class="nc" id="L92">            org.jivesoftware.openfire.crowd.jaxb.Group group = groupCache.get(name);</span>
+<span class="nc bnc" id="L93" title="All 2 branches missed.">            if (group == null) {</span>
+<span class="nc" id="L94">                group = manager.getGroup(name);</span>
+<span class="nc" id="L95">                groupCache.put(name, group);</span>
+            }
+<span class="nc" id="L97">            Collection&lt;JID&gt; members = getGroupMembers(name);</span>
+<span class="nc" id="L98">            Collection&lt;JID&gt; admins = Collections.emptyList();</span>
+<span class="nc" id="L99">            return new Group(name, group.description, members, admins);</span>
+            
+<span class="nc" id="L101">        } catch (RemoteException re) {</span>
+<span class="nc" id="L102">            LOG.error(&quot;Failure to load group:&quot; + String.valueOf(name), re);</span>
+<span class="nc" id="L103">            throw new GroupNotFoundException(re);</span>
+        }
+    }
+
+    
+    private Collection&lt;JID&gt; getGroupMembers(String groupName) {
+<span class="nc" id="L109">        Cache&lt;String, ArrayList&lt;JID&gt;&gt; groupMembershipCache = CacheFactory.createLocalCache(GROUP_MEMBERSHIP_CACHE_NAME);</span>
+<span class="nc" id="L110">        Collection&lt;JID&gt; members = groupMembershipCache.get(groupName);</span>
+<span class="nc bnc" id="L111" title="All 2 branches missed.">        if (members != null) {</span>
+<span class="nc" id="L112">            return members;</span>
+        }
+        
+        try {
+<span class="nc" id="L116">            List&lt;String&gt; users = manager.getGroupMembers(groupName);</span>
+<span class="nc" id="L117">            ArrayList&lt;JID&gt; results = new ArrayList&lt;&gt;();</span>
+
+<span class="nc bnc" id="L119" title="All 2 branches missed.">            for (String username : users) {</span>
+<span class="nc" id="L120">                results.add(server.createJID(username, null));</span>
+<span class="nc" id="L121">            }</span>
+            
+<span class="nc" id="L123">            groupMembershipCache.put(groupName, results);</span>
+<span class="nc" id="L124">            return results;</span>
+            
+<span class="nc" id="L126">        } catch (RemoteException re) {</span>
+<span class="nc" id="L127">            LOG.error(&quot;Failure to get the members of crowd group:&quot; + String.valueOf(groupName), re);</span>
+        }
+        
+<span class="nc" id="L130">        groupMembershipCache.put(groupName, new ArrayList&lt;JID&gt;());</span>
+<span class="nc" id="L131">        return Collections.emptyList();</span>
+    }
+    
+    @Override
+    public Collection&lt;String&gt; getGroupNames(JID user) {
+<span class="nc" id="L136">        Cache&lt;JID, ArrayList&lt;String&gt;&gt; userMembershipCache = CacheFactory.createCache(USER_MEMBERSHIP_CACHE_NAME);</span>
+<span class="nc" id="L137">        ArrayList&lt;String&gt; groups = userMembershipCache.get(user);</span>
+<span class="nc bnc" id="L138" title="All 2 branches missed.">        if (groups != null) {</span>
+<span class="nc" id="L139">            return groups;</span>
+        }
+        
+        try {
+<span class="nc" id="L143">            groups = new ArrayList(manager.getUserGroups(user.getNode()));</span>
+<span class="nc" id="L144">            userMembershipCache.put(user, groups);</span>
+<span class="nc" id="L145">            return groups;</span>
+<span class="nc" id="L146">        } catch (RemoteException re) {</span>
+<span class="nc" id="L147">            LOG.error(&quot;Failure to load the groups of user:&quot; + String.valueOf(user), re);</span>
+        }
+        
+<span class="nc" id="L150">        userMembershipCache.put(user, new ArrayList&lt;String&gt;());</span>
+<span class="nc" id="L151">        return Collections.emptyList();</span>
+    }
+
+    @Override
+    public int getGroupCount() {
+<span class="nc" id="L156">        lock.readLock().lock();</span>
+        try {
+<span class="nc" id="L158">            return groups.size();</span>
+        } finally {
+<span class="nc" id="L160">            lock.readLock().unlock();</span>
+<span class="nc" id="L161">        }</span>
+    }
+
+    @Override
+    public Collection&lt;String&gt; getGroupNames() {
+<span class="nc" id="L166">        lock.readLock().lock();</span>
+        try {
+<span class="nc" id="L168">            return groups;</span>
+        } finally {
+<span class="nc" id="L170">            lock.readLock().unlock();</span>
+<span class="nc" id="L171">        }</span>
+    }
+
+    @Override
+    public Collection&lt;String&gt; getGroupNames(int startIndex, int numResults) {
+<span class="nc" id="L176">        lock.readLock().lock();</span>
+        try {
+<span class="nc" id="L178">            Collection&lt;String&gt; results = new ArrayList&lt;&gt;(numResults);</span>
+            
+<span class="nc bnc" id="L180" title="All 4 branches missed.">            for (int i = 0, j = startIndex; i &lt; numResults &amp;&amp; j &lt; groups.size(); ++i, ++j) {</span>
+<span class="nc" id="L181">                results.add(groups.get(j));</span>
+            }
+            
+<span class="nc" id="L184">            return results;</span>
+        } finally {
+<span class="nc" id="L186">            lock.readLock().unlock();</span>
+<span class="nc" id="L187">        }</span>
+    }
+
+    @Override
+    public Collection&lt;String&gt; search(String query) {
+<span class="nc" id="L192">        lock.readLock().lock();</span>
+        try {
+<span class="nc" id="L194">            ArrayList&lt;String&gt; results = new ArrayList&lt;&gt;();</span>
+            
+<span class="nc bnc" id="L196" title="All 4 branches missed.">            if (query != null &amp;&amp; query.trim().length() &gt; 0) {</span>
+                
+<span class="nc bnc" id="L198" title="All 2 branches missed.">                if (query.endsWith(&quot;*&quot;)) {</span>
+<span class="nc" id="L199">                    query = query.substring(0, query.length() - 1);</span>
+                }
+<span class="nc bnc" id="L201" title="All 2 branches missed.">                if (query.startsWith(&quot;*&quot;)) {</span>
+<span class="nc" id="L202">                    query = query.substring(1);</span>
+                }
+<span class="nc" id="L204">                query = query.toLowerCase();</span>
+                
+<span class="nc bnc" id="L206" title="All 2 branches missed.">                for (String groupName : groups) {</span>
+<span class="nc bnc" id="L207" title="All 2 branches missed.">                    if (groupName.toLowerCase().contains(query)) {</span>
+<span class="nc" id="L208">                        results.add(groupName);</span>
+                    }
+<span class="nc" id="L210">                }</span>
+            }
+            
+<span class="nc" id="L213">            return results;</span>
+            
+        } finally {
+<span class="nc" id="L216">            lock.readLock().unlock();</span>
+<span class="nc" id="L217">        }</span>
+    }
+
+    @Override
+    public Collection&lt;String&gt; search(String query, int startIndex, int numResults) {
+<span class="nc" id="L222">        lock.readLock().lock();</span>
+        try {
+<span class="nc" id="L224">            ArrayList&lt;String&gt; foundGroups = (ArrayList&lt;String&gt;) search(query);</span>
+            
+<span class="nc" id="L226">            Collection&lt;String&gt; results = new ArrayList&lt;&gt;();</span>
+            
+<span class="nc bnc" id="L228" title="All 4 branches missed.">            for (int i = 0, j = startIndex; i &lt; numResults &amp;&amp; j &lt; foundGroups.size(); ++i, ++j) {</span>
+<span class="nc" id="L229">                results.add(foundGroups.get(j));</span>
+            }
+            
+<span class="nc" id="L232">            return results;</span>
+            
+        } finally {
+<span class="nc" id="L235">            lock.readLock().unlock();</span>
+<span class="nc" id="L236">        }</span>
+    }
+
+    /**
+     * Modifying group not implemented - read-only for now
+     */
+    @Override
+    public boolean isReadOnly() {
+<span class="nc" id="L244">        return true;</span>
+    }
+
+    @Override
+    public boolean isSearchSupported() {
+<span class="nc" id="L249">        return true;</span>
+    }
+
+    
+    
+    /**
+     * @see org.jivesoftware.openfire.group.AbstractGroupProvider#search(java.lang.String, java.lang.String)
+     */
+    // TODO search on group attributes in Crowd
+    @Override
+    public Collection&lt;String&gt; search(String key, String value) {
+<span class="nc" id="L260">        LOG.info(&quot;Search groups on attibutes not implemented yet&quot;);</span>
+<span class="nc" id="L261">        return Collections.emptyList();</span>
+    }
+
+
+
+
+
+<span class="nc" id="L268">    static class GroupSynch implements Runnable {</span>
+        @Override
+        public void run() {
+<span class="nc" id="L271">            LOG.info(&quot;running synch with crowd...&quot;);</span>
+<span class="nc" id="L272">            CrowdManager manager = null;</span>
+            try {
+<span class="nc" id="L274">                manager = CrowdManager.getInstance();</span>
+<span class="nc" id="L275">            } catch (Exception e) {</span>
+<span class="nc" id="L276">                LOG.error(&quot;Failure to load the Crowd manager&quot;, e);</span>
+<span class="nc" id="L277">                return;</span>
+<span class="nc" id="L278">            }</span>
+            
+<span class="nc" id="L280">            List&lt;String&gt; allGroups = null;</span>
+            try {
+<span class="nc" id="L282">                allGroups = manager.getAllGroupNames();</span>
+<span class="nc" id="L283">            } catch (RemoteException re) {</span>
+<span class="nc" id="L284">                LOG.error(&quot;Failure to fetch all crowd groups name&quot;, re);</span>
+<span class="nc" id="L285">                return;</span>
+<span class="nc" id="L286">            }</span>
+            
+<span class="nc bnc" id="L288" title="All 4 branches missed.">            if (allGroups != null &amp;&amp; allGroups.size() &gt; 0) {</span>
+<span class="nc" id="L289">                CrowdGroupProvider.lock.writeLock().lock();</span>
+                try {
+<span class="nc" id="L291">                    CrowdGroupProvider.groups = allGroups;</span>
+                } finally {
+<span class="nc" id="L293">                    CrowdGroupProvider.lock.writeLock().unlock();</span>
+<span class="nc" id="L294">                }</span>
+            }
+            
+<span class="nc" id="L297">            LOG.info(&quot;crowd synch done, returned &quot; + allGroups.size() + &quot; groups&quot;);</span>
+<span class="nc" id="L298">        }</span>
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

@@ -1,0 +1,1039 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>ConnectionListener.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.spi</a> &gt; <span class="el_source">ConnectionListener.java</span></div><h1>ConnectionListener.java</h1><pre class="source lang-java linenums">package org.jivesoftware.openfire.spi;
+
+import org.apache.mina.transport.socket.nio.NioSocketAcceptor;
+import org.jivesoftware.openfire.Connection;
+import org.jivesoftware.openfire.ServerPort;
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.keystore.CertificateStoreConfiguration;
+import org.jivesoftware.openfire.net.SocketConnection;
+import org.jivesoftware.util.JiveGlobals;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.net.InetAddress;
+import java.util.Arrays;
+import java.util.LinkedHashSet;
+import java.util.Set;
+
+/**
+ * As a server, Openfire accepts connection requests from other network entities. The exact functionality is subject to
+ * configuration details (eg: TCP port on which connections are accepted, TLS policy that is applied, etc). An instance
+ * of this class is used to manage this configuration for one type of connection (on one TCP port), and is responsible
+ * for managing the lifecycle of the entity that implements the acceptance of new connections.
+ *
+ * @author Guus der Kinderen, guus.der.kinderen@gmail.com
+ */
+// TODO most getters in this class assume that the ConnectionAcceptor property value match the property values of JiveGlobals. This should be the case, but should be asserted.
+public class ConnectionListener
+{
+    private Logger Log;
+
+    // Connection characteristics
+    private final ConnectionType type;
+    private final int defaultPort;
+    private final InetAddress bindAddress; // if null, represents any local address (typically 0.0.0.0 or ::0)
+    private CertificateStoreConfiguration identityStoreConfiguration;
+    private CertificateStoreConfiguration trustStoreConfiguration;
+
+    // Name of properties used to configure the acceptor.
+    private final String tcpPortPropertyName;
+
+    /**
+     * Name of property that toggles availability. 'null' indicates that the listener should always be enabled (and
+     * cannot be turned on/off).
+     */
+    private final String isEnabledPropertyName;
+
+    /**
+     * Name of property that configures the maximum threads that can currently be processing IO related to this
+     * listener. 'null' indicates that a default number should be used.
+     */
+    private final String maxPoolSizePropertyName; // Max threads
+
+    /**
+     * Name of property that configures the maximum amount (in bytes) of IO data can be cached, pending processing.
+     * 'nll' indicates that the cache size is unbounded. Unbounded caches should be used for high-volume and/or trusted
+     * connections only (if at all).
+     */
+    private final String maxReadBufferPropertyName; // Max buffer size
+
+    /**
+     * Name of property that configures the TLS policy that's applicable to this listener. Instead of a property name,
+     * the name of a {@link org.jivesoftware.openfire.Connection.TLSPolicy} can be used to indicate that this listener
+     * is 'hard-coded' in this state (configuration changes will cause exceptions to be thrown).
+     */
+    private final String tlsPolicyPropertyName;
+
+    /**
+     * Name of property that configures the policy regarding compression (eg: ZLIB) that's applicable to this listener.
+     * 'null' causes an implementation default to be used.
+     */
+    private final String compressionPolicyPropertyName;
+
+    /**
+     * Name of property that configures the policy regarding mutual authentication that's applicable to this listener.
+     * 'null' indicates that this policy cannot be configured and 'disabled' should be used as a default.
+     */
+    private final String clientAuthPolicyPropertyName;
+
+    // The entity that performs the acceptance of new (socket) connections.
+    private ConnectionAcceptor connectionAcceptor;
+
+
+    ConnectionListener getConnectionListener( ConnectionType type ) {
+<span class="nc" id="L84">        ConnectionManagerImpl connectionManager = ((ConnectionManagerImpl) XMPPServer.getInstance().getConnectionManager());</span>
+<span class="nc" id="L85">        return connectionManager.getListener( type, getTLSPolicy().equals( Connection.TLSPolicy.legacyMode ) );</span>
+    }
+
+    /**
+     * Instantiates a new connection listener.
+     *
+     * @param type the connection type
+     * @param tcpPortPropertyName the name of the system property holding the TCP port
+     * @param defaultPort the default port number if the property is not set
+     * @param isEnabledPropertyName Property name (of a boolean) that toggles availability. Null to indicate that this listener is 'always on'
+     * @param maxPoolSizePropertyName Property name (of an int) that defines maximum IO processing threads. Null causes an unconfigurable default amount to be used.
+     * @param maxReadBufferPropertyName Property name (of an int) that defines maximum amount (in bytes) of IO data can be cached, pending processing. Null to indicate boundless caches.
+     * @param tlsPolicyPropertyName Property name (of a string) that defines the applicable TLS Policy. Or, the value {@link org.jivesoftware.openfire.Connection.TLSPolicy} to indicate unconfigurable TLS Policy. Cannot be null.
+     * @param clientAuthPolicyPropertyName Property name (of an string) that defines maximum IO processing threads. Null causes a unconfigurabel value of 'wanted' to be used.
+     * @param bindAddress the address to bind to
+     * @param identityStoreConfiguration the certificates the server identify as
+     * @param trustStoreConfiguration the certificates the server trusts
+     * @param compressionPolicyPropertyName the name of the system property indicating if compression is enabled or not
+     */
+    public ConnectionListener( ConnectionType type, String tcpPortPropertyName, int defaultPort, String isEnabledPropertyName, String maxPoolSizePropertyName, String maxReadBufferPropertyName, String tlsPolicyPropertyName, String clientAuthPolicyPropertyName, InetAddress bindAddress, CertificateStoreConfiguration identityStoreConfiguration, CertificateStoreConfiguration trustStoreConfiguration, String compressionPolicyPropertyName )
+<span class="nc" id="L105">    {</span>
+<span class="nc" id="L106">        this.type = type;</span>
+<span class="nc" id="L107">        this.tcpPortPropertyName = tcpPortPropertyName;</span>
+<span class="nc" id="L108">        this.defaultPort = defaultPort;</span>
+<span class="nc" id="L109">        this.isEnabledPropertyName = isEnabledPropertyName;</span>
+<span class="nc" id="L110">        this.maxPoolSizePropertyName = maxPoolSizePropertyName;</span>
+<span class="nc" id="L111">        this.maxReadBufferPropertyName = maxReadBufferPropertyName;</span>
+<span class="nc" id="L112">        this.tlsPolicyPropertyName = tlsPolicyPropertyName;</span>
+<span class="nc" id="L113">        this.clientAuthPolicyPropertyName = clientAuthPolicyPropertyName;</span>
+<span class="nc" id="L114">        this.bindAddress = bindAddress;</span>
+<span class="nc" id="L115">        this.identityStoreConfiguration = identityStoreConfiguration;</span>
+<span class="nc" id="L116">        this.trustStoreConfiguration = trustStoreConfiguration;</span>
+<span class="nc" id="L117">        this.compressionPolicyPropertyName = compressionPolicyPropertyName;</span>
+
+        // A listener cannot be changed into or from legacy mode. That fact is safe to use in the name of the logger..
+<span class="nc bnc" id="L120" title="All 2 branches missed.">        final String name = getType().toString().toLowerCase() + ( getTLSPolicy().equals( Connection.TLSPolicy.legacyMode ) ? &quot;-legacyMode&quot; : &quot;&quot; );</span>
+<span class="nc" id="L121">        this.Log = LoggerFactory.getLogger( ConnectionListener.class.getName() + &quot;[&quot; + name + &quot;]&quot; );</span>
+<span class="nc" id="L122">    }</span>
+
+    /**
+     * Return if the configuration allows this listener to be enabled (but does not verify that the listener is
+     * indeed active).
+     *
+     * @return true if configuration allows this listener to be enabled, otherwise false.
+     */
+    public boolean isEnabled()
+    {
+        // Not providing a property name indicates that availability cannot be toggled. The listener is 'always on'.
+<span class="nc bnc" id="L133" title="All 2 branches missed.">        if (isEnabledPropertyName == null )</span>
+        {
+<span class="nc" id="L135">            return true;</span>
+        }
+        // TODO if this is an SSL connection, legacy code required the existence of at least one certificate in the identity store in addition to the property value (although no such requirement is enforced for a TLS connection that might or might not be elevated to encrypted).
+<span class="nc" id="L138">        return JiveGlobals.getBooleanProperty( isEnabledPropertyName, true );</span>
+    }
+
+    /**
+     * Activates or deactivates the listener, and changes the configuration accordingly. This configuration change is
+     * persisted. An invocation of this method has no effect if the listener is already in the provided state.
+     * @param enable to enable or disable the listener
+     */
+    public synchronized void enable( boolean enable )
+    {
+        // Not providing a property name indicates that availability cannot be toggled. The listener is 'always on'.
+<span class="nc bnc" id="L149" title="All 4 branches missed.">        if ( isEnabledPropertyName == null &amp;&amp; !enable )</span>
+        {
+<span class="nc" id="L151">            throw new IllegalArgumentException( &quot;This listener cannot be disabled!&quot; );</span>
+        }
+
+<span class="nc bnc" id="L154" title="All 2 branches missed.">        final boolean isRunning = connectionAcceptor != null;</span>
+<span class="nc bnc" id="L155" title="All 2 branches missed.">        if ( enable == isRunning )</span>
+        {
+            // This is likely to be caused by a cadence of property changes and harmless / safe to ignore.
+<span class="nc" id="L158">            Log.debug( &quot;Ignoring enable({}): listener already in this state.&quot;, enable );</span>
+<span class="nc" id="L159">            return;</span>
+        }
+
+<span class="nc" id="L162">            JiveGlobals.setProperty( isEnabledPropertyName, Boolean.toString( enable ) );</span>
+<span class="nc" id="L163">        restart();</span>
+<span class="nc" id="L164">    }</span>
+
+    /**
+     * Attempts to start the connection acceptor, creating a new instance when needed.
+     *
+     * An invocation of this method does not change the configuration for this connection. As a result, an acceptor will
+     * &lt;em&gt;not&lt;/em&gt; be started when the listener is not enabled (in such cases, an invocation of this method has no
+     * effect).
+     *
+     * In order to start this listener and persist this as the desired state for this connection, use #enable(true).
+     *
+     * This method should not be called when an acceptor has already been started (instead, {@link #restart()} should be
+     * used to explicitly define the need to stop a previous connection). The current implementation of this method will
+     * stop a pre-existing acceptor, but only when it is currently not serving connections. When the acceptor is not
+     * idle, this method has no effect. This behavior might change in the future.
+     */
+    public synchronized void start()
+    {
+        // TODO Start all connection types here, by supplying more connection acceptors other than a MINA-based one.
+<span class="nc bnc" id="L183" title="All 2 branches missed.">        switch ( getType() )</span>
+        {
+            case BOSH_C2S:
+            case WEBADMIN:
+<span class="nc" id="L187">                Log.debug( &quot;Not starting a (MINA-based) connection acceptor, as connections of type &quot; + getType() + &quot; depend on another IO technology.&quot;);</span>
+<span class="nc" id="L188">                return;</span>
+
+            default:
+        }
+
+<span class="nc bnc" id="L193" title="All 2 branches missed.">        if ( !isEnabled() )</span>
+        {
+<span class="nc" id="L195">            Log.debug( &quot;Not starting: disabled by configuration.&quot; );</span>
+<span class="nc" id="L196">            return;</span>
+        }
+
+<span class="nc bnc" id="L199" title="All 2 branches missed.">        if ( connectionAcceptor != null )</span>
+        {
+            // This might indicate an illegal state. Legacy code allows for this, so we won't throw a runtime exception (for now).
+<span class="nc bnc" id="L202" title="All 2 branches missed.">            if ( !connectionAcceptor.isIdle() )</span>
+            {
+<span class="nc" id="L204">                Log.warn( &quot;Unable to start: it appears to have already been started (and it is currently serving connections)! To restart, first stop this listener explicitly.&quot; );</span>
+<span class="nc" id="L205">                return;</span>
+            }
+            else
+            {
+<span class="nc" id="L209">                Log.warn( &quot;Stopping (in order to restart) an instance that has already been started, but is idle. This start would have failed if the listener was not idle. The implementation should have called stop() or restart() first, to ensure a clean restart!&quot; );</span>
+<span class="nc" id="L210">                connectionAcceptor.stop();</span>
+            }
+        }
+
+<span class="nc" id="L214">        Log.debug( &quot;Starting...&quot; );</span>
+<span class="nc bnc" id="L215" title="All 2 branches missed.">        if ( getType() == ConnectionType.SOCKET_S2S )</span>
+        {
+<span class="nc" id="L217">            connectionAcceptor = new LegacyConnectionAcceptor( generateConnectionConfiguration() );</span>
+        }
+        else
+        {
+<span class="nc" id="L221">            connectionAcceptor = new MINAConnectionAcceptor( generateConnectionConfiguration() );</span>
+        }
+
+<span class="nc" id="L224">        connectionAcceptor.start();</span>
+<span class="nc" id="L225">        Log.info( &quot;Started.&quot; );</span>
+<span class="nc" id="L226">    }</span>
+
+    /**
+     * Generates an immutable ConnectionConfiguration based on the current state.
+     *
+     * @return an immutable configuration, never null.
+     */
+    public ConnectionConfiguration generateConnectionConfiguration()
+    {
+<span class="nc" id="L235">        final int defaultMaxPoolSize = 16;</span>
+        final int maxThreadPoolSize;
+<span class="nc bnc" id="L237" title="All 2 branches missed.">        if ( maxPoolSizePropertyName == null )</span>
+        {
+<span class="nc" id="L239">            maxThreadPoolSize = defaultMaxPoolSize;</span>
+        }
+        else
+        {
+<span class="nc" id="L243">            maxThreadPoolSize = JiveGlobals.getIntProperty( maxPoolSizePropertyName, defaultMaxPoolSize );</span>
+        }
+
+        final int maxBufferSize;
+<span class="nc bnc" id="L247" title="All 2 branches missed.">        if ( maxReadBufferPropertyName != null )</span>
+        {
+<span class="nc" id="L249">            maxBufferSize = JiveGlobals.getIntProperty( maxReadBufferPropertyName, 10 * 1024 * 1024 );</span>
+        }
+        else
+        {
+<span class="nc" id="L253">            maxBufferSize = -1; // No upper bound.</span>
+        }
+
+        // Take the current state of this instance, and create a new configuration.
+<span class="nc" id="L257">        return new ConnectionConfiguration(</span>
+<span class="nc" id="L258">                getType(),</span>
+<span class="nc" id="L259">                isEnabled(),</span>
+                maxThreadPoolSize,
+                maxBufferSize,
+<span class="nc" id="L262">                getClientAuth(),</span>
+<span class="nc" id="L263">                getBindAddress(),</span>
+<span class="nc" id="L264">                getPort(),</span>
+<span class="nc" id="L265">                getTLSPolicy(),</span>
+                identityStoreConfiguration,
+                trustStoreConfiguration,
+<span class="nc" id="L268">                acceptSelfSignedCertificates(),</span>
+<span class="nc" id="L269">                verifyCertificateValidity(),</span>
+<span class="nc" id="L270">                getEncryptionProtocols(),</span>
+<span class="nc" id="L271">                getEncryptionCipherSuites(),</span>
+<span class="nc" id="L272">                getCompressionPolicy()</span>
+        );
+    }
+
+    /**
+     * Attempts to stop the connection acceptor. If the connection acceptor has not been started, an invocation of this
+     * method has no effect.
+     *
+     * An invocation of this method does not change the configuration for this connection. As a result, the acceptor for
+     * this connection can be restarted when this ConnectionListener instance is replaced.
+     *
+     * In order to stop this listener (and persist this as the desired state for this connection, use #enable(false).
+     */
+    protected synchronized void stop()
+    {
+<span class="nc bnc" id="L287" title="All 2 branches missed.">        if ( connectionAcceptor == null )</span>
+        {
+<span class="nc" id="L289">            Log.debug( &quot;Not stopping: it hasn't been started.&quot; );</span>
+<span class="nc" id="L290">            return;</span>
+        }
+
+<span class="nc" id="L293">        Log.debug( &quot;Stopping...&quot; );</span>
+        try
+        {
+<span class="nc" id="L296">            connectionAcceptor.stop();</span>
+        }
+        finally
+        {
+<span class="nc" id="L300">            connectionAcceptor = null;</span>
+<span class="nc" id="L301">        }</span>
+<span class="nc" id="L302">        Log.info( &quot;Stopped.&quot; );</span>
+<span class="nc" id="L303">    }</span>
+
+    /**
+     * Starts or restarts this instance (typically used to put into effect a configuration change).
+     *
+     * A connection that was started, but is disabled by configuration will be stopped but not restarted by an
+     * invocation of this method.
+     */
+    public synchronized void restart()
+    {
+<span class="nc" id="L313">        Log.debug( &quot;Restarting...&quot; );</span>
+        try
+        {
+<span class="nc bnc" id="L316" title="All 2 branches missed.">            if ( connectionAcceptor != null )</span>
+            {
+<span class="nc" id="L318">                stop();</span>
+            }
+        }
+        finally
+        {
+<span class="nc" id="L323">            start(); // won't actually start anything if not enabled.</span>
+<span class="nc" id="L324">        }</span>
+<span class="nc" id="L325">        Log.info( &quot;Done restarting...&quot; );</span>
+<span class="nc" id="L326">    }</span>
+
+    /**
+     * Reconfigures the acceptor without breaking existing connections. Note that not all configuration changes
+     * can be applied. These changes will be applied after a restart.
+     */
+    public synchronized void reloadConfiguration()
+    {
+<span class="nc bnc" id="L334" title="All 2 branches missed.">        if ( connectionAcceptor == null )</span>
+        {
+<span class="nc" id="L336">            return; // There's no point in reloading config of a stopped instance. Config will be reloaded when started.</span>
+        }
+
+<span class="nc" id="L339">        Log.debug( &quot;Reconfiguring...&quot; );</span>
+<span class="nc" id="L340">        connectionAcceptor.reconfigure( generateConnectionConfiguration() );</span>
+<span class="nc" id="L341">        Log.info( &quot;Reconfigured.&quot; );</span>
+<span class="nc" id="L342">    }</span>
+
+    /**
+     * Returns the MINA-specific socket acceptor that is managed by the instance.
+     *
+     * @return A socket acceptor, or null when this listener is disabled or not based on a MINA implementation.
+     */
+    // TODO see if we can avoid exposing MINA internals.
+    public NioSocketAcceptor getSocketAcceptor()
+    {
+<span class="nc bnc" id="L352" title="All 4 branches missed.">        if ( connectionAcceptor == null || !(connectionAcceptor instanceof MINAConnectionAcceptor) )</span>
+        {
+<span class="nc" id="L354">            return null;</span>
+        }
+
+<span class="nc" id="L357">        return ((MINAConnectionAcceptor)connectionAcceptor).getSocketAcceptor();</span>
+    }
+
+    /**
+     * Returns the network address on which connections are accepted when this listener is enabled.
+     *
+     * This method can return null, which indicates that connections are accepted on any local address (typically
+     * 0.0.0.0 or ::0).
+     *
+     * @return A network address or null.
+     */
+    public InetAddress getBindAddress()
+    {
+<span class="nc" id="L370">        return bindAddress;</span>
+    }
+
+    /**
+     * Returns the type of connection that is accepted by this listener.
+     *
+     * @return A connection type (never null).
+     */
+    public ConnectionType getType()
+    {
+<span class="nc" id="L380">        return type;</span>
+    }
+
+
+    /**
+     * The TCP port number on which connections will be accepted when this listener is enabled.
+     *
+     * @return A port number.
+     */
+    public int getPort()
+    {
+<span class="nc bnc" id="L391" title="All 2 branches missed.">        if ( tcpPortPropertyName != null )</span>
+        {
+<span class="nc" id="L393">            return JiveGlobals.getIntProperty( tcpPortPropertyName, defaultPort );</span>
+        }
+        else
+        {
+<span class="nc" id="L397">            return defaultPort;</span>
+        }
+    }
+
+    /**
+     * Changes the TCP port on which connections are accepted, This configuration change is persisted.
+     *
+     * If the listener is currently enabled, this configuration change will be applied immediately (which will cause a
+     * restart of the underlying connection acceptor).
+     *
+     * An invocation of this method has no effect if the new port value is equal to the existing value.
+     *
+     * @param port A port number.
+     */
+    public void setPort( int port )
+    {
+<span class="nc" id="L413">        final long oldPort = getPort();</span>
+<span class="nc bnc" id="L414" title="All 2 branches missed.">        if (port == oldPort ) {</span>
+<span class="nc" id="L415">            Log.debug( &quot;Ignoring port change request (to '{}'): listener already in this state.&quot;, port );</span>
+<span class="nc" id="L416">            return;</span>
+        }
+
+<span class="nc" id="L419">        Log.debug( &quot;Changing port from '{}' to '{}'.&quot;, oldPort, port );</span>
+<span class="nc bnc" id="L420" title="All 2 branches missed.">        if ( tcpPortPropertyName != null )</span>
+        {
+<span class="nc" id="L422">            JiveGlobals.setProperty( tcpPortPropertyName, String.valueOf( port ) );</span>
+        }
+<span class="nc" id="L424">        restart();</span>
+<span class="nc" id="L425">    }</span>
+
+    public Connection.ClientAuth getClientAuth()
+    {
+        Connection.ClientAuth clientAuth;
+<span class="nc bnc" id="L430" title="All 2 branches missed.">        if ( clientAuthPolicyPropertyName == null )</span>
+        {
+<span class="nc" id="L432">            clientAuth = Connection.ClientAuth.disabled;</span>
+        }
+        else
+        {
+<span class="nc" id="L436">            final String value = JiveGlobals.getProperty( clientAuthPolicyPropertyName, Connection.ClientAuth.disabled.name() );</span>
+            try
+            {
+<span class="nc" id="L439">                clientAuth = Connection.ClientAuth.valueOf( value );</span>
+            }
+<span class="nc" id="L441">            catch ( IllegalArgumentException e )</span>
+            {
+<span class="nc" id="L443">                Log.error( &quot;Error parsing property value of '{}' into a valid ClientAUth. Offending value: '{}'.&quot;, value, clientAuthPolicyPropertyName, e );</span>
+<span class="nc" id="L444">                clientAuth = Connection.ClientAuth.disabled;</span>
+<span class="nc" id="L445">            }</span>
+        }
+<span class="nc" id="L447">        return clientAuth;</span>
+    }
+
+    public void setClientAuth( Connection.ClientAuth clientAuth )
+    {
+<span class="nc" id="L452">        final Connection.ClientAuth oldValue = getClientAuth();</span>
+<span class="nc bnc" id="L453" title="All 2 branches missed.">        if ( oldValue.equals( clientAuth ) )</span>
+        {
+<span class="nc" id="L455">            Log.debug( &quot;Ignoring client auth configuration change request (to '{}'): listener already in this state.&quot;, clientAuth );</span>
+<span class="nc" id="L456">            return;</span>
+        }
+<span class="nc" id="L458">        Log.debug( &quot;Changing client auth configuration from '{}' to '{}'.&quot;, oldValue, clientAuth );</span>
+<span class="nc" id="L459">        JiveGlobals.setProperty( clientAuthPolicyPropertyName, clientAuth.toString() );</span>
+<span class="nc" id="L460">        restart();</span>
+<span class="nc" id="L461">    }</span>
+
+    /**
+     * Returns the applicable TLS policy, but only when it is hardcoded (and inconfigurable).
+     * @return a policy or null.
+     */
+    private Connection.TLSPolicy getHardcodedTLSPolicy()
+    {
+        try
+        {
+<span class="nc" id="L471">            return Connection.TLSPolicy.valueOf( tlsPolicyPropertyName );</span>
+<span class="nc" id="L472">        } catch ( IllegalArgumentException ex ) {</span>
+            // Not hardcoded!
+<span class="nc" id="L474">            return null;</span>
+        }
+    }
+
+    /**
+     * Returns whether TLS is mandatory, optional, disabled or mandatory immediately for new connections. When TLS is
+     * mandatory connections are required to be encrypted or otherwise will be closed.
+     *
+     * When TLS is disabled connections are not allowed to be (or become) encrypted. In this case, connections will be
+     * closed when encryption is attempted.
+     *
+     * @return An encryption policy, never null.
+     */
+    public Connection.TLSPolicy getTLSPolicy()
+    {
+
+<span class="nc" id="L490">        final Connection.TLSPolicy hardcoded = getHardcodedTLSPolicy();</span>
+<span class="nc bnc" id="L491" title="All 2 branches missed.">        if ( hardcoded != null )</span>
+        {
+<span class="nc" id="L493">            return hardcoded;</span>
+        }
+        else
+        {
+<span class="nc" id="L497">            final String policyName = JiveGlobals.getProperty( tlsPolicyPropertyName, Connection.TLSPolicy.optional.toString() );</span>
+            Connection.TLSPolicy tlsPolicy;
+            try
+            {
+<span class="nc" id="L501">                tlsPolicy = Connection.TLSPolicy.valueOf(policyName);</span>
+            }
+<span class="nc" id="L503">            catch ( IllegalArgumentException e )</span>
+            {
+<span class="nc" id="L505">                Log.error( &quot;Error parsing property value of '{}' into a valid TLS_POLICY. Offending value: '{}'.&quot;, policyName, tlsPolicyPropertyName, e );</span>
+<span class="nc" id="L506">                tlsPolicy = Connection.TLSPolicy.optional;</span>
+<span class="nc" id="L507">            }</span>
+<span class="nc" id="L508">            return tlsPolicy;</span>
+        }
+    }
+
+    /**
+     * Sets whether TLS is mandatory, optional, disabled or mandatory immediately for new connections. When TLS is
+     * mandatory connections are required to be encrypted or otherwise will be closed. This configuration change is
+     * persisted.
+     *
+     * If the listener is currently enabled, this configuration change will be applied immediately (which will cause a
+     * restart of the underlying connection acceptor).
+     *
+     * When TLS is disabled connections are not allowed to be (or become) encrypted. In this case, connections will be
+     * closed when encryption is attempted.
+     *
+     * This method disallows changing the policy from or into legacy mode. Such a change is logged but otherwise
+     * ignored.
+     *
+     * An invocation of this method has no effect if the new policy value is equal to the existing value.
+     *
+     * @param policy an encryption policy (not null).
+     */
+    public void setTLSPolicy( SocketConnection.TLSPolicy policy )
+    {
+<span class="nc" id="L532">        final Connection.TLSPolicy oldPolicy = getTLSPolicy();</span>
+<span class="nc bnc" id="L533" title="All 2 branches missed.">        if ( oldPolicy.equals( policy ) )</span>
+        {
+<span class="nc" id="L535">            Log.debug( &quot;Ignoring TLS Policy change request (to '{}'): listener already in this state.&quot;, policy );</span>
+<span class="nc" id="L536">            return;</span>
+        }
+
+<span class="nc" id="L539">        final Connection.TLSPolicy hardcoded = getHardcodedTLSPolicy();</span>
+<span class="nc bnc" id="L540" title="All 2 branches missed.">        if ( hardcoded != null )</span>
+        {
+<span class="nc" id="L542">            throw new IllegalArgumentException( &quot;The TLS Policy for this listener is hardcoded (to '&quot;+hardcoded+&quot;'). It cannot be changed.&quot; );</span>
+        }
+
+<span class="nc bnc" id="L545" title="All 2 branches missed.">        if ( Connection.TLSPolicy.legacyMode.equals( policy ) )</span>
+        {
+<span class="nc" id="L547">            Log.warn( &quot;Ignoring TLS Policy change request (to '{}'): You cannot reconfigure an existing connection (from '{}') into legacy mode!&quot;, policy, oldPolicy );</span>
+<span class="nc" id="L548">            return;</span>
+        }
+
+<span class="nc bnc" id="L551" title="All 2 branches missed.">        if ( Connection.TLSPolicy.legacyMode.equals( oldPolicy ) )</span>
+        {
+<span class="nc" id="L553">            Log.warn( &quot;Ignoring TLS Policy change request (to '{}'): You cannot reconfigure an existing connection that is in legacy mode!&quot;, policy );</span>
+<span class="nc" id="L554">            return;</span>
+        }
+
+<span class="nc" id="L557">        Log.debug( &quot;Changing TLS Policy from '{}' to '{}'.&quot;, oldPolicy, policy );</span>
+<span class="nc" id="L558">        JiveGlobals.setProperty( tlsPolicyPropertyName, policy.toString() );</span>
+<span class="nc" id="L559">        restart();</span>
+<span class="nc" id="L560">    }</span>
+
+    /**
+     * Returns whether compression is optional or disabled for new connections.
+     *
+     * @return A compression policy (never null)
+     */
+    public Connection.CompressionPolicy getCompressionPolicy()
+    {
+        // Depending on the connection type, define a good default value.
+        final Connection.CompressionPolicy defaultPolicy;
+<span class="nc bnc" id="L571" title="All 2 branches missed.">        switch ( getType() )</span>
+        {
+            // More likely to have good bandwidth. Compression on high-volume data gobbles CPU.
+            case COMPONENT:
+            case CONNECTION_MANAGER:
+            case SOCKET_S2S:
+<span class="nc" id="L577">                defaultPolicy = Connection.CompressionPolicy.disabled;</span>
+<span class="nc" id="L578">                break;</span>
+
+            // At least *offer* compression functionality.
+            case SOCKET_C2S:
+            case BOSH_C2S:
+            case WEBADMIN:
+            default:
+<span class="nc" id="L585">                defaultPolicy = Connection.CompressionPolicy.optional;</span>
+                break;
+        }
+
+<span class="nc bnc" id="L589" title="All 2 branches missed.">        if ( compressionPolicyPropertyName == null )</span>
+        {
+<span class="nc" id="L591">            return defaultPolicy;</span>
+        }
+        else
+        {
+<span class="nc" id="L595">            final String policyName = JiveGlobals.getProperty( compressionPolicyPropertyName, defaultPolicy.toString() );</span>
+            try
+            {
+<span class="nc" id="L598">                return Connection.CompressionPolicy.valueOf( policyName );</span>
+            }
+<span class="nc" id="L600">            catch ( IllegalArgumentException e )</span>
+            {
+<span class="nc" id="L602">                Log.error( &quot;Error parsing property value of '{}' into a valid Compression Policy. Offending value: '{}'.&quot;, tlsPolicyPropertyName, policyName, e );</span>
+<span class="nc" id="L603">                return defaultPolicy;</span>
+            }
+        }
+    }
+
+    /**
+     * Sets whether compression is optional or disabled for new connections. This configuration change is persisted.
+     *
+     * If the listener is currently enabled, this configuration change will be applied immediately (which will cause a
+     * restart of the underlying connection acceptor).
+     *
+     * An invocation of this method has no effect if the new policy value is equal to the existing value.
+     *
+     * @param policy a compression policy (not null).
+     */
+    public void setCompressionPolicy( Connection.CompressionPolicy policy )
+    {
+<span class="nc" id="L620">        final Connection.CompressionPolicy oldPolicy = getCompressionPolicy();</span>
+<span class="nc bnc" id="L621" title="All 2 branches missed.">        if ( oldPolicy.equals( policy ) )</span>
+        {
+<span class="nc" id="L623">            Log.debug( &quot;Ignoring Compression Policy change request (to '{}'): listener already in this state.&quot;, policy );</span>
+<span class="nc" id="L624">            return;</span>
+        }
+
+<span class="nc" id="L627">        Log.debug( &quot;Changing Compression Policy from '{}' to '{}'.&quot;, oldPolicy, policy );</span>
+<span class="nc" id="L628">        JiveGlobals.setProperty( compressionPolicyPropertyName, policy.toString() );</span>
+<span class="nc" id="L629">        restart();</span>
+<span class="nc" id="L630">    }</span>
+
+    /**
+     * Returns the configuration for the identity store that identifies this instance of Openfire to the peer
+     * on connections created by this listener.
+     *
+     * @return The configuration of the identity store (not null)
+     */
+    public CertificateStoreConfiguration getIdentityStoreConfiguration() {
+<span class="nc" id="L639">        return this.identityStoreConfiguration;</span>
+    }
+
+    /**
+     * Replaces the configuration for the identity store that identifies this instance of Openfire to the peer
+     * on connections created by this listener.
+     *
+     * If the listener is currently enabled, this configuration change will be applied immediately (which will cause a
+     * restart of the underlying connection acceptor).
+     *
+     * @param configuration The identity store configuration (not null)
+     */
+    public void setIdentityStoreConfiguration( CertificateStoreConfiguration configuration )
+    {
+<span class="nc bnc" id="L653" title="All 2 branches missed.">        if ( this.identityStoreConfiguration.equals( configuration ) )</span>
+        {
+<span class="nc" id="L655">            Log.debug( &quot;Ignoring identity store configuration change request (to '{}'): listener already in this state.&quot;, configuration );</span>
+<span class="nc" id="L656">            return;</span>
+        }
+<span class="nc" id="L658">        Log.debug( &quot;Changing identity store configuration  from '{}' to '{}'.&quot;, this.identityStoreConfiguration, configuration );</span>
+<span class="nc" id="L659">        this.identityStoreConfiguration = configuration;</span>
+<span class="nc" id="L660">        restart();</span>
+<span class="nc" id="L661">    }</span>
+
+    /**
+     * Returns the configuration for the trust store that is used to identify/trust peers on connections created by this
+     * listener.
+     *
+     * @return The configuration of the identity store (not null)
+     */
+    public CertificateStoreConfiguration getTrustStoreConfiguration() {
+<span class="nc" id="L670">        return this.trustStoreConfiguration;</span>
+    }
+
+    /**
+     * Replaces the configuration for the trust store that is used to identify/trust peers on connections created by
+     * this listener.
+     *
+     * If the listener is currently enabled, this configuration change will be applied immediately (which will cause a
+     * restart of the underlying connection acceptor).
+     *
+     * @param configuration The configuration of the identity store (not null)
+     */
+    public void setTrustStoreConfiguration( CertificateStoreConfiguration configuration )
+    {
+<span class="nc bnc" id="L684" title="All 2 branches missed.">        if ( this.trustStoreConfiguration.equals( configuration ) )</span>
+        {
+<span class="nc" id="L686">            Log.debug( &quot;Ignoring trust store configuration change request (to '{}'): listener already in this state.&quot;, configuration );</span>
+<span class="nc" id="L687">            return;</span>
+        }
+<span class="nc" id="L689">        Log.debug( &quot;Changing trust store configuration  from '{}' to '{}'.&quot;, this.trustStoreConfiguration, configuration );</span>
+<span class="nc" id="L690">        this.trustStoreConfiguration = configuration;</span>
+<span class="nc" id="L691">        restart();</span>
+<span class="nc" id="L692">    }</span>
+
+    /**
+     * A boolean that indicates if self-signed peer certificates can be used to establish an encrypted connection.
+     *
+     * @return true when self-signed certificates are accepted, otherwise false.
+     */
+    public boolean acceptSelfSignedCertificates()
+    {
+        // TODO these are new properties! Deprecate (migrate?) all existing 'accept-selfsigned properties' (Eg: org.jivesoftware.openfire.session.ConnectionSettings.Server.TLS_ACCEPT_SELFSIGNED_CERTS )
+<span class="nc" id="L702">        final String propertyName = type.getPrefix() + &quot;certificate.accept-selfsigned&quot;;</span>
+<span class="nc" id="L703">        final boolean defaultValue = false;</span>
+
+<span class="nc bnc" id="L705" title="All 2 branches missed.">        if ( type.getFallback() == null )</span>
+        {
+<span class="nc" id="L707">            return JiveGlobals.getBooleanProperty( propertyName, defaultValue );</span>
+        }
+        else
+        {
+<span class="nc" id="L711">            return JiveGlobals.getBooleanProperty( propertyName, getConnectionListener( type.getFallback() ).acceptSelfSignedCertificates() );</span>
+        }
+    }
+
+    /**
+     * Configuresif self-signed peer certificates can be used to establish an encrypted connection.
+     *
+     * @param accept true when self-signed certificates are accepted, otherwise false.
+     */
+    public void setAcceptSelfSignedCertificates( boolean accept )
+    {
+<span class="nc" id="L722">        final boolean oldValue = verifyCertificateValidity();</span>
+
+        // Always set the property explicitly even if it appears the equal to the old value (the old value might be a fallback value).
+<span class="nc" id="L725">        JiveGlobals.setProperty( type.getPrefix() + &quot;certificate.accept-selfsigned&quot;, Boolean.toString( accept ) );</span>
+
+<span class="nc bnc" id="L727" title="All 2 branches missed.">        if ( oldValue == accept )</span>
+        {
+<span class="nc" id="L729">            Log.debug( &quot;Ignoring self-signed certificate acceptance policy change request (to '{}'): listener already in this state.&quot;, accept );</span>
+<span class="nc" id="L730">            return;</span>
+        }
+
+<span class="nc" id="L733">        Log.debug( &quot;Changing self-signed certificate acceptance policy from '{}' to '{}'.&quot;, oldValue, accept );</span>
+<span class="nc" id="L734">        restart();</span>
+<span class="nc" id="L735">    }</span>
+
+    /**
+     * A boolean that indicates if the current validity of certificates (based on their 'notBefore' and 'notAfter'
+     * property values) is used when they are used to establish an encrypted connection..
+     *
+     * @return true when certificates are required to be valid to establish a secured connection, otherwise false.
+     */
+    public boolean verifyCertificateValidity()
+    {
+        // TODO these are new properties! Deprecate (migrate?) all existing 'verify / verify-validity properties' (Eg: org.jivesoftware.openfire.session.ConnectionSettings.Server.TLS_CERTIFICATE_VERIFY_VALIDITY )
+<span class="nc" id="L746">        final String propertyName = type.getPrefix() + &quot;certificate.verify.validity&quot;;</span>
+<span class="nc" id="L747">        final boolean defaultValue = true;</span>
+
+<span class="nc bnc" id="L749" title="All 2 branches missed.">        if ( type.getFallback() == null )</span>
+        {
+<span class="nc" id="L751">            return JiveGlobals.getBooleanProperty( propertyName, defaultValue );</span>
+        }
+        else
+        {
+<span class="nc" id="L755">            return JiveGlobals.getBooleanProperty( propertyName, getConnectionListener( type.getFallback() ).acceptSelfSignedCertificates() );</span>
+        }
+    }
+
+    /**
+     * Configures if the current validity of certificates (based on their 'notBefore' and 'notAfter' property values) is
+     * used when they are used to establish an encrypted connection..
+     *
+     * @param verify true when certificates are required to be valid to establish a secured connection, otherwise false.
+     */
+    public void setVerifyCertificateValidity( boolean verify )
+    {
+<span class="nc" id="L767">        final boolean oldValue = verifyCertificateValidity();</span>
+
+        // Always set the property explicitly even if it appears the equal to the old value (the old value might be a fallback value).
+<span class="nc" id="L770">        JiveGlobals.setProperty( type.getPrefix() + &quot;certificate.verify.validity&quot;, Boolean.toString( verify ) );</span>
+
+<span class="nc bnc" id="L772" title="All 2 branches missed.">        if ( oldValue == verify )</span>
+        {
+<span class="nc" id="L774">            Log.debug( &quot;Ignoring certificate validity verification configuration change request (to '{}'): listener already in this state.&quot;, verify );</span>
+<span class="nc" id="L775">            return;</span>
+        }
+
+<span class="nc" id="L778">        Log.debug( &quot;Changing certificate validity verification configuration from '{}' to '{}'.&quot;, oldValue, verify );</span>
+<span class="nc" id="L779">        restart();</span>
+<span class="nc" id="L780">    }</span>
+
+    /**
+     * A collection of protocol names that can be used for encryption of connections.
+     *
+     * When non-empty, the list is intended to specify those protocols (from a larger collection of implementation-
+     * supported protocols) that can be used to establish encryption.
+     *
+     * The order over which values are iterated in the result is equal to the order of values in the comma-separated
+     * configuration string. This can, but is not guaranteed to, indicate preference.
+     *
+     * @return An (ordered) set of protocols, never null but possibly empty.
+     */
+    public Set&lt;String&gt; getEncryptionProtocols()
+    {
+<span class="nc" id="L795">        final Set&lt;String&gt; result = new LinkedHashSet&lt;&gt;();</span>
+<span class="nc" id="L796">        final String csv = getEncryptionProtocolsCommaSeparated();</span>
+<span class="nc bnc" id="L797" title="All 2 branches missed.">        if ( csv.isEmpty() ) {</span>
+            try {
+<span class="nc" id="L799">                result.addAll( EncryptionArtifactFactory.getDefaultProtocols() );</span>
+<span class="nc" id="L800">            } catch ( Exception ex ) {</span>
+<span class="nc" id="L801">                Log.error( &quot;An error occurred while obtaining the default encryption protocol setting.&quot;, ex );</span>
+<span class="nc" id="L802">            }</span>
+        } else {
+<span class="nc" id="L804">            result.addAll( Arrays.asList( csv.split( &quot;\\s*,\\s*&quot; ) ) );</span>
+        }
+
+        // OF-1118: Do not return protocols that are not supported by the implementation.
+        try {
+<span class="nc" id="L809">            result.retainAll( EncryptionArtifactFactory.getSupportedProtocols() );</span>
+<span class="nc" id="L810">        } catch ( Exception ex ) {</span>
+<span class="nc" id="L811">            Log.error( &quot;An error occurred while obtaining the supported encryption protocols.&quot;, ex );</span>
+<span class="nc" id="L812">        }</span>
+
+<span class="nc" id="L814">        return result;</span>
+    }
+
+    protected String getEncryptionProtocolsCommaSeparated()
+    {
+<span class="nc" id="L819">        final String propertyName = type.getPrefix() + &quot;protocols&quot;;</span>
+<span class="nc" id="L820">        final String defaultValue = &quot;&quot;;</span>
+
+<span class="nc bnc" id="L822" title="All 2 branches missed.">        if ( type.getFallback() == null )</span>
+        {
+<span class="nc" id="L824">            return JiveGlobals.getProperty( propertyName, defaultValue ).trim();</span>
+        }
+        else
+        {
+<span class="nc" id="L828">            return JiveGlobals.getProperty( propertyName, getConnectionListener( type.getFallback() ).getEncryptionProtocolsCommaSeparated() ).trim();</span>
+        }
+    }
+
+    /**
+     * Defines the collection of protocols (by name) that can be used for encryption of connections.
+     *
+     * When non-empty, the list is intended to specify those protocols (from a larger collection of implementation-
+     * supported protocols) that can be used to establish encryption. An empty list will cause an implementation
+     * default to be used.
+     *
+     * The order over which values are presented can, but is not guaranteed to, indicate preference.
+     *
+     * @param protocols An (ordered) set of protocol names, can be null.
+     */
+    public void setEncryptionProtocols( Set&lt;String&gt; protocols ) {
+<span class="nc bnc" id="L844" title="All 2 branches missed.">        if ( protocols == null ) {</span>
+<span class="nc" id="L845">            setEncryptionProtocols( new String[0] );</span>
+        } else {
+<span class="nc" id="L847">            setEncryptionProtocols( protocols.toArray( new String[ protocols.size() ] ) );</span>
+        }
+<span class="nc" id="L849">    }</span>
+
+    /**
+     * Defines the collection of protocols (by name) that can be used for encryption of connections.
+     *
+     * When non-empty, the list is intended to specify those protocols (from a larger collection of implementation-
+     * supported protocols) that can be used to establish encryption. An empty list will cause an implementation
+     * default to be used.
+     *
+     * The order over which values are presented can, but is not guaranteed to, indicate preference.
+     *
+     * @param protocols An array of protocol names, can be null.
+     */
+    public void setEncryptionProtocols( String[] protocols )
+    {
+<span class="nc bnc" id="L864" title="All 2 branches missed.">        if ( protocols == null) {</span>
+<span class="nc" id="L865">            protocols = new String[0];</span>
+        }
+<span class="nc" id="L867">        final String oldValue = getEncryptionProtocolsCommaSeparated();</span>
+
+        // Always set the property explicitly even if it appears the equal to the old value (the old value might be a fallback value).
+<span class="nc" id="L870">        final StringBuilder csv = new StringBuilder();</span>
+<span class="nc bnc" id="L871" title="All 2 branches missed.">        for( String protocol : protocols )</span>
+        {
+<span class="nc" id="L873">            csv.append( protocol );</span>
+<span class="nc" id="L874">            csv.append( ',' );</span>
+        }
+<span class="nc bnc" id="L876" title="All 2 branches missed.">        final String newValue = csv.length() &gt; 0 ? csv.substring( 0, csv.length() - 1 ) : &quot;&quot;;</span>
+<span class="nc" id="L877">        JiveGlobals.setProperty( type.getPrefix() + &quot;protocols&quot;, newValue );</span>
+
+<span class="nc bnc" id="L879" title="All 2 branches missed.">        if ( oldValue.equals( newValue ) )</span>
+        {
+<span class="nc" id="L881">            Log.debug( &quot;Ignoring protocol configuration change request (to '{}'): listener already in this state.&quot;, newValue );</span>
+<span class="nc" id="L882">            return;</span>
+        }
+
+<span class="nc" id="L885">        Log.debug( &quot;Changing protocol configuration from '{}' to '{}'.&quot;, oldValue, newValue );</span>
+<span class="nc" id="L886">        restart();</span>
+<span class="nc" id="L887">    }</span>
+
+    /**
+     * A collection of cipher suite names that can be used for encryption of connections.
+     *
+     * When non-empty, the list is intended to specify those cipher suites (from a larger collection of implementation-
+     * supported cipher suites) that can be used to establish encryption.
+     *
+     * The order over which values are iterated in the result is equal to the order of values in the comma-separated
+     * configuration string. This can, but is not guaranteed to, indicate preference.
+     *
+     * @return An (ordered) set of cipher suite names, never null but possibly empty.
+     */
+    public Set&lt;String&gt; getEncryptionCipherSuites()
+    {
+<span class="nc" id="L902">        final Set&lt;String&gt; result = new LinkedHashSet&lt;&gt;();</span>
+<span class="nc" id="L903">        final String csv = getEncryptionCipherSuitesCommaSeparated();</span>
+<span class="nc bnc" id="L904" title="All 2 branches missed.">        if ( csv.isEmpty() ) {</span>
+            try {
+<span class="nc" id="L906">                result.addAll( EncryptionArtifactFactory.getDefaultCipherSuites() );</span>
+<span class="nc" id="L907">            } catch ( Exception ex ) {</span>
+<span class="nc" id="L908">                Log.error( &quot;An error occurred while obtaining the default encryption cipher suite setting.&quot;, ex );</span>
+<span class="nc" id="L909">            }</span>
+        } else {
+<span class="nc" id="L911">            result.addAll( Arrays.asList( csv.split( &quot;\\s*,\\s*&quot; ) ) );</span>
+        }
+
+        // OF-1118: Do not return cipher suites that are not supported by the implementation.
+        try {
+<span class="nc" id="L916">            result.retainAll( EncryptionArtifactFactory.getSupportedCipherSuites() );</span>
+<span class="nc" id="L917">        } catch ( Exception ex ) {</span>
+<span class="nc" id="L918">            Log.warn( &quot;An error occurred while obtaining the supported encryption cipher suites.&quot;, ex );</span>
+<span class="nc" id="L919">        }</span>
+
+<span class="nc" id="L921">        return result;</span>
+    }
+
+    protected String getEncryptionCipherSuitesCommaSeparated()
+    {
+<span class="nc" id="L926">        final String propertyName = type.getPrefix() + &quot;ciphersuites&quot;;</span>
+<span class="nc" id="L927">        final String defaultValue = &quot;&quot;;</span>
+
+<span class="nc bnc" id="L929" title="All 2 branches missed.">        if ( type.getFallback() == null )</span>
+        {
+<span class="nc" id="L931">            return JiveGlobals.getProperty( propertyName, defaultValue );</span>
+        }
+        else
+        {
+<span class="nc" id="L935">            return JiveGlobals.getProperty( propertyName, getConnectionListener( type.getFallback() ).getEncryptionCipherSuitesCommaSeparated() );</span>
+        }
+    }
+
+    /**
+     * Defines the collection of cipher suite (by name) that can be used for encryption of connections.
+     *
+     * When non-empty, the list is intended to specify those cipher suites (from a larger collection of implementation-
+     * supported cipher suites) that can be used to establish encryption. An empty list will cause an implementation
+     * default to be used.
+     *
+     * The order over which values are presented can, but is not guaranteed to, indicate preference.
+     *
+     * @param cipherSuites An (ordered) set of cipher suite names, can be null.
+     */
+    public void setEncryptionCipherSuites( Set&lt;String&gt; cipherSuites ) {
+<span class="nc bnc" id="L951" title="All 2 branches missed.">        if ( cipherSuites == null ) {</span>
+<span class="nc" id="L952">            setEncryptionCipherSuites( new String[0] );</span>
+        } else {
+<span class="nc" id="L954">            setEncryptionCipherSuites( cipherSuites.toArray( new String[ cipherSuites.size() ] ) );</span>
+        }
+<span class="nc" id="L956">    }</span>
+
+    /**
+     * Defines the collection of cipher suite (by name) that can be used for encryption of connections.
+     *
+     * When non-empty, the list is intended to specify those cipher suites (from a larger collection of implementation-
+     * supported cipher suites) that can be used to establish encryption. An empty list will cause an implementation
+     * default to be used.
+     *
+     * The order over which values are presented can, but is not guaranteed to, indicate preference.
+     *
+     * @param cipherSuites An array of cipher suite names, can be null.
+     */
+    public void setEncryptionCipherSuites( String[] cipherSuites )
+    {
+<span class="nc bnc" id="L971" title="All 2 branches missed.">        if ( cipherSuites == null) {</span>
+<span class="nc" id="L972">            cipherSuites = new String[0];</span>
+        }
+<span class="nc" id="L974">        final String oldValue = getEncryptionCipherSuitesCommaSeparated();</span>
+
+        // Always set the property explicitly even if it appears the equal to the old value (the old value might be a fallback value).
+<span class="nc" id="L977">        final StringBuilder csv = new StringBuilder();</span>
+<span class="nc bnc" id="L978" title="All 2 branches missed.">        for( String cipherSuite : cipherSuites )</span>
+        {
+<span class="nc" id="L980">            csv.append( cipherSuite );</span>
+<span class="nc" id="L981">            csv.append( ',' );</span>
+        }
+<span class="nc bnc" id="L983" title="All 2 branches missed.">        final String newValue = csv.length() &gt; 0 ? csv.substring( 0, csv.length() - 1 ) : &quot;&quot;;</span>
+<span class="nc" id="L984">        JiveGlobals.setProperty( type.getPrefix() + &quot;ciphersuites&quot;, newValue );</span>
+
+<span class="nc bnc" id="L986" title="All 2 branches missed.">        if ( oldValue.equals( newValue ) )</span>
+        {
+<span class="nc" id="L988">            Log.debug( &quot;Ignoring cipher suite configuration change request (to '{}'): listener already in this state.&quot;, newValue );</span>
+<span class="nc" id="L989">            return;</span>
+        }
+
+<span class="nc" id="L992">        Log.debug( &quot;Changing cipher suite configuration from '{}' to '{}'.&quot;, oldValue, newValue );</span>
+<span class="nc" id="L993">        restart();</span>
+<span class="nc" id="L994">    }</span>
+
+    /**
+     * Constructs and returns a ServerPort instance that reflects the state of this listener.
+     *
+     * @return A ServerPort instance, or null when the listener is not enabled.
+     * @deprecated To obtain the state of this instance, use corresponding getters instead.
+     */
+    @Deprecated
+    public ServerPort getServerPort()
+    {
+<span class="nc bnc" id="L1005" title="All 2 branches missed.">        if ( connectionAcceptor == null )</span>
+        {
+<span class="nc" id="L1007">            return null;</span>
+        }
+
+<span class="nc" id="L1010">        final int port = getPort();</span>
+<span class="nc" id="L1011">        final String name = getBindAddress().getHostName();</span>
+<span class="nc" id="L1012">        final String address = getBindAddress().getHostAddress();</span>
+<span class="nc bnc" id="L1013" title="All 2 branches missed.">        final boolean isSecure = getTLSPolicy() != Connection.TLSPolicy.disabled;</span>
+<span class="nc" id="L1014">        final String algorithm = null;</span>
+
+<span class="nc bnc" id="L1016" title="All 5 branches missed.">        switch ( type ) {</span>
+            case SOCKET_C2S:
+<span class="nc" id="L1018">                return new ServerPort( port, name, address, isSecure, algorithm, ServerPort.Type.client );</span>
+            case SOCKET_S2S:
+<span class="nc" id="L1020">                return new ServerPort( port, name, address, isSecure, algorithm, ServerPort.Type.server );</span>
+            case COMPONENT:
+<span class="nc" id="L1022">                return new ServerPort( port, name, address, isSecure, algorithm, ServerPort.Type.component );</span>
+            case CONNECTION_MANAGER:
+<span class="nc" id="L1024">                return new ServerPort( port, name, address, isSecure, algorithm, ServerPort.Type.connectionManager );</span>
+            default:
+<span class="nc" id="L1026">                throw new IllegalStateException( &quot;Unrecognized type: &quot; + type );</span>
+        }
+    }
+    @Override
+    public String toString()
+    {
+<span class="nc bnc" id="L1032" title="All 2 branches missed.">        final String name = getType().toString().toLowerCase() + ( getTLSPolicy().equals( Connection.TLSPolicy.legacyMode ) ? &quot;-legacyMode&quot; : &quot;&quot; );</span>
+<span class="nc" id="L1033">        return &quot;ConnectionListener{&quot; +</span>
+                &quot;name=&quot; + name +
+                '}';
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

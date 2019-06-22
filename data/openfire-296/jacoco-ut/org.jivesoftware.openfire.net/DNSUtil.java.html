@@ -1,0 +1,429 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>DNSUtil.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.net</a> &gt; <span class="el_source">DNSUtil.java</span></div><h1>DNSUtil.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2004-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.net;
+
+import org.jivesoftware.openfire.session.ConnectionSettings;
+import org.jivesoftware.util.JiveGlobals;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import javax.naming.NameNotFoundException;
+import javax.naming.NamingException;
+import javax.naming.directory.Attribute;
+import javax.naming.directory.Attributes;
+import javax.naming.directory.DirContext;
+import javax.naming.directory.InitialDirContext;
+
+import java.util.*;
+
+/**
+ * Utility class to perform DNS lookups for XMPP services.
+ *
+ * @author Matt Tucker
+ */
+<span class="nc" id="L38">public class DNSUtil {</span>
+
+    private static DirContext context;
+
+<span class="fc" id="L42">    private static final Logger logger = LoggerFactory.getLogger(DNSUtil.class);</span>
+
+    /**
+     * Internal DNS that allows to specify target IP addresses and ports to use for domains.
+     * The internal DNS will be checked up before performing an actual DNS SRV lookup.
+     */
+    private static Map&lt;String, HostAddress&gt; dnsOverride;
+
+    static {
+        try {
+<span class="fc" id="L52">            Hashtable&lt;String,String&gt; env = new Hashtable&lt;&gt;();</span>
+<span class="fc" id="L53">            env.put(&quot;java.naming.factory.initial&quot;, &quot;com.sun.jndi.dns.DnsContextFactory&quot;);</span>
+<span class="fc" id="L54">            context = new InitialDirContext(env);</span>
+
+<span class="fc" id="L56">            String property = JiveGlobals.getProperty(&quot;dnsutil.dnsOverride&quot;);</span>
+<span class="pc bpc" id="L57" title="1 of 2 branches missed.">            if (property != null) {</span>
+<span class="nc" id="L58">                dnsOverride = decode(property);</span>
+            }
+        }
+<span class="nc" id="L61">        catch (Exception e) {</span>
+<span class="nc" id="L62">            logger.error(&quot;Can't initialize DNS context!&quot;, e);</span>
+<span class="fc" id="L63">        }</span>
+<span class="fc" id="L64">    }</span>
+
+    /**
+     * Returns a sorted list of host names and ports that the specified XMPP
+     * domain can be reached at for server-to-server communication.
+     *
+     * DNS lookups for a SRV records in the form &quot;_xmpp-server._tcp.example.com&quot;
+     * and &quot;_xmpps-server._tcp.example.com&quot; are attempted, in line with section
+     * 3.2 of XMPP Core and XEP-0368.
+     *
+     * If those lookup fail to provide any records, a lookup in the older form
+     * of &quot;_jabber._tcp.example.com&quot; is attempted since servers that implement
+     * an older version of the protocol may be listed using that notation.
+     *
+     * If that lookup fails as well, it's assumed that the XMPP server lives at
+     * the host resolved by a DNS A lookup at the specified domain on the
+     * specified default port.&lt;p&gt;
+     *
+     * As an example, a lookup for &quot;example.com&quot; may return &quot;im.example.com:5269&quot;.
+     *
+     * @param domain the domain.
+     * @param defaultPort default port to return if the DNS look up fails.
+     * @return a list of  HostAddresses, which encompasses the hostname and port
+     *         that the XMPP server can be reached at for the specified domain.
+     * @see &lt;a href=&quot;https://tools.ietf.org/html/rfc6120#section-3.2&quot;&gt;XMPP CORE&lt;/a&gt;
+     * @see &lt;a href=&quot;https://xmpp.org/extensions/xep-0368.html&quot;&gt;XEP-0368&lt;/a&gt;
+     */
+    public static List&lt;HostAddress&gt; resolveXMPPDomain(String domain, int defaultPort) {
+        // Check if there is an entry in the internal DNS for the specified domain
+<span class="nc" id="L93">        List&lt;HostAddress&gt; results = new LinkedList&lt;&gt;();</span>
+<span class="nc bnc" id="L94" title="All 2 branches missed.">        if (dnsOverride != null) {</span>
+<span class="nc" id="L95">            HostAddress hostAddress = dnsOverride.get(domain);</span>
+<span class="nc bnc" id="L96" title="All 2 branches missed.">            if (hostAddress == null) {</span>
+<span class="nc" id="L97">                hostAddress = dnsOverride.get(&quot;*&quot;);</span>
+            }
+<span class="nc bnc" id="L99" title="All 2 branches missed.">            if (hostAddress != null) {</span>
+<span class="nc" id="L100">                results.add(hostAddress);</span>
+<span class="nc" id="L101">                return results;</span>
+            }
+        }
+
+        // Attempt the SRV lookup.
+<span class="nc" id="L106">        final List&lt;WeightedHostAddress&gt; srvLookups = new LinkedList&lt;&gt;();</span>
+<span class="nc" id="L107">        srvLookups.addAll(srvLookup(&quot;xmpp-server&quot;, &quot;tcp&quot;, domain ) );</span>
+
+<span class="nc" id="L109">        final boolean allowTLS = JiveGlobals.getBooleanProperty(ConnectionSettings.Server.TLS_ENABLED, true);</span>
+<span class="nc bnc" id="L110" title="All 2 branches missed.">        if (allowTLS) {</span>
+<span class="nc" id="L111">            srvLookups.addAll(srvLookup(&quot;xmpps-server&quot;, &quot;tcp&quot;, domain));</span>
+        }
+<span class="nc bnc" id="L113" title="All 2 branches missed.">        if (!srvLookups.isEmpty()) {</span>
+            // we have to re-prioritize the combination of both lookups.
+<span class="nc" id="L115">            results.addAll( prioritize( srvLookups.toArray( new WeightedHostAddress[0] ) ) );</span>
+        }
+
+<span class="nc bnc" id="L118" title="All 2 branches missed.">        if (results.isEmpty()) {</span>
+<span class="nc" id="L119">            results.addAll(srvLookup( &quot;jabber&quot;, &quot;tcp&quot;, domain ) );</span>
+        }
+
+        // Use domain and default port as fallback.
+<span class="nc bnc" id="L123" title="All 2 branches missed.">        if (results.isEmpty()) {</span>
+<span class="nc" id="L124">            results.add(new HostAddress(domain, defaultPort, false));</span>
+        }
+<span class="nc" id="L126">        return results;</span>
+    }
+
+    /**
+     * Returns the internal DNS that allows to specify target IP addresses and ports
+     * to use for domains. The internal DNS will be checked up before performing an
+     * actual DNS SRV lookup.
+     *
+     * @return the internal DNS that allows to specify target IP addresses and ports
+     *         to use for domains.
+     */
+    public static Map&lt;String, HostAddress&gt; getDnsOverride() {
+<span class="nc" id="L138">        return dnsOverride;</span>
+    }
+
+    /**
+     * Sets the internal DNS that allows to specify target IP addresses and ports
+     * to use for domains. The internal DNS will be checked up before performing an
+     * actual DNS SRV lookup.
+     *
+     * @param dnsOverride the internal DNS that allows to specify target IP addresses and ports
+     *        to use for domains.
+     */
+    public static void setDnsOverride(Map&lt;String, HostAddress&gt; dnsOverride) {
+<span class="nc" id="L150">        DNSUtil.dnsOverride = dnsOverride;</span>
+<span class="nc" id="L151">        JiveGlobals.setProperty(&quot;dnsutil.dnsOverride&quot;, encode(dnsOverride));</span>
+<span class="nc" id="L152">    }</span>
+
+    private static String encode(Map&lt;String, HostAddress&gt; internalDNS) {
+<span class="nc bnc" id="L155" title="All 2 branches missed.">        if (internalDNS == null) {</span>
+<span class="nc" id="L156">            return &quot;&quot;;</span>
+        }
+<span class="nc" id="L158">        StringBuilder sb = new StringBuilder(100);</span>
+<span class="nc bnc" id="L159" title="All 2 branches missed.">        for (String key : internalDNS.keySet()) {</span>
+<span class="nc bnc" id="L160" title="All 2 branches missed.">            if (sb.length() &gt; 0) {</span>
+<span class="nc" id="L161">                sb.append(',');</span>
+            }
+<span class="nc" id="L163">            sb.append('{').append(key).append(',');</span>
+<span class="nc" id="L164">            sb.append(internalDNS.get(key).getHost()).append(':');</span>
+<span class="nc" id="L165">            sb.append(internalDNS.get(key).getPort()).append('}');</span>
+<span class="nc" id="L166">        }</span>
+<span class="nc" id="L167">        return sb.toString();</span>
+    }
+
+    private static Map&lt;String, HostAddress&gt; decode(String encodedValue) {
+<span class="nc" id="L171">        Map&lt;String, HostAddress&gt; answer = new HashMap&lt;&gt;();</span>
+<span class="nc" id="L172">        StringTokenizer st = new StringTokenizer(encodedValue, &quot;{},:&quot;);</span>
+<span class="nc bnc" id="L173" title="All 2 branches missed.">        while (st.hasMoreElements()) {</span>
+<span class="nc" id="L174">            String key = st.nextToken();</span>
+<span class="nc" id="L175">            answer.put(key, new HostAddress(st.nextToken(), Integer.parseInt(st.nextToken()), false));</span>
+<span class="nc" id="L176">        }</span>
+<span class="nc" id="L177">        return answer;</span>
+    }
+
+    /**
+     * Performs a DNS SRV lookup. Does not take into account any DNS overrides configured in this class.
+     *
+     * The results returned by this method are ordered by priority (ascending), and order of equal priority entries is
+     * randomized by weight, as defined in the DNS SRV specification.
+     *
+     * @param service the symbolic name of the desired service (cannot be null).
+     * @param proto the transport protocol of the desired service; this is usually either TCP or UDP (cannot be null).
+     * @param name the domain name for which this record is valid (cannot be null).
+     * @return An ordered of results (possibly empty, never null).
+     */
+    public static List&lt;WeightedHostAddress&gt; srvLookup(String service, String proto, String name) {
+<span class="nc bnc" id="L192" title="All 6 branches missed.">        if (service == null || proto == null || name == null) {</span>
+<span class="nc" id="L193">            throw new NullPointerException(&quot;DNS lookup can't be null&quot;);</span>
+        }
+
+<span class="nc bnc" id="L196" title="All 2 branches missed.">        if ( !service.startsWith( &quot;_&quot; ) )</span>
+        {
+<span class="nc" id="L198">            service = &quot;_&quot; + service;</span>
+        }
+<span class="nc bnc" id="L200" title="All 2 branches missed.">        if ( !service.endsWith( &quot;.&quot; ) )</span>
+        {
+<span class="nc" id="L202">            service = service + &quot;.&quot;;</span>
+        }
+
+<span class="nc bnc" id="L205" title="All 2 branches missed.">        if ( !proto.startsWith( &quot;_&quot; ) )</span>
+        {
+<span class="nc" id="L207">            proto = &quot;_&quot; + proto;</span>
+        }
+<span class="nc bnc" id="L209" title="All 2 branches missed.">        if ( !proto.endsWith( &quot;.&quot; ) )</span>
+        {
+<span class="nc" id="L211">            proto = proto+ &quot;.&quot;;</span>
+        }
+
+<span class="nc bnc" id="L214" title="All 2 branches missed.">        if ( !name.endsWith( &quot;.&quot; ) ) {</span>
+<span class="nc" id="L215">            name = name + &quot;.&quot;;</span>
+        }
+
+        // _service._proto.name.
+<span class="nc" id="L219">        final String lookup = (service + proto + name).toLowerCase();</span>
+        try {
+<span class="nc" id="L221">            Attributes dnsLookup =</span>
+<span class="nc" id="L222">                    context.getAttributes(lookup, new String[]{&quot;SRV&quot;});</span>
+<span class="nc" id="L223">            Attribute srvRecords = dnsLookup.get(&quot;SRV&quot;);</span>
+<span class="nc bnc" id="L224" title="All 2 branches missed.">            if (srvRecords == null) {</span>
+<span class="nc" id="L225">                logger.debug(&quot;No SRV record found for domain: &quot; + lookup);</span>
+<span class="nc" id="L226">                return Collections.emptyList();</span>
+            }
+<span class="nc" id="L228">            WeightedHostAddress[] hosts = new WeightedHostAddress[srvRecords.size()];</span>
+<span class="nc" id="L229">            final boolean directTLS = lookup.startsWith( &quot;_xmpps-&quot; ); // XEP-0368</span>
+<span class="nc bnc" id="L230" title="All 2 branches missed.">            for (int i = 0; i &lt; srvRecords.size(); i++) {</span>
+<span class="nc" id="L231">                hosts[i] = new WeightedHostAddress(((String)srvRecords.get(i)).split(&quot; &quot;), directTLS);</span>
+            }
+
+<span class="nc" id="L234">            return prioritize(hosts);</span>
+        }
+<span class="nc" id="L236">        catch (NameNotFoundException e) {</span>
+<span class="nc" id="L237">            logger.debug(&quot;No SRV record found for: &quot; + lookup, e);</span>
+        }
+<span class="nc" id="L239">        catch (NamingException e) {</span>
+<span class="nc" id="L240">            logger.error(&quot;Can't process DNS lookup!&quot;, e);</span>
+<span class="nc" id="L241">        }</span>
+<span class="nc" id="L242">        return Collections.emptyList();</span>
+    }
+
+    /**
+     * Checks if the provided DNS pattern matches the provided name. For example, this method will:
+     * return &lt;em&gt;true&lt;/em&gt;  for name: {@code xmpp.example.org}, pattern: {@code *.example.org}
+     * return &lt;em&gt;false&lt;/em&gt; for name: {@code xmpp.example.org}, pattern: {@code example.org}
+     *
+     * This method is not case sensitive.
+     *
+     * @param name The name to check against a pattern (cannot be null or empty).
+     * @param pattern the pattern (cannot be null or empty).
+     * @return true when the name is covered by the pattern, otherwise false.
+     */
+    public static boolean isNameCoveredByPattern( String name, String pattern )
+    {
+<span class="pc bpc" id="L258" title="4 of 8 branches missed.">        if ( name == null || name.isEmpty() || pattern == null || pattern.isEmpty() )</span>
+        {
+<span class="nc" id="L260">            throw new IllegalArgumentException( &quot;Arguments cannot be null or empty.&quot; );</span>
+        }
+
+<span class="fc" id="L263">        final String needle = name.toLowerCase();</span>
+<span class="fc" id="L264">        final String hayStack = pattern.toLowerCase();</span>
+
+<span class="fc bfc" id="L266" title="All 2 branches covered.">        if ( needle.equals( hayStack )) {</span>
+<span class="fc" id="L267">            return true;</span>
+        }
+
+<span class="fc bfc" id="L270" title="All 2 branches covered.">        if ( hayStack.startsWith( &quot;*.&quot; ) ) {</span>
+<span class="fc" id="L271">            return needle.endsWith( hayStack.substring( 2 ) );</span>
+        }
+<span class="fc" id="L273">        return false;</span>
+    }
+
+    /**
+     * Encapsulates a hostname and port.
+     */
+    public static class HostAddress {
+
+        private final String host;
+        private final int port;
+        private boolean directTLS;
+
+<span class="fc" id="L285">        private HostAddress(String host, int port, boolean directTLS) {</span>
+            // Host entries in DNS should end with a &quot;.&quot;.
+<span class="pc bpc" id="L287" title="1 of 2 branches missed.">            if (host.endsWith(&quot;.&quot;)) {</span>
+<span class="nc" id="L288">                this.host = host.substring(0, host.length()-1);</span>
+            }
+            else {
+<span class="fc" id="L291">                this.host = host;</span>
+            }
+<span class="fc" id="L293">            this.port = port;</span>
+<span class="fc" id="L294">            this.directTLS = directTLS;</span>
+<span class="fc" id="L295">        }</span>
+
+        /**
+         * Returns the hostname.
+         *
+         * @return the hostname.
+         */
+        public String getHost() {
+<span class="nc" id="L303">            return host;</span>
+        }
+
+        /**
+         * Returns the port.
+         *
+         * @return the port.
+         */
+        public int getPort() {
+<span class="nc" id="L312">            return port;</span>
+        }
+
+        public boolean isDirectTLS()
+        {
+<span class="nc" id="L317">            return directTLS;</span>
+        }
+
+        @Override
+        public String toString() {
+<span class="nc" id="L322">            return host + &quot;:&quot; + port;</span>
+        }
+    }
+
+    public static List&lt;WeightedHostAddress&gt; prioritize(WeightedHostAddress[] records) {
+<span class="fc" id="L327">        final List&lt;WeightedHostAddress&gt; result = new LinkedList&lt;&gt;();</span>
+
+        // sort by priority (ascending)
+<span class="fc" id="L330">        SortedMap&lt;Integer, Set&lt;WeightedHostAddress&gt;&gt; byPriority = new TreeMap&lt;&gt;();</span>
+<span class="fc bfc" id="L331" title="All 2 branches covered.">        for(final WeightedHostAddress record : records) {</span>
+<span class="fc bfc" id="L332" title="All 2 branches covered.">            if (byPriority.containsKey(record.getPriority())) {</span>
+<span class="fc" id="L333">                byPriority.get(record.getPriority()).add(record);</span>
+            } else {
+<span class="fc" id="L335">                final Set&lt;WeightedHostAddress&gt; set = new HashSet&lt;&gt;();</span>
+<span class="fc" id="L336">                set.add(record);</span>
+<span class="fc" id="L337">                byPriority.put(record.getPriority(), set);</span>
+            }
+        }
+
+        // now, randomize each priority set by weight.
+<span class="fc bfc" id="L342" title="All 2 branches covered.">        for(Map.Entry&lt;Integer, Set&lt;WeightedHostAddress&gt;&gt; weights : byPriority.entrySet()) {</span>
+
+<span class="fc" id="L344">            List&lt;WeightedHostAddress&gt; zeroWeights = new LinkedList&lt;&gt;();</span>
+
+<span class="fc" id="L346">            int totalWeight = 0;</span>
+<span class="fc" id="L347">            final Iterator&lt;WeightedHostAddress&gt; i = weights.getValue().iterator();</span>
+<span class="fc bfc" id="L348" title="All 2 branches covered.">            while (i.hasNext()) {</span>
+<span class="fc" id="L349">                final WeightedHostAddress next = i.next();</span>
+<span class="fc bfc" id="L350" title="All 2 branches covered.">                if (next.weight == 0) {</span>
+                    // set aside, as these should be considered last according to the RFC.
+<span class="fc" id="L352">                    zeroWeights.add(next);</span>
+<span class="fc" id="L353">                    i.remove();</span>
+<span class="fc" id="L354">                    continue;</span>
+                }
+
+<span class="fc" id="L357">                totalWeight += next.getWeight();</span>
+<span class="fc" id="L358">            }</span>
+
+<span class="fc" id="L360">            int iterationWeight = totalWeight;</span>
+<span class="fc" id="L361">            Iterator&lt;WeightedHostAddress&gt; iter = weights.getValue().iterator();</span>
+<span class="fc bfc" id="L362" title="All 2 branches covered.">            while (iter.hasNext()) {</span>
+<span class="fc" id="L363">                int needle = new Random().nextInt(iterationWeight);</span>
+
+                while (true) {
+<span class="fc" id="L366">                    final WeightedHostAddress record = iter.next();</span>
+<span class="fc" id="L367">                    needle -= record.getWeight();</span>
+<span class="fc bfc" id="L368" title="All 2 branches covered.">                    if (needle &lt;= 0) {</span>
+<span class="fc" id="L369">                        result.add(record);</span>
+<span class="fc" id="L370">                        iter.remove();</span>
+<span class="fc" id="L371">                        iterationWeight -= record.getWeight();</span>
+<span class="fc" id="L372">                        break;</span>
+                    }
+<span class="fc" id="L374">                }</span>
+<span class="fc" id="L375">                iter = weights.getValue().iterator();</span>
+<span class="fc" id="L376">            }</span>
+
+            // finally, append the hosts with zero priority (shuffled)
+<span class="fc" id="L379">            Collections.shuffle(zeroWeights);</span>
+<span class="fc bfc" id="L380" title="All 2 branches covered.">            for(WeightedHostAddress zero : zeroWeights) {</span>
+<span class="fc" id="L381">                result.add(zero);</span>
+<span class="fc" id="L382">            }</span>
+<span class="fc" id="L383">        }</span>
+
+<span class="fc" id="L385">        return result;</span>
+    }
+    /**
+     * The representation of weighted address.
+     */
+    public static class WeightedHostAddress extends HostAddress {
+
+        private final int priority;
+        private final int weight;
+
+        private WeightedHostAddress(String[] srvRecordEntries, boolean directTLS) {
+<span class="nc" id="L396">            super(srvRecordEntries[srvRecordEntries.length-1],</span>
+<span class="nc" id="L397">                  Integer.parseInt(srvRecordEntries[srvRecordEntries.length-2]),</span>
+                  directTLS
+            );
+<span class="nc" id="L400">            weight = Integer.parseInt(srvRecordEntries[srvRecordEntries.length-3]);</span>
+<span class="nc" id="L401">            priority = Integer.parseInt(srvRecordEntries[srvRecordEntries.length-4]);</span>
+<span class="nc" id="L402">        }</span>
+
+        WeightedHostAddress(String host, int port, boolean directTLS, int priority, int weight) {
+<span class="fc" id="L405">            super(host, port, directTLS);</span>
+<span class="fc" id="L406">            this.priority = priority;</span>
+<span class="fc" id="L407">            this.weight = weight;</span>
+<span class="fc" id="L408">        }</span>
+
+        /**
+         * Returns the priority.
+         *
+         * @return the priority.
+         */
+        public int getPriority() {
+<span class="fc" id="L416">            return priority;</span>
+        }
+
+        /**
+         * Returns the weight.
+         *
+         * @return the weight.
+         */
+        public int getWeight() {
+<span class="fc" id="L425">            return weight;</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

@@ -1,0 +1,121 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>SocketSendingTracker.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.net</a> &gt; <span class="el_source">SocketSendingTracker.java</span></div><h1>SocketSendingTracker.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2004-2009 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.net;
+
+/**
+ * A SocketSendingTracker keeps track of all the sockets that are currently sending data and
+ * checks the health of the sockets to detect hanged connections. If a sending operation takes
+ * too much time (i.e. exceeds a time limit) then it is assumed that the connection has been
+ * lost and for some reason the JVM has not been notified of the dead connection. Once a dead
+ * connection has been detected it will be closed so that the thread that was writing to the
+ * socket can resume. Resuming locked threads is important since otherwise a complete system halt
+ * may occur.&lt;p&gt;
+ *
+ * The time limit to wait before considering a connection dead can be configured changing the
+ * property &lt;b&gt;xmpp.session.sending-limit&lt;/b&gt;. If the property was not defined then a default
+ * time limit of 60 seconds will be assumed. This means that by default if a sending operation
+ * takes longer than 60 seconds then the connection will be closed and the client disconnected.
+ * Therefore, it is important to not set a very low time limit since active clients may be
+ * incorrectly considered as dead clients.
+ *
+ * @author Gaston Dombiak
+ */
+public class SocketSendingTracker {
+
+
+<span class="nc" id="L40">    private static SocketSendingTracker instance = new SocketSendingTracker();</span>
+
+    /**
+     * Flag that indicates if the tracket should shutdown the tracking process.
+     */
+<span class="nc" id="L45">    private boolean shutdown = false;</span>
+
+    /**
+     * Thread used for checking periodically the health of the sockets involved in sending
+     * operations.
+     */
+    private Thread checkingThread;
+
+    /**
+     * Returns the unique instance of this class.
+     *
+     * @return the unique instance of this class.
+     */
+    public static SocketSendingTracker getInstance() {
+<span class="nc" id="L59">        return instance;</span>
+    }
+
+    /**
+     * Hide the constructor so that only one instance of this class can exist.
+     */
+<span class="nc" id="L65">    private SocketSendingTracker() {</span>
+<span class="nc" id="L66">    }</span>
+
+    /**
+     * Start up the daemon thread that will check for the health of the sockets that are
+     * currently sending data.
+     */
+    public void start() {
+<span class="nc" id="L73">        shutdown = false;</span>
+<span class="nc" id="L74">        checkingThread = new Thread(&quot;SocketSendingTracker&quot;) {</span>
+            @Override
+            public void run() {
+<span class="nc bnc" id="L77" title="All 2 branches missed.">                while (!shutdown) {</span>
+<span class="nc" id="L78">                    checkHealth();</span>
+<span class="nc" id="L79">                    synchronized (this) {</span>
+                        try {
+<span class="nc" id="L81">                            wait(10000);</span>
+                        }
+<span class="nc" id="L83">                        catch (InterruptedException e) {</span>
+<span class="nc" id="L84">                        }</span>
+<span class="nc" id="L85">                    }</span>
+                }
+<span class="nc" id="L87">            }</span>
+        };
+<span class="nc" id="L89">        checkingThread.setDaemon(true);</span>
+<span class="nc" id="L90">        checkingThread.start();</span>
+<span class="nc" id="L91">    }</span>
+
+    /**
+     * Indicates that the checking thread should be stoped. The thread will be waked up
+     * so that it can be stoped.
+     */
+    public void shutdown() {
+<span class="nc" id="L98">        shutdown = true;</span>
+        // Use a wait/notify algorithm to ensure that the thread stops immediately if it
+        // was waiting
+<span class="nc" id="L101">        synchronized (checkingThread) {</span>
+<span class="nc" id="L102">            checkingThread.notify();</span>
+<span class="nc" id="L103">        }</span>
+<span class="nc" id="L104">    }</span>
+
+    /**
+     * Checks if a socket has been trying to send data for a given amount of time. If it has
+     * exceded a limit of time then the socket will be closed.&lt;p&gt;
+     *
+     * It is expected that sending operations will not take too much time so the checking will
+     * be very fast since very few sockets will be present in the Map and most or all of them
+     * will not exceed the time limit. Therefore, it is expected the overhead of this class to be
+     * quite small.
+     */
+    private void checkHealth() {
+<span class="nc bnc" id="L116" title="All 2 branches missed.">        for (SocketConnection connection : SocketConnection.getInstances()) {</span>
+<span class="nc" id="L117">            connection.checkHealth();</span>
+<span class="nc" id="L118">        }</span>
+<span class="nc" id="L119">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

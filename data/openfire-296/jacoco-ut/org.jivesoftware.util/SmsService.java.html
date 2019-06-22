@@ -1,0 +1,440 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>SmsService.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.util</a> &gt; <span class="el_source">SmsService.java</span></div><h1>SmsService.java</h1><pre class="source lang-java linenums">package org.jivesoftware.util;
+
+import org.apache.commons.pool2.BasePooledObjectFactory;
+import org.apache.commons.pool2.ObjectPool;
+import org.apache.commons.pool2.PooledObject;
+import org.apache.commons.pool2.impl.DefaultPooledObject;
+import org.apache.commons.pool2.impl.GenericObjectPool;
+import org.jsmpp.bean.*;
+import org.jsmpp.extra.NegativeResponseException;
+import org.jsmpp.session.BindParameter;
+import org.jsmpp.session.SMPPSession;
+import org.jsmpp.util.AbsoluteTimeFormatter;
+import org.jsmpp.util.TimeFormatter;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.util.*;
+
+/**
+ * A service to send SMS messages.&lt;p&gt;
+ *
+ * This class is configured with a set of Jive properties. Note that each service provider can require a different set
+ * of properties to be set.
+ * &lt;ul&gt;
+ * &lt;li&gt;{@code sms.smpp.connections.maxAmount} -- the maximum amount of connections. The default value is one.
+ * &lt;li&gt;{@code sms.smpp.connections.idleMillis} -- time (in ms) after which idle connections are allowed to be evicted. Defaults to two minutes.
+ * &lt;li&gt;{@code sms.smpp.host} -- the host name of your SMPP Server or SMSC, i.e. smsc.example.org. The default value is &quot;localhost&quot;.
+ * &lt;li&gt;{@code sms.smpp.port} -- the port on which the SMSC is listening. Defaults to 2775.
+ * &lt;li&gt;{@code sms.smpp.systemId} -- the 'user name' to use when connecting to the SMSC.
+ * &lt;li&gt;{@code sms.smpp.password} -- the password that authenticates the systemId value when connecting to the SMSC.
+ * &lt;li&gt;{@code sms.smpp.systemType} -- an optional system type, which, if defined, will be used when connecting to the SMSC.
+ * &lt;li&gt;{@code sms.smpp.receive.ton} -- The type-of-number value for 'receiving' SMS messages. Defaults to 'UNKNOWN'.
+ * &lt;li&gt;{@code sms.smpp.receive.npi} -- The number-plan-indicator value for 'receiving' SMS messages. Defaults to 'UNKNOWN'.
+ * &lt;li&gt;{@code sms.smpp.source.ton} -- The type-of-number value for the source of SMS messages. Defaults to 'UNKNOWN'.
+ * &lt;li&gt;{@code sms.smpp.source.npi} -- The number-plan-indicator value for the source of SMS messages. Defaults to 'UNKNOWN'.
+ * &lt;li&gt;{@code sms.smpp.source.address} -- The source address of SMS messages.
+ * &lt;li&gt;{@code sms.smpp.destination.ton} -- The type-of-number value for the destination of SMS messages. Defaults to 'UNKNOWN'.
+ * &lt;li&gt;{@code sms.smpp.destination.npi} -- The number-plan-indicator value for the destination of SMS messages. Defaults to 'UNKNOWN'.
+ * &lt;/ul&gt;
+ *
+ * @author Guus der Kinderen, guus@goodbytes.nl
+ */
+public class SmsService
+{
+<span class="nc" id="L45">    private static final Logger Log = LoggerFactory.getLogger( SmsService.class );</span>
+
+<span class="nc" id="L47">    private static TimeFormatter timeFormatter = new AbsoluteTimeFormatter();</span>
+
+    private static SmsService INSTANCE;
+
+    public static synchronized SmsService getInstance()
+    {
+<span class="nc bnc" id="L53" title="All 2 branches missed.">        if ( INSTANCE == null )</span>
+        {
+<span class="nc" id="L55">            INSTANCE = new SmsService();</span>
+        }
+
+<span class="nc" id="L58">        return INSTANCE;</span>
+    }
+
+    /**
+     * Pool of SMPP sessions that is used to transmit messages to the SMSC.
+     */
+    private final SMPPSessionPool sessionPool;
+
+    private SmsService()
+<span class="nc" id="L67">    {</span>
+<span class="nc" id="L68">        sessionPool = new SMPPSessionPool();</span>
+<span class="nc" id="L69">        PropertyEventDispatcher.addListener( sessionPool );</span>
+<span class="nc" id="L70">    }</span>
+
+    /**
+     * Causes a new SMS message to be sent.
+     *
+     * Note that the message is sent asynchronously. This method does not block. A successful invocation does not
+     * guarantee successful delivery
+     *
+     * @param message   The body of the message (cannot be null or empty).
+     * @param recipient The address / phone number to which the message is to be send (cannot be null or empty).
+     */
+    public void send( String message, String recipient )
+    {
+<span class="nc bnc" id="L83" title="All 4 branches missed.">        if ( message == null || message.isEmpty() )</span>
+        {
+<span class="nc" id="L85">            throw new IllegalArgumentException( &quot;Argument 'message' cannot be null or an empty String.&quot; );</span>
+        }
+
+<span class="nc bnc" id="L88" title="All 4 branches missed.">        if ( recipient == null || recipient.isEmpty() )</span>
+        {
+<span class="nc" id="L90">            throw new IllegalArgumentException( &quot;Argument 'recipient' cannot be null or an empty String.&quot; );</span>
+        }
+
+<span class="nc" id="L93">        TaskEngine.getInstance().submit( new SmsTask( sessionPool, message, recipient ) );</span>
+<span class="nc" id="L94">    }</span>
+
+    /**
+     * Causes a new SMS message to be sent.
+     *
+     * This method differs from {@link #send(String, String)} in that the message is sent before this method returns,
+     * rather than queueing the messages to be sent later (in an async fashion). As a result, any exceptions that occur
+     * while sending the message are thrown by this method (which can be useful to test the configuration of this
+     * service).
+     *
+     * @param message   The body of the message (cannot be null or empty).
+     * @param recipient The address / phone number to which the message is to be send (cannot be null or empty).
+     * @throws Exception On any problem.
+     */
+    public void sendImmediately( String message, String recipient ) throws Exception
+    {
+<span class="nc bnc" id="L110" title="All 4 branches missed.">        if ( message == null || message.isEmpty() )</span>
+        {
+<span class="nc" id="L112">            throw new IllegalArgumentException( &quot;Argument 'message' cannot be null or an empty String.&quot; );</span>
+        }
+
+<span class="nc bnc" id="L115" title="All 4 branches missed.">        if ( recipient == null || recipient.isEmpty() )</span>
+        {
+<span class="nc" id="L117">            throw new IllegalArgumentException( &quot;Argument 'recipient' cannot be null or an empty String.&quot; );</span>
+        }
+
+        try
+        {
+<span class="nc" id="L122">            new SmsTask( sessionPool, message, recipient ).sendMessage();</span>
+        }
+<span class="nc" id="L124">        catch ( Exception e )</span>
+        {
+<span class="nc" id="L126">            Log.error( &quot;An exception occurred while sending a SMS message (to '{}')&quot;, recipient, e );</span>
+<span class="nc" id="L127">            throw e;</span>
+<span class="nc" id="L128">        }</span>
+<span class="nc" id="L129">    }</span>
+
+    /**
+     * Checks if an exception in the chain of the provided throwable contains a 'command status' that can be
+     * translated in a somewhat more helpful error message.
+     *
+     * The list of error messages was taken from http://www.smssolutions.net/tutorials/smpp/smpperrorcodes/
+     *
+     * @param ex The exception in which to search for a command status.
+     * @return a human readable error message.
+     */
+    public static String getDescriptiveMessage( Throwable ex )
+    {
+<span class="nc bnc" id="L142" title="All 2 branches missed.">        if ( ex instanceof NegativeResponseException )</span>
+        {
+<span class="nc" id="L144">            final Map&lt;Integer, String&gt; errors = new HashMap&lt;&gt;();</span>
+<span class="nc" id="L145">            errors.put( 0x00000000, &quot;No Error&quot; );</span>
+<span class="nc" id="L146">            errors.put( 0x00000001, &quot;Message too long&quot; );</span>
+<span class="nc" id="L147">            errors.put( 0x00000002, &quot;Command length is invalid&quot; );</span>
+<span class="nc" id="L148">            errors.put( 0x00000003, &quot;Command ID is invalid or not supported&quot; );</span>
+<span class="nc" id="L149">            errors.put( 0x00000004, &quot;Incorrect bind status for given command&quot; );</span>
+<span class="nc" id="L150">            errors.put( 0x00000005, &quot;Already bound&quot; );</span>
+<span class="nc" id="L151">            errors.put( 0x00000006, &quot;Invalid Priority Flag&quot; );</span>
+<span class="nc" id="L152">            errors.put( 0x00000007, &quot;Invalid registered delivery flag&quot; );</span>
+<span class="nc" id="L153">            errors.put( 0x00000008, &quot;System error&quot; );</span>
+<span class="nc" id="L154">            errors.put( 0x0000000A, &quot;Invalid source address&quot; );</span>
+<span class="nc" id="L155">            errors.put( 0x0000000B, &quot;Invalid destination address&quot; );</span>
+<span class="nc" id="L156">            errors.put( 0x0000000C, &quot;Message ID is invalid&quot; );</span>
+<span class="nc" id="L157">            errors.put( 0x0000000D, &quot;Bind failed&quot; );</span>
+<span class="nc" id="L158">            errors.put( 0x0000000E, &quot;Invalid password&quot; );</span>
+<span class="nc" id="L159">            errors.put( 0x0000000F, &quot;Invalid System ID&quot; );</span>
+<span class="nc" id="L160">            errors.put( 0x00000011, &quot;Cancelling message failed&quot; );</span>
+<span class="nc" id="L161">            errors.put( 0x00000013, &quot;Message recplacement failed&quot; );</span>
+<span class="nc" id="L162">            errors.put( 0x00000014, &quot;Message queue full&quot; );</span>
+<span class="nc" id="L163">            errors.put( 0x00000015, &quot;Invalid service type&quot; );</span>
+<span class="nc" id="L164">            errors.put( 0x00000033, &quot;Invalid number of destinations&quot; );</span>
+<span class="nc" id="L165">            errors.put( 0x00000034, &quot;Invalid distribution list name&quot; );</span>
+<span class="nc" id="L166">            errors.put( 0x00000040, &quot;Invalid destination flag&quot; );</span>
+<span class="nc" id="L167">            errors.put( 0x00000042, &quot;Invalid submit with replace request&quot; );</span>
+<span class="nc" id="L168">            errors.put( 0x00000043, &quot;Invalid esm class set&quot; );</span>
+<span class="nc" id="L169">            errors.put( 0x00000044, &quot;Invalid submit to ditribution list&quot; );</span>
+<span class="nc" id="L170">            errors.put( 0x00000045, &quot;Submitting message has failed&quot; );</span>
+<span class="nc" id="L171">            errors.put( 0x00000048, &quot;Invalid source address type of number ( TON )&quot; );</span>
+<span class="nc" id="L172">            errors.put( 0x00000049, &quot;Invalid source address numbering plan ( NPI )&quot; );</span>
+<span class="nc" id="L173">            errors.put( 0x00000050, &quot;Invalid destination address type of number ( TON )&quot; );</span>
+<span class="nc" id="L174">            errors.put( 0x00000051, &quot;Invalid destination address numbering plan ( NPI )&quot; );</span>
+<span class="nc" id="L175">            errors.put( 0x00000053, &quot;Invalid system type&quot; );</span>
+<span class="nc" id="L176">            errors.put( 0x00000054, &quot;Invalid replace_if_present flag&quot; );</span>
+<span class="nc" id="L177">            errors.put( 0x00000055, &quot;Invalid number of messages&quot; );</span>
+<span class="nc" id="L178">            errors.put( 0x00000058, &quot;Throttling error&quot; );</span>
+<span class="nc" id="L179">            errors.put( 0x00000061, &quot;Invalid scheduled delivery time&quot; );</span>
+<span class="nc" id="L180">            errors.put( 0x00000062, &quot;Invalid Validty Period value&quot; );</span>
+<span class="nc" id="L181">            errors.put( 0x00000063, &quot;Predefined message not found&quot; );</span>
+<span class="nc" id="L182">            errors.put( 0x00000064, &quot;ESME Receiver temporary error&quot; );</span>
+<span class="nc" id="L183">            errors.put( 0x00000065, &quot;ESME Receiver permanent error&quot; );</span>
+<span class="nc" id="L184">            errors.put( 0x00000066, &quot;ESME Receiver reject message error&quot; );</span>
+<span class="nc" id="L185">            errors.put( 0x00000067, &quot;Message query request failed&quot; );</span>
+<span class="nc" id="L186">            errors.put( 0x000000C0, &quot;Error in the optional part of the PDU body&quot; );</span>
+<span class="nc" id="L187">            errors.put( 0x000000C1, &quot;TLV not allowed&quot; );</span>
+<span class="nc" id="L188">            errors.put( 0x000000C2, &quot;Invalid parameter length&quot; );</span>
+<span class="nc" id="L189">            errors.put( 0x000000C3, &quot;Expected TLV missing&quot; );</span>
+<span class="nc" id="L190">            errors.put( 0x000000C4, &quot;Invalid TLV value&quot; );</span>
+<span class="nc" id="L191">            errors.put( 0x000000FE, &quot;Transaction delivery failure&quot; );</span>
+<span class="nc" id="L192">            errors.put( 0x000000FF, &quot;Unknown error&quot; );</span>
+<span class="nc" id="L193">            errors.put( 0x00000100, &quot;ESME not authorised to use specified servicetype&quot; );</span>
+<span class="nc" id="L194">            errors.put( 0x00000101, &quot;ESME prohibited from using specified operation&quot; );</span>
+<span class="nc" id="L195">            errors.put( 0x00000102, &quot;Specified servicetype is unavailable&quot; );</span>
+<span class="nc" id="L196">            errors.put( 0x00000103, &quot;Specified servicetype is denied&quot; );</span>
+<span class="nc" id="L197">            errors.put( 0x00000104, &quot;Invalid data coding scheme&quot; );</span>
+<span class="nc" id="L198">            errors.put( 0x00000105, &quot;Invalid source address subunit&quot; );</span>
+<span class="nc" id="L199">            errors.put( 0x00000106, &quot;Invalid destination address subunit&quot; );</span>
+<span class="nc" id="L200">            errors.put( 0x0000040B, &quot;Insufficient credits to send message&quot; );</span>
+<span class="nc" id="L201">            errors.put( 0x0000040C, &quot;Destination address blocked by the ActiveXperts SMPP Demo Server&quot; );</span>
+
+<span class="nc" id="L203">            String error = errors.get( ( (NegativeResponseException) ex ).getCommandStatus() );</span>
+<span class="nc bnc" id="L204" title="All 4 branches missed.">            if ( ex.getMessage() != null &amp;&amp; !ex.getMessage().isEmpty() )</span>
+            {
+<span class="nc" id="L206">                error += &quot; (exception message: '&quot; + ex.getMessage() + &quot;')&quot;;</span>
+            }
+<span class="nc" id="L208">            return error;</span>
+        }
+<span class="nc bnc" id="L210" title="All 2 branches missed.">        else if ( ex.getCause() != null )</span>
+        {
+<span class="nc" id="L212">            return getDescriptiveMessage( ex.getCause() );</span>
+        }
+
+<span class="nc" id="L215">        return ex.getMessage();</span>
+    }
+
+    /**
+     * Runnable that allows an SMS to be sent in a different thread.
+     */
+    private static class SmsTask implements Runnable
+    {
+        private final ObjectPool&lt;SMPPSession&gt; sessionPool;
+
+        // Settings that apply to source of an SMS message.
+<span class="nc" id="L226">        private final TypeOfNumber sourceTon = JiveGlobals.getEnumProperty( &quot;sms.smpp.source.ton&quot;, TypeOfNumber.class, TypeOfNumber.UNKNOWN );</span>
+<span class="nc" id="L227">        private final NumberingPlanIndicator sourceNpi = JiveGlobals.getEnumProperty( &quot;sms.smpp.source.npi&quot;, NumberingPlanIndicator.class, NumberingPlanIndicator.UNKNOWN );</span>
+<span class="nc" id="L228">        private final String sourceAddress = JiveGlobals.getProperty( &quot;sms.smpp.source.address&quot; );</span>
+
+        // Settings that apply to destination of an SMS message.
+<span class="nc" id="L231">        private final TypeOfNumber destinationTon = JiveGlobals.getEnumProperty( &quot;sms.smpp.destination.ton&quot;, TypeOfNumber.class, TypeOfNumber.UNKNOWN );</span>
+<span class="nc" id="L232">        private final NumberingPlanIndicator destinationNpi = JiveGlobals.getEnumProperty( &quot;sms.smpp.destination.npi&quot;, NumberingPlanIndicator.class, NumberingPlanIndicator.UNKNOWN );</span>
+
+        private final String destinationAddress;
+        private final byte[] message;
+
+        // Non-configurable defaults (for now - TODO?)
+<span class="nc" id="L238">        private final ESMClass esm = new ESMClass();</span>
+<span class="nc" id="L239">        private final byte protocolId = 0;</span>
+<span class="nc" id="L240">        private final byte priorityFlag = 1;</span>
+<span class="nc" id="L241">        private final String serviceType = &quot;CMT&quot;;</span>
+<span class="nc" id="L242">        private final String scheduleDeliveryTime = timeFormatter.format( new Date() );</span>
+<span class="nc" id="L243">        private final String validityPeriod = null;</span>
+<span class="nc" id="L244">        private final RegisteredDelivery registeredDelivery = new RegisteredDelivery( SMSCDeliveryReceipt.DEFAULT );</span>
+<span class="nc" id="L245">        private final byte replaceIfPresentFlag = 0;</span>
+<span class="nc" id="L246">        private final DataCoding dataCoding = new GeneralDataCoding( Alphabet.ALPHA_DEFAULT, MessageClass.CLASS1, false );</span>
+<span class="nc" id="L247">        private final byte smDefaultMsgId = 0;</span>
+
+
+        SmsTask( ObjectPool&lt;SMPPSession&gt; sessionPool, String message, String destinationAddress )
+<span class="nc" id="L251">        {</span>
+<span class="nc" id="L252">            this.sessionPool = sessionPool;</span>
+<span class="nc" id="L253">            this.message = message.getBytes();</span>
+<span class="nc" id="L254">            this.destinationAddress = destinationAddress;</span>
+<span class="nc" id="L255">        }</span>
+
+        @Override
+        public void run()
+        {
+            try
+            {
+<span class="nc" id="L262">                sendMessage();</span>
+            }
+<span class="nc" id="L264">            catch ( Exception e )</span>
+            {
+<span class="nc" id="L266">                Log.error( &quot;An exception occurred while sending a SMS message (to '{}')&quot;, destinationAddress, e );</span>
+<span class="nc" id="L267">            }</span>
+<span class="nc" id="L268">        }</span>
+
+        public void sendMessage() throws Exception
+        {
+<span class="nc" id="L272">            final SMPPSession session = sessionPool.borrowObject();</span>
+            try
+            {
+<span class="nc" id="L275">                final String messageId = session.submitShortMessage(</span>
+                    serviceType,
+                    sourceTon, sourceNpi, sourceAddress,
+                    destinationTon, destinationNpi, destinationAddress,
+                    esm, protocolId, priorityFlag,
+                    scheduleDeliveryTime, validityPeriod, registeredDelivery, replaceIfPresentFlag,
+                    dataCoding, smDefaultMsgId, message );
+<span class="nc" id="L282">                Log.debug( &quot;Message submitted, message_id is '{}'.&quot;, messageId );</span>
+            }
+            finally
+            {
+<span class="nc" id="L286">                sessionPool.returnObject( session );</span>
+<span class="nc" id="L287">            }</span>
+<span class="nc" id="L288">        }</span>
+    }
+
+    /**
+     * A factory of SMPPSession instances that are used in an object pool.
+     *
+     * @author Guus der Kinderen, guus.der.kinderen@gmail.com
+     */
+<span class="nc" id="L296">    private static class SMPPSessionFactory extends BasePooledObjectFactory&lt;SMPPSession&gt;</span>
+    {
+<span class="nc" id="L298">        private static final Logger Log = LoggerFactory.getLogger( SMPPSessionFactory.class );</span>
+
+        @Override
+        public SMPPSession create() throws Exception
+        {
+            // SMSC connection settings
+<span class="nc" id="L304">            final String host = JiveGlobals.getProperty( &quot;sms.smpp.host&quot;, &quot;localhost&quot; );</span>
+<span class="nc" id="L305">            final int port = JiveGlobals.getIntProperty( &quot;sms.smpp.port&quot;, 2775 );</span>
+<span class="nc" id="L306">            final String systemId = JiveGlobals.getProperty( &quot;sms.smpp.systemId&quot; );</span>
+<span class="nc" id="L307">            final String password = JiveGlobals.getProperty( &quot;sms.smpp.password&quot; );</span>
+<span class="nc" id="L308">            final String systemType = JiveGlobals.getProperty( &quot;sms.smpp.systemType&quot; );</span>
+
+            // Settings that apply to 'receiving' SMS. Should not apply to this implementation, as we're not receiving anything..
+<span class="nc" id="L311">            final TypeOfNumber receiveTon = JiveGlobals.getEnumProperty( &quot;sms.smpp.receive.ton&quot;, TypeOfNumber.class, TypeOfNumber.UNKNOWN );</span>
+<span class="nc" id="L312">            final NumberingPlanIndicator receiveNpi = JiveGlobals.getEnumProperty( &quot;sms.smpp.receive.npi&quot;, NumberingPlanIndicator.class, NumberingPlanIndicator.UNKNOWN );</span>
+
+<span class="nc" id="L314">            Log.debug( &quot;Creating a new sesssion (host: '{}', port: '{}', systemId: '{}'.&quot;, host, port, systemId );</span>
+<span class="nc" id="L315">            final SMPPSession session = new SMPPSession();</span>
+<span class="nc" id="L316">            session.connectAndBind( host, port, new BindParameter( BindType.BIND_TX, systemId, password, systemType, receiveTon, receiveNpi, null ) );</span>
+<span class="nc" id="L317">            Log.debug( &quot;Created a new session with ID '{}'.&quot;, session.getSessionId() );</span>
+<span class="nc" id="L318">            return session;</span>
+        }
+
+        @Override
+        public boolean validateObject( PooledObject&lt;SMPPSession&gt; pooledObject )
+        {
+<span class="nc" id="L324">            final SMPPSession session = pooledObject.getObject();</span>
+<span class="nc" id="L325">            final boolean isValid = session.getSessionState().isTransmittable(); // updated by the SMPPSession internal enquireLink timer.</span>
+<span class="nc" id="L326">            Log.debug( &quot;Ran a check to see if session with ID '{}' is valid. Outcome: {}&quot;, session.getSessionId(), isValid );</span>
+<span class="nc" id="L327">            return isValid;</span>
+        }
+
+        @Override
+        public void destroyObject( PooledObject&lt;SMPPSession&gt; pooledObject ) throws Exception
+        {
+<span class="nc" id="L333">            final SMPPSession session = pooledObject.getObject();</span>
+<span class="nc" id="L334">            Log.debug( &quot;Destroying a pooled session with ID '{}'.&quot;, session.getSessionId() );</span>
+<span class="nc" id="L335">            session.unbindAndClose();</span>
+<span class="nc" id="L336">        }</span>
+
+        @Override
+        public PooledObject&lt;SMPPSession&gt; wrap( SMPPSession smppSession )
+        {
+<span class="nc" id="L341">            return new DefaultPooledObject&lt;&gt;( smppSession );</span>
+        }
+    }
+
+    /**
+     * Implementation of an Object pool that manages instances of SMPPSession. The intend of this pool is to have a
+     * single session, that's allowed to be idle for at least two minutes before being closed.
+     *
+     * The pool reacts to Openfire property changes, clearing all (inactive) sessions when a property used to create
+     * a session is modified. Note that sessions that are borrowed from the pool are not affected by such a change. When
+     * a property change occurs while a session is borrowed, a warning is logged (the property change will be applied
+     * when that session is eventually rotated out of the pool by the eviction strategy.
+     *
+     * @author Guus der Kinderen, guus.der.kinderen@gmail.com
+     */
+    private static class SMPPSessionPool extends GenericObjectPool&lt;SMPPSession&gt; implements PropertyEventListener
+    {
+<span class="nc" id="L358">        private static final Logger Log = LoggerFactory.getLogger( SMPPSessionPool.class );</span>
+
+        SMPPSessionPool()
+        {
+<span class="nc" id="L362">            super( new SMPPSessionFactory() );</span>
+<span class="nc" id="L363">            setMaxTotal( JiveGlobals.getIntProperty( &quot;sms.smpp.connections.maxAmount&quot;, 1 ) );</span>
+<span class="nc" id="L364">            setNumTestsPerEvictionRun( getMaxTotal() );</span>
+
+<span class="nc" id="L366">            setMinEvictableIdleTimeMillis( JiveGlobals.getLongProperty( &quot;sms.smpp.connections.idleMillis&quot;, 1000 * 60 * 2 ) );</span>
+<span class="nc bnc" id="L367" title="All 2 branches missed.">            if ( getMinEvictableIdleTimeMillis() &gt; 0 )</span>
+            {
+<span class="nc" id="L369">                setTimeBetweenEvictionRunsMillis( getMinEvictableIdleTimeMillis() / 10 );</span>
+            }
+
+<span class="nc" id="L372">            setTestOnBorrow( true );</span>
+<span class="nc" id="L373">            setTestWhileIdle( true );</span>
+<span class="nc" id="L374">        }</span>
+
+        void processPropertyChange( String propertyName )
+        {
+<span class="nc" id="L378">            final Set&lt;String&gt; ofInterest = new HashSet&lt;&gt;();</span>
+<span class="nc" id="L379">            ofInterest.add( &quot;sms.smpp.host&quot; );</span>
+<span class="nc" id="L380">            ofInterest.add( &quot;sms.smpp.port&quot; );</span>
+<span class="nc" id="L381">            ofInterest.add( &quot;sms.smpp.systemId&quot; );</span>
+<span class="nc" id="L382">            ofInterest.add( &quot;sms.smpp.password&quot; );</span>
+<span class="nc" id="L383">            ofInterest.add( &quot;sms.smpp.systemType&quot; );</span>
+<span class="nc" id="L384">            ofInterest.add( &quot;sms.smpp.receive.ton&quot; );</span>
+<span class="nc" id="L385">            ofInterest.add( &quot;sms.smpp.receive.npi&quot; );</span>
+
+<span class="nc bnc" id="L387" title="All 2 branches missed.">            if ( ofInterest.contains( propertyName ) )</span>
+            {
+<span class="nc" id="L389">                Log.debug( &quot;Property change for '{}' detected. Clearing all (inactive) sessions.&quot;, propertyName );</span>
+<span class="nc bnc" id="L390" title="All 2 branches missed.">                if ( getNumActive() &gt; 0 )</span>
+                {
+                    // This can occur when an SMS is being sent while the property is being updated at the same time.
+<span class="nc" id="L393">                    Log.warn( &quot;Note that property change for '{}' will not affect one or more sessions that are currently actively used (although changes will be applied after the session is rotated out, due to time-based eviction).&quot; );</span>
+                }
+<span class="nc" id="L395">                clear();</span>
+            }
+
+            // No need to clear the sessions for these properties:
+<span class="nc bnc" id="L399" title="All 2 branches missed.">            if ( propertyName.equals( &quot;sms.smpp.connections.maxAmount&quot; ) )</span>
+            {
+<span class="nc" id="L401">                setMaxTotal( JiveGlobals.getIntProperty( &quot;sms.smpp.connections.maxAmount&quot;, 1 ) );</span>
+<span class="nc" id="L402">                setNumTestsPerEvictionRun( getMaxTotal() );</span>
+            }
+
+<span class="nc bnc" id="L405" title="All 2 branches missed.">            if ( propertyName.equals( &quot;sms.smpp.connections.idleMillis&quot; ) )</span>
+            {
+<span class="nc" id="L407">                setMinEvictableIdleTimeMillis( JiveGlobals.getLongProperty( &quot;sms.smpp.connections.idleMillis&quot;, 1000 * 60 * 2 ) );</span>
+<span class="nc bnc" id="L408" title="All 2 branches missed.">                if ( getMinEvictableIdleTimeMillis() &gt; 0 )</span>
+                {
+<span class="nc" id="L410">                    setTimeBetweenEvictionRunsMillis( getMinEvictableIdleTimeMillis() / 10 );</span>
+                }
+            }
+<span class="nc" id="L413">        }</span>
+
+        @Override
+        public void propertySet( String property, Map&lt;String, Object&gt; params )
+        {
+<span class="nc" id="L418">            processPropertyChange( property );</span>
+<span class="nc" id="L419">        }</span>
+
+        @Override
+        public void propertyDeleted( String property, Map&lt;String, Object&gt; params )
+        {
+<span class="nc" id="L424">            processPropertyChange( property );</span>
+<span class="nc" id="L425">        }</span>
+
+        @Override
+        public void xmlPropertySet( String property, Map&lt;String, Object&gt; params )
+        {
+<span class="nc" id="L430">            processPropertyChange( property );</span>
+<span class="nc" id="L431">        }</span>
+
+        @Override
+        public void xmlPropertyDeleted( String property, Map&lt;String, Object&gt; params )
+        {
+<span class="nc" id="L436">            processPropertyChange( property );</span>
+<span class="nc" id="L437">        }</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

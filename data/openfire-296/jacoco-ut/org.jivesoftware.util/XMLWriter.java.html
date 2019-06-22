@@ -1,0 +1,1560 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>XMLWriter.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.util</a> &gt; <span class="el_source">XMLWriter.java</span></div><h1>XMLWriter.java</h1><pre class="source lang-java linenums">package org.jivesoftware.util;
+
+import org.dom4j.*;
+import org.dom4j.io.OutputFormat;
+import org.dom4j.tree.NamespaceStack;
+import org.xml.sax.*;
+import org.xml.sax.ext.LexicalHandler;
+import org.xml.sax.helpers.XMLFilterImpl;
+
+import java.io.*;
+import java.nio.charset.StandardCharsets;
+import java.util.*;
+
+/**
+ * Replacement class of the original XMLWriter.java (version: 1.77) since the original is still
+ * using StringBuffer which is not fast.
+ */
+public class XMLWriter extends XMLFilterImpl implements LexicalHandler {
+
+    private static final String PAD_TEXT = &quot; &quot;;
+
+<span class="fc" id="L22">    protected static final String[] LEXICAL_HANDLER_NAMES = {</span>
+        &quot;http://xml.org/sax/properties/lexical-handler&quot;,
+        &quot;http://xml.org/sax/handlers/LexicalHandler&quot;
+    };
+
+<span class="fc" id="L27">    protected static final OutputFormat DEFAULT_FORMAT = new OutputFormat();</span>
+
+    /** Should entityRefs by resolved when writing ? */
+<span class="pc" id="L30">    private boolean resolveEntityRefs = true;</span>
+
+    /** Stores the last type of node written so algorithms can refer to the
+      * previous node type */
+    protected int lastOutputNodeType;
+
+    /** Stores the xml:space attribute value of preserve for whitespace flag */
+<span class="pc" id="L37">    protected boolean preserve=false;</span>
+
+    /** The Writer used to output to */
+    protected Writer writer;
+
+    /** The Stack of namespaceStack written so far */
+<span class="pc" id="L43">    private NamespaceStack namespaceStack = new NamespaceStack();</span>
+
+    /** The format used by this writer */
+    private OutputFormat format;
+
+    /** whether we should escape text */
+<span class="pc" id="L49">    private boolean escapeText = true;</span>
+    /** The initial number of indentations (so you can print a whole
+        document indented, if you like) **/
+<span class="pc" id="L52">    private int indentLevel = 0;</span>
+
+    /** buffer used when escaping strings */
+<span class="pc" id="L55">    private StringBuilder buffer = new StringBuilder();</span>
+
+    /** whether we have added characters before from the same chunk of characters */
+<span class="pc" id="L58">    private boolean charactersAdded = false;</span>
+    private char lastChar;
+
+    /** Whether a flush should occur after writing a document */
+    private boolean autoFlush;
+
+    /** Lexical handler we should delegate to */
+    private LexicalHandler lexicalHandler;
+
+    /** Whether comments should appear inside DTD declarations - defaults to false */
+    private boolean showCommentsInDTDs;
+
+    /** Is the writer curerntly inside a DTD definition? */
+    private boolean inDTD;
+
+    /** The namespaces used for the current element when consuming SAX events */
+    private Map&lt;String, String&gt; namespacesMap;
+
+    /**
+     * what is the maximum allowed character code
+     * such as 127 in US-ASCII (7 bit) or 255 in ISO-* (8 bit)
+     * or -1 to not escape any characters (other than the special XML characters like &lt; &gt; &amp;)
+     */
+    private int maximumAllowedCharacter;
+
+    public XMLWriter(Writer writer) {
+<span class="nc" id="L84">        this( writer, DEFAULT_FORMAT );</span>
+<span class="nc" id="L85">    }</span>
+
+<span class="fc" id="L87">    public XMLWriter(Writer writer, OutputFormat format) {</span>
+<span class="fc" id="L88">        this.writer = writer;</span>
+<span class="fc" id="L89">        this.format = format;</span>
+<span class="fc" id="L90">        namespaceStack.push(Namespace.NO_NAMESPACE);</span>
+<span class="fc" id="L91">    }</span>
+
+<span class="nc" id="L93">    public XMLWriter() throws UnsupportedEncodingException {</span>
+<span class="nc" id="L94">        this.format = DEFAULT_FORMAT;</span>
+<span class="nc" id="L95">        this.writer = new BufferedWriter( new OutputStreamWriter( System.out, StandardCharsets.UTF_8) );</span>
+<span class="nc" id="L96">        this.autoFlush = true;</span>
+<span class="nc" id="L97">        namespaceStack.push(Namespace.NO_NAMESPACE);</span>
+<span class="nc" id="L98">    }</span>
+
+<span class="nc" id="L100">    public XMLWriter(OutputStream out) throws UnsupportedEncodingException {</span>
+<span class="nc" id="L101">        this.format = DEFAULT_FORMAT;</span>
+<span class="nc" id="L102">        this.writer = createWriter(out, format.getEncoding());</span>
+<span class="nc" id="L103">        this.autoFlush = true;</span>
+<span class="nc" id="L104">        namespaceStack.push(Namespace.NO_NAMESPACE);</span>
+<span class="nc" id="L105">    }</span>
+
+<span class="nc" id="L107">    public XMLWriter(OutputStream out, OutputFormat format) throws UnsupportedEncodingException {</span>
+<span class="nc" id="L108">        this.format = format;</span>
+<span class="nc" id="L109">        this.writer = createWriter(out, format.getEncoding());</span>
+<span class="nc" id="L110">        this.autoFlush = true;</span>
+<span class="nc" id="L111">        namespaceStack.push(Namespace.NO_NAMESPACE);</span>
+<span class="nc" id="L112">    }</span>
+
+<span class="nc" id="L114">    public XMLWriter(OutputFormat format) throws UnsupportedEncodingException {</span>
+<span class="nc" id="L115">        this.format = format;</span>
+<span class="nc" id="L116">        this.writer = createWriter( System.out, format.getEncoding() );</span>
+<span class="nc" id="L117">        this.autoFlush = true;</span>
+<span class="nc" id="L118">        namespaceStack.push(Namespace.NO_NAMESPACE);</span>
+<span class="nc" id="L119">    }</span>
+
+    public void setWriter(Writer writer) {
+<span class="nc" id="L122">        this.writer = writer;</span>
+<span class="nc" id="L123">        this.autoFlush = false;</span>
+<span class="nc" id="L124">    }</span>
+
+    public void setOutputStream(OutputStream out) throws UnsupportedEncodingException {
+<span class="nc" id="L127">        this.writer = createWriter(out, format.getEncoding());</span>
+<span class="nc" id="L128">        this.autoFlush = true;</span>
+<span class="nc" id="L129">    }</span>
+
+    /**
+     * @return true if text thats output should be escaped.
+     * This is enabled by default. It could be disabled if
+     * the output format is textual, like in XSLT where we can have
+     * xml, html or text output.
+     */
+    public boolean isEscapeText() {
+<span class="nc" id="L138">        return escapeText;</span>
+    }
+
+    /**
+     * Sets whether text output should be escaped or not.
+     * This is enabled by default. It could be disabled if
+     * the output format is textual, like in XSLT where we can have
+     * xml, html or text output.
+     * @param escapeText {@code true} to escape text, otherwise {@code false}
+     */
+    public void setEscapeText(boolean escapeText) {
+<span class="nc" id="L149">        this.escapeText = escapeText;</span>
+<span class="nc" id="L150">    }</span>
+
+
+    /** Set the initial indentation level.  This can be used to output
+      * a document (or, more likely, an element) starting at a given
+      * indent level, so it's not always flush against the left margin.
+      * Default: 0
+      *
+      * @param indentLevel the number of indents to start with
+      */
+    public void setIndentLevel(int indentLevel) {
+<span class="nc" id="L161">        this.indentLevel = indentLevel;</span>
+<span class="nc" id="L162">    }</span>
+
+    /**
+     * Returns the maximum allowed character code that should be allowed
+     * unescaped which defaults to 127 in US-ASCII (7 bit) or
+     * 255 in ISO-* (8 bit).
+     * @return the maximum character code
+     */
+    public int getMaximumAllowedCharacter() {
+<span class="fc bfc" id="L171" title="All 2 branches covered.">        if (maximumAllowedCharacter == 0) {</span>
+<span class="fc" id="L172">            maximumAllowedCharacter = defaultMaximumAllowedCharacter();</span>
+        }
+<span class="fc" id="L174">        return maximumAllowedCharacter;</span>
+    }
+
+    /**
+     * Sets the maximum allowed character code that should be allowed
+     * unescaped
+     * such as 127 in US-ASCII (7 bit) or 255 in ISO-* (8 bit)
+     * or -1 to not escape any characters (other than the special XML characters like &amp;lt; &amp;gt; &amp;amp;)
+     *
+     * If this is not explicitly set then it is defaulted from the encoding.
+     *
+     * @param maximumAllowedCharacter The maximumAllowedCharacter to set
+     */
+    public void setMaximumAllowedCharacter(int maximumAllowedCharacter) {
+<span class="nc" id="L188">        this.maximumAllowedCharacter = maximumAllowedCharacter;</span>
+<span class="nc" id="L189">    }</span>
+
+    /**
+     * Flushes the underlying Writer
+     *
+     * @throws IOException if the writer could not be flushed
+     */
+    public void flush() throws IOException {
+<span class="nc" id="L197">        writer.flush();</span>
+<span class="nc" id="L198">    }</span>
+
+    /**
+     * Closes the underlying Writer
+     *
+     * @throws IOException if the writer could not be closed
+     */
+    public void close() throws IOException {
+<span class="nc" id="L206">        writer.close();</span>
+<span class="nc" id="L207">    }</span>
+
+    /**
+     * Writes the new line text to the underlying Writer
+     *
+     * @throws IOException if the new line could not be written
+     */
+    public void println() throws IOException {
+<span class="fc" id="L215">        writer.write( format.getLineSeparator() );</span>
+<span class="fc" id="L216">    }</span>
+
+    /** Writes the given {@link org.dom4j.Attribute}.
+      *
+      * @param attribute &lt;code&gt;Attribute&lt;/code&gt; to output.
+     * @throws IOException if the attribute could not be written
+      */
+    public void write(Attribute attribute) throws IOException {
+<span class="nc" id="L224">        writeAttribute(attribute);</span>
+
+<span class="nc bnc" id="L226" title="All 2 branches missed.">        if ( autoFlush ) {</span>
+<span class="nc" id="L227">            flush();</span>
+        }
+<span class="nc" id="L229">    }</span>
+
+
+    /** &lt;p&gt;This will print the &lt;code&gt;Document&lt;/code&gt; to the current Writer.&lt;/p&gt;
+     *
+     * &lt;p&gt; Warning: using your own Writer may cause the writer's
+     * preferred character encoding to be ignored.  If you use
+     * encodings other than UTF8, we recommend using the method that
+     * takes an OutputStream instead.  &lt;/p&gt;
+     *
+     * &lt;p&gt;Note: as with all Writers, you may need to flush() yours
+     * after this method returns.&lt;/p&gt;
+     *
+     * @param doc &lt;code&gt;Document&lt;/code&gt; to format.
+     * @throws IOException - if there's any problem writing.
+     **/
+    public void write(Document doc) throws IOException {
+<span class="fc" id="L246">        writeDeclaration();</span>
+
+<span class="pc bpc" id="L248" title="1 of 2 branches missed.">        if (doc.getDocType() != null) {</span>
+<span class="nc" id="L249">            indent();</span>
+<span class="nc" id="L250">            writeDocType(doc.getDocType());</span>
+        }
+
+<span class="fc bfc" id="L253" title="All 2 branches covered.">        for ( int i = 0, size = doc.nodeCount(); i &lt; size; i++ ) {</span>
+<span class="fc" id="L254">            Node node = doc.node(i);</span>
+<span class="fc" id="L255">            writeNode( node );</span>
+        }
+<span class="fc" id="L257">        writePrintln();</span>
+
+<span class="pc bpc" id="L259" title="1 of 2 branches missed.">        if ( autoFlush ) {</span>
+<span class="nc" id="L260">            flush();</span>
+        }
+<span class="fc" id="L262">    }</span>
+
+    /** &lt;p&gt;Writes the &lt;code&gt;{@link org.dom4j.Element}&lt;/code&gt;, including
+      * its &lt;code&gt;{@link Attribute}&lt;/code&gt;s, and its value, and all
+      * its content (child nodes) to the current Writer.&lt;/p&gt;
+      *
+      * @param element &lt;code&gt;Element&lt;/code&gt; to output.
+     * @throws IOException if the element could not be written
+      */
+    public void write(Element element) throws IOException {
+<span class="nc" id="L272">        writeElement(element);</span>
+
+<span class="nc bnc" id="L274" title="All 2 branches missed.">        if ( autoFlush ) {</span>
+<span class="nc" id="L275">            flush();</span>
+        }
+<span class="nc" id="L277">    }</span>
+
+
+    /** Writes the given {@link CDATA}.
+      *
+      * @param cdata &lt;code&gt;CDATA&lt;/code&gt; to output.
+     * @throws IOException if the cdata could not be written
+      */
+    public void write(CDATA cdata) throws IOException {
+<span class="nc" id="L286">        writeCDATA( cdata.getText() );</span>
+
+<span class="nc bnc" id="L288" title="All 2 branches missed.">        if ( autoFlush ) {</span>
+<span class="nc" id="L289">            flush();</span>
+        }
+<span class="nc" id="L291">    }</span>
+
+    /** Writes the given {@link Comment}.
+      *
+      * @param comment &lt;code&gt;Comment&lt;/code&gt; to output.
+     * @throws IOException if the comment could not be written
+      */
+    public void write(Comment comment) throws IOException {
+<span class="nc" id="L299">        writeComment( comment.getText() );</span>
+
+<span class="nc bnc" id="L301" title="All 2 branches missed.">        if ( autoFlush ) {</span>
+<span class="nc" id="L302">            flush();</span>
+        }
+<span class="nc" id="L304">    }</span>
+
+    /** Writes the given {@link DocumentType}.
+      *
+      * @param docType &lt;code&gt;DocumentType&lt;/code&gt; to output.
+      * @throws IOException if the docType could not be written
+      */
+    public void write(DocumentType docType) throws IOException {
+<span class="nc" id="L312">        writeDocType(docType);</span>
+
+<span class="nc bnc" id="L314" title="All 2 branches missed.">        if ( autoFlush ) {</span>
+<span class="nc" id="L315">            flush();</span>
+        }
+<span class="nc" id="L317">    }</span>
+
+
+    /** Writes the given {@link Entity}.
+      *
+      * @param entity &lt;code&gt;Entity&lt;/code&gt; to output.
+      * @throws IOException if the entity could not be written
+      */
+    public void write(Entity entity) throws IOException {
+<span class="nc" id="L326">        writeEntity( entity );</span>
+
+<span class="nc bnc" id="L328" title="All 2 branches missed.">        if ( autoFlush ) {</span>
+<span class="nc" id="L329">            flush();</span>
+        }
+<span class="nc" id="L331">    }</span>
+
+
+    /** Writes the given {@link Namespace}.
+      *
+      * @param namespace &lt;code&gt;Namespace&lt;/code&gt; to output.
+      * @throws IOException if the namespace could not be written
+      */
+    public void write(Namespace namespace) throws IOException {
+<span class="nc" id="L340">        writeNamespace(namespace);</span>
+
+<span class="nc bnc" id="L342" title="All 2 branches missed.">        if ( autoFlush ) {</span>
+<span class="nc" id="L343">            flush();</span>
+        }
+<span class="nc" id="L345">    }</span>
+
+    /** Writes the given {@link ProcessingInstruction}.
+      *
+      * @param processingInstruction &lt;code&gt;ProcessingInstruction&lt;/code&gt; to output.
+     * @throws IOException if the instruction could not be written
+      */
+    public void write(ProcessingInstruction processingInstruction) throws IOException {
+<span class="nc" id="L353">        writeProcessingInstruction(processingInstruction);</span>
+
+<span class="nc bnc" id="L355" title="All 2 branches missed.">        if ( autoFlush ) {</span>
+<span class="nc" id="L356">            flush();</span>
+        }
+<span class="nc" id="L358">    }</span>
+
+    /** &lt;p&gt;Print out a {@link String}, Perfoms
+      * the necessary entity escaping and whitespace stripping.&lt;/p&gt;
+      *
+      * @param text is the text to output
+      * @throws IOException if the text could not be written
+      */
+    public void write(String text) throws IOException {
+<span class="nc" id="L367">        writeString(text);</span>
+
+<span class="nc bnc" id="L369" title="All 2 branches missed.">        if ( autoFlush ) {</span>
+<span class="nc" id="L370">            flush();</span>
+        }
+<span class="nc" id="L372">    }</span>
+
+    /** Writes the given {@link Text}.
+      *
+      * @param text &lt;code&gt;Text&lt;/code&gt; to output.
+     * @throws IOException if the text could not be written
+      */
+    public void write(Text text) throws IOException {
+<span class="nc" id="L380">        writeString(text.getText());</span>
+
+<span class="nc bnc" id="L382" title="All 2 branches missed.">        if ( autoFlush ) {</span>
+<span class="nc" id="L383">            flush();</span>
+        }
+<span class="nc" id="L385">    }</span>
+
+    /** Writes the given {@link Node}.
+      *
+      * @param node &lt;code&gt;Node&lt;/code&gt; to output.
+      * @throws IOException if the node could not be written
+      */
+    public void write(Node node) throws IOException {
+<span class="nc" id="L393">        writeNode(node);</span>
+
+<span class="nc bnc" id="L395" title="All 2 branches missed.">        if ( autoFlush ) {</span>
+<span class="nc" id="L396">            flush();</span>
+        }
+<span class="nc" id="L398">    }</span>
+
+    /** Writes the given object which should be a String, a Node or a List
+      * of Nodes.
+      *
+      * @param object is the object to output.
+     * @throws IOException if the object could not be written
+      */
+    public void write(Object object) throws IOException {
+<span class="nc bnc" id="L407" title="All 2 branches missed.">        if (object instanceof Node) {</span>
+<span class="nc" id="L408">            write((Node) object);</span>
+        }
+<span class="nc bnc" id="L410" title="All 2 branches missed.">        else if (object instanceof String) {</span>
+<span class="nc" id="L411">            write((String) object);</span>
+        }
+<span class="nc bnc" id="L413" title="All 2 branches missed.">        else if (object instanceof List) {</span>
+<span class="nc" id="L414">            List list = (List) object;</span>
+<span class="nc bnc" id="L415" title="All 2 branches missed.">            for ( int i = 0, size = list.size(); i &lt; size; i++ ) {</span>
+<span class="nc" id="L416">                write( list.get(i) );</span>
+            }
+<span class="nc" id="L418">        }</span>
+<span class="nc bnc" id="L419" title="All 2 branches missed.">        else if (object != null) {</span>
+<span class="nc" id="L420">            throw new IOException( &quot;Invalid object: &quot; + object );</span>
+        }
+<span class="nc" id="L422">    }</span>
+
+
+    /** &lt;p&gt;Writes the opening tag of an {@link Element},
+      * including its {@link Attribute}s
+      * but without its content.&lt;/p&gt;
+      *
+      * @param element &lt;code&gt;Element&lt;/code&gt; to output.
+     * @throws IOException if the element could not be written
+      */
+    public void writeOpen(Element element) throws IOException {
+<span class="nc" id="L433">        writer.write(&quot;&lt;&quot;);</span>
+<span class="nc" id="L434">        writer.write( element.getQualifiedName() );</span>
+<span class="nc" id="L435">        writeAttributes(element);</span>
+<span class="nc" id="L436">        writer.write(&quot;&gt;&quot;);</span>
+<span class="nc" id="L437">    }</span>
+
+    /** &lt;p&gt;Writes the closing tag of an {@link Element}&lt;/p&gt;
+      *
+      * @param element &lt;code&gt;Element&lt;/code&gt; to output.
+     * @throws IOException if the element could not be written
+      */
+    public void writeClose(Element element) throws IOException {
+<span class="nc" id="L445">        writeClose( element.getQualifiedName() );</span>
+<span class="nc" id="L446">    }</span>
+
+
+    // XMLFilterImpl methods
+    //-------------------------------------------------------------------------
+    @Override
+    public void parse(InputSource source) throws IOException, SAXException {
+<span class="nc" id="L453">        installLexicalHandler();</span>
+<span class="nc" id="L454">        super.parse(source);</span>
+<span class="nc" id="L455">    }</span>
+
+
+    @Override
+    public void setProperty(String name, Object value) throws SAXNotRecognizedException, SAXNotSupportedException {
+<span class="nc bnc" id="L460" title="All 2 branches missed.">        for (int i = 0; i &lt; LEXICAL_HANDLER_NAMES.length; i++) {</span>
+<span class="nc bnc" id="L461" title="All 2 branches missed.">            if (LEXICAL_HANDLER_NAMES[i].equals(name)) {</span>
+<span class="nc" id="L462">                setLexicalHandler((LexicalHandler) value);</span>
+<span class="nc" id="L463">                return;</span>
+            }
+        }
+<span class="nc" id="L466">        super.setProperty(name, value);</span>
+<span class="nc" id="L467">    }</span>
+
+    @Override
+    public Object getProperty(String name) throws SAXNotRecognizedException, SAXNotSupportedException {
+<span class="nc bnc" id="L471" title="All 2 branches missed.">        for (int i = 0; i &lt; LEXICAL_HANDLER_NAMES.length; i++) {</span>
+<span class="nc bnc" id="L472" title="All 2 branches missed.">            if (LEXICAL_HANDLER_NAMES[i].equals(name)) {</span>
+<span class="nc" id="L473">                return getLexicalHandler();</span>
+            }
+        }
+<span class="nc" id="L476">        return super.getProperty(name);</span>
+    }
+
+    public void setLexicalHandler (LexicalHandler handler) {
+<span class="nc bnc" id="L480" title="All 2 branches missed.">        if (handler == null) {</span>
+<span class="nc" id="L481">            throw new NullPointerException(&quot;Null lexical handler&quot;);</span>
+        }
+        else {
+<span class="nc" id="L484">            this.lexicalHandler = handler;</span>
+        }
+<span class="nc" id="L486">    }</span>
+
+    public LexicalHandler getLexicalHandler(){
+<span class="nc" id="L489">        return lexicalHandler;</span>
+    }
+
+
+    // ContentHandler interface
+    //-------------------------------------------------------------------------
+    @Override
+    public void setDocumentLocator(Locator locator) {
+<span class="nc" id="L497">        super.setDocumentLocator(locator);</span>
+<span class="nc" id="L498">    }</span>
+
+    @Override
+    public void startDocument() throws SAXException {
+        try {
+<span class="nc" id="L503">            writeDeclaration();</span>
+<span class="nc" id="L504">            super.startDocument();</span>
+        }
+<span class="nc" id="L506">        catch (IOException e) {</span>
+<span class="nc" id="L507">            handleException(e);</span>
+<span class="nc" id="L508">        }</span>
+<span class="nc" id="L509">    }</span>
+
+    @Override
+    public void endDocument() throws SAXException {
+<span class="nc" id="L513">        super.endDocument();</span>
+
+<span class="nc bnc" id="L515" title="All 2 branches missed.">        if ( autoFlush ) {</span>
+            try {
+<span class="nc" id="L517">                flush();</span>
+<span class="nc" id="L518">            } catch ( IOException e) {}</span>
+        }
+<span class="nc" id="L520">    }</span>
+
+    @Override
+    public void startPrefixMapping(String prefix, String uri) throws SAXException {
+<span class="nc bnc" id="L524" title="All 2 branches missed.">        if ( namespacesMap == null ) {</span>
+<span class="nc" id="L525">            namespacesMap = new HashMap&lt;&gt;();</span>
+        }
+<span class="nc" id="L527">        namespacesMap.put(prefix, uri);</span>
+<span class="nc" id="L528">        super.startPrefixMapping(prefix, uri);</span>
+<span class="nc" id="L529">    }</span>
+
+    @Override
+    public void endPrefixMapping(String prefix) throws SAXException {
+<span class="nc" id="L533">        super.endPrefixMapping(prefix);</span>
+<span class="nc" id="L534">    }</span>
+
+    @Override
+    public void startElement(String namespaceURI, String localName, String qName, Attributes attributes) throws SAXException {
+        try {
+<span class="nc" id="L539">            charactersAdded = false;</span>
+
+<span class="nc" id="L541">            writePrintln();</span>
+<span class="nc" id="L542">            indent();</span>
+<span class="nc" id="L543">            writer.write(&quot;&lt;&quot;);</span>
+<span class="nc" id="L544">            writer.write(qName);</span>
+<span class="nc" id="L545">            writeNamespaces();</span>
+<span class="nc" id="L546">            writeAttributes( attributes );</span>
+<span class="nc" id="L547">            writer.write(&quot;&gt;&quot;);</span>
+<span class="nc" id="L548">            ++indentLevel;</span>
+<span class="nc" id="L549">            lastOutputNodeType = Node.ELEMENT_NODE;</span>
+
+<span class="nc" id="L551">            super.startElement( namespaceURI, localName, qName, attributes );</span>
+        }
+<span class="nc" id="L553">        catch (IOException e) {</span>
+<span class="nc" id="L554">            handleException(e);</span>
+<span class="nc" id="L555">        }</span>
+<span class="nc" id="L556">    }</span>
+
+    @Override
+    public void endElement(String namespaceURI, String localName, String qName) throws SAXException {
+        try {
+<span class="nc" id="L561">            charactersAdded = false;</span>
+<span class="nc" id="L562">            --indentLevel;</span>
+<span class="nc bnc" id="L563" title="All 2 branches missed.">            if ( lastOutputNodeType == Node.ELEMENT_NODE ) {</span>
+<span class="nc" id="L564">                writePrintln();</span>
+<span class="nc" id="L565">                indent();</span>
+            }
+
+            // XXXX: need to determine this using a stack and checking for
+            // content / children
+<span class="nc" id="L570">            boolean hadContent = true;</span>
+<span class="nc bnc" id="L571" title="All 2 branches missed.">            if ( hadContent ) {</span>
+<span class="nc" id="L572">                writeClose(qName);</span>
+            }
+            else {
+<span class="nc" id="L575">                writeEmptyElementClose(qName);</span>
+            }
+<span class="nc" id="L577">            lastOutputNodeType = Node.ELEMENT_NODE;</span>
+
+<span class="nc" id="L579">            super.endElement( namespaceURI, localName, qName );</span>
+        }
+<span class="nc" id="L581">        catch (IOException e) {</span>
+<span class="nc" id="L582">            handleException(e);</span>
+<span class="nc" id="L583">        }</span>
+<span class="nc" id="L584">    }</span>
+
+    @Override
+    public void characters(char[] ch, int start, int length) throws SAXException {
+<span class="nc bnc" id="L588" title="All 6 branches missed.">        if (ch == null || ch.length == 0 || length &lt;= 0) {</span>
+<span class="nc" id="L589">            return;</span>
+        }
+
+        try {
+            /*
+             * we can't use the writeString method here because it's possible
+             * we don't receive all characters at once and calling writeString
+             * would cause unwanted spaces to be added in between these chunks
+             * of character arrays.
+             */
+<span class="nc" id="L599">            String string = new String(ch, start, length);</span>
+
+<span class="nc bnc" id="L601" title="All 2 branches missed.">            if (escapeText) {</span>
+<span class="nc" id="L602">                string = escapeElementEntities(string);</span>
+            }
+
+<span class="nc bnc" id="L605" title="All 2 branches missed.">            if (format.isTrimText()) {</span>
+<span class="nc bnc" id="L606" title="All 4 branches missed.">                if ((lastOutputNodeType == Node.TEXT_NODE) &amp;&amp; !charactersAdded) {</span>
+<span class="nc" id="L607">                    writer.write(&quot; &quot;);</span>
+<span class="nc bnc" id="L608" title="All 4 branches missed.">                } else if (charactersAdded &amp;&amp; Character.isWhitespace(lastChar)) {</span>
+<span class="nc" id="L609">                    writer.write(lastChar);</span>
+                }
+
+<span class="nc" id="L612">                String delim = &quot;&quot;;</span>
+<span class="nc" id="L613">                StringTokenizer tokens = new StringTokenizer(string);</span>
+<span class="nc bnc" id="L614" title="All 2 branches missed.">                while (tokens.hasMoreTokens()) {</span>
+<span class="nc" id="L615">                    writer.write(delim);</span>
+<span class="nc" id="L616">                    writer.write(tokens.nextToken());</span>
+<span class="nc" id="L617">                    delim = &quot; &quot;;</span>
+                }
+<span class="nc" id="L619">            } else {</span>
+<span class="nc" id="L620">                writer.write(string);</span>
+            }
+
+<span class="nc" id="L623">            charactersAdded = true;</span>
+<span class="nc" id="L624">            lastChar = ch[start + length - 1];</span>
+<span class="nc" id="L625">            lastOutputNodeType = Node.TEXT_NODE;</span>
+
+<span class="nc" id="L627">            super.characters(ch, start, length);</span>
+        }
+<span class="nc" id="L629">        catch (IOException e) {</span>
+<span class="nc" id="L630">            handleException(e);</span>
+<span class="nc" id="L631">        }</span>
+<span class="nc" id="L632">    }</span>
+
+    @Override
+    public void ignorableWhitespace(char[] ch, int start, int length) throws SAXException {
+<span class="nc" id="L636">        super.ignorableWhitespace(ch, start, length);</span>
+<span class="nc" id="L637">    }</span>
+
+    @Override
+    public void processingInstruction(String target, String data) throws SAXException {
+        try {
+<span class="nc" id="L642">            indent();</span>
+<span class="nc" id="L643">            writer.write(&quot;&lt;?&quot;);</span>
+<span class="nc" id="L644">            writer.write(target);</span>
+<span class="nc" id="L645">            writer.write(&quot; &quot;);</span>
+<span class="nc" id="L646">            writer.write(data);</span>
+<span class="nc" id="L647">            writer.write(&quot;?&gt;&quot;);</span>
+<span class="nc" id="L648">            writePrintln();</span>
+<span class="nc" id="L649">            lastOutputNodeType = Node.PROCESSING_INSTRUCTION_NODE;</span>
+
+<span class="nc" id="L651">            super.processingInstruction(target, data);</span>
+        }
+<span class="nc" id="L653">        catch (IOException e) {</span>
+<span class="nc" id="L654">            handleException(e);</span>
+<span class="nc" id="L655">        }</span>
+<span class="nc" id="L656">    }</span>
+
+
+
+    // DTDHandler interface
+    //-------------------------------------------------------------------------
+    @Override
+    public void notationDecl(String name, String publicID, String systemID) throws SAXException {
+<span class="nc" id="L664">        super.notationDecl(name, publicID, systemID);</span>
+<span class="nc" id="L665">    }</span>
+
+    @Override
+    public void unparsedEntityDecl(String name, String publicID, String systemID, String notationName) throws SAXException {
+<span class="nc" id="L669">        super.unparsedEntityDecl(name, publicID, systemID, notationName);</span>
+<span class="nc" id="L670">    }</span>
+
+
+    // LexicalHandler interface
+    //-------------------------------------------------------------------------
+    @Override
+    public void startDTD(String name, String publicID, String systemID) throws SAXException {
+<span class="nc" id="L677">        inDTD = true;</span>
+        try {
+<span class="nc" id="L679">            writeDocType(name, publicID, systemID);</span>
+        }
+<span class="nc" id="L681">        catch (IOException e) {</span>
+<span class="nc" id="L682">            handleException(e);</span>
+<span class="nc" id="L683">        }</span>
+
+<span class="nc bnc" id="L685" title="All 2 branches missed.">        if (lexicalHandler != null) {</span>
+<span class="nc" id="L686">            lexicalHandler.startDTD(name, publicID, systemID);</span>
+        }
+<span class="nc" id="L688">    }</span>
+
+    @Override
+    public void endDTD() throws SAXException {
+<span class="nc" id="L692">        inDTD = false;</span>
+<span class="nc bnc" id="L693" title="All 2 branches missed.">        if (lexicalHandler != null) {</span>
+<span class="nc" id="L694">            lexicalHandler.endDTD();</span>
+        }
+<span class="nc" id="L696">    }</span>
+
+    @Override
+    public void startCDATA() throws SAXException {
+        try {
+<span class="nc" id="L701">            writer.write( &quot;&lt;![CDATA[&quot; );</span>
+        }
+<span class="nc" id="L703">        catch (IOException e) {</span>
+<span class="nc" id="L704">            handleException(e);</span>
+<span class="nc" id="L705">        }</span>
+
+<span class="nc bnc" id="L707" title="All 2 branches missed.">        if (lexicalHandler != null) {</span>
+<span class="nc" id="L708">            lexicalHandler.startCDATA();</span>
+        }
+<span class="nc" id="L710">    }</span>
+
+    @Override
+    public void endCDATA() throws SAXException {
+        try {
+<span class="nc" id="L715">            writer.write( &quot;]]&gt;&quot; );</span>
+        }
+<span class="nc" id="L717">        catch (IOException e) {</span>
+<span class="nc" id="L718">            handleException(e);</span>
+<span class="nc" id="L719">        }</span>
+
+<span class="nc bnc" id="L721" title="All 2 branches missed.">        if (lexicalHandler != null) {</span>
+<span class="nc" id="L722">            lexicalHandler.endCDATA();</span>
+        }
+<span class="nc" id="L724">    }</span>
+
+    @Override
+    public void startEntity(String name) throws SAXException {
+        try {
+<span class="nc" id="L729">            writeEntityRef(name);</span>
+        }
+<span class="nc" id="L731">        catch (IOException e) {</span>
+<span class="nc" id="L732">            handleException(e);</span>
+<span class="nc" id="L733">        }</span>
+
+<span class="nc bnc" id="L735" title="All 2 branches missed.">        if (lexicalHandler != null) {</span>
+<span class="nc" id="L736">            lexicalHandler.startEntity(name);</span>
+        }
+<span class="nc" id="L738">    }</span>
+
+    @Override
+    public void endEntity(String name) throws SAXException {
+<span class="nc bnc" id="L742" title="All 2 branches missed.">        if (lexicalHandler != null) {</span>
+<span class="nc" id="L743">            lexicalHandler.endEntity(name);</span>
+        }
+<span class="nc" id="L745">    }</span>
+
+    @Override
+    public void comment(char[] ch, int start, int length) throws SAXException {
+<span class="nc bnc" id="L749" title="All 4 branches missed.">        if ( showCommentsInDTDs || ! inDTD ) {</span>
+            try {
+<span class="nc" id="L751">                charactersAdded = false;</span>
+<span class="nc" id="L752">                writeComment( new String(ch, start, length) );</span>
+            }
+<span class="nc" id="L754">            catch (IOException e) {</span>
+<span class="nc" id="L755">                handleException(e);</span>
+<span class="nc" id="L756">            }</span>
+        }
+
+<span class="nc bnc" id="L759" title="All 2 branches missed.">        if (lexicalHandler != null) {</span>
+<span class="nc" id="L760">            lexicalHandler.comment(ch, start, length);</span>
+        }
+<span class="nc" id="L762">    }</span>
+
+
+
+    // Implementation methods
+    //-------------------------------------------------------------------------
+    protected void writeElement(Element element) throws IOException {
+<span class="fc" id="L769">        int size = element.nodeCount();</span>
+<span class="fc" id="L770">        String qualifiedName = element.getQualifiedName();</span>
+
+<span class="fc" id="L772">        writePrintln();</span>
+<span class="fc" id="L773">        indent();</span>
+
+<span class="fc" id="L775">        writer.write(&quot;&lt;&quot;);</span>
+<span class="fc" id="L776">        writer.write(qualifiedName);</span>
+
+<span class="fc" id="L778">        int previouslyDeclaredNamespaces = namespaceStack.size();</span>
+<span class="fc" id="L779">        Namespace ns = element.getNamespace();</span>
+<span class="pc bpc" id="L780" title="1 of 2 branches missed.">        if (isNamespaceDeclaration( ns ) ) {</span>
+<span class="nc" id="L781">            namespaceStack.push(ns);</span>
+<span class="nc" id="L782">            writeNamespace(ns);</span>
+        }
+
+        // Print out additional namespace declarations
+<span class="fc" id="L786">        boolean textOnly = true;</span>
+<span class="fc bfc" id="L787" title="All 2 branches covered.">        for ( int i = 0; i &lt; size; i++ ) {</span>
+<span class="fc" id="L788">            Node node = element.node(i);</span>
+<span class="pc bpc" id="L789" title="1 of 2 branches missed.">            if ( node instanceof Namespace ) {</span>
+<span class="nc" id="L790">                Namespace additional = (Namespace) node;</span>
+<span class="nc bnc" id="L791" title="All 2 branches missed.">                if (isNamespaceDeclaration( additional ) ) {</span>
+<span class="nc" id="L792">                    namespaceStack.push(additional);</span>
+<span class="nc" id="L793">                    writeNamespace(additional);</span>
+                }
+<span class="nc" id="L795">            }</span>
+<span class="fc bfc" id="L796" title="All 2 branches covered.">            else if ( node instanceof Element) {</span>
+<span class="fc" id="L797">                textOnly = false;</span>
+            }
+<span class="pc bpc" id="L799" title="1 of 2 branches missed.">            else if ( node instanceof Comment) {</span>
+<span class="nc" id="L800">                textOnly = false;</span>
+            }
+        }
+
+<span class="fc" id="L804">        writeAttributes(element);</span>
+
+<span class="fc" id="L806">        lastOutputNodeType = Node.ELEMENT_NODE;</span>
+
+<span class="pc bpc" id="L808" title="1 of 2 branches missed.">        if ( size &lt;= 0 ) {</span>
+<span class="nc" id="L809">            writeEmptyElementClose(qualifiedName);</span>
+        }
+        else {
+<span class="fc" id="L812">            writer.write(&quot;&gt;&quot;);</span>
+<span class="fc bfc" id="L813" title="All 2 branches covered.">            if ( textOnly ) {</span>
+                // we have at least one text node so lets assume
+                // that its non-empty
+<span class="fc" id="L816">                writeElementContent(element);</span>
+            }
+            else {
+                // we know it's not null or empty from above
+<span class="fc" id="L820">                ++indentLevel;</span>
+
+<span class="fc" id="L822">                writeElementContent(element);</span>
+
+<span class="fc" id="L824">                --indentLevel;</span>
+
+<span class="fc" id="L826">                writePrintln();</span>
+<span class="fc" id="L827">                indent();</span>
+            }
+<span class="fc" id="L829">            writer.write(&quot;&lt;/&quot;);</span>
+<span class="fc" id="L830">            writer.write(qualifiedName);</span>
+<span class="fc" id="L831">            writer.write(&quot;&gt;&quot;);</span>
+        }
+
+        // remove declared namespaceStack from stack
+<span class="pc bpc" id="L835" title="1 of 2 branches missed.">        while (namespaceStack.size() &gt; previouslyDeclaredNamespaces) {</span>
+<span class="nc" id="L836">            namespaceStack.pop();</span>
+        }
+
+<span class="fc" id="L839">        lastOutputNodeType = Node.ELEMENT_NODE;</span>
+<span class="fc" id="L840">    }</span>
+
+    /**
+     * Determines if element is a special case of XML elements
+     * where it contains an xml:space attribute of &quot;preserve&quot;.
+     * If it does, then retain whitespace.
+     * @param element the element to check
+     * @return {@code true} if whitespace should be preserved, otherwise {@code false}
+     */
+    protected final boolean isElementSpacePreserved(Element element) {
+<span class="fc" id="L850">      final Attribute attr = element.attribute(&quot;space&quot;);</span>
+<span class="fc" id="L851">      boolean preserveFound=preserve; //default to global state</span>
+<span class="pc bpc" id="L852" title="1 of 2 branches missed.">      if (attr!=null) {</span>
+<span class="nc bnc" id="L853" title="All 2 branches missed.">        if (&quot;xml&quot;.equals(attr.getNamespacePrefix()) &amp;&amp;</span>
+<span class="nc bnc" id="L854" title="All 2 branches missed.">            &quot;preserve&quot;.equals(attr.getText())) {</span>
+<span class="nc" id="L855">          preserveFound = true;</span>
+        }
+        else {
+<span class="nc" id="L858">          preserveFound = false;</span>
+        }
+      }
+<span class="fc" id="L861">      return preserveFound;</span>
+    }
+    /** Outputs the content of the given element. If whitespace trimming is
+     * enabled then all adjacent text nodes are appended together before
+     * the whitespace trimming occurs to avoid problems with multiple
+     * text nodes being created due to text content that spans parser buffers
+     * in a SAX parser.
+     * @param element the element to write
+     * @throws IOException if the element could not be written
+     */
+    protected void writeElementContent(Element element) throws IOException {
+<span class="fc" id="L872">        boolean trim = format.isTrimText();</span>
+<span class="fc" id="L873">        boolean oldPreserve=preserve;</span>
+<span class="pc bpc" id="L874" title="1 of 2 branches missed.">        if (trim) { //verify we have to before more expensive test</span>
+<span class="fc" id="L875">          preserve=isElementSpacePreserved(element);</span>
+<span class="pc bpc" id="L876" title="1 of 2 branches missed.">          trim = !preserve;</span>
+        }
+<span class="pc bpc" id="L878" title="1 of 2 branches missed.">        if (trim) {</span>
+            // concatenate adjacent text nodes together
+            // so that whitespace trimming works properly
+<span class="fc" id="L881">            Text lastTextNode = null;</span>
+<span class="fc" id="L882">            StringBuilder buffer = null;</span>
+<span class="fc" id="L883">            boolean textOnly = true;</span>
+<span class="fc bfc" id="L884" title="All 2 branches covered.">            for ( int i = 0, size = element.nodeCount(); i &lt; size; i++ ) {</span>
+<span class="fc" id="L885">                Node node = element.node(i);</span>
+<span class="fc bfc" id="L886" title="All 2 branches covered.">                if ( node instanceof Text ) {</span>
+<span class="pc bpc" id="L887" title="1 of 2 branches missed.">                    if ( lastTextNode == null ) {</span>
+<span class="fc" id="L888">                        lastTextNode = (Text) node;</span>
+                    }
+                    else {
+<span class="nc bnc" id="L891" title="All 2 branches missed.">                        if (buffer == null) {</span>
+<span class="nc" id="L892">                            buffer = new StringBuilder( lastTextNode.getText() );</span>
+                        }
+<span class="nc" id="L894">                      buffer.append( node.getText() );</span>
+                    }
+                }
+                else {
+<span class="pc bpc" id="L898" title="1 of 4 branches missed.">                    if (!textOnly &amp;&amp; format.isPadText()) {</span>
+<span class="fc" id="L899">                        writer.write(PAD_TEXT);</span>
+                    }
+
+<span class="fc" id="L902">                    textOnly = false;</span>
+
+<span class="pc bpc" id="L904" title="1 of 2 branches missed.">                    if ( lastTextNode != null ) {</span>
+<span class="nc bnc" id="L905" title="All 2 branches missed.">                        if ( buffer != null ) {</span>
+<span class="nc" id="L906">                            writeString( buffer.toString() );</span>
+<span class="nc" id="L907">                            buffer = null;</span>
+                        }
+                        else {
+<span class="nc" id="L910">                            writeString( lastTextNode.getText() );</span>
+                        }
+<span class="nc" id="L912">                        lastTextNode = null;</span>
+
+<span class="nc bnc" id="L914" title="All 2 branches missed.">                        if (format.isPadText()) {</span>
+<span class="nc" id="L915">                            writer.write(PAD_TEXT);</span>
+                        }
+                    }
+<span class="fc" id="L918">                    writeNode(node);</span>
+                }
+            }
+<span class="fc bfc" id="L921" title="All 2 branches covered.">            if ( lastTextNode != null ) {</span>
+<span class="pc bpc" id="L922" title="3 of 4 branches missed.">                if (!textOnly &amp;&amp; format.isPadText()) {</span>
+<span class="nc" id="L923">                    writer.write(PAD_TEXT);</span>
+                }
+<span class="pc bpc" id="L925" title="1 of 2 branches missed.">                if ( buffer != null ) {</span>
+<span class="nc" id="L926">                    writeString( buffer.toString() );</span>
+<span class="nc" id="L927">                    buffer = null;</span>
+                }
+                else {
+<span class="fc" id="L930">                    writeString( lastTextNode.getText() );</span>
+                }
+<span class="fc" id="L932">                lastTextNode = null;</span>
+            }
+<span class="fc" id="L934">        }</span>
+        else {
+<span class="nc" id="L936">            Node lastTextNode = null;</span>
+<span class="nc bnc" id="L937" title="All 2 branches missed.">            for ( int i = 0, size = element.nodeCount(); i &lt; size; i++ ) {</span>
+<span class="nc" id="L938">                Node node = element.node(i);</span>
+<span class="nc bnc" id="L939" title="All 2 branches missed.">                if (node instanceof Text) {</span>
+<span class="nc" id="L940">                    writeNode(node);</span>
+<span class="nc" id="L941">                    lastTextNode = node;</span>
+                } else {
+<span class="nc bnc" id="L943" title="All 4 branches missed.">                    if ((lastTextNode != null) &amp;&amp; format.isPadText()) {</span>
+<span class="nc" id="L944">                        writer.write(PAD_TEXT);</span>
+                    }
+<span class="nc" id="L946">                    writeNode(node);</span>
+<span class="nc bnc" id="L947" title="All 4 branches missed.">                    if ((lastTextNode != null) &amp;&amp; format.isPadText()) {</span>
+<span class="nc" id="L948">                        writer.write(PAD_TEXT);</span>
+                    }
+<span class="nc" id="L950">                    lastTextNode = null;</span>
+                }
+            }
+        }
+<span class="fc" id="L954">        preserve=oldPreserve;</span>
+<span class="fc" id="L955">    }</span>
+    protected void writeCDATA(String text) throws IOException {
+<span class="nc" id="L957">        writer.write( &quot;&lt;![CDATA[&quot; );</span>
+<span class="nc bnc" id="L958" title="All 2 branches missed.">        if (text != null) {</span>
+<span class="nc" id="L959">            writer.write( text );</span>
+        }
+<span class="nc" id="L961">        writer.write( &quot;]]&gt;&quot; );</span>
+
+<span class="nc" id="L963">        lastOutputNodeType = Node.CDATA_SECTION_NODE;</span>
+<span class="nc" id="L964">    }</span>
+
+    protected void writeDocType(DocumentType docType) throws IOException {
+<span class="nc bnc" id="L967" title="All 2 branches missed.">        if (docType != null) {</span>
+<span class="nc" id="L968">            docType.write( writer );</span>
+            //writeDocType( docType.getElementName(), docType.getPublicID(), docType.getSystemID() );
+<span class="nc" id="L970">            writePrintln();</span>
+        }
+<span class="nc" id="L972">    }</span>
+
+
+    protected void writeNamespace(Namespace namespace) throws IOException {
+<span class="nc bnc" id="L976" title="All 2 branches missed.">        if ( namespace != null ) {</span>
+<span class="nc" id="L977">            writeNamespace(namespace.getPrefix(), namespace.getURI());</span>
+        }
+<span class="nc" id="L979">    }</span>
+
+    /**
+     * Writes the SAX namepsaces
+     * @throws IOException if the namespaces could not be written
+     */
+    protected void writeNamespaces() throws IOException {
+<span class="nc bnc" id="L986" title="All 2 branches missed.">        if ( namespacesMap != null ) {</span>
+<span class="nc bnc" id="L987" title="All 2 branches missed.">            for ( Iterator iter = namespacesMap.entrySet().iterator(); iter.hasNext(); ) {</span>
+<span class="nc" id="L988">                Map.Entry entry = (Map.Entry) iter.next();</span>
+<span class="nc" id="L989">                String prefix = (String) entry.getKey();</span>
+<span class="nc" id="L990">                String uri = (String) entry.getValue();</span>
+<span class="nc" id="L991">                writeNamespace(prefix, uri);</span>
+<span class="nc" id="L992">            }</span>
+<span class="nc" id="L993">            namespacesMap = null;</span>
+        }
+<span class="nc" id="L995">    }</span>
+
+    /**
+     * Writes the SAX namepsaces
+     * @param prefix the namespace prefix
+     * @param uri the URL of the namespace
+     * @throws IOException if the namespace could not be written
+     */
+    protected void writeNamespace(String prefix, String uri) throws IOException {
+<span class="nc bnc" id="L1004" title="All 4 branches missed.">        if ( prefix != null &amp;&amp; prefix.length() &gt; 0 ) {</span>
+<span class="nc" id="L1005">            writer.write(&quot; xmlns:&quot;);</span>
+<span class="nc" id="L1006">            writer.write(prefix);</span>
+<span class="nc" id="L1007">            writer.write(&quot;=\&quot;&quot;);</span>
+        }
+        else {
+<span class="nc" id="L1010">            writer.write(&quot; xmlns=\&quot;&quot;);</span>
+        }
+<span class="nc" id="L1012">        writer.write(uri);</span>
+<span class="nc" id="L1013">        writer.write(&quot;\&quot;&quot;);</span>
+<span class="nc" id="L1014">    }</span>
+
+    protected void writeProcessingInstruction(ProcessingInstruction processingInstruction) throws IOException {
+        //indent();
+<span class="nc" id="L1018">        writer.write( &quot;&lt;?&quot; );</span>
+<span class="nc" id="L1019">        writer.write( processingInstruction.getName() );</span>
+<span class="nc" id="L1020">        writer.write( &quot; &quot; );</span>
+<span class="nc" id="L1021">        writer.write( processingInstruction.getText() );</span>
+<span class="nc" id="L1022">        writer.write( &quot;?&gt;&quot; );</span>
+<span class="nc" id="L1023">        writePrintln();</span>
+
+<span class="nc" id="L1025">        lastOutputNodeType = Node.PROCESSING_INSTRUCTION_NODE;</span>
+<span class="nc" id="L1026">    }</span>
+
+    protected void writeString(String text) throws IOException {
+<span class="pc bpc" id="L1029" title="2 of 4 branches missed.">        if ( text != null &amp;&amp; text.length() &gt; 0 ) {</span>
+<span class="pc bpc" id="L1030" title="1 of 2 branches missed.">            if ( escapeText ) {</span>
+<span class="fc" id="L1031">                text = escapeElementEntities(text);</span>
+            }
+
+//            if (format.isPadText()) {
+//                if (lastOutputNodeType == Node.ELEMENT_NODE) {
+//                    writer.write(PAD_TEXT);
+//                }
+//            }
+
+<span class="pc bpc" id="L1040" title="1 of 2 branches missed.">            if (format.isTrimText()) {</span>
+<span class="fc" id="L1041">                boolean first = true;</span>
+<span class="fc" id="L1042">                StringTokenizer tokenizer = new StringTokenizer(text);</span>
+<span class="fc bfc" id="L1043" title="All 2 branches covered.">                while (tokenizer.hasMoreTokens()) {</span>
+<span class="fc" id="L1044">                    String token = tokenizer.nextToken();</span>
+<span class="pc bpc" id="L1045" title="1 of 2 branches missed.">                    if ( first ) {</span>
+<span class="fc" id="L1046">                        first = false;</span>
+<span class="pc bpc" id="L1047" title="1 of 2 branches missed.">                        if ( lastOutputNodeType == Node.TEXT_NODE ) {</span>
+<span class="nc" id="L1048">                            writer.write(&quot; &quot;);</span>
+                        }
+                    }
+                    else {
+<span class="nc" id="L1052">                        writer.write(&quot; &quot;);</span>
+                    }
+<span class="fc" id="L1054">                    writer.write(token);</span>
+<span class="fc" id="L1055">                    lastOutputNodeType = Node.TEXT_NODE;</span>
+<span class="fc" id="L1056">                }</span>
+<span class="fc" id="L1057">            }</span>
+            else {
+<span class="nc" id="L1059">                lastOutputNodeType = Node.TEXT_NODE;</span>
+<span class="nc" id="L1060">                writer.write(text);</span>
+            }
+        }
+<span class="fc" id="L1063">    }</span>
+
+    /**
+     * This method is used to write out Nodes that contain text
+     * and still allow for xml:space to be handled properly.
+     * @param node the node to write
+     * @throws IOException if the node could not be written
+     */
+    protected void writeNodeText(Node node) throws IOException {
+<span class="nc" id="L1072">        String text = node.getText();</span>
+<span class="nc bnc" id="L1073" title="All 4 branches missed.">        if (text != null &amp;&amp; text.length() &gt; 0) {</span>
+<span class="nc bnc" id="L1074" title="All 2 branches missed.">            if (escapeText) {</span>
+<span class="nc" id="L1075">                text = escapeElementEntities(text);</span>
+            }
+
+<span class="nc" id="L1078">            lastOutputNodeType = Node.TEXT_NODE;</span>
+<span class="nc" id="L1079">            writer.write(text);</span>
+        }
+<span class="nc" id="L1081">    }</span>
+
+    protected void writeNode(Node node) throws IOException {
+<span class="fc" id="L1084">        int nodeType = node.getNodeType();</span>
+<span class="pc bpc" id="L1085" title="9 of 11 branches missed.">        switch (nodeType) {</span>
+            case Node.ELEMENT_NODE:
+<span class="fc" id="L1087">                writeElement((Element) node);</span>
+<span class="fc" id="L1088">                break;</span>
+            case Node.ATTRIBUTE_NODE:
+<span class="nc" id="L1090">                writeAttribute((Attribute) node);</span>
+<span class="nc" id="L1091">                break;</span>
+            case Node.TEXT_NODE:
+<span class="nc" id="L1093">                writeNodeText(node);</span>
+                //write((Text) node);
+<span class="nc" id="L1095">                break;</span>
+            case Node.CDATA_SECTION_NODE:
+<span class="nc" id="L1097">                writeCDATA(node.getText());</span>
+<span class="nc" id="L1098">                break;</span>
+            case Node.ENTITY_REFERENCE_NODE:
+<span class="nc" id="L1100">                writeEntity((Entity) node);</span>
+<span class="nc" id="L1101">                break;</span>
+            case Node.PROCESSING_INSTRUCTION_NODE:
+<span class="nc" id="L1103">                writeProcessingInstruction((ProcessingInstruction) node);</span>
+<span class="nc" id="L1104">                break;</span>
+            case Node.COMMENT_NODE:
+<span class="fc" id="L1106">                writeComment(node.getText());</span>
+<span class="fc" id="L1107">                break;</span>
+            case Node.DOCUMENT_NODE:
+<span class="nc" id="L1109">                write((Document) node);</span>
+<span class="nc" id="L1110">                break;</span>
+            case Node.DOCUMENT_TYPE_NODE:
+<span class="nc" id="L1112">                writeDocType((DocumentType) node);</span>
+<span class="nc" id="L1113">                break;</span>
+            case Node.NAMESPACE_NODE:
+                // Will be output with attributes
+                //write((Namespace) node);
+<span class="nc" id="L1117">                break;</span>
+            default:
+<span class="nc" id="L1119">                throw new IOException( &quot;Invalid node type: &quot; + node );</span>
+        }
+<span class="fc" id="L1121">    }</span>
+
+
+
+
+    protected void installLexicalHandler() {
+<span class="nc" id="L1127">        XMLReader parent = getParent();</span>
+<span class="nc bnc" id="L1128" title="All 2 branches missed.">        if (parent == null) {</span>
+<span class="nc" id="L1129">            throw new NullPointerException(&quot;No parent for filter&quot;);</span>
+        }
+        // try to register for lexical events
+<span class="nc bnc" id="L1132" title="All 2 branches missed.">        for (int i = 0; i &lt; LEXICAL_HANDLER_NAMES.length; i++) {</span>
+            try {
+<span class="nc" id="L1134">                parent.setProperty(LEXICAL_HANDLER_NAMES[i], this);</span>
+<span class="nc" id="L1135">                break;</span>
+            }
+<span class="nc" id="L1137">            catch (SAXNotRecognizedException | SAXNotSupportedException ex) {</span>
+                // ignore
+            }
+        }
+<span class="nc" id="L1141">    }</span>
+
+    protected void writeDocType(String name, String publicID, String systemID) throws IOException {
+<span class="nc" id="L1144">        boolean hasPublic = false;</span>
+
+<span class="nc" id="L1146">        writer.write(&quot;&lt;!DOCTYPE &quot;);</span>
+<span class="nc" id="L1147">        writer.write(name);</span>
+<span class="nc bnc" id="L1148" title="All 4 branches missed.">        if ((publicID != null) &amp;&amp; (!publicID.equals(&quot;&quot;))) {</span>
+<span class="nc" id="L1149">            writer.write(&quot; PUBLIC \&quot;&quot;);</span>
+<span class="nc" id="L1150">            writer.write(publicID);</span>
+<span class="nc" id="L1151">            writer.write(&quot;\&quot;&quot;);</span>
+<span class="nc" id="L1152">            hasPublic = true;</span>
+        }
+<span class="nc bnc" id="L1154" title="All 4 branches missed.">        if ((systemID != null) &amp;&amp; (!systemID.equals(&quot;&quot;))) {</span>
+<span class="nc bnc" id="L1155" title="All 2 branches missed.">            if (!hasPublic) {</span>
+<span class="nc" id="L1156">                writer.write(&quot; SYSTEM&quot;);</span>
+            }
+<span class="nc" id="L1158">            writer.write(&quot; \&quot;&quot;);</span>
+<span class="nc" id="L1159">            writer.write(systemID);</span>
+<span class="nc" id="L1160">            writer.write(&quot;\&quot;&quot;);</span>
+        }
+<span class="nc" id="L1162">        writer.write(&quot;&gt;&quot;);</span>
+<span class="nc" id="L1163">        writePrintln();</span>
+<span class="nc" id="L1164">    }</span>
+
+    protected void writeEntity(Entity entity) throws IOException {
+<span class="nc bnc" id="L1167" title="All 2 branches missed.">        if (!resolveEntityRefs()) {</span>
+<span class="nc" id="L1168">            writeEntityRef( entity.getName() );</span>
+        } else {
+<span class="nc" id="L1170">            writer.write(entity.getText());</span>
+        }
+<span class="nc" id="L1172">    }</span>
+
+    protected void writeEntityRef(String name) throws IOException {
+<span class="nc" id="L1175">        writer.write( &quot;&amp;&quot; );</span>
+<span class="nc" id="L1176">        writer.write( name );</span>
+<span class="nc" id="L1177">        writer.write( &quot;;&quot; );</span>
+
+<span class="nc" id="L1179">        lastOutputNodeType = Node.ENTITY_REFERENCE_NODE;</span>
+<span class="nc" id="L1180">    }</span>
+
+    protected void writeComment(String text) throws IOException {
+<span class="pc bpc" id="L1183" title="1 of 2 branches missed.">        if (format.isNewlines()) {</span>
+<span class="fc" id="L1184">            println();</span>
+<span class="fc" id="L1185">            indent();</span>
+        }
+<span class="fc" id="L1187">        writer.write( &quot;&lt;!--&quot; );</span>
+<span class="fc" id="L1188">        writer.write( text );</span>
+<span class="fc" id="L1189">        writer.write( &quot;--&gt;&quot; );</span>
+
+<span class="fc" id="L1191">        lastOutputNodeType = Node.COMMENT_NODE;</span>
+<span class="fc" id="L1192">    }</span>
+
+    /** Writes the attributes of the given element
+      * @param element the element whose attributes should be written
+      * @throws IOException if the element could not be written
+      */
+    protected void writeAttributes( Element element ) throws IOException {
+
+        // I do not yet handle the case where the same prefix maps to
+        // two different URIs. For attributes on the same element
+        // this is illegal; but as yet we don't throw an exception
+        // if someone tries to do this
+<span class="pc bpc" id="L1204" title="1 of 2 branches missed.">        for ( int i = 0, size = element.attributeCount(); i &lt; size; i++ ) {</span>
+<span class="nc" id="L1205">            Attribute attribute = element.attribute(i);</span>
+<span class="nc" id="L1206">            Namespace ns = attribute.getNamespace();</span>
+<span class="nc bnc" id="L1207" title="All 6 branches missed.">            if (ns != null &amp;&amp; ns != Namespace.NO_NAMESPACE &amp;&amp; ns != Namespace.XML_NAMESPACE) {</span>
+<span class="nc" id="L1208">                String prefix = ns.getPrefix();</span>
+<span class="nc" id="L1209">                String uri = namespaceStack.getURI(prefix);</span>
+<span class="nc bnc" id="L1210" title="All 2 branches missed.">                if (!ns.getURI().equals(uri)) { // output a new namespace declaration</span>
+<span class="nc" id="L1211">                    writeNamespace(ns);</span>
+<span class="nc" id="L1212">                    namespaceStack.push(ns);</span>
+                }
+            }
+
+            // If the attribute is a namespace declaration, check if we have already
+            // written that declaration elsewhere (if that's the case, it must be
+            // in the namespace stack
+<span class="nc" id="L1219">            String attName = attribute.getName();</span>
+<span class="nc bnc" id="L1220" title="All 2 branches missed.">            if (attName.startsWith(&quot;xmlns:&quot;)) {</span>
+<span class="nc" id="L1221">                String prefix = attName.substring(6);</span>
+<span class="nc bnc" id="L1222" title="All 2 branches missed.">                if (namespaceStack.getNamespaceForPrefix(prefix) == null) {</span>
+<span class="nc" id="L1223">                    String uri = attribute.getValue();</span>
+<span class="nc" id="L1224">                    namespaceStack.push(prefix, uri);</span>
+<span class="nc" id="L1225">                    writeNamespace(prefix, uri);</span>
+                }
+<span class="nc bnc" id="L1227" title="All 2 branches missed.">            } else if (attName.equals(&quot;xmlns&quot;)) {</span>
+<span class="nc bnc" id="L1228" title="All 2 branches missed.">                if (namespaceStack.getDefaultNamespace() == null) {</span>
+<span class="nc" id="L1229">                    String uri = attribute.getValue();</span>
+<span class="nc" id="L1230">                    namespaceStack.push(null, uri);</span>
+<span class="nc" id="L1231">                    writeNamespace(null, uri);</span>
+<span class="nc" id="L1232">                }</span>
+            } else {
+<span class="nc" id="L1234">                char quote = format.getAttributeQuoteCharacter();</span>
+<span class="nc" id="L1235">                writer.write(&quot; &quot;);</span>
+<span class="nc" id="L1236">                writer.write(attribute.getQualifiedName());</span>
+<span class="nc" id="L1237">                writer.write(&quot;=&quot;);</span>
+<span class="nc" id="L1238">                writer.write(quote);</span>
+<span class="nc" id="L1239">                writeEscapeAttributeEntities(attribute.getValue());</span>
+<span class="nc" id="L1240">                writer.write(quote);</span>
+            }
+        }
+<span class="fc" id="L1243">    }</span>
+
+    protected void writeAttribute(Attribute attribute) throws IOException {
+<span class="nc" id="L1246">        writer.write(&quot; &quot;);</span>
+<span class="nc" id="L1247">        writer.write(attribute.getQualifiedName());</span>
+<span class="nc" id="L1248">        writer.write(&quot;=&quot;);</span>
+
+<span class="nc" id="L1250">        char quote = format.getAttributeQuoteCharacter();</span>
+<span class="nc" id="L1251">        writer.write(quote);</span>
+
+<span class="nc" id="L1253">        writeEscapeAttributeEntities(attribute.getValue());</span>
+
+<span class="nc" id="L1255">        writer.write(quote);</span>
+<span class="nc" id="L1256">        lastOutputNodeType = Node.ATTRIBUTE_NODE;</span>
+<span class="nc" id="L1257">    }</span>
+
+    protected void writeAttributes(Attributes attributes) throws IOException {
+<span class="nc bnc" id="L1260" title="All 2 branches missed.">        for (int i = 0, size = attributes.getLength(); i &lt; size; i++) {</span>
+<span class="nc" id="L1261">            writeAttribute( attributes, i );</span>
+        }
+<span class="nc" id="L1263">    }</span>
+
+    protected void writeAttribute(Attributes attributes, int index) throws IOException {
+<span class="nc" id="L1266">        char quote = format.getAttributeQuoteCharacter();</span>
+<span class="nc" id="L1267">        writer.write(&quot; &quot;);</span>
+<span class="nc" id="L1268">        writer.write(attributes.getQName(index));</span>
+<span class="nc" id="L1269">        writer.write(&quot;=&quot;);</span>
+<span class="nc" id="L1270">        writer.write(quote);</span>
+<span class="nc" id="L1271">        writeEscapeAttributeEntities(attributes.getValue(index));</span>
+<span class="nc" id="L1272">        writer.write(quote);</span>
+<span class="nc" id="L1273">    }</span>
+
+
+
+    protected void indent() throws IOException {
+<span class="fc" id="L1278">        String indent = format.getIndent();</span>
+<span class="pc bpc" id="L1279" title="2 of 4 branches missed.">        if ( indent != null &amp;&amp; indent.length() &gt; 0 ) {</span>
+<span class="fc bfc" id="L1280" title="All 2 branches covered.">            for ( int i = 0; i &lt; indentLevel; i++ ) {</span>
+<span class="fc" id="L1281">                writer.write(indent);</span>
+            }
+        }
+<span class="fc" id="L1284">    }</span>
+
+    /**
+     * &lt;p&gt;
+     * This will print a new line only if the newlines flag was set to true
+     * &lt;/p&gt;
+     * @throws IOException if the new line could not be written
+     */
+    protected void writePrintln() throws IOException  {
+<span class="pc bpc" id="L1293" title="1 of 2 branches missed.">        if (format.isNewlines()) {</span>
+<span class="fc" id="L1294">            writer.write( format.getLineSeparator() );</span>
+        }
+<span class="fc" id="L1296">    }</span>
+
+    /**
+     * Get an OutputStreamWriter, use preferred encoding.
+     * @param outStream the outut stream
+     * @param encoding the encoding of the stream
+     * @return the IO writer
+     * @throws UnsupportedEncodingException if the encoding is not support
+     */
+    protected Writer createWriter(OutputStream outStream, String encoding) throws UnsupportedEncodingException {
+<span class="nc" id="L1306">        return new BufferedWriter(</span>
+            new OutputStreamWriter( outStream, encoding )
+        );
+    }
+
+    /**
+     * &lt;p&gt;
+     * This will write the declaration to the given Writer.
+     *   Assumes XML version 1.0 since we don't directly know.
+     * &lt;/p&gt;
+     * @throws IOException if the declaration could not be written
+     */
+    protected void writeDeclaration() throws IOException {
+<span class="fc" id="L1319">        String encoding = format.getEncoding();</span>
+
+        // Only print of declaration is not suppressed
+<span class="pc bpc" id="L1322" title="1 of 2 branches missed.">        if (! format.isSuppressDeclaration()) {</span>
+            // Assume 1.0 version
+<span class="pc bpc" id="L1324" title="1 of 2 branches missed.">            if (encoding.equals(&quot;UTF8&quot;)) {</span>
+<span class="nc" id="L1325">                writer.write(&quot;&lt;?xml version=\&quot;1.0\&quot;&quot;);</span>
+<span class="nc bnc" id="L1326" title="All 2 branches missed.">                if (!format.isOmitEncoding()) {</span>
+<span class="nc" id="L1327">                    writer.write(&quot; encoding=\&quot;UTF-8\&quot;&quot;);</span>
+                }
+<span class="nc" id="L1329">                writer.write(&quot;?&gt;&quot;);</span>
+            } else {
+<span class="fc" id="L1331">                writer.write(&quot;&lt;?xml version=\&quot;1.0\&quot;&quot;);</span>
+<span class="pc bpc" id="L1332" title="1 of 2 branches missed.">                if (! format.isOmitEncoding()) {</span>
+<span class="fc" id="L1333">                    writer.write(&quot; encoding=\&quot;&quot; + encoding + &quot;\&quot;&quot;);</span>
+                }
+<span class="fc" id="L1335">                writer.write(&quot;?&gt;&quot;);</span>
+            }
+<span class="pc bpc" id="L1337" title="1 of 2 branches missed.">            if (format.isNewLineAfterDeclaration()) {</span>
+<span class="fc" id="L1338">                println();</span>
+            }
+        }
+<span class="fc" id="L1341">    }</span>
+
+    protected void writeClose(String qualifiedName) throws IOException {
+<span class="nc" id="L1344">        writer.write(&quot;&lt;/&quot;);</span>
+<span class="nc" id="L1345">        writer.write(qualifiedName);</span>
+<span class="nc" id="L1346">        writer.write(&quot;&gt;&quot;);</span>
+<span class="nc" id="L1347">    }</span>
+
+    protected void writeEmptyElementClose(String qualifiedName) throws IOException {
+        // Simply close up
+<span class="nc bnc" id="L1351" title="All 2 branches missed.">        if (! format.isExpandEmptyElements()) {</span>
+<span class="nc" id="L1352">            writer.write(&quot;/&gt;&quot;);</span>
+        } else {
+<span class="nc" id="L1354">            writer.write(&quot;&gt;&lt;/&quot;);</span>
+<span class="nc" id="L1355">            writer.write(qualifiedName);</span>
+<span class="nc" id="L1356">            writer.write(&quot;&gt;&quot;);</span>
+        }
+<span class="nc" id="L1358">    }</span>
+
+    protected boolean isExpandEmptyElements() {
+<span class="nc" id="L1361">        return format.isExpandEmptyElements();</span>
+    }
+
+
+    /** This will take the pre-defined entities in XML 1.0 and
+      * convert their character representation to the appropriate
+      * entity reference, suitable for XML attributes.
+     * @param text the entities to escale
+     * @return the escaped entities
+      */
+    protected String escapeElementEntities(String text) {
+<span class="fc" id="L1372">        char[] block = null;</span>
+<span class="fc" id="L1373">        int i, last = 0, size = text.length();</span>
+<span class="fc bfc" id="L1374" title="All 2 branches covered.">        for ( i = 0; i &lt; size; i++ ) {</span>
+<span class="fc" id="L1375">            String entity = null;</span>
+<span class="fc" id="L1376">            char c = text.charAt(i);</span>
+<span class="pc bpc" id="L1377" title="4 of 5 branches missed.">            switch( c ) {</span>
+                case '&lt;' :
+<span class="nc" id="L1379">                    entity = &quot;&amp;lt;&quot;;</span>
+<span class="nc" id="L1380">                    break;</span>
+                case '&gt;' :
+<span class="nc" id="L1382">                    entity = &quot;&amp;gt;&quot;;</span>
+<span class="nc" id="L1383">                    break;</span>
+                case '&amp;' :
+<span class="nc" id="L1385">                    entity = &quot;&amp;amp;&quot;;</span>
+<span class="nc" id="L1386">                    break;</span>
+                case '\t': case '\n': case '\r':
+                    // don't encode standard whitespace characters
+<span class="nc bnc" id="L1389" title="All 2 branches missed.">                    if (preserve) {</span>
+<span class="nc" id="L1390">                      entity=String.valueOf(c);</span>
+                    }
+                    break;
+                default:
+<span class="pc bpc" id="L1394" title="2 of 4 branches missed.">                    if (c &lt; 32 || shouldEncodeChar(c)) {</span>
+<span class="nc" id="L1395">                        entity = &quot;&amp;#&quot; + (int) c + &quot;;&quot;;</span>
+                    }
+                    break;
+            }
+<span class="pc bpc" id="L1399" title="1 of 2 branches missed.">            if (entity != null) {</span>
+<span class="nc bnc" id="L1400" title="All 2 branches missed.">                if ( block == null ) {</span>
+<span class="nc" id="L1401">                    block = text.toCharArray();</span>
+                }
+<span class="nc" id="L1403">                buffer.append(block, last, i - last);</span>
+<span class="nc" id="L1404">                buffer.append(entity);</span>
+<span class="nc" id="L1405">                last = i + 1;</span>
+            }
+        }
+<span class="pc bpc" id="L1408" title="1 of 2 branches missed.">        if ( last == 0 ) {</span>
+<span class="fc" id="L1409">            return text;</span>
+        }
+<span class="nc bnc" id="L1411" title="All 2 branches missed.">        if ( last &lt; size ) {</span>
+<span class="nc bnc" id="L1412" title="All 2 branches missed.">            if ( block == null ) {</span>
+<span class="nc" id="L1413">                block = text.toCharArray();</span>
+            }
+<span class="nc" id="L1415">            buffer.append(block, last, i - last);</span>
+        }
+<span class="nc" id="L1417">        String answer = buffer.toString();</span>
+<span class="nc" id="L1418">        buffer.setLength(0);</span>
+<span class="nc" id="L1419">        return answer;</span>
+    }
+
+
+    protected void writeEscapeAttributeEntities(String text) throws IOException {
+<span class="nc bnc" id="L1424" title="All 2 branches missed.">        if ( text != null ) {</span>
+<span class="nc" id="L1425">            String escapedText = escapeAttributeEntities( text );</span>
+<span class="nc" id="L1426">            writer.write( escapedText );</span>
+        }
+<span class="nc" id="L1428">    }</span>
+    /** This will take the pre-defined entities in XML 1.0 and
+      * convert their character representation to the appropriate
+      * entity reference, suitable for XML attributes.
+     * @param text the entitie to escape
+     * @return the escaped entity
+      */
+    protected String escapeAttributeEntities(String text) {
+<span class="nc" id="L1436">        char quote = format.getAttributeQuoteCharacter();</span>
+
+<span class="nc" id="L1438">        char[] block = null;</span>
+<span class="nc" id="L1439">        int i, last = 0, size = text.length();</span>
+<span class="nc bnc" id="L1440" title="All 2 branches missed.">        for ( i = 0; i &lt; size; i++ ) {</span>
+<span class="nc" id="L1441">            String entity = null;</span>
+<span class="nc" id="L1442">            char c = text.charAt(i);</span>
+<span class="nc bnc" id="L1443" title="All 7 branches missed.">            switch( c ) {</span>
+                case '&lt;' :
+<span class="nc" id="L1445">                    entity = &quot;&amp;lt;&quot;;</span>
+<span class="nc" id="L1446">                    break;</span>
+                case '&gt;' :
+<span class="nc" id="L1448">                    entity = &quot;&amp;gt;&quot;;</span>
+<span class="nc" id="L1449">                    break;</span>
+                case '\'' :
+<span class="nc bnc" id="L1451" title="All 2 branches missed.">                    if (quote == '\'') {</span>
+<span class="nc" id="L1452">                        entity = &quot;&amp;apos;&quot;;</span>
+                    }
+                    break;
+                case '\&quot;' :
+<span class="nc bnc" id="L1456" title="All 2 branches missed.">                    if (quote == '\&quot;') {</span>
+<span class="nc" id="L1457">                        entity = &quot;&amp;quot;&quot;;</span>
+                    }
+                    break;
+                case '&amp;' :
+<span class="nc" id="L1461">                    entity = &quot;&amp;amp;&quot;;</span>
+<span class="nc" id="L1462">                    break;</span>
+                case '\t': case '\n': case '\r':
+                    // don't encode standard whitespace characters
+<span class="nc" id="L1465">                    break;</span>
+                default:
+<span class="nc bnc" id="L1467" title="All 4 branches missed.">                    if (c &lt; 32 || shouldEncodeChar(c)) {</span>
+<span class="nc" id="L1468">                        entity = &quot;&amp;#&quot; + (int) c + &quot;;&quot;;</span>
+                    }
+                    break;
+            }
+<span class="nc bnc" id="L1472" title="All 2 branches missed.">            if (entity != null) {</span>
+<span class="nc bnc" id="L1473" title="All 2 branches missed.">                if ( block == null ) {</span>
+<span class="nc" id="L1474">                    block = text.toCharArray();</span>
+                }
+<span class="nc" id="L1476">                buffer.append(block, last, i - last);</span>
+<span class="nc" id="L1477">                buffer.append(entity);</span>
+<span class="nc" id="L1478">                last = i + 1;</span>
+            }
+        }
+<span class="nc bnc" id="L1481" title="All 2 branches missed.">        if ( last == 0 ) {</span>
+<span class="nc" id="L1482">            return text;</span>
+        }
+<span class="nc bnc" id="L1484" title="All 2 branches missed.">        if ( last &lt; size ) {</span>
+<span class="nc bnc" id="L1485" title="All 2 branches missed.">            if ( block == null ) {</span>
+<span class="nc" id="L1486">                block = text.toCharArray();</span>
+            }
+<span class="nc" id="L1488">            buffer.append(block, last, i - last);</span>
+        }
+<span class="nc" id="L1490">        String answer = buffer.toString();</span>
+<span class="nc" id="L1491">        buffer.setLength(0);</span>
+<span class="nc" id="L1492">        return answer;</span>
+    }
+
+    /**
+     * Should the given character be escaped. This depends on the
+     * encoding of the document.
+     * @param c the character to check
+     * @return {@code true} to escape the character, otherwise {@code false}
+     */
+    protected boolean shouldEncodeChar(char c) {
+<span class="fc" id="L1502">        int max = getMaximumAllowedCharacter();</span>
+<span class="pc bpc" id="L1503" title="3 of 4 branches missed.">        return max &gt; 0 &amp;&amp; c &gt; max;</span>
+    }
+
+    /**
+     * Returns the maximum allowed character code that should be allowed
+     * unescaped which defaults to 127 in US-ASCII (7 bit) or
+     * 255 in ISO-* (8 bit).
+     * @return the maximum allow character code
+     */
+    protected int defaultMaximumAllowedCharacter() {
+<span class="fc" id="L1513">        String encoding = format.getEncoding();</span>
+<span class="pc bpc" id="L1514" title="1 of 2 branches missed.">        if (encoding != null) {</span>
+<span class="pc bpc" id="L1515" title="1 of 2 branches missed.">            if (encoding.equals(&quot;US-ASCII&quot;)) {</span>
+<span class="nc" id="L1516">                return 127;</span>
+            }
+        }
+        // no encoding for things like ISO-*, UTF-8 or UTF-16
+<span class="fc" id="L1520">        return -1;</span>
+    }
+
+    protected boolean isNamespaceDeclaration( Namespace ns ) {
+<span class="pc bpc" id="L1524" title="2 of 4 branches missed.">        if (ns != null &amp;&amp; ns != Namespace.XML_NAMESPACE) {</span>
+<span class="fc" id="L1525">            String uri = ns.getURI();</span>
+<span class="pc bpc" id="L1526" title="1 of 2 branches missed.">            if ( uri != null ) {</span>
+<span class="pc bpc" id="L1527" title="1 of 2 branches missed.">                if ( ! namespaceStack.contains( ns ) ) {</span>
+<span class="nc" id="L1528">                    return true;</span>
+
+                }
+            }
+        }
+<span class="fc" id="L1533">        return false;</span>
+
+    }
+
+    protected void handleException(IOException e) throws SAXException {
+<span class="nc" id="L1538">        throw new SAXException(e);</span>
+    }
+
+    //Laramie Crocker 4/8/2002 10:38AM
+    /** Lets subclasses get at the current format object, so they can call setTrimText, setNewLines, etc.
+      * Put in to support the HTMLWriter, in the way
+      *  that it pushes the current newline/trim state onto a stack and overrides
+      *  the state within preformatted tags.
+     * @return the output format
+      */
+    protected OutputFormat getOutputFormat() {
+<span class="nc" id="L1549">        return format;</span>
+    }
+
+    public boolean resolveEntityRefs() {
+<span class="nc" id="L1553">        return resolveEntityRefs;</span>
+    }
+
+    public void setResolveEntityRefs(boolean resolve) {
+<span class="nc" id="L1557">        this.resolveEntityRefs = resolve;</span>
+<span class="nc" id="L1558">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

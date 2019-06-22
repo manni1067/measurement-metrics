@@ -1,0 +1,546 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>LocalSession.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.session</a> &gt; <span class="el_source">LocalSession.java</span></div><h1>LocalSession.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2004-2009 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.session;
+
+import java.net.UnknownHostException;
+import java.security.cert.Certificate;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.Locale;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicLong;
+import javax.net.ssl.SSLSession;
+
+import org.jivesoftware.openfire.Connection;
+import org.jivesoftware.openfire.SessionManager;
+import org.jivesoftware.openfire.StreamID;
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.auth.UnauthorizedException;
+import org.jivesoftware.openfire.interceptor.InterceptorManager;
+import org.jivesoftware.openfire.interceptor.PacketRejectedException;
+import org.jivesoftware.openfire.net.SocketConnection;
+import org.jivesoftware.openfire.net.TLSStreamHandler;
+import org.jivesoftware.openfire.streammanagement.StreamManager;
+import org.jivesoftware.util.LocaleUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmpp.packet.*;
+
+/**
+ * The session represents a connection between the server and a client (c2s) or
+ * another server (s2s) as well as a connection with a component. Authentication and
+ * user accounts are associated with c2s connections while s2s has an optional authentication
+ * association but no single user user.&lt;p&gt;
+ *
+ * Obtain object managers from the session in order to access server resources.
+ *
+ * @author Gaston Dombiak
+ */
+public abstract class LocalSession implements Session {
+
+<span class="nc" id="L55">    private static final Logger Log = LoggerFactory.getLogger(LocalSession.class);</span>
+
+    /**
+     * The utf-8 charset for decoding and encoding Jabber packet streams.
+     */
+<span class="nc" id="L60">    protected static String CHARSET = &quot;UTF-8&quot;;</span>
+
+    /**
+     * The Address this session is authenticated as.
+     */
+    private JID address;
+    /**
+     * The stream id for this session (random and unique).
+     */
+    private StreamID streamID;
+
+    /**
+     * The current session status.
+     */
+<span class="nc" id="L74">    protected int status = STATUS_CONNECTED;</span>
+
+    /**
+     * The connection that this session represents.
+     */
+    protected Connection conn;
+
+    protected SessionManager sessionManager;
+
+    private String serverName;
+
+<span class="nc" id="L85">    private long startDate = System.currentTimeMillis();</span>
+
+    private long lastActiveDate;
+<span class="nc" id="L88">    private AtomicLong clientPacketCount = new AtomicLong( 0 );</span>
+<span class="nc" id="L89">    private AtomicLong serverPacketCount = new AtomicLong( 0 );</span>
+
+    /**
+     * Session temporary data. All data stored in this &lt;code&gt;Map&lt;/code&gt; disapear when session
+     * finishes.
+     */
+<span class="nc" id="L95">    private final Map&lt;String, Object&gt; sessionData = new HashMap&lt;&gt;();</span>
+
+    /**
+     * Software Version (XEP-0092) data as obtained from the peer on this connection.
+     */
+<span class="nc" id="L100">    private Map&lt;String, String&gt; softwareVersionData = new HashMap&lt;&gt;();</span>
+
+    /**
+     * XEP-0198 Stream Manager
+     */
+    protected final StreamManager streamManager;
+
+    private final Locale language;
+
+    /**
+     * Creates a session with an underlying connection and permission protection.
+     *
+     * @param serverName domain of the XMPP server where the new session belongs.
+     * @param connection The connection we are proxying.
+     * @param streamID unique identifier for this session.
+     * @param language The language to use for this session.
+     */
+<span class="nc" id="L117">    public LocalSession(String serverName, Connection connection, StreamID streamID, Locale language) {</span>
+<span class="nc bnc" id="L118" title="All 2 branches missed.">        if (connection == null) {</span>
+<span class="nc" id="L119">            throw new IllegalArgumentException(&quot;connection must not be null&quot;);</span>
+        }
+<span class="nc" id="L121">        conn = connection;</span>
+<span class="nc" id="L122">        this.streamID = streamID;</span>
+<span class="nc" id="L123">        this.serverName = serverName;</span>
+<span class="nc" id="L124">        String id = streamID.getID();</span>
+<span class="nc" id="L125">        this.address = new JID(null, serverName, id, true);</span>
+<span class="nc" id="L126">        this.sessionManager = SessionManager.getInstance();</span>
+<span class="nc" id="L127">        this.streamManager = new StreamManager(this);</span>
+<span class="nc" id="L128">        this.language = language;</span>
+<span class="nc" id="L129">    }</span>
+
+    /**
+     * Returns true if the session is detached (that is, if the underlying connection
+     * has been closed.
+     *
+     * @return true if session detached
+     */
+    public boolean isDetached() {
+<span class="nc bnc" id="L138" title="All 2 branches missed.">        return this.conn == null;</span>
+    }
+
+    /**
+     * Set the session to detached mode, indicating that the underlying connection
+     * has been closed.
+     */
+    public void setDetached() {
+<span class="nc" id="L146">        this.sessionManager.addDetached(this);</span>
+<span class="nc" id="L147">        this.conn = null;</span>
+<span class="nc" id="L148">    }</span>
+
+    /**
+     * Reattach the session to a new connection. The connection must already be
+     * initialized as a running XML Stream, normally by having run through XEP-0198
+     * resumption.
+     * @param connection The connection to attach the session to
+     * @param h the sequence number of the last handled stanza sent over the former stream
+     */
+    public void reattach(Connection connection, long h) {
+<span class="nc" id="L158">        Connection temp = this.conn;</span>
+<span class="nc" id="L159">        this.conn = null;</span>
+<span class="nc bnc" id="L160" title="All 4 branches missed.">        if (temp != null &amp;&amp; !temp.isClosed()) {</span>
+<span class="nc" id="L161">            temp.close();</span>
+        }
+<span class="nc" id="L163">        this.conn = connection;</span>
+<span class="nc" id="L164">        this.conn.reinit(this);</span>
+<span class="nc" id="L165">        this.status = STATUS_AUTHENTICATED;</span>
+<span class="nc" id="L166">        this.sessionManager.removeDetached(this);</span>
+<span class="nc" id="L167">        this.streamManager.onResume(new JID(null, this.serverName, null, true), h);</span>
+<span class="nc" id="L168">    }</span>
+
+    /**
+      * Obtain the address of the user. The address is used by services like the core
+      * server packet router to determine if a packet should be sent to the handler.
+      * Handlers that are working on behalf of the server should use the generic server
+      * hostname address (e.g. server.com).
+      *
+      * @return the address of the packet handler.
+      */
+    @Override
+    public JID getAddress() {
+<span class="nc" id="L180">        return address;</span>
+    }
+
+    /**
+     * Sets the new address of this session. The address is used by services like the core
+     * server packet router to determine if a packet should be sent to the handler.
+     * Handlers that are working on behalf of the server should use the generic server
+     * hostname address (e.g. server.com).
+     *
+     * @param address the new address of this session.
+     */
+    public void setAddress(JID address){
+<span class="nc" id="L192">        this.address = address;</span>
+<span class="nc" id="L193">    }</span>
+
+    /**
+     * Returns the connection associated with this Session.
+     *
+     * @return The connection for this session
+     */
+    public Connection getConnection() {
+<span class="nc bnc" id="L201" title="All 2 branches missed.">        if (conn == null) {</span>
+            try {
+<span class="nc" id="L203">                conn.isClosed(); // This generates an NPE deliberately.</span>
+<span class="nc" id="L204">            } catch (NullPointerException e) {</span>
+<span class="nc" id="L205">                Log.error(&quot;Attempt to read connection of detached session: &quot;, e);</span>
+<span class="nc" id="L206">            }</span>
+        }
+<span class="nc" id="L208">        return conn;</span>
+    }
+
+    /**
+     * Obtain the current status of this session.
+     *
+     * @return The status code for this session
+     */
+    @Override
+    public int getStatus() {
+<span class="nc" id="L218">        return status;</span>
+    }
+
+    /**
+     * Set the new status of this session. Setting a status may trigger
+     * certain events to occur (setting a closed status will close this
+     * session).
+     *
+     * @param status The new status code for this session
+     */
+    public void setStatus(int status) {
+<span class="nc bnc" id="L229" title="All 4 branches missed.">        if (status == STATUS_CLOSED &amp;&amp; this.streamManager.getResume()) {</span>
+<span class="nc" id="L230">            Log.debug(&quot;Suppressing close.&quot;);</span>
+<span class="nc" id="L231">            return;</span>
+        }
+<span class="nc" id="L233">        this.status = status;</span>
+<span class="nc" id="L234">    }</span>
+
+    /**
+     * Obtain the stream ID associated with this sesison. Stream ID's are generated by the server
+     * and should be unique and random.
+     *
+     * @return This session's assigned stream ID
+     */
+    @Override
+    public StreamID getStreamID() {
+<span class="nc" id="L244">        return streamID;</span>
+    }
+
+    /**
+     * Obtain the name of the server this session belongs to.
+     *
+     * @return the server name.
+     */
+    @Override
+    public String getServerName() {
+<span class="nc" id="L254">        return serverName;</span>
+    }
+
+    /**
+     * Obtain the date the session was created.
+     *
+     * @return the session's creation date.
+     */
+    @Override
+    public Date getCreationDate() {
+<span class="nc" id="L264">        return new Date(startDate);</span>
+    }
+
+    /**
+     * Obtain the time the session last had activity.
+     *
+     * @return The last time the session received activity.
+     */
+    @Override
+    public Date getLastActiveDate() {
+<span class="nc" id="L274">        return new Date(lastActiveDate);</span>
+    }
+
+    /**
+     * Increments the number of packets sent from the client to the server.
+     */
+    public void incrementClientPacketCount() {
+<span class="nc" id="L281">        clientPacketCount.incrementAndGet();</span>
+<span class="nc" id="L282">        lastActiveDate = System.currentTimeMillis();</span>
+<span class="nc" id="L283">        streamManager.incrementServerProcessedStanzas();</span>
+<span class="nc" id="L284">    }</span>
+
+    /**
+     * Increments the number of packets sent from the server to the client.
+     */
+    public void incrementServerPacketCount() {
+<span class="nc" id="L290">        serverPacketCount.incrementAndGet();</span>
+<span class="nc" id="L291">        lastActiveDate = System.currentTimeMillis();</span>
+<span class="nc" id="L292">    }</span>
+
+    /**
+     * Obtain the number of packets sent from the client to the server.
+     *
+     * @return The number of packets sent from the client to the server.
+     */
+    @Override
+    public long getNumClientPackets() {
+<span class="nc" id="L301">        return clientPacketCount.get();</span>
+    }
+
+    /**
+     * Obtain the number of packets sent from the server to the client.
+     *
+     * @return The number of packets sent from the server to the client.
+     */
+    @Override
+    public long getNumServerPackets() {
+<span class="nc" id="L311">        return serverPacketCount.get();</span>
+    }
+
+    /**
+     * Saves given session data. Data are saved to temporary storage only and are accessible during
+     * this session life only and only from this session instance.
+     *
+     * @param key a &lt;code&gt;String&lt;/code&gt; value of stored data key ID.
+     * @param value a &lt;code&gt;Object&lt;/code&gt; value of data stored in session.
+     * @see #getSessionData(String)
+     */
+    public void setSessionData(String key, Object value) {
+<span class="nc" id="L323">        synchronized (sessionData) {</span>
+<span class="nc" id="L324">            sessionData.put(key, value);</span>
+<span class="nc" id="L325">        }</span>
+<span class="nc" id="L326">    }</span>
+
+    /**
+     * Retrieves session data. This method gives access to temporary session data only. You can
+     * retrieve earlier saved data giving key ID to receive needed value. Please see
+     * {@link #setSessionData(String, Object)}  description for more details.
+     *
+     * @param key a &lt;code&gt;String&lt;/code&gt; value of stored data ID.
+     * @return a &lt;code&gt;Object&lt;/code&gt; value of data for given key.
+     * @see #setSessionData(String, Object)
+     */
+    public Object getSessionData(String key) {
+<span class="nc" id="L338">        synchronized (sessionData) {</span>
+<span class="nc" id="L339">            return sessionData.get(key);</span>
+<span class="nc" id="L340">        }</span>
+    }
+
+    /**
+     * Removes session data. Please see {@link #setSessionData(String, Object)} description
+     * for more details.
+     *
+     * @param key a &lt;code&gt;String&lt;/code&gt; value of stored data ID.
+     * @see #setSessionData(String, Object)
+     */
+    public void removeSessionData(String key) {
+<span class="nc" id="L351">        synchronized (sessionData) {</span>
+<span class="nc" id="L352">            sessionData.remove(key);</span>
+<span class="nc" id="L353">        }</span>
+<span class="nc" id="L354">    }</span>
+
+    /**
+     * Get XEP-0198 Stream manager for session
+     * @return The StreamManager for the session.
+     */
+    public StreamManager getStreamManager() {
+<span class="nc" id="L361">        return streamManager;</span>
+    }
+
+    @Override
+    public void process(Packet packet) {
+        // Check that the requested packet can be processed
+<span class="nc bnc" id="L367" title="All 2 branches missed.">        if (canProcess(packet)) {</span>
+            // Perform the actual processing of the packet. This usually implies sending
+            // the packet to the entity
+            try {
+                // Invoke the interceptors before we send the packet
+<span class="nc" id="L372">                InterceptorManager.getInstance().invokeInterceptors(packet, this, false, false);</span>
+<span class="nc" id="L373">                deliver(packet);</span>
+                // Invoke the interceptors after we have sent the packet
+<span class="nc" id="L375">                InterceptorManager.getInstance().invokeInterceptors(packet, this, false, true);</span>
+            }
+<span class="nc" id="L377">            catch (PacketRejectedException e) {</span>
+                // An interceptor rejected the packet so do nothing
+            }
+<span class="nc" id="L380">            catch (Exception e) {</span>
+<span class="nc" id="L381">                Log.error(LocaleUtils.getLocalizedString(&quot;admin.error&quot;), e);</span>
+<span class="nc" id="L382">            }</span>
+        } else {
+            // http://xmpp.org/extensions/xep-0016.html#protocol-error
+<span class="nc bnc" id="L385" title="All 2 branches missed.">            if (packet instanceof Message) {</span>
+                // For message stanzas, the server SHOULD return an error, which SHOULD be &lt;service-unavailable/&gt;.
+<span class="nc" id="L387">                Message message = (Message) packet;</span>
+<span class="nc" id="L388">                Message result = message.createCopy();</span>
+<span class="nc" id="L389">                result.setTo(message.getFrom());</span>
+<span class="nc" id="L390">                result.setError(PacketError.Condition.service_unavailable);</span>
+<span class="nc" id="L391">                XMPPServer.getInstance().getRoutingTable().routePacket(message.getFrom(), result, true);</span>
+<span class="nc bnc" id="L392" title="All 2 branches missed.">            } else if (packet instanceof IQ) {</span>
+                // For IQ stanzas of type &quot;get&quot; or &quot;set&quot;, the server MUST return an error, which SHOULD be &lt;service-unavailable/&gt;.
+                // IQ stanzas of other types MUST be silently dropped by the server.
+<span class="nc" id="L395">                IQ iq = (IQ) packet;</span>
+<span class="nc bnc" id="L396" title="All 4 branches missed.">                if (iq.getType() == IQ.Type.get || iq.getType() == IQ.Type.set) {</span>
+<span class="nc" id="L397">                    IQ result = IQ.createResultIQ(iq);</span>
+<span class="nc" id="L398">                    result.setError(PacketError.Condition.service_unavailable);</span>
+<span class="nc" id="L399">                    XMPPServer.getInstance().getRoutingTable().routePacket(iq.getFrom(), result, true);</span>
+                }
+            }
+        }
+<span class="nc" id="L403">    }</span>
+
+    /**
+     * Returns true if the specified packet can be delivered to the entity. Subclasses will use different
+     * criterias to determine of processing is allowed or not. For instance, client sessions will use
+     * privacy lists while outgoing server sessions will always allow this action.
+     *
+     * @param packet the packet to analyze if it must be blocked.
+     * @return true if the specified packet must be blocked.
+     */
+    abstract boolean canProcess(Packet packet);
+
+    abstract void deliver(Packet packet) throws UnauthorizedException;
+
+    @Override
+    public void deliverRawText(String text) {
+<span class="nc bnc" id="L419" title="All 2 branches missed.">        if ( conn == null )</span>
+        {
+<span class="nc" id="L421">            Log.debug( &quot;Unable to deliver raw text in session, as its connection is null. Dropping: &quot; + text );</span>
+<span class="nc" id="L422">            return;</span>
+        }
+<span class="nc" id="L424">        conn.deliverRawText(text);</span>
+<span class="nc" id="L425">    }</span>
+
+    /**
+     * Returns a text with the available stream features. Each subclass may return different
+     * values depending whether the session has been authenticated or not.
+     *
+     * @return a text with the available stream features or {@code null} to add nothing.
+     */
+    public abstract String getAvailableStreamFeatures();
+
+    @Override
+    public void close() {
+<span class="nc bnc" id="L437" title="All 2 branches missed.">        if (conn == null) return;</span>
+<span class="nc" id="L438">        conn.close();</span>
+<span class="nc" id="L439">    }</span>
+
+    @Override
+    public boolean validate() {
+<span class="nc" id="L443">        return conn.validate();</span>
+    }
+
+    @Override
+    public boolean isSecure() {
+<span class="nc" id="L448">        return conn.isSecure();</span>
+    }
+
+    @Override
+    public Certificate[] getPeerCertificates() {
+<span class="nc" id="L453">        return conn.getPeerCertificates();</span>
+    }
+
+    @Override
+    public boolean isClosed() {
+<span class="nc" id="L458">        return conn.isClosed();</span>
+    }
+
+    @Override
+    public String getHostAddress() throws UnknownHostException {
+<span class="nc bnc" id="L463" title="All 2 branches missed.">        if (conn == null) {</span>
+<span class="nc" id="L464">            throw new UnknownHostException(&quot;Detached session&quot;);</span>
+        }
+<span class="nc" id="L466">        return conn.getHostAddress();</span>
+    }
+
+    @Override
+    public String getHostName() throws UnknownHostException {
+<span class="nc bnc" id="L471" title="All 2 branches missed.">        if (conn == null) {</span>
+<span class="nc" id="L472">            throw new UnknownHostException(&quot;Detached session&quot;);</span>
+        }
+<span class="nc" id="L474">        return conn.getHostName();</span>
+    }
+
+    @Override
+    public String toString() {
+<span class="nc" id="L479">        return super.toString() + &quot; status: &quot; + status + &quot; address: &quot; + address + &quot; id: &quot; + streamID;</span>
+    }
+
+    protected static int[] decodeVersion(String version) {
+<span class="nc" id="L483">        int[] answer = new int[] {0 , 0};</span>
+<span class="nc" id="L484">        String [] versionString = version.split(&quot;\\.&quot;);</span>
+<span class="nc" id="L485">        answer[0] = Integer.parseInt(versionString[0]);</span>
+<span class="nc" id="L486">        answer[1] = Integer.parseInt(versionString[1]);</span>
+<span class="nc" id="L487">        return answer;</span>
+    }
+
+    /**
+     * Returns true if the other peer of this session presented a self-signed certificate. When
+     * using self-signed certificate for server-2-server sessions then SASL EXTERNAL will not be
+     * used and instead server-dialback will be preferred for vcerifying the identify of the remote
+     * server.
+     *
+     * @return true if the other peer of this session presented a self-signed certificate.
+     */
+    public boolean isUsingSelfSignedCertificate() {
+<span class="nc" id="L499">        return conn.isUsingSelfSignedCertificate();</span>
+    }
+
+    /**
+     * Returns a String representing the Cipher Suite Name, or &quot;NONE&quot;.
+     * @return String
+     */
+    @Override
+    public String getCipherSuiteName() {
+<span class="nc" id="L508">        SocketConnection s = (SocketConnection)getConnection();</span>
+<span class="nc bnc" id="L509" title="All 2 branches missed.">        if (s != null) {</span>
+<span class="nc" id="L510">            TLSStreamHandler t = s.getTLSStreamHandler();</span>
+<span class="nc bnc" id="L511" title="All 2 branches missed.">            if (t != null) {</span>
+<span class="nc" id="L512">                SSLSession ssl = t.getSSLSession();</span>
+<span class="nc bnc" id="L513" title="All 2 branches missed.">                if (ssl != null) {</span>
+<span class="nc" id="L514">                    return ssl.getCipherSuite();</span>
+                }
+            }
+        }
+<span class="nc" id="L518">        return &quot;NONE&quot;;</span>
+    }
+
+    @Override
+    public final Locale getLanguage() {
+<span class="nc" id="L523">        return language;</span>
+    }
+
+    /**
+     * Retrieves Software Version data. This method gives access to temporary Software Version data only. 
+     * @return a Map collection value of data .
+     */
+    @Override
+    public Map&lt;String, String&gt; getSoftwareVersion() {
+<span class="nc" id="L532">        return softwareVersionData; </span>
+    }
+
+    /**
+     * Saves given session data. Data is saved to temporary storage only and is accessible during
+     * this session life only and only from this session instance.
+     * @param key a &lt;code&gt;String&lt;/code&gt; value of stored data key ID.
+     * @param value a &lt;code&gt;String&lt;/code&gt; value of data stored in session.
+     */
+    public void setSoftwareVersionData(String key, String value) {
+<span class="nc" id="L542">        softwareVersionData.put(key, value);</span>
+<span class="nc" id="L543">    }</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

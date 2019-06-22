@@ -1,0 +1,285 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>SocketReadingMode.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.net</a> &gt; <span class="el_source">SocketReadingMode.java</span></div><h1>SocketReadingMode.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.net;
+
+import java.io.IOException;
+import java.net.Socket;
+
+import org.dom4j.DocumentException;
+import org.dom4j.Element;
+import org.jivesoftware.openfire.Connection;
+import org.jivesoftware.openfire.session.Session;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmlpull.v1.XmlPullParserException;
+import org.xmpp.packet.StreamError;
+
+import javax.net.ssl.SSLHandshakeException;
+
+/**
+ * Abstract class for {@link BlockingReadingMode}.
+ *
+ * @author Gaston Dombiak
+ */
+abstract class SocketReadingMode {
+
+<span class="nc" id="L40">    private static final Logger Log = LoggerFactory.getLogger(SocketReadingMode.class);</span>
+
+    /**
+     * The utf-8 charset for decoding and encoding Jabber packet streams.
+     */
+<span class="nc" id="L45">    protected static String CHARSET = &quot;UTF-8&quot;;</span>
+
+    protected SocketReader socketReader;
+    protected Socket socket;
+
+<span class="nc" id="L50">    protected SocketReadingMode(Socket socket, SocketReader socketReader) {</span>
+<span class="nc" id="L51">        this.socket = socket;</span>
+<span class="nc" id="L52">        this.socketReader = socketReader;</span>
+<span class="nc" id="L53">    }</span>
+
+    /*
+    * This method is invoked when client send data to the channel.
+    */
+    abstract void run();
+
+    /**
+     * Tries to secure the connection using TLS. If the connection is secured then reset
+     * the parser to use the new secured reader. But if the connection failed to be secured
+     * then send a &lt;failure&gt; stanza and close the connection.
+     *
+     * @return true if the connection was secured.
+     */
+    protected boolean negotiateTLS() {
+<span class="nc bnc" id="L68" title="All 2 branches missed.">        if (socketReader.connection.getTlsPolicy() == Connection.TLSPolicy.disabled) {</span>
+            // Set the not_authorized error
+<span class="nc" id="L70">            StreamError error = new StreamError(StreamError.Condition.not_authorized);</span>
+            // Deliver stanza
+<span class="nc" id="L72">            socketReader.connection.deliverRawText(error.toXML());</span>
+            // Close the underlying connection
+<span class="nc" id="L74">            socketReader.connection.close();</span>
+            // Log a warning so that admins can track this case from the server side
+<span class="nc" id="L76">            Log.warn(&quot;TLS requested by initiator when TLS was never offered by server. &quot; +</span>
+                    &quot;Closing connection : &quot; + socketReader.connection);
+<span class="nc" id="L78">            return false;</span>
+        }
+        // Client requested to secure the connection using TLS. Negotiate TLS.
+        try {
+            // This code is only used for s2s
+<span class="nc" id="L83">            socketReader.connection.startTLS(false, false);</span>
+        }
+<span class="nc" id="L85">        catch (SSLHandshakeException e) {</span>
+            // RFC3620, section 5.4.3.2 &quot;STARTTLS Failure&quot; - close the socket *without* sending any more data (&lt;failure/&gt; nor &lt;/stream&gt;).
+<span class="nc" id="L87">            Log.info( &quot;STARTTLS negotiation (with: {}) failed.&quot;, socketReader.connection, e );</span>
+<span class="nc" id="L88">            socketReader.connection.forceClose();</span>
+<span class="nc" id="L89">            return false;</span>
+        }
+<span class="nc" id="L91">        catch (IOException | RuntimeException e) {</span>
+            // RFC3620, section 5.4.2.2 &quot;Failure case&quot; - Send a &lt;failure/&gt; element, then close the socket.
+<span class="nc" id="L93">            Log.warn( &quot;An exception occurred while performing STARTTLS negotiation (with: {})&quot;, socketReader.connection, e);</span>
+<span class="nc" id="L94">            socketReader.connection.deliverRawText(&quot;&lt;failure xmlns=\&quot;urn:ietf:params:xml:ns:xmpp-tls\&quot;/&gt;&quot;);</span>
+<span class="nc" id="L95">            socketReader.connection.close();</span>
+<span class="nc" id="L96">            return false;</span>
+<span class="nc" id="L97">        }</span>
+<span class="nc" id="L98">        return true;</span>
+    }
+
+    /**
+     * TLS negotiation was successful so open a new stream and offer the new stream features.
+     * The new stream features will include available SASL mechanisms and specific features
+     * depending on the session type such as auth for Non-SASL authentication and register
+     * for in-band registration.
+     */
+    protected void tlsNegotiated() throws XmlPullParserException, IOException {
+        // Offer stream features including SASL Mechanisms
+<span class="nc" id="L109">        StringBuilder sb = new StringBuilder(620);</span>
+<span class="nc" id="L110">        sb.append(geStreamHeader());</span>
+<span class="nc" id="L111">        sb.append(&quot;&lt;stream:features&gt;&quot;);</span>
+        // Include available SASL Mechanisms
+<span class="nc" id="L113">        sb.append(SASLAuthentication.getSASLMechanisms(socketReader.session));</span>
+        // Include specific features such as auth and register for client sessions
+<span class="nc" id="L115">        String specificFeatures = socketReader.session.getAvailableStreamFeatures();</span>
+<span class="nc bnc" id="L116" title="All 2 branches missed.">        if (specificFeatures != null) {</span>
+<span class="nc" id="L117">            sb.append(specificFeatures);</span>
+        }
+<span class="nc" id="L119">        sb.append(&quot;&lt;/stream:features&gt;&quot;);</span>
+<span class="nc" id="L120">        socketReader.connection.deliverRawText(sb.toString());</span>
+<span class="nc" id="L121">    }</span>
+
+    protected boolean authenticateClient(Element doc) throws DocumentException, IOException,
+            XmlPullParserException {
+        // Ensure that connection was secured if TLS was required
+<span class="nc bnc" id="L126" title="All 2 branches missed.">        if (socketReader.connection.getTlsPolicy() == Connection.TLSPolicy.required &amp;&amp;</span>
+<span class="nc bnc" id="L127" title="All 2 branches missed.">                !socketReader.connection.isSecure()) {</span>
+<span class="nc" id="L128">            socketReader.closeNeverSecuredConnection();</span>
+<span class="nc" id="L129">            return false;</span>
+        }
+
+<span class="nc" id="L132">        boolean isComplete = false;</span>
+<span class="nc" id="L133">        boolean success = false;</span>
+<span class="nc bnc" id="L134" title="All 2 branches missed.">        while (!isComplete) {</span>
+<span class="nc" id="L135">            SASLAuthentication.Status status = SASLAuthentication.handle(socketReader.session, doc);</span>
+<span class="nc bnc" id="L136" title="All 2 branches missed.">            if (status == SASLAuthentication.Status.needResponse) {</span>
+                // Get the next answer since we are not done yet
+<span class="nc" id="L138">                doc = socketReader.reader.parseDocument().getRootElement();</span>
+<span class="nc bnc" id="L139" title="All 2 branches missed.">                if (doc == null) {</span>
+                    // Nothing was read because the connection was closed or dropped
+<span class="nc" id="L141">                    isComplete = true;</span>
+                }
+            }
+            else {
+<span class="nc" id="L145">                isComplete = true;</span>
+<span class="nc bnc" id="L146" title="All 2 branches missed.">                success = status == SASLAuthentication.Status.authenticated;</span>
+            }
+<span class="nc" id="L148">        }</span>
+<span class="nc" id="L149">        return success;</span>
+    }
+
+    /**
+     * After SASL authentication was successful we should open a new stream and offer
+     * new stream features such as resource binding and session establishment. Notice that
+     * resource binding and session establishment should only be offered to clients (i.e. not
+     * to servers or external components)
+     */
+    protected void saslSuccessful() throws XmlPullParserException, IOException {
+<span class="nc" id="L159">        StringBuilder sb = new StringBuilder(420);</span>
+<span class="nc" id="L160">        sb.append(geStreamHeader());</span>
+<span class="nc" id="L161">        sb.append(&quot;&lt;stream:features&gt;&quot;);</span>
+
+        // Include specific features such as resource binding and session establishment
+        // for client sessions
+<span class="nc" id="L165">        String specificFeatures = socketReader.session.getAvailableStreamFeatures();</span>
+<span class="nc bnc" id="L166" title="All 2 branches missed.">        if (specificFeatures != null) {</span>
+<span class="nc" id="L167">            sb.append(specificFeatures);</span>
+        }
+<span class="nc" id="L169">        sb.append(&quot;&lt;/stream:features&gt;&quot;);</span>
+<span class="nc" id="L170">        socketReader.connection.deliverRawText(sb.toString());</span>
+<span class="nc" id="L171">    }</span>
+
+    /**
+     * Start using compression but first check if the connection can and should use compression.
+     * The connection will be closed if the requested method is not supported, if the connection
+     * is already using compression or if client requested to use compression but this feature
+     * is disabled.
+     *
+     * @param doc the element sent by the client requesting compression. Compression method is
+     *        included.
+     * @return true if it was possible to use compression.
+     * @throws IOException if an error occurs while starting using compression.
+     */
+    protected boolean compressClient(Element doc) throws IOException, XmlPullParserException {
+<span class="nc" id="L185">        String error = null;</span>
+<span class="nc bnc" id="L186" title="All 2 branches missed.">        if (socketReader.connection.getCompressionPolicy() == Connection.CompressionPolicy.disabled) {</span>
+            // Client requested compression but this feature is disabled
+<span class="nc" id="L188">            error = &quot;&lt;failure xmlns='http://jabber.org/protocol/compress'&gt;&lt;setup-failed/&gt;&lt;/failure&gt;&quot;;</span>
+            // Log a warning so that admins can track this case from the server side
+<span class="nc" id="L190">            Log.warn(&quot;Client requested compression while compression is disabled. Closing &quot; +</span>
+                    &quot;connection : &quot; + socketReader.connection);
+        }
+<span class="nc bnc" id="L193" title="All 2 branches missed.">        else if (socketReader.connection.isCompressed()) {</span>
+            // Client requested compression but connection is already compressed
+<span class="nc" id="L195">            error = &quot;&lt;failure xmlns='http://jabber.org/protocol/compress'&gt;&lt;setup-failed/&gt;&lt;/failure&gt;&quot;;</span>
+            // Log a warning so that admins can track this case from the server side
+<span class="nc" id="L197">            Log.warn(&quot;Client requested compression and connection is already compressed. Closing &quot; +</span>
+                    &quot;connection : &quot; + socketReader.connection);
+        }
+        else {
+            // Check that the requested method is supported
+<span class="nc" id="L202">            String method = doc.elementText(&quot;method&quot;);</span>
+<span class="nc bnc" id="L203" title="All 2 branches missed.">            if (!&quot;zlib&quot;.equals(method)) {</span>
+<span class="nc" id="L204">                error = &quot;&lt;failure xmlns='http://jabber.org/protocol/compress'&gt;&lt;unsupported-method/&gt;&lt;/failure&gt;&quot;;</span>
+                // Log a warning so that admins can track this case from the server side
+<span class="nc" id="L206">                Log.warn(&quot;Requested compression method is not supported: &quot; + method +</span>
+                        &quot;. Closing connection : &quot; + socketReader.connection);
+            }
+        }
+
+<span class="nc bnc" id="L211" title="All 2 branches missed.">        if (error != null) {</span>
+            // Deliver stanza
+<span class="nc" id="L213">            socketReader.connection.deliverRawText(error);</span>
+<span class="nc" id="L214">            return false;</span>
+        }
+        else {
+            // Start using compression for incoming traffic
+<span class="nc" id="L218">            socketReader.connection.addCompression();</span>
+
+            // Indicate client that he can proceed and compress the socket
+<span class="nc" id="L221">            socketReader.connection.deliverRawText(&quot;&lt;compressed xmlns='http://jabber.org/protocol/compress'/&gt;&quot;);</span>
+
+            // Start using compression for outgoing traffic
+<span class="nc" id="L224">            socketReader.connection.startCompression();</span>
+<span class="nc" id="L225">            return true;</span>
+        }
+    }
+
+    /**
+     * After compression was successful we should open a new stream and offer
+     * new stream features such as resource binding and session establishment. Notice that
+     * resource binding and session establishment should only be offered to clients (i.e. not
+     * to servers or external components)
+     */
+    protected void compressionSuccessful() throws XmlPullParserException, IOException
+    {
+<span class="nc" id="L237">        StringBuilder sb = new StringBuilder(340);</span>
+<span class="nc" id="L238">        sb.append(geStreamHeader());</span>
+<span class="nc" id="L239">        sb.append(&quot;&lt;stream:features&gt;&quot;);</span>
+        // Include SASL mechanisms only if client has not been authenticated
+<span class="nc bnc" id="L241" title="All 2 branches missed.">        if (socketReader.session.getStatus() != Session.STATUS_AUTHENTICATED) {</span>
+            // Include available SASL Mechanisms
+<span class="nc" id="L243">            sb.append(SASLAuthentication.getSASLMechanisms(socketReader.session));</span>
+        }
+        // Include specific features such as resource binding and session establishment
+        // for client sessions
+<span class="nc" id="L247">        String specificFeatures = socketReader.session.getAvailableStreamFeatures();</span>
+<span class="nc bnc" id="L248" title="All 2 branches missed.">        if (specificFeatures != null)</span>
+        {
+<span class="nc" id="L250">            sb.append(specificFeatures);</span>
+        }
+<span class="nc" id="L252">        sb.append(&quot;&lt;/stream:features&gt;&quot;);</span>
+<span class="nc" id="L253">        socketReader.connection.deliverRawText(sb.toString());</span>
+<span class="nc" id="L254">    }</span>
+
+    private String geStreamHeader() {
+<span class="nc" id="L257">        StringBuilder sb = new StringBuilder(200);</span>
+<span class="nc" id="L258">        sb.append(&quot;&lt;?xml version='1.0' encoding='&quot;);</span>
+<span class="nc" id="L259">        sb.append(CHARSET);</span>
+<span class="nc" id="L260">        sb.append(&quot;'?&gt;&quot;);</span>
+<span class="nc bnc" id="L261" title="All 2 branches missed.">        if (socketReader.connection.isFlashClient()) {</span>
+<span class="nc" id="L262">            sb.append(&quot;&lt;flash:stream xmlns:flash=\&quot;http://www.jabber.com/streams/flash\&quot; &quot;);</span>
+        } else {
+<span class="nc" id="L264">            sb.append(&quot;&lt;stream:stream &quot;);</span>
+        }
+<span class="nc" id="L266">        sb.append(&quot;xmlns:stream=\&quot;http://etherx.jabber.org/streams\&quot; xmlns=\&quot;&quot;);</span>
+<span class="nc" id="L267">        sb.append(socketReader.getNamespace()).append('\&quot;');</span>
+<span class="nc bnc" id="L268" title="All 2 branches missed.">        if (socketReader.getExtraNamespaces() != null) {</span>
+<span class="nc" id="L269">            sb.append(' ');</span>
+<span class="nc" id="L270">            sb.append(socketReader.getExtraNamespaces());</span>
+        }
+<span class="nc" id="L272">        sb.append(&quot; from=\&quot;&quot;);</span>
+<span class="nc" id="L273">        sb.append(socketReader.session.getServerName());</span>
+<span class="nc" id="L274">        sb.append(&quot;\&quot; id=\&quot;&quot;);</span>
+<span class="nc" id="L275">        sb.append(socketReader.session.getStreamID().toString());</span>
+<span class="nc" id="L276">        sb.append(&quot;\&quot; xml:lang=\&quot;&quot;);</span>
+<span class="nc" id="L277">        sb.append(socketReader.session.getLanguage().toLanguageTag());</span>
+<span class="nc" id="L278">        sb.append(&quot;\&quot; version=\&quot;&quot;);</span>
+<span class="nc" id="L279">        sb.append(Session.MAJOR_VERSION).append('.').append(Session.MINOR_VERSION);</span>
+<span class="nc" id="L280">        sb.append(&quot;\&quot;&gt;&quot;);</span>
+<span class="nc" id="L281">        return sb.toString();</span>
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

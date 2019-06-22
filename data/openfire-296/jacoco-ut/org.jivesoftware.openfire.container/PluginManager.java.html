@@ -1,0 +1,1305 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>PluginManager.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.container</a> &gt; <span class="el_source">PluginManager.java</span></div><h1>PluginManager.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2004-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.container;
+
+import java.io.BufferedInputStream;
+import java.io.File;
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.file.DirectoryStream;
+import java.nio.file.FileVisitResult;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.SimpleFileVisitor;
+import java.nio.file.StandardCopyOption;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.nio.file.attribute.FileTime;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.TreeMap;
+import java.util.concurrent.CopyOnWriteArraySet;
+import java.util.jar.JarFile;
+import java.util.zip.ZipException;
+
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.spi.LoggerContext;
+import org.dom4j.Attribute;
+import org.dom4j.Document;
+import org.dom4j.Element;
+import org.dom4j.io.SAXReader;
+import org.jivesoftware.admin.AdminConsole;
+import org.jivesoftware.database.DbConnectionManager;
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.util.JavaSpecVersion;
+import org.jivesoftware.util.JiveGlobals;
+import org.jivesoftware.util.LocaleUtils;
+import org.jivesoftware.util.Version;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Manages plugins.
+ *
+ * The {@code plugins} directory is monitored for any new plugins, and they are dynamically loaded.
+ *
+ * An instance of this class can be obtained using: {@code XMPPServer.getInstance().getPluginManager()}
+ *
+ * These states are defined for plugin management:
+ * &lt;ul&gt;
+ *     &lt;li&gt;&lt;em&gt;installed&lt;/em&gt; - the plugin archive file is present in the {@code plugins} directory.&lt;/li&gt;
+ *     &lt;li&gt;&lt;em&gt;extracted&lt;/em&gt; - the plugin archive file has been extracted.&lt;/li&gt;
+ *     &lt;li&gt;&lt;em&gt;loaded&lt;/em&gt; - the plugin has (successfully) been initialized.&lt;/li&gt;
+ * &lt;/ul&gt;
+ *
+ * Note that an &lt;em&gt;installed&lt;/em&gt; plugin is not per definition an &lt;em&gt;extracted&lt;/em&gt; plugin, and an extracted
+ * plugin is not per definition a &lt;em&gt;loaded&lt;/em&gt; plugin.  A plugin that's extracted might, for instance, fail to
+ * load, due to restrictions imposed by its {@code minServerVersion} definition.
+ *
+ * @author Matt Tucker
+ * @see Plugin
+ * @see org.jivesoftware.openfire.XMPPServer#getPluginManager()
+ */
+public class PluginManager
+{
+<span class="nc" id="L86">    private static final Logger Log = LoggerFactory.getLogger( PluginManager.class );</span>
+
+    private final Path pluginDirectory;
+
+    /**
+     * Plugins that are loaded, mapped by their canonical name.
+     */
+<span class="nc" id="L93">    private final Map&lt;String, Plugin&gt; pluginsLoaded = new TreeMap&lt;&gt;( String.CASE_INSENSITIVE_ORDER );</span>
+
+    /**
+     * The plugin classloader for each loaded plugin.
+     */
+<span class="nc" id="L98">    private final Map&lt;Plugin, PluginClassLoader&gt; classloaders = new HashMap&lt;&gt;();</span>
+
+    /**
+     * The directory in which a plugin is extracted, mapped by canonical name. This collection contains loaded plugins,
+     * as well as extracted (but not loaded) plugins.
+     *
+     * Note that typically these directories are subdirectories of {@code plugins}, but a 'dev-plugin' could live
+     * elsewhere.
+     */
+<span class="nc" id="L107">    private final Map&lt;String, Path&gt; pluginDirs = new HashMap&lt;&gt;();</span>
+
+    /**
+     * Plugin metadata for all extracted plugins, mapped by canonical name.
+     */
+<span class="nc" id="L112">    private final Map&lt;String, PluginMetadata&gt; pluginMetadata = Collections.synchronizedMap(new TreeMap&lt;&gt;(String.CASE_INSENSITIVE_ORDER));</span>
+
+<span class="nc" id="L114">    private final Map&lt;Plugin, PluginDevEnvironment&gt; pluginDevelopment = new HashMap&lt;&gt;();</span>
+<span class="nc" id="L115">    private final Map&lt;Plugin, List&lt;String&gt;&gt; parentPluginMap = new HashMap&lt;&gt;();</span>
+<span class="nc" id="L116">    private final Map&lt;Plugin, String&gt; childPluginMap = new HashMap&lt;&gt;();</span>
+<span class="nc" id="L117">    private final Set&lt;PluginListener&gt; pluginListeners = new CopyOnWriteArraySet&lt;&gt;();</span>
+<span class="nc" id="L118">    private final Set&lt;PluginManagerListener&gt; pluginManagerListeners = new CopyOnWriteArraySet&lt;&gt;();</span>
+<span class="nc" id="L119">    private final Map&lt;String, Integer&gt; failureToLoadCount = new HashMap&lt;&gt;();</span>
+
+    private final PluginMonitor pluginMonitor;
+<span class="nc" id="L122">    private boolean executed = false;</span>
+
+    /**
+     * Constructs a new plugin manager.
+     *
+     * @param pluginDir the directory containing all Openfire plugins, typically OPENFIRE_HOME/plugins/
+     */
+    public PluginManager( File pluginDir )
+<span class="nc" id="L130">    {</span>
+<span class="nc" id="L131">        this.pluginDirectory = pluginDir.toPath();</span>
+<span class="nc" id="L132">        pluginMonitor = new PluginMonitor( this );</span>
+<span class="nc" id="L133">    }</span>
+
+    /**
+     * Starts plugins and the plugin monitoring service.
+     */
+    public synchronized void start()
+    {
+<span class="nc" id="L140">        pluginMonitor.start();</span>
+<span class="nc" id="L141">    }</span>
+
+    /**
+     * Shuts down all running plugins.
+     */
+    public synchronized void shutdown()
+    {
+<span class="nc" id="L148">        Log.info( &quot;Shutting down. Unloading all loaded plugins...&quot; );</span>
+
+        // Stop the plugin monitoring service.
+<span class="nc" id="L151">        pluginMonitor.stop();</span>
+
+        // Shutdown all loaded plugins.
+<span class="nc bnc" id="L154" title="All 2 branches missed.">        for ( Map.Entry&lt;String, Plugin&gt; plugin : pluginsLoaded.entrySet() )</span>
+        {
+            try
+            {
+<span class="nc" id="L158">                plugin.getValue().destroyPlugin();</span>
+<span class="nc" id="L159">                Log.info( &quot;Unloaded plugin '{}'.&quot;, plugin.getKey() );</span>
+            }
+<span class="nc" id="L161">            catch ( Exception e )</span>
+            {
+<span class="nc" id="L163">                Log.error( &quot;An exception occurred while trying to unload plugin '{}':&quot;, plugin.getKey(), e );</span>
+<span class="nc" id="L164">            }</span>
+<span class="nc" id="L165">        }</span>
+<span class="nc" id="L166">        pluginsLoaded.clear();</span>
+<span class="nc" id="L167">        pluginDirs.clear();</span>
+<span class="nc" id="L168">        pluginMetadata.clear();</span>
+<span class="nc" id="L169">        classloaders.clear();</span>
+<span class="nc" id="L170">        pluginDevelopment.clear();</span>
+<span class="nc" id="L171">        childPluginMap.clear();</span>
+<span class="nc" id="L172">        failureToLoadCount.clear();</span>
+<span class="nc" id="L173">    }</span>
+
+    /**
+     * Returns the directory that contains all plugins. This typically is OPENFIRE_HOME/plugins.
+     *
+     * @return The directory that contains all plugins.
+     */
+    public Path getPluginsDirectory()
+    {
+<span class="nc" id="L182">        return pluginDirectory;</span>
+    }
+
+    /**
+     * Installs or updates an existing plugin.
+     *
+     * @param in the input stream that contains the new plugin definition.
+     * @param pluginFilename the filename of the plugin to create or update.
+     * @return true if the plugin was successfully installed or updated.
+     */
+    public boolean installPlugin( InputStream in, String pluginFilename )
+    {
+<span class="nc bnc" id="L194" title="All 4 branches missed.">        if ( pluginFilename == null || pluginFilename.isEmpty() )</span>
+        {
+<span class="nc" id="L196">            Log.error( &quot;Error installing plugin: pluginFilename was null or empty.&quot; );</span>
+<span class="nc" id="L197">            return false;</span>
+        }
+<span class="nc bnc" id="L199" title="All 2 branches missed.">        if ( in == null )</span>
+        {
+<span class="nc" id="L201">            Log.error( &quot;Error installing plugin '{}': Input stream was null.&quot;, pluginFilename );</span>
+<span class="nc" id="L202">            return false;</span>
+        }
+        try
+        {
+            // If pluginFilename is a path instead of a simple file name, we only want the file name
+<span class="nc" id="L207">            pluginFilename = Paths.get(pluginFilename).getFileName().toString();</span>
+            // Absolute path to the plugin file
+<span class="nc" id="L209">            Path absolutePath = pluginDirectory.resolve( pluginFilename );</span>
+<span class="nc" id="L210">            Path partFile = pluginDirectory.resolve( pluginFilename + &quot;.part&quot; );</span>
+            // Save input stream contents to a temp file
+<span class="nc" id="L212">            Files.copy( in, partFile, StandardCopyOption.REPLACE_EXISTING );</span>
+
+            // Check if zip file, else ZipException caught below.
+<span class="nc" id="L215">            try (JarFile ignored = new JarFile(partFile.toFile())) {</span>
+<span class="nc bnc" id="L216" title="All 4 branches missed.">            } catch (ZipException e) {</span>
+<span class="nc" id="L217">                Files.deleteIfExists(partFile);</span>
+<span class="nc" id="L218">                throw e;</span>
+<span class="nc" id="L219">            }</span>
+
+            // Rename temp file to .jar
+<span class="nc" id="L222">            Files.move( partFile, absolutePath, StandardCopyOption.REPLACE_EXISTING );</span>
+            // Ask the plugin monitor to update the plugin immediately.
+<span class="nc" id="L224">            pluginMonitor.runNow( true );</span>
+        }
+<span class="nc" id="L226">        catch ( IOException e )</span>
+        {
+<span class="nc" id="L228">            Log.error( &quot;An exception occurred while installing new version of plugin '{}':&quot;, pluginFilename, e );</span>
+<span class="nc" id="L229">            return false;</span>
+<span class="nc" id="L230">        }</span>
+<span class="nc" id="L231">        return true;</span>
+    }
+
+    /**
+     * Returns true if the plugin by the specified name is installed. Specifically, this checks if the plugin
+     * archive file is present in the {@code plugins} directory.
+     *
+     * Note that an &lt;em&gt;installed&lt;/em&gt; plugin is not per definition an &lt;em&gt;extracted&lt;/em&gt; plugin, and an extracted
+     * plugin is not per definition a &lt;em&gt;loaded&lt;/em&gt; plugin.  A plugin that's extracted might, for instance, fail to
+     * load, due to restrictions imposed by its {@code minServerVersion} definition.
+     *
+     * @param canonicalName the canonical filename of the plugin (cannot be null).
+     * @return true if the plugin is installed, otherwise false.
+     */
+    public boolean isInstalled( final String canonicalName )
+    {
+<span class="nc" id="L247">        final DirectoryStream.Filter&lt;Path&gt; filter = new DirectoryStream.Filter&lt;Path&gt;()</span>
+<span class="nc" id="L248">        {</span>
+            @Override
+            public boolean accept( Path entry ) {
+<span class="nc" id="L251">                final String name = entry.getFileName().toString();</span>
+<span class="nc bnc" id="L252" title="All 4 branches missed.">                return Files.exists( entry ) &amp;&amp; !Files.isDirectory( entry ) &amp;&amp;</span>
+<span class="nc bnc" id="L253" title="All 4 branches missed.">                        ( name.equalsIgnoreCase( canonicalName + &quot;.jar&quot; ) || name.equalsIgnoreCase( canonicalName + &quot;.war&quot; ) );</span>
+            }
+        };
+
+<span class="nc" id="L257">        try ( final DirectoryStream&lt;Path&gt; paths = Files.newDirectoryStream( pluginDirectory, filter ) )</span>
+        {
+<span class="nc" id="L259">            return paths.iterator().hasNext();</span>
+<span class="nc bnc" id="L260" title="All 8 branches missed.">        }</span>
+<span class="nc" id="L261">        catch ( IOException e )</span>
+        {
+<span class="nc" id="L263">            Log.error( &quot;Unable to determine if plugin '{}' is installed.&quot;, canonicalName, e );</span>
+
+            // return the next best guess
+<span class="nc" id="L266">            return pluginsLoaded.containsKey( canonicalName );</span>
+        }
+    }
+
+    /**
+     * Returns true if the plugin by the specified name is extracted. Specifically, this checks if the {@code plugins}
+     * directory contains a subdirectory that matches the canonical name of the plugin.
+     *
+     * Note that an &lt;em&gt;installed&lt;/em&gt; plugin is not per definition an &lt;em&gt;extracted&lt;/em&gt; plugin, and an extracted
+     * plugin is not per definition a &lt;em&gt;loaded&lt;/em&gt; plugin.  A plugin that's extracted might, for instance, fail to
+     * load, due to restrictions imposed by its {@code minServerVersion} definition.
+     *
+     * @param canonicalName the canonical filename of the plugin (cannot be null).
+     * @return true if the plugin is extracted, otherwise false.
+     */
+    public boolean isExtracted( final String canonicalName )
+    {
+<span class="nc" id="L283">        return pluginMetadata.containsKey( canonicalName );</span>
+    }
+
+    /**
+     * Returns true if the plugin by the specified name is loaded. Specifically, this checks if an instance was created
+     * for the plugin class file.
+     *
+     * Note that an &lt;em&gt;installed&lt;/em&gt; plugin is not per definition an &lt;em&gt;extracted&lt;/em&gt; plugin, and an extracted
+     * plugin is not per definition a &lt;em&gt;loaded&lt;/em&gt; plugin.  A plugin that's extracted might, for instance, fail to
+     * load, due to restrictions imposed by its {@code minServerVersion} definition.
+     *
+     * @param canonicalName the canonical filename of the plugin (cannot be null).
+     * @return true if the plugin is extracted, otherwise false.
+     */
+    public boolean isLoaded( final String canonicalName )
+    {
+<span class="nc" id="L299">        return pluginsLoaded.containsKey( canonicalName );</span>
+    }
+
+    /**
+     * Returns metadata for all extracted plugins, mapped by their canonical name.
+     *
+     * The collection is alphabetically sorted, by plugin name.
+     *
+     * Note that an &lt;em&gt;installed&lt;/em&gt; plugin is not per definition an &lt;em&gt;extracted&lt;/em&gt; plugin, and an extracted
+     * plugin is not per definition a &lt;em&gt;loaded&lt;/em&gt; plugin.  A plugin that's extracted might, for instance, fail to
+     * load, due to restrictions imposed by its {@code minServerVersion} definition.
+     *
+     * @return A collection of metadata (possibly empty, never null).
+     */
+    public Map&lt;String, PluginMetadata&gt; getMetadataExtractedPlugins()
+    {
+        // Create a copy of the TreeMap to avoid ConcurrentModificationExceptions
+        // Note; needs to be synchronized as creating the copy iterates over the elements
+        // See https://docs.oracle.com/javase/8/docs/api/java/util/Collections.html#synchronizedMap-java.util.Map-
+<span class="nc" id="L318">        synchronized (this.pluginMetadata) {</span>
+<span class="nc" id="L319">            return Collections.unmodifiableMap(new TreeMap&lt;&gt;(this.pluginMetadata));</span>
+<span class="nc" id="L320">        }</span>
+    }
+
+    /**
+     * Returns metadata for an extracted plugin, or null when the plugin is extracted nor loaded.
+     *
+     * Note that an &lt;em&gt;installed&lt;/em&gt; plugin is not per definition an &lt;em&gt;extracted&lt;/em&gt; plugin, and an extracted
+     * plugin is not per definition a &lt;em&gt;loaded&lt;/em&gt; plugin.  A plugin that's extracted might, for instance, fail to
+     * load, due to restrictions imposed by its {@code minServerVersion} definition.
+     *
+     * @param canonicalName the canonical name (lower case JAR/WAR file without exception) of the plugin
+     * @return A collection of metadata (possibly empty, never null).
+     */
+    public PluginMetadata getMetadata( String canonicalName )
+    {
+<span class="nc" id="L335">        return this.pluginMetadata.get( canonicalName );</span>
+    }
+
+    /**
+     * Returns a Collection of all loaded plugins.
+     *
+     * The returned collection will not include plugins that have been downloaded, but not loaded.
+     *
+     * @return a Collection of all loaded plugins.
+     */
+    public Collection&lt;Plugin&gt; getPlugins()
+    {
+<span class="nc" id="L347">        return Collections.unmodifiableCollection( Arrays.asList( pluginsLoaded.values().toArray(new Plugin[0]) ) );</span>
+    }
+
+    /**
+     * Returns the canonical name for a loaded plugin.
+     *
+     * @param plugin A plugin (cannot be null).
+     * @return The canonical name for the plugin (never null).
+     */
+    public String getCanonicalName( Plugin plugin )
+    {
+        // TODO consider using a bimap for a more efficient lookup.
+<span class="nc bnc" id="L359" title="All 2 branches missed.">        for ( Map.Entry&lt;String, Plugin&gt; entry : pluginsLoaded.entrySet() )</span>
+        {
+<span class="nc bnc" id="L361" title="All 2 branches missed.">            if ( entry.getValue().equals( plugin ) )</span>
+            {
+<span class="nc" id="L363">                return entry.getKey();</span>
+            }
+<span class="nc" id="L365">        }</span>
+<span class="nc" id="L366">        return null;</span>
+    }
+
+    /**
+     * Returns a loaded plugin by its canonical name or {@code null} if a plugin with that name does not exist. The
+     * canonical name is the lowercase-name of the plugin archive, without the file extension. For example: &quot;broadcast&quot;.
+     *
+     * @deprecated in Openfire 4.4 in favour of {@link #getPluginByName(String)}
+     * @param canonicalName the name of the plugin.
+     * @return the plugin.
+     */
+    // TODO: (2019-03-26) Remove with Openfire 5.0
+    @Deprecated
+    public Plugin getPlugin( String canonicalName )
+    {
+<span class="nc" id="L381">        return pluginsLoaded.get( canonicalName.toLowerCase() );</span>
+    }
+
+    /**
+     * Returns a loaded plugin by the name contained in the plugin.xml &amp;lt;name/&amp;gt; tag, ignoring case.
+     * For example: &quot;broadcast&quot;.
+     *
+     * @param pluginName the name of the plugin.
+     * @return the plugin, if found
+     * @since Openfire 4.4
+     */
+    public Optional&lt;Plugin&gt; getPluginByName(final String pluginName) {
+<span class="nc" id="L393">        return pluginMetadata.values().stream()</span>
+            // Find the matching metadata
+<span class="nc" id="L395">            .filter(pluginMetadata -&gt; pluginName.equalsIgnoreCase(pluginMetadata.getName()))</span>
+<span class="nc" id="L396">            .findAny()</span>
+            // Find the canonical name for this plugin
+<span class="nc" id="L398">            .map(PluginMetadata::getCanonicalName)</span>
+            // Finally, find the plugin
+<span class="nc" id="L400">            .flatMap(canonicalName -&gt; Optional.of(pluginsLoaded.get(canonicalName)));</span>
+    }
+
+    /**
+     * @deprecated Use #getPluginPath() instead.
+     * @param plugin the plugin to get the directory for
+     * @return the plugin's directory
+     */
+    @Deprecated
+    public File getPluginDirectory( Plugin plugin )
+    {
+<span class="nc" id="L411">        return getPluginPath( plugin ).toFile();</span>
+    }
+
+    /**
+     * Returns the plugin's directory.
+     *
+     * @param plugin the plugin.
+     * @return the plugin's directory.
+     * @since Openfire 4.1
+     */
+    public Path getPluginPath( Plugin plugin )
+    {
+<span class="nc" id="L423">        final String canonicalName = getCanonicalName( plugin );</span>
+<span class="nc bnc" id="L424" title="All 2 branches missed.">        if ( canonicalName != null )</span>
+        {
+<span class="nc" id="L426">            return pluginDirs.get( canonicalName );</span>
+        }
+<span class="nc" id="L428">        return null;</span>
+    }
+
+    /**
+     * Returns true if at least one attempt to load plugins has been done. A true value does not mean
+     * that available plugins have been loaded nor that plugins to be added in the future are already
+     * loaded. :)&lt;p&gt;
+     *
+     * @return true if at least one attempt to load plugins has been done.
+     */
+    public boolean isExecuted()
+    {
+<span class="nc" id="L440">        return executed;</span>
+    }
+
+    /**
+     * Loads a plugin.
+     *
+     * @param pluginDir the plugin directory.
+     */
+    boolean loadPlugin( String canonicalName, Path pluginDir )
+    {
+<span class="nc" id="L450">        final PluginMetadata metadata = PluginMetadata.getInstance( pluginDir );</span>
+<span class="nc" id="L451">        pluginMetadata.put( canonicalName, metadata );</span>
+
+        // Only load the admin plugin during setup mode.
+<span class="nc bnc" id="L454" title="All 4 branches missed.">        if ( XMPPServer.getInstance().isSetupMode() &amp;&amp; !( canonicalName.equals( &quot;admin&quot; ) ) )</span>
+        {
+<span class="nc" id="L456">            return false;</span>
+        }
+
+<span class="nc bnc" id="L459" title="All 4 branches missed.">        if ( failureToLoadCount.containsKey( canonicalName ) &amp;&amp; failureToLoadCount.get( canonicalName ) &gt; JiveGlobals.getIntProperty( &quot;plugins.loading.retries&quot;, 5 ) )</span>
+        {
+<span class="nc" id="L461">            Log.debug( &quot;The unloaded file for plugin '{}' is silently ignored, as it has failed to load repeatedly.&quot;, canonicalName );</span>
+<span class="nc" id="L462">            return false;</span>
+        }
+
+<span class="nc" id="L465">        Log.debug( &quot;Loading plugin '{}'...&quot;, canonicalName );</span>
+        try
+        {
+<span class="nc" id="L468">            final Path pluginConfig = pluginDir.resolve( &quot;plugin.xml&quot; );</span>
+<span class="nc bnc" id="L469" title="All 2 branches missed.">            if ( !Files.exists( pluginConfig ) )</span>
+            {
+<span class="nc" id="L471">                Log.warn( &quot;Plugin '{}' could not be loaded: no plugin.xml file found.&quot;, canonicalName );</span>
+<span class="nc" id="L472">                failureToLoadCount.put( canonicalName, Integer.MAX_VALUE ); // Don't retry - this cannot be recovered from.</span>
+<span class="nc" id="L473">                return false;</span>
+            }
+
+<span class="nc" id="L476">            final Version currentServerVersion = XMPPServer.getInstance().getServerInfo().getVersion();</span>
+
+            // See if the plugin specifies a minimum version of Openfire required to run.
+<span class="nc bnc" id="L479" title="All 2 branches missed.">            if ( metadata.getMinServerVersion() != null )</span>
+            {
+                // OF-1338: Ignore release status when comparing minimum server version requirement.
+<span class="nc bnc" id="L482" title="All 2 branches missed.">                if (metadata.getMinServerVersion().isNewerThan(currentServerVersion.ignoringReleaseStatus())) {</span>
+<span class="nc" id="L483">                    Log.warn( &quot;Ignoring plugin '{}': requires server version {}. Current server version is {}.&quot;, canonicalName, metadata.getMinServerVersion(), currentServerVersion );</span>
+<span class="nc" id="L484">                    failureToLoadCount.put( canonicalName, Integer.MAX_VALUE ); // Don't retry - this cannot be recovered from.</span>
+<span class="nc" id="L485">                    return false;</span>
+                }
+            }
+
+            // See if the plugin specifies a maximum version of Openfire required to run.
+<span class="nc bnc" id="L490" title="All 2 branches missed.">            if ( metadata.getPriorToServerVersion() != null )</span>
+            {
+                // OF-1338: Ignore release status when comparing maximum server version requirement.
+<span class="nc" id="L493">                final Version compareVersion = new Version( currentServerVersion.getMajor(), currentServerVersion.getMinor(), currentServerVersion.getMicro(), null, -1 );</span>
+<span class="nc bnc" id="L494" title="All 2 branches missed.">                if ( !metadata.getPriorToServerVersion().isNewerThan( compareVersion ) )</span>
+                {
+<span class="nc" id="L496">                    Log.warn( &quot;Ignoring plugin '{}': compatible with server versions up to but excluding {}. Current server version is {}.&quot;, canonicalName, metadata.getPriorToServerVersion(), currentServerVersion );</span>
+<span class="nc" id="L497">                    failureToLoadCount.put( canonicalName, Integer.MAX_VALUE ); // Don't retry - this cannot be recovered from.</span>
+<span class="nc" id="L498">                    return false;</span>
+                }
+            }
+
+            // See if the plugin specifies a minimum version of Java required to run.
+<span class="nc bnc" id="L503" title="All 2 branches missed.">            if ( metadata.getMinJavaVersion() != null )</span>
+            {
+<span class="nc" id="L505">                final JavaSpecVersion runtimeVersion = new JavaSpecVersion( System.getProperty( &quot;java.specification.version&quot; ) );</span>
+<span class="nc bnc" id="L506" title="All 2 branches missed.">                if ( metadata.getMinJavaVersion().isNewerThan( runtimeVersion ) )</span>
+                {
+<span class="nc" id="L508">                    Log.warn( &quot;Ignoring plugin '{}': requires Java specification version {}. Openfire is currently running in Java {}.&quot;, canonicalName, metadata.getMinJavaVersion(), System.getProperty( &quot;java.specification.version&quot; ) );</span>
+<span class="nc" id="L509">                    failureToLoadCount.put( canonicalName, Integer.MAX_VALUE ); // Don't retry - this cannot be recovered from.</span>
+<span class="nc" id="L510">                    return false;</span>
+                }
+            }
+
+            // Properties to be used to load external resources. When set, plugin is considered to run in DEV mode.
+<span class="nc" id="L515">            final String devModeClassesDir = System.getProperty( canonicalName + &quot;.classes&quot; );</span>
+<span class="nc" id="L516">            final String devModewebRoot = System.getProperty( canonicalName + &quot;.webRoot&quot; );</span>
+<span class="nc bnc" id="L517" title="All 4 branches missed.">            final boolean devMode = devModewebRoot != null || devModeClassesDir != null;</span>
+<span class="nc bnc" id="L518" title="All 2 branches missed.">            final PluginDevEnvironment dev = ( devMode ? configurePluginDevEnvironment( pluginDir, devModeClassesDir, devModewebRoot ) : null );</span>
+
+            // Initialize the plugin class loader, which is either a new instance, or a the loader from a parent plugin.
+            final PluginClassLoader pluginLoader;
+
+            // Check to see if this is a child plugin of another plugin. If it is, we re-use the parent plugin's class
+            // loader so that the plugins can interact.
+<span class="nc" id="L525">            String parentPluginName = null;</span>
+<span class="nc" id="L526">            Plugin parentPlugin = null;</span>
+
+<span class="nc" id="L528">            final String parentCanonicalName = PluginMetadataHelper.getParentPlugin( pluginDir );</span>
+<span class="nc bnc" id="L529" title="All 2 branches missed.">            if ( parentCanonicalName != null )</span>
+            {
+                // The name of the parent plugin as specified in plugin.xml might have incorrect casing. Lookup the correct name.
+<span class="nc bnc" id="L532" title="All 2 branches missed.">                for ( final Map.Entry&lt;String, Plugin&gt; entry : pluginsLoaded.entrySet() )</span>
+                {
+<span class="nc bnc" id="L534" title="All 2 branches missed.">                    if ( entry.getKey().equalsIgnoreCase( parentCanonicalName ) )</span>
+                    {
+<span class="nc" id="L536">                        parentPluginName = entry.getKey();</span>
+<span class="nc" id="L537">                        parentPlugin = entry.getValue();</span>
+<span class="nc" id="L538">                        break;</span>
+                    }
+<span class="nc" id="L540">                }</span>
+
+                // See if the parent is loaded.
+<span class="nc bnc" id="L543" title="All 2 branches missed.">                if ( parentPlugin == null )</span>
+                {
+<span class="nc" id="L545">                    Log.info( &quot;Unable to load plugin '{}': parent plugin '{}' has not been loaded.&quot;, canonicalName, parentCanonicalName );</span>
+<span class="nc" id="L546">                    Integer count = failureToLoadCount.get( canonicalName );</span>
+<span class="nc bnc" id="L547" title="All 2 branches missed.">                    if ( count == null ) {</span>
+<span class="nc" id="L548">                        count = 0;</span>
+                    }
+<span class="nc" id="L550">                    failureToLoadCount.put( canonicalName, ++count );</span>
+<span class="nc" id="L551">                    return false;</span>
+                }
+<span class="nc" id="L553">                pluginLoader = classloaders.get( parentPlugin );</span>
+            }
+            else
+            {
+                // This is not a child plugin, so create a new class loader.
+<span class="nc" id="L558">                pluginLoader = new PluginClassLoader();</span>
+            }
+
+            // Add the plugin sources to the classloaded.
+<span class="nc" id="L562">            pluginLoader.addDirectory( pluginDir.toFile(), devMode );</span>
+
+            // When running in DEV mode, add optional other sources too.
+<span class="nc bnc" id="L565" title="All 4 branches missed.">            if ( dev != null &amp;&amp; dev.getClassesDir() != null )</span>
+            {
+<span class="nc" id="L567">                pluginLoader.addURLFile( dev.getClassesDir().toURI().toURL() );</span>
+            }
+
+            // Initialise a logging context, if necessary
+<span class="nc" id="L571">            final Path path = pluginDir.resolve(&quot;classes/log4j2.xml&quot;);</span>
+<span class="nc bnc" id="L572" title="All 2 branches missed.">            if (Files.isRegularFile(path)) {</span>
+<span class="nc" id="L573">                synchronized (PluginManager.class) {</span>
+<span class="nc" id="L574">                    final LoggerContext loggerContext = LogManager.getContext(pluginLoader, false, path.toUri());</span>
+<span class="nc" id="L575">                    loggerContext.getLogger(&quot;To avoid LOG4J2-1094&quot;);</span>
+<span class="nc" id="L576">                }</span>
+            }
+
+            // Instantiate the plugin!
+<span class="nc" id="L580">            final SAXReader saxReader = new SAXReader();</span>
+<span class="nc" id="L581">            saxReader.setEncoding( &quot;UTF-8&quot; );</span>
+<span class="nc" id="L582">            final Document pluginXML = saxReader.read( pluginConfig.toFile() );</span>
+
+<span class="nc" id="L584">            final String className = pluginXML.selectSingleNode( &quot;/plugin/class&quot; ).getText().trim();</span>
+<span class="nc" id="L585">            final Plugin plugin = (Plugin) pluginLoader.loadClass( className ).newInstance();</span>
+
+            // Bookkeeping!
+<span class="nc" id="L588">            classloaders.put( plugin, pluginLoader );</span>
+<span class="nc" id="L589">            pluginsLoaded.put( canonicalName, plugin );</span>
+<span class="nc" id="L590">            pluginDirs.put( canonicalName, pluginDir );</span>
+<span class="nc bnc" id="L591" title="All 2 branches missed.">            if ( dev != null )</span>
+            {
+<span class="nc" id="L593">                pluginDevelopment.put( plugin, dev );</span>
+            }
+
+            // If this is a child plugin, register it as such.
+<span class="nc bnc" id="L597" title="All 2 branches missed.">            if ( parentPlugin != null )</span>
+            {
+<span class="nc" id="L599">                List&lt;String&gt; childrenPlugins = parentPluginMap.get( parentPlugin );</span>
+<span class="nc bnc" id="L600" title="All 2 branches missed.">                if ( childrenPlugins == null )</span>
+                {
+<span class="nc" id="L602">                    childrenPlugins = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L603">                    parentPluginMap.put( parentPlugin, childrenPlugins );</span>
+                }
+<span class="nc" id="L605">                childrenPlugins.add( canonicalName );</span>
+
+                // Also register child to parent relationship.
+<span class="nc" id="L608">                childPluginMap.put( plugin, parentPluginName );</span>
+            }
+
+            // Check the plugin's database schema (if it requires one).
+<span class="nc bnc" id="L612" title="All 2 branches missed.">            if ( !DbConnectionManager.getSchemaManager().checkPluginSchema( plugin ) )</span>
+            {
+                // The schema was not there and auto-upgrade failed.
+<span class="nc" id="L615">                Log.error( &quot;Error while loading plugin '{}': {}&quot;, canonicalName, LocaleUtils.getLocalizedString( &quot;upgrade.database.failure&quot; ) );</span>
+            }
+
+            // Load any JSP's defined by the plugin.
+<span class="nc" id="L619">            final Path webXML = pluginDir.resolve( &quot;web&quot; ).resolve( &quot;WEB-INF&quot; ).resolve( &quot;web.xml&quot; );</span>
+<span class="nc bnc" id="L620" title="All 2 branches missed.">            if ( Files.exists( webXML ) )</span>
+            {
+<span class="nc" id="L622">                PluginServlet.registerServlets( this, plugin, webXML.toFile() );</span>
+            }
+
+            // Load any custom-defined servlets.
+<span class="nc" id="L626">            final Path customWebXML = pluginDir.resolve( &quot;web&quot; ).resolve( &quot;WEB-INF&quot; ).resolve( &quot;web-custom.xml&quot; );</span>
+<span class="nc bnc" id="L627" title="All 2 branches missed.">            if ( Files.exists( customWebXML ) )</span>
+            {
+<span class="nc" id="L629">                PluginServlet.registerServlets( this, plugin, customWebXML.toFile() );</span>
+            }
+
+            // Configure caches of the plugin
+<span class="nc" id="L633">            configureCaches( pluginDir, canonicalName );</span>
+
+            // Initialze the plugin.
+<span class="nc" id="L636">            final ClassLoader oldLoader = Thread.currentThread().getContextClassLoader();</span>
+<span class="nc" id="L637">            Thread.currentThread().setContextClassLoader( pluginLoader );</span>
+<span class="nc" id="L638">            plugin.initializePlugin( this, pluginDir.toFile() );</span>
+<span class="nc" id="L639">            Log.debug( &quot;Initialized plugin '{}'.&quot;, canonicalName );</span>
+<span class="nc" id="L640">            Thread.currentThread().setContextClassLoader( oldLoader );</span>
+
+            // If there a &lt;adminconsole&gt; section defined, register it.
+<span class="nc" id="L643">            final Element adminElement = (Element) pluginXML.selectSingleNode( &quot;/plugin/adminconsole&quot; );</span>
+<span class="nc bnc" id="L644" title="All 2 branches missed.">            if ( adminElement != null )</span>
+            {
+<span class="nc" id="L646">                final Element appName = (Element) adminElement.selectSingleNode( &quot;/plugin/adminconsole/global/appname&quot; );</span>
+<span class="nc bnc" id="L647" title="All 2 branches missed.">                if ( appName != null )</span>
+                {
+                    // Set the plugin name so that the proper i18n String can be loaded.
+<span class="nc" id="L650">                    appName.addAttribute( &quot;plugin&quot;, canonicalName );</span>
+                }
+
+                // If global images are specified, override their URL.
+<span class="nc" id="L654">                Element imageEl = (Element) adminElement.selectSingleNode( &quot;/plugin/adminconsole/global/logo-image&quot; );</span>
+<span class="nc bnc" id="L655" title="All 2 branches missed.">                if ( imageEl != null )</span>
+                {
+<span class="nc" id="L657">                    imageEl.setText( &quot;plugins/&quot; + canonicalName + &quot;/&quot; + imageEl.getText() );</span>
+<span class="nc" id="L658">                    imageEl.addAttribute( &quot;plugin&quot;, canonicalName ); // Set the plugin name so that the proper i18n String can be loaded.</span>
+                }
+<span class="nc" id="L660">                imageEl = (Element) adminElement.selectSingleNode( &quot;/plugin/adminconsole/global/login-image&quot; );</span>
+<span class="nc bnc" id="L661" title="All 2 branches missed.">                if ( imageEl != null )</span>
+                {
+<span class="nc" id="L663">                    imageEl.setText( &quot;plugins/&quot; + canonicalName + &quot;/&quot; + imageEl.getText() );</span>
+<span class="nc" id="L664">                    imageEl.addAttribute( &quot;plugin&quot;, canonicalName ); // Set the plugin name so that the proper i18n String can be loaded.</span>
+                }
+
+                // Modify all the URL's in the XML so that they are passed through the plugin servlet correctly.
+<span class="nc" id="L668">                final List urls = adminElement.selectNodes( &quot;//@url&quot; );</span>
+<span class="nc bnc" id="L669" title="All 2 branches missed.">                for ( final Object url : urls )</span>
+                {
+<span class="nc" id="L671">                    final Attribute attr = (Attribute) url;</span>
+<span class="nc" id="L672">                    attr.setValue( &quot;plugins/&quot; + canonicalName + &quot;/&quot; + attr.getValue() );</span>
+<span class="nc" id="L673">                }</span>
+
+                // In order to internationalize the names and descriptions in the model, we add a &quot;plugin&quot; attribute to
+                // each tab, sidebar, and item so that the the renderer knows where to load the i18n Strings from.
+<span class="nc" id="L677">                final String[] elementNames = new String[]{ &quot;tab&quot;, &quot;sidebar&quot;, &quot;item&quot; };</span>
+<span class="nc bnc" id="L678" title="All 2 branches missed.">                for ( final String elementName : elementNames )</span>
+                {
+<span class="nc" id="L680">                    final List values = adminElement.selectNodes( &quot;//&quot; + elementName );</span>
+<span class="nc bnc" id="L681" title="All 2 branches missed.">                    for ( final Object value : values )</span>
+                    {
+<span class="nc" id="L683">                        final Element element = (Element) value;</span>
+                        // Make sure there's a name or description. Otherwise, no need to i18n settings.
+<span class="nc bnc" id="L685" title="All 4 branches missed.">                        if ( element.attribute( &quot;name&quot; ) != null || element.attribute( &quot;value&quot; ) != null )</span>
+                        {
+<span class="nc" id="L687">                            element.addAttribute( &quot;plugin&quot;, canonicalName );</span>
+                        }
+<span class="nc" id="L689">                    }</span>
+                }
+
+<span class="nc" id="L692">                AdminConsole.addModel( canonicalName, adminElement );</span>
+            }
+<span class="nc" id="L694">            firePluginCreatedEvent( canonicalName, plugin );</span>
+<span class="nc" id="L695">            Log.info( &quot;Successfully loaded plugin '{}'.&quot;, canonicalName );</span>
+<span class="nc" id="L696">            return true;</span>
+        }
+<span class="nc" id="L698">        catch ( Throwable e )</span>
+        {
+<span class="nc" id="L700">            Log.error( &quot;An exception occurred while loading plugin '{}':&quot;, canonicalName, e );</span>
+<span class="nc" id="L701">            Integer count = failureToLoadCount.get( canonicalName );</span>
+<span class="nc bnc" id="L702" title="All 2 branches missed.">            if ( count == null ) {</span>
+<span class="nc" id="L703">                count = 0;</span>
+            }
+<span class="nc" id="L705">            failureToLoadCount.put( canonicalName, ++count );</span>
+<span class="nc" id="L706">            return false;</span>
+        }
+    }
+
+    private PluginDevEnvironment configurePluginDevEnvironment( final Path pluginDir, String classesDir, String webRoot ) throws IOException
+    {
+<span class="nc" id="L712">        final String pluginName = pluginDir.getFileName().toString();</span>
+
+<span class="nc" id="L714">        final Path compilationClassesDir = pluginDir.resolve( &quot;classes&quot; );</span>
+<span class="nc bnc" id="L715" title="All 2 branches missed.">        if ( Files.notExists( compilationClassesDir ) )</span>
+        {
+<span class="nc" id="L717">            Files.createDirectory( compilationClassesDir );</span>
+        }
+<span class="nc" id="L719">        compilationClassesDir.toFile().deleteOnExit();</span>
+
+<span class="nc" id="L721">        final PluginDevEnvironment dev = new PluginDevEnvironment();</span>
+<span class="nc" id="L722">        Log.info( &quot;Plugin '{}' is running in development mode.&quot;, pluginName );</span>
+<span class="nc bnc" id="L723" title="All 2 branches missed.">        if ( webRoot != null )</span>
+        {
+<span class="nc" id="L725">            Path webRootDir = Paths.get( webRoot );</span>
+<span class="nc bnc" id="L726" title="All 2 branches missed.">            if ( Files.notExists( webRootDir ) )</span>
+            {
+                // Ok, let's try it relative from this plugin dir?
+<span class="nc" id="L729">                webRootDir = pluginDir.resolve( webRoot );</span>
+            }
+
+<span class="nc bnc" id="L732" title="All 2 branches missed.">            if ( Files.exists( webRootDir ) )</span>
+            {
+<span class="nc" id="L734">                dev.setWebRoot( webRootDir.toFile() );</span>
+            }
+        }
+
+<span class="nc bnc" id="L738" title="All 2 branches missed.">        if ( classesDir != null )</span>
+        {
+<span class="nc" id="L740">            Path classes = Paths.get( classesDir );</span>
+<span class="nc bnc" id="L741" title="All 2 branches missed.">            if ( Files.notExists( classes ) )</span>
+            {
+                // ok, let's try it relative from this plugin dir?
+<span class="nc" id="L744">                classes = pluginDir.resolve( classesDir );</span>
+            }
+
+<span class="nc bnc" id="L747" title="All 2 branches missed.">            if ( Files.exists( classes ) )</span>
+            {
+<span class="nc" id="L749">                dev.setClassesDir( classes.toFile() );</span>
+            }
+        }
+
+<span class="nc" id="L753">        return dev;</span>
+    }
+
+    private void configureCaches( Path pluginDir, String pluginName )
+    {
+<span class="nc" id="L758">        Path cacheConfig = pluginDir.resolve( &quot;cache-config.xml&quot; );</span>
+<span class="nc bnc" id="L759" title="All 2 branches missed.">        if ( Files.exists( cacheConfig ) )</span>
+        {
+<span class="nc" id="L761">            PluginCacheConfigurator configurator = new PluginCacheConfigurator();</span>
+            try
+            {
+<span class="nc" id="L764">                configurator.setInputStream( new BufferedInputStream( Files.newInputStream( cacheConfig ) ) );</span>
+<span class="nc" id="L765">                configurator.configure( pluginName );</span>
+            }
+<span class="nc" id="L767">            catch ( Exception e )</span>
+            {
+<span class="nc" id="L769">                Log.error( &quot;An exception occurred while trying to configure caches for plugin '{}':&quot;, pluginName, e );</span>
+<span class="nc" id="L770">            }</span>
+        }
+<span class="nc" id="L772">    }</span>
+
+    /**
+     * Delete a plugin, which removes the plugin.jar/war file after which the plugin is unloaded.
+     * @param pluginName the plugin to delete
+     */
+    public void deletePlugin( final String pluginName )
+    {
+<span class="nc" id="L780">        Log.debug( &quot;Deleting plugin '{}'...&quot;, pluginName );</span>
+
+<span class="nc" id="L782">        try ( final DirectoryStream&lt;Path&gt; ds = Files.newDirectoryStream( getPluginsDirectory(), new DirectoryStream.Filter&lt;Path&gt;()</span>
+<span class="nc" id="L783">        {</span>
+            @Override
+            public boolean accept( final Path path ) {
+<span class="nc bnc" id="L786" title="All 2 branches missed.">                if ( Files.isDirectory( path ) )</span>
+                {
+<span class="nc" id="L788">                    return false;</span>
+                }
+
+<span class="nc" id="L791">                final String fileName = path.getFileName().toString().toLowerCase();</span>
+<span class="nc bnc" id="L792" title="All 4 branches missed.">                return ( fileName.equals( pluginName + &quot;.jar&quot; ) || fileName.equals( pluginName + &quot;.war&quot; ) );</span>
+            }
+        } ) )
+        {
+<span class="nc bnc" id="L796" title="All 2 branches missed.">            for ( final Path pluginFile : ds )</span>
+            {
+                try
+                {
+<span class="nc" id="L800">                    Files.delete( pluginFile );</span>
+<span class="nc" id="L801">                    pluginMonitor.runNow( true ); // trigger unload by running the monitor (which is more thread-safe than calling unloadPlugin directly).</span>
+                }
+<span class="nc" id="L803">                catch ( IOException ex )</span>
+                {
+<span class="nc" id="L805">                    Log.warn( &quot;Unable to delete plugin '{}', as the plugin jar/war file cannot be deleted. File path: {}&quot;, pluginName, pluginFile, ex );</span>
+<span class="nc" id="L806">                }</span>
+<span class="nc" id="L807">            }</span>
+<span class="nc bnc" id="L808" title="All 8 branches missed.">        }</span>
+<span class="nc" id="L809">        catch ( Throwable e )</span>
+        {
+<span class="nc" id="L811">            Log.error( &quot;An unexpected exception occurred while deleting plugin '{}'.&quot;, pluginName, e );</span>
+<span class="nc" id="L812">        }</span>
+<span class="nc" id="L813">    }</span>
+
+    public boolean reloadPlugin( String pluginName )
+    {
+<span class="nc" id="L817">        Log.debug( &quot;Reloading plugin '{}'...&quot; );</span>
+
+<span class="nc" id="L819">        final Plugin plugin = getPlugin( pluginName );</span>
+<span class="nc bnc" id="L820" title="All 2 branches missed.">        if ( plugin == null )</span>
+        {
+<span class="nc" id="L822">            Log.warn( &quot;Unable to reload plugin '{}'. No such plugin loaded.&quot;, pluginName );</span>
+<span class="nc" id="L823">            return false;</span>
+        }
+
+<span class="nc" id="L826">        final Path path = getPluginPath( plugin );</span>
+<span class="nc bnc" id="L827" title="All 2 branches missed.">        if ( path == null )</span>
+        {
+            // When there's a plugin, there should be a path. If there isn't, our code is buggy.
+<span class="nc" id="L830">            throw new IllegalStateException( &quot;Unable to determine installation path of plugin: &quot; + pluginName );</span>
+        }
+
+        try
+        {
+<span class="nc" id="L835">            Files.setLastModifiedTime( path, FileTime.fromMillis( 0 ) );</span>
+        }
+<span class="nc" id="L837">        catch ( IOException e )</span>
+        {
+<span class="nc" id="L839">            Log.warn( &quot;Unable to reload plugin '{}'. Unable to reset the 'last modified time' of the plugin path. Try removing and restoring the plugin jar file manually.&quot; );</span>
+<span class="nc" id="L840">            return false;</span>
+<span class="nc" id="L841">        }</span>
+
+<span class="nc" id="L843">        pluginMonitor.runNow( false );</span>
+<span class="nc" id="L844">        return true;</span>
+    }
+
+    /**
+     * Unloads a plugin. The {@link Plugin#destroyPlugin()} method will be called and then any resources will be
+     * released. The name should be the canonical name of the plugin (based on the plugin directory name) and not the
+     * human readable name as given by the plugin meta-data.
+     *
+     * This method only removes the plugin but does not delete the plugin JAR file. Therefore, if the plugin JAR still
+     * exists after this method is called, the plugin will be started again the next  time the plugin monitor process
+     * runs. This is useful for &quot;restarting&quot; plugins. To completely remove the plugin, use {@link #deletePlugin(String)}
+     * instead.
+     *
+     * This method is called automatically when a plugin's JAR file is deleted.
+     *
+     * @param canonicalName the canonical name of the plugin to unload.
+     */
+    void unloadPlugin( String canonicalName )
+    {
+<span class="nc" id="L863">        Log.debug( &quot;Unloading plugin '{}'...&quot;, canonicalName );</span>
+
+<span class="nc" id="L865">        failureToLoadCount.remove( canonicalName );</span>
+
+<span class="nc" id="L867">        Plugin plugin = pluginsLoaded.get( canonicalName );</span>
+<span class="nc bnc" id="L868" title="All 2 branches missed.">        if ( plugin != null )</span>
+        {
+            // Remove from dev mode if it exists.
+<span class="nc" id="L871">            pluginDevelopment.remove( plugin );</span>
+
+            // See if any child plugins are defined.
+<span class="nc bnc" id="L874" title="All 2 branches missed.">            if ( parentPluginMap.containsKey( plugin ) )</span>
+            {
+<span class="nc" id="L876">                String[] childPlugins = parentPluginMap.get( plugin ).toArray(new String[0]);</span>
+<span class="nc bnc" id="L877" title="All 2 branches missed.">                for ( String childPlugin : childPlugins )</span>
+                {
+<span class="nc" id="L879">                    Log.debug( &quot;Unloading child plugin: '{}'.&quot;, childPlugin );</span>
+<span class="nc" id="L880">                    childPluginMap.remove( pluginsLoaded.get( childPlugin ) );</span>
+<span class="nc" id="L881">                    unloadPlugin( childPlugin );</span>
+                }
+<span class="nc" id="L883">                parentPluginMap.remove( plugin );</span>
+            }
+
+<span class="nc" id="L886">            Path webXML = pluginDirectory.resolve( canonicalName ).resolve( &quot;web&quot; ).resolve( &quot;WEB-INF&quot; ).resolve( &quot;web.xml&quot; );</span>
+<span class="nc bnc" id="L887" title="All 2 branches missed.">            if ( Files.exists( webXML ) )</span>
+            {
+<span class="nc" id="L889">                AdminConsole.removeModel( canonicalName );</span>
+<span class="nc" id="L890">                PluginServlet.unregisterServlets( webXML.toFile() );</span>
+            }
+<span class="nc" id="L892">            Path customWebXML = pluginDirectory.resolve( canonicalName ).resolve( &quot;web&quot; ).resolve( &quot;WEB-INF&quot; ).resolve( &quot;web-custom.xml&quot; );</span>
+<span class="nc bnc" id="L893" title="All 2 branches missed.">            if ( Files.exists( customWebXML ) )</span>
+            {
+<span class="nc" id="L895">                PluginServlet.unregisterServlets( customWebXML.toFile() );</span>
+            }
+
+            // Wrap destroying the plugin in a try/catch block. Otherwise, an exception raised
+            // in the destroy plugin process will disrupt the whole unloading process. It's still
+            // possible that classloader destruction won't work in the case that destroying the plugin
+            // fails. In that case, Openfire may need to be restarted to fully cleanup the plugin
+            // resources.
+            try
+            {
+<span class="nc" id="L905">                plugin.destroyPlugin();</span>
+<span class="nc" id="L906">                Log.debug( &quot;Destroyed plugin '{}'.&quot;, canonicalName );</span>
+            }
+<span class="nc" id="L908">            catch ( Exception e )</span>
+            {
+<span class="nc" id="L910">                Log.error( &quot;An exception occurred while unloading plugin '{}':&quot;, canonicalName, e );</span>
+<span class="nc" id="L911">            }</span>
+        }
+
+        // Remove references to the plugin so it can be unloaded from memory
+        // If plugin still fails to be removed then we will add references back
+        // Anyway, for a few seconds admins may not see the plugin in the admin console
+        // and in a subsequent refresh it will appear if failed to be removed
+<span class="nc" id="L918">        pluginsLoaded.remove( canonicalName );</span>
+<span class="nc" id="L919">        Path pluginFile = pluginDirs.remove( canonicalName );</span>
+<span class="nc" id="L920">        PluginClassLoader pluginLoader = classloaders.remove( plugin );</span>
+<span class="nc" id="L921">        PluginMetadata metadata = pluginMetadata.remove( canonicalName );</span>
+
+        // try to close the cached jar files from the plugin class loader
+<span class="nc bnc" id="L924" title="All 2 branches missed.">        if ( pluginLoader != null )</span>
+        {
+<span class="nc" id="L926">            pluginLoader.unloadJarFiles();</span>
+        }
+        else
+        {
+<span class="nc" id="L930">            Log.warn( &quot;No plugin loader found for '{}'.&quot;, canonicalName );</span>
+        }
+
+        // Try to remove the folder where the plugin was exploded. If this works then
+        // the plugin was successfully removed. Otherwise, some objects created by the
+        // plugin are still in memory.
+<span class="nc" id="L936">        Path dir = pluginDirectory.resolve( canonicalName );</span>
+        // Give the plugin 2 seconds to unload.
+        try
+        {
+<span class="nc" id="L940">            Thread.sleep( 2000 );</span>
+            // Ask the system to clean up references.
+<span class="nc" id="L942">            System.gc();</span>
+<span class="nc" id="L943">            int count = 0;</span>
+<span class="nc bnc" id="L944" title="All 4 branches missed.">            while ( !deleteDir( dir ) &amp;&amp; count++ &lt; 5 )</span>
+            {
+<span class="nc" id="L946">                Log.warn( &quot;Error unloading plugin '{}'. Will attempt again momentarily.&quot;, canonicalName );</span>
+<span class="nc" id="L947">                Thread.sleep( 8000 );</span>
+                // Ask the system to clean up references.
+<span class="nc" id="L949">                System.gc();</span>
+            }
+        }
+<span class="nc" id="L952">        catch ( InterruptedException e )</span>
+        {
+<span class="nc" id="L954">            Log.debug( &quot;Stopped waiting for plugin '{}' to be fully unloaded.&quot;, canonicalName, e );</span>
+<span class="nc" id="L955">        }</span>
+
+<span class="nc bnc" id="L957" title="All 4 branches missed.">        if ( plugin != null &amp;&amp; Files.notExists( dir ) )</span>
+        {
+            // Unregister plugin caches
+<span class="nc" id="L960">            PluginCacheRegistry.getInstance().unregisterCaches( canonicalName );</span>
+
+            // See if this is a child plugin. If it is, we should unload
+            // the parent plugin as well.
+<span class="nc bnc" id="L964" title="All 2 branches missed.">            if ( childPluginMap.containsKey( plugin ) )</span>
+            {
+<span class="nc" id="L966">                String parentPluginName = childPluginMap.get( plugin );</span>
+<span class="nc" id="L967">                Plugin parentPlugin = pluginsLoaded.get( parentPluginName );</span>
+<span class="nc" id="L968">                List&lt;String&gt; childrenPlugins = parentPluginMap.get( parentPlugin );</span>
+
+<span class="nc" id="L970">                childrenPlugins.remove( canonicalName );</span>
+<span class="nc" id="L971">                childPluginMap.remove( plugin );</span>
+
+                // When the parent plugin implements PluginListener, its pluginDestroyed() method
+                // isn't called if it dies first before its child. Athough the parent will die anyway,
+                // it's proper if the parent &quot;gets informed first&quot; about the dying child when the
+                // child is the one being killed first.
+<span class="nc bnc" id="L977" title="All 2 branches missed.">                if ( parentPlugin instanceof PluginListener )</span>
+                {
+                    PluginListener listener;
+<span class="nc" id="L980">                    listener = (PluginListener) parentPlugin;</span>
+<span class="nc" id="L981">                    listener.pluginDestroyed( canonicalName, plugin );</span>
+                }
+<span class="nc" id="L983">                unloadPlugin( parentPluginName );</span>
+            }
+<span class="nc" id="L985">            firePluginDestroyedEvent( canonicalName, plugin );</span>
+<span class="nc" id="L986">            Log.info( &quot;Successfully unloaded plugin '{}'.&quot;, canonicalName );</span>
+        }
+<span class="nc bnc" id="L988" title="All 2 branches missed.">        else if ( plugin != null )</span>
+        {
+<span class="nc" id="L990">            Log.info( &quot;Restore references since we failed to remove the plugin '{}'.&quot;, canonicalName );</span>
+<span class="nc" id="L991">            pluginsLoaded.put( canonicalName, plugin );</span>
+<span class="nc" id="L992">            pluginDirs.put( canonicalName, pluginFile );</span>
+<span class="nc" id="L993">            classloaders.put( plugin, pluginLoader );</span>
+<span class="nc" id="L994">            pluginMetadata.put( canonicalName, metadata );</span>
+        }
+<span class="nc" id="L996">    }</span>
+
+    /**
+     * Loads a class from the classloader of a plugin.
+     *
+     * @param plugin the plugin.
+     * @param className the name of the class to load.
+     * @return the class.
+     * @throws ClassNotFoundException if the class was not found.
+     */
+    public Class loadClass( Plugin plugin, String className ) throws ClassNotFoundException {
+<span class="nc" id="L1007">        PluginClassLoader loader = classloaders.get( plugin );</span>
+<span class="nc" id="L1008">        return loader.loadClass( className );</span>
+    }
+
+    /**
+     * Returns a plugin's dev environment if development mode is enabled for
+     * the plugin.
+     *
+     * @param plugin the plugin.
+     * @return the plugin dev environment, or {@code null} if development
+     *         mode is not enabled for the plugin.
+     */
+    public PluginDevEnvironment getDevEnvironment( Plugin plugin )
+    {
+<span class="nc" id="L1021">        return pluginDevelopment.get( plugin );</span>
+    }
+
+    /**
+     * @deprecated Moved to {@link PluginMetadataHelper#getName(Plugin)}.
+     * @param plugin the plugin to get the name for
+     * @return the name of the plugin, as defined in the plugin.xml
+     */
+    @Deprecated
+    public String getName( Plugin plugin )
+    {
+<span class="nc" id="L1032">        return PluginMetadataHelper.getName( plugin );</span>
+    }
+
+    /**
+     * @deprecated Moved to {@link PluginMetadataHelper#getDescription(Plugin)}.
+     * @param plugin the plugin to get the description for
+     * @return the description of the plugin
+     */
+    @Deprecated
+    public String getDescription( Plugin plugin )
+    {
+<span class="nc" id="L1043">        return PluginMetadataHelper.getDescription( plugin );</span>
+    }
+
+    /**
+     * @deprecated Moved to {@link PluginMetadataHelper#getAuthor(Plugin)}.
+     * @param plugin the plugin to get the author for
+     * @return the author of the plugin
+     */
+    @Deprecated
+    public String getAuthor( Plugin plugin )
+    {
+<span class="nc" id="L1054">        return PluginMetadataHelper.getAuthor( plugin );</span>
+    }
+
+    /**
+     * @deprecated Moved to {@link PluginMetadataHelper#getVersion(Plugin)}.
+     * @param plugin the plugin to get the version for
+     * @return the version of the plugin
+     */
+    @Deprecated
+    public String getVersion( Plugin plugin )
+    {
+<span class="nc" id="L1065">        return PluginMetadataHelper.getVersion( plugin ).getVersionString();</span>
+    }
+
+    /**
+     * @deprecated Moved to {@link PluginMetadataHelper#getMinServerVersion(Plugin)}.
+     * @param plugin the plugin to get the minimum server version for
+     * @return the minimum server version for the plugin
+     */
+    @Deprecated
+    public String getMinServerVersion( Plugin plugin )
+    {
+<span class="nc" id="L1076">        return PluginMetadataHelper.getMinServerVersion( plugin ).getVersionString();</span>
+    }
+
+    /**
+     * @deprecated Moved to {@link PluginMetadataHelper#getDatabaseKey(Plugin)}.
+     * @param plugin the plugin to get the database key for
+     * @return the database key for the plugin
+     */
+    @Deprecated
+    public String getDatabaseKey( Plugin plugin )
+    {
+<span class="nc" id="L1087">        return PluginMetadataHelper.getDatabaseKey( plugin );</span>
+    }
+
+    /**
+     * @deprecated Moved to {@link PluginMetadataHelper#getDatabaseVersion(Plugin)}.
+     * @param plugin the plugin to get the database version for
+     * @return the database version for the plugin
+     */
+    @Deprecated
+    public int getDatabaseVersion( Plugin plugin )
+    {
+<span class="nc" id="L1098">        return PluginMetadataHelper.getDatabaseVersion( plugin );</span>
+    }
+
+    /**
+     * @deprecated Moved to {@link PluginMetadataHelper#getLicense(Plugin)}.
+     * @param plugin the plugin to get the licence for
+     * @return the licence for the plugin
+     */
+    @Deprecated
+    public String getLicense( Plugin plugin )
+    {
+<span class="nc" id="L1109">        return PluginMetadataHelper.getLicense( plugin );</span>
+    }
+
+    /**
+     * Returns the classloader of a plugin.
+     *
+     * @param plugin the plugin.
+     * @return the classloader of the plugin.
+     */
+    public PluginClassLoader getPluginClassloader( Plugin plugin )
+    {
+<span class="nc" id="L1120">        return classloaders.get( plugin );</span>
+    }
+
+
+    /**
+     * Deletes a directory.
+     *
+     * @param dir the directory to delete.
+     * @return true if the directory was deleted.
+     */
+    static boolean deleteDir( Path dir )
+    {
+        try
+        {
+<span class="nc bnc" id="L1134" title="All 2 branches missed.">            if ( Files.isDirectory( dir ) )</span>
+            {
+<span class="nc" id="L1136">                Files.walkFileTree( dir, new SimpleFileVisitor&lt;Path&gt;()</span>
+<span class="nc" id="L1137">                {</span>
+                    @Override
+                    public FileVisitResult visitFile( Path file, BasicFileAttributes attrs ) throws IOException
+                    {
+                        try
+                        {
+<span class="nc" id="L1143">                            Files.deleteIfExists( file );</span>
+                        }
+<span class="nc" id="L1145">                        catch ( IOException e )</span>
+                        {
+<span class="nc" id="L1147">                            Log.debug( &quot;Plugin removal: could not delete: {}&quot;, file );</span>
+<span class="nc" id="L1148">                            throw e;</span>
+<span class="nc" id="L1149">                        }</span>
+<span class="nc" id="L1150">                        return FileVisitResult.CONTINUE;</span>
+                    }
+
+                    @Override
+                    public FileVisitResult postVisitDirectory( Path dir, IOException exc ) throws IOException
+                    {
+                        try
+                        {
+<span class="nc" id="L1158">                            Files.deleteIfExists( dir );</span>
+                        }
+<span class="nc" id="L1160">                        catch ( IOException e )</span>
+                        {
+<span class="nc" id="L1162">                            Log.debug( &quot;Plugin removal: could not delete: {}&quot;, dir );</span>
+<span class="nc" id="L1163">                            throw e;</span>
+<span class="nc" id="L1164">                        }</span>
+<span class="nc" id="L1165">                        return FileVisitResult.CONTINUE;</span>
+                    }
+                } );
+            }
+<span class="nc bnc" id="L1169" title="All 4 branches missed.">            return Files.notExists( dir ) || Files.deleteIfExists( dir );</span>
+        }
+<span class="nc" id="L1171">        catch ( IOException e )</span>
+        {
+<span class="nc" id="L1173">            return Files.notExists( dir );</span>
+        }
+    }
+
+    /**
+     * Registers a PluginListener, which will now start receiving events regarding plugin creation and destruction.
+     *
+     * When the listener was already registered, this method will have no effect.
+     *
+     * @param listener the listener to be notified (cannot be null).
+     */
+    public void addPluginListener( PluginListener listener )
+    {
+<span class="nc" id="L1186">        pluginListeners.add( listener );</span>
+<span class="nc" id="L1187">    }</span>
+
+    /**
+     * Deregisters a PluginListener, which will no longer receive events.
+     *
+     * When the listener was never added, this method will have no effect.
+     *
+     * @param listener the listener to be removed (cannot be null).
+     */
+    public void removePluginListener( PluginListener listener )
+    {
+<span class="nc" id="L1198">        pluginListeners.remove( listener );</span>
+<span class="nc" id="L1199">    }</span>
+
+    /**
+     * Registers a PluginManagerListener, which will now start receiving events regarding plugin management.
+     *
+     * @param listener the listener to be notified (cannot be null).
+     */
+    public void addPluginManagerListener( PluginManagerListener listener )
+    {
+<span class="nc" id="L1208">        pluginManagerListeners.add( listener );</span>
+<span class="nc bnc" id="L1209" title="All 2 branches missed.">        if ( isExecuted() )</span>
+        {
+<span class="nc" id="L1211">            firePluginsMonitored(listener);</span>
+        }
+<span class="nc" id="L1213">    }</span>
+
+    /**
+     * Deregisters a PluginManagerListener, which will no longer receive events.
+     *
+     * When the listener was never added, this method will have no effect.
+     *
+     * @param listener the listener to be notified (cannot be null).
+     */
+    public void removePluginManagerListener( PluginManagerListener listener )
+    {
+<span class="nc" id="L1224">        pluginManagerListeners.remove( listener );</span>
+<span class="nc" id="L1225">    }</span>
+
+    /**
+     * Notifies all registered PluginListener instances that a new plugin was created.
+     *
+     * @param name The name of the plugin
+     * @param plugin the plugin.
+     */
+    void firePluginCreatedEvent( String name, Plugin plugin )
+    {
+<span class="nc bnc" id="L1235" title="All 2 branches missed.">        for ( final PluginListener listener : pluginListeners )</span>
+        {
+            try
+            {
+<span class="nc" id="L1239">                listener.pluginCreated( name, plugin );</span>
+            }
+<span class="nc" id="L1241">            catch ( Exception ex )</span>
+            {
+<span class="nc" id="L1243">                Log.warn( &quot;An exception was thrown when one of the pluginManagerListeners was notified of a 'created' event for plugin '{}'!&quot;, name, ex );</span>
+<span class="nc" id="L1244">            }</span>
+<span class="nc" id="L1245">        }</span>
+<span class="nc" id="L1246">    }</span>
+
+    /**
+     * Notifies all registered PluginListener instances that a plugin was destroyed.
+     *
+     * @param name The name of the plugin
+     * @param plugin the plugin.
+     */
+    void firePluginDestroyedEvent( String name, Plugin plugin )
+    {
+<span class="nc bnc" id="L1256" title="All 2 branches missed.">        for ( final PluginListener listener : pluginListeners )</span>
+        {
+            try
+            {
+<span class="nc" id="L1260">                listener.pluginDestroyed( name, plugin );</span>
+            }
+<span class="nc" id="L1262">            catch ( Exception ex )</span>
+            {
+<span class="nc" id="L1264">                Log.warn( &quot;An exception was thrown when one of the pluginManagerListeners was notified of a 'destroyed' event for plugin '{}'!&quot;, name, ex );</span>
+<span class="nc" id="L1265">            }</span>
+
+<span class="nc" id="L1267">        }</span>
+<span class="nc" id="L1268">    }</span>
+
+    /**
+     * Notifies all registered PluginManagerListener instances that the service monitoring for plugin changes completed a
+     * periodic check.
+     */
+    void firePluginsMonitored()
+    {
+        // Set that at least one iteration was done. That means that &quot;all available&quot; plugins
+        // have been loaded by now.
+<span class="nc bnc" id="L1278" title="All 2 branches missed.">        if ( !XMPPServer.getInstance().isSetupMode() )</span>
+        {
+<span class="nc" id="L1280">            executed = true;</span>
+        }
+
+<span class="nc bnc" id="L1283" title="All 2 branches missed.">        for ( final PluginManagerListener listener : pluginManagerListeners )</span>
+        {
+<span class="nc" id="L1285">            firePluginsMonitored(listener);</span>
+<span class="nc" id="L1286">        }</span>
+<span class="nc" id="L1287">    }</span>
+
+    private void firePluginsMonitored(final PluginManagerListener listener) {
+        try
+        {
+<span class="nc" id="L1292">            listener.pluginsMonitored();</span>
+        }
+<span class="nc" id="L1294">        catch ( Exception ex )</span>
+        {
+<span class="nc" id="L1296">            Log.warn( &quot;An exception was thrown when one of the pluginManagerListeners was notified of a 'monitored' event!&quot;, ex );</span>
+<span class="nc" id="L1297">        }</span>
+<span class="nc" id="L1298">    }</span>
+
+    public boolean isMonitorTaskRunning()
+    {
+<span class="nc" id="L1302">        return pluginMonitor.isTaskRunning();</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

@@ -1,0 +1,167 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>PluginCacheRegistry.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.container</a> &gt; <span class="el_source">PluginCacheRegistry.java</span></div><h1>PluginCacheRegistry.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.container;
+
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+import org.jivesoftware.util.JiveConstants;
+import org.jivesoftware.util.cache.CacheFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * A simple registry of cache configuration data for plugins.
+ */
+public class PluginCacheRegistry {
+    
+<span class="nc" id="L35">    private static final Logger Log = LoggerFactory.getLogger(PluginCacheRegistry.class);</span>
+
+<span class="nc" id="L37">    private static final PluginCacheRegistry instance = new PluginCacheRegistry();</span>
+
+<span class="nc" id="L39">    private Map&lt;String, CacheInfo&gt; extraCacheMappings = new HashMap&lt;&gt;();</span>
+<span class="nc" id="L40">    private Map&lt;String, List&lt;CacheInfo&gt;&gt; pluginCaches = new HashMap&lt;&gt;();</span>
+
+    public static PluginCacheRegistry getInstance() {
+<span class="nc" id="L43">        return instance;</span>
+    }
+
+<span class="nc" id="L46">    private PluginCacheRegistry() {</span>
+<span class="nc" id="L47">    }</span>
+
+    /**
+     * Registers cache configuration data for a give cache and plugin.
+     *
+     * @param pluginName the name of the plugin which will use the cache.
+     * @param info the cache configuration data.
+     */
+    public void registerCache(String pluginName, CacheInfo info) {
+<span class="nc" id="L56">        extraCacheMappings.put(info.getCacheName(), info);</span>
+<span class="nc" id="L57">        List&lt;CacheInfo&gt; caches = pluginCaches.get(pluginName);</span>
+
+<span class="nc bnc" id="L59" title="All 2 branches missed.">        if (caches == null) {</span>
+<span class="nc" id="L60">            caches = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L61">            pluginCaches.put(pluginName, caches);</span>
+        }
+
+<span class="nc" id="L64">        caches.add(info);</span>
+
+        // Set system properties for this cache
+<span class="nc" id="L67">        CacheFactory.setCacheTypeProperty(info.getCacheName(), info.getType().getName());</span>
+<span class="nc" id="L68">        CacheFactory.setMaxSizeProperty(info.getCacheName(), getMaxSizeFromProperty(info));</span>
+<span class="nc" id="L69">        CacheFactory.setMaxLifetimeProperty(info.getCacheName(), getMaxLifetimeFromProperty(info));</span>
+<span class="nc" id="L70">        CacheFactory.setMinCacheSize(info.getCacheName(), getMinSizeFromProperty(info));</span>
+<span class="nc" id="L71">    }</span>
+
+    /**
+     * Unregisters all caches for the given plugin.
+     *
+     * @param pluginName the name of the plugin whose caches will be unregistered.
+     */
+    public void unregisterCaches(String pluginName) {
+<span class="nc" id="L79">        List&lt;CacheInfo&gt; caches = pluginCaches.remove(pluginName);</span>
+<span class="nc bnc" id="L80" title="All 2 branches missed.">        if (caches != null) {</span>
+<span class="nc bnc" id="L81" title="All 2 branches missed.">            for (CacheInfo info : caches) {</span>
+<span class="nc" id="L82">                extraCacheMappings.remove(info.getCacheName());</span>
+                // Check if other cluster nodes have this plugin installed
+<span class="nc" id="L84">                Collection&lt;Boolean&gt; answers =</span>
+<span class="nc" id="L85">                        CacheFactory.doSynchronousClusterTask(new IsPluginInstalledTask(pluginName), false);</span>
+<span class="nc bnc" id="L86" title="All 2 branches missed.">                for (Boolean installed : answers) {</span>
+<span class="nc bnc" id="L87" title="All 2 branches missed.">                    if (installed) {</span>
+<span class="nc" id="L88">                        return;</span>
+                    }
+<span class="nc" id="L90">                }</span>
+                // Destroy cache if we are the last node hosting this plugin
+                try {
+<span class="nc" id="L93">                    CacheFactory.destroyCache(info.getCacheName());</span>
+                }
+<span class="nc" id="L95">                catch (Exception e) {</span>
+<span class="nc" id="L96">                    Log.warn(e.getMessage(), e);</span>
+<span class="nc" id="L97">                }</span>
+<span class="nc" id="L98">            }</span>
+        }
+<span class="nc" id="L100">    }</span>
+
+    public CacheInfo getCacheInfo(String name) {
+<span class="nc" id="L103">        return extraCacheMappings.get(name);</span>
+    }
+
+    private long getMaxSizeFromProperty(CacheInfo cacheInfo) {
+<span class="nc" id="L107">        String sizeProp = cacheInfo.getParams().get(&quot;back-size-high&quot;);</span>
+<span class="nc bnc" id="L108" title="All 2 branches missed.">        if (sizeProp != null) {</span>
+<span class="nc bnc" id="L109" title="All 2 branches missed.">            if (&quot;0&quot;.equals(sizeProp)) {</span>
+<span class="nc" id="L110">                return -1l;</span>
+            }
+            try {
+<span class="nc" id="L113">                return Integer.parseInt(sizeProp);</span>
+            }
+<span class="nc" id="L115">            catch (NumberFormatException nfe) {</span>
+<span class="nc" id="L116">                Log.warn(&quot;Unable to parse back-size-high for cache: &quot; + cacheInfo.getCacheName());</span>
+            }
+        }
+        // Return default
+<span class="nc" id="L120">        return CacheFactory.DEFAULT_MAX_CACHE_SIZE;</span>
+    }
+
+    private static long getMaxLifetimeFromProperty(CacheInfo cacheInfo) {
+<span class="nc" id="L124">        String lifetimeProp = cacheInfo.getParams().get(&quot;back-expiry&quot;);</span>
+<span class="nc bnc" id="L125" title="All 2 branches missed.">        if (lifetimeProp != null) {</span>
+<span class="nc bnc" id="L126" title="All 2 branches missed.">            if (&quot;0&quot;.equals(lifetimeProp)) {</span>
+<span class="nc" id="L127">                return -1l;</span>
+            }
+<span class="nc" id="L129">            long factor = 1;</span>
+<span class="nc bnc" id="L130" title="All 2 branches missed.">            if (lifetimeProp.endsWith(&quot;m&quot;)) {</span>
+<span class="nc" id="L131">                factor = JiveConstants.MINUTE;</span>
+            }
+<span class="nc bnc" id="L133" title="All 2 branches missed.">            else if (lifetimeProp.endsWith(&quot;h&quot;)) {</span>
+<span class="nc" id="L134">                factor = JiveConstants.HOUR;</span>
+            }
+<span class="nc bnc" id="L136" title="All 2 branches missed.">            else if (lifetimeProp.endsWith(&quot;d&quot;)) {</span>
+<span class="nc" id="L137">                factor = JiveConstants.DAY;</span>
+            }
+            try {
+<span class="nc" id="L140">                return Long.parseLong(lifetimeProp.substring(0, lifetimeProp.length()-1)) * factor;</span>
+            }
+<span class="nc" id="L142">            catch (NumberFormatException nfe) {</span>
+<span class="nc" id="L143">                Log.warn(&quot;Unable to parse back-expiry for cache: &quot; + cacheInfo.getCacheName());</span>
+            }
+        }
+        // Return default
+<span class="nc" id="L147">        return CacheFactory.DEFAULT_MAX_CACHE_LIFETIME;</span>
+    }
+
+    private long getMinSizeFromProperty(CacheInfo cacheInfo) {
+<span class="nc" id="L151">        String sizeProp = cacheInfo.getParams().get(&quot;back-size-low&quot;);</span>
+<span class="nc bnc" id="L152" title="All 2 branches missed.">        if (sizeProp != null) {</span>
+<span class="nc bnc" id="L153" title="All 2 branches missed.">            if (&quot;0&quot;.equals(sizeProp)) {</span>
+<span class="nc" id="L154">                return -1l;</span>
+            }
+            try {
+<span class="nc" id="L157">                return Integer.parseInt(sizeProp);</span>
+            }
+<span class="nc" id="L159">            catch (NumberFormatException nfe) {</span>
+<span class="nc" id="L160">                Log.warn(&quot;Unable to parse back-size-low for cache: &quot; + cacheInfo.getCacheName());</span>
+            }
+        }
+        // Return default
+<span class="nc" id="L164">        return CacheFactory.DEFAULT_MAX_CACHE_SIZE;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

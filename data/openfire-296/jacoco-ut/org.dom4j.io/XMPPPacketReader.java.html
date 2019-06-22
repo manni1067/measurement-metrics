@@ -1,0 +1,553 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>XMPPPacketReader.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.dom4j.io</a> &gt; <span class="el_source">XMPPPacketReader.java</span></div><h1>XMPPPacketReader.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2001-2004 (C) MetaStuff, Ltd. All Rights Reserved.
+ *
+ * This software is open source.
+ * See the bottom of this file for the licence.
+ *
+ */
+
+package org.dom4j.io;
+
+import org.dom4j.*;
+import org.jivesoftware.openfire.net.MXParser;
+import org.xmlpull.v1.XmlPullParser;
+import org.xmlpull.v1.XmlPullParserException;
+import org.xmlpull.v1.XmlPullParserFactory;
+
+import java.io.*;
+import java.net.URL;
+import java.util.Arrays;
+import java.util.Collection;
+
+/**
+ * &lt;p&gt;&lt;code&gt;XMPPPacketReader&lt;/code&gt; is a Reader of DOM4J documents that
+ * uses the fast
+ * &lt;a href=&quot;http://www.extreme.indiana.edu/soap/xpp/&quot;&gt;XML Pull Parser 3.x&lt;/a&gt;.
+ * It is very fast for use in SOAP style environments.&lt;/p&gt;
+ *
+ * @author &lt;a href=&quot;mailto:pelle@neubia.com&quot;&gt;Pelle Braendgaard&lt;/a&gt;
+ * @author &lt;a href=&quot;mailto:jstrachan@apache.org&quot;&gt;James Strachan&lt;/a&gt;
+ */
+public class XMPPPacketReader {
+
+    /**
+     * &lt;code&gt;DocumentFactory&lt;/code&gt; used to create new document objects
+     */
+    private DocumentFactory factory;
+
+    /**
+     * &lt;code&gt;XmlPullParser&lt;/code&gt; used to parse XML
+     */
+    private MXParser xppParser;
+
+    /**
+     * &lt;code&gt;XmlPullParser&lt;/code&gt; used to parse XML
+     */
+    private XmlPullParserFactory xppFactory;
+
+    /**
+     * DispatchHandler to call when each &lt;code&gt;Element&lt;/code&gt; is encountered
+     */
+    private DispatchHandler dispatchHandler;
+
+    /**
+     * Last time a full Document was read or a heartbeat was received. Hearbeats
+     * are represented as whitespaces received while a Document is not being parsed.
+     */
+<span class="pc" id="L57">    private long lastActive = System.currentTimeMillis();</span>
+
+    /**
+     * Stream of various endpoints (eg: s2s, c2s) use different default namespaces. To be able to use a stanza that's
+     * parsed on one type of endpoint in the context of another endpoint, we explicitly ignore these namespaced. This
+     * allows us to forward, for instance, a stanza received via C2S (which has the &quot;jabber:client&quot; default namespace)
+     * on a S2S stream (which has the &quot;jabber:server&quot; default namespace).
+     *
+     * @see &lt;a href=&quot;https://xmpp.org/rfcs/rfc6120.html#streams-ns-xmpp&quot;&gt;RFC 6120, 4.8.3. XMPP Content Namespaces&lt;/a&gt;
+     */
+<span class="fc" id="L67">    public static final Collection&lt;String&gt; IGNORED_NAMESPACE_ON_STANZA = Arrays.asList( &quot;jabber:client&quot;, &quot;jabber:server&quot;, &quot;jabber:connectionmanager&quot;, &quot;jabber:component:accept&quot;, &quot;http://jabber.org/protocol/httpbind&quot; );</span>
+
+<span class="fc" id="L69">    public XMPPPacketReader() {</span>
+<span class="fc" id="L70">    }</span>
+
+<span class="nc" id="L72">    public XMPPPacketReader(DocumentFactory factory) {</span>
+<span class="nc" id="L73">        this.factory = factory;</span>
+<span class="nc" id="L74">    }</span>
+
+
+    /**
+     * &lt;p&gt;Reads a Document from the given &lt;code&gt;File&lt;/code&gt;&lt;/p&gt;
+     *
+     * @param file is the &lt;code&gt;File&lt;/code&gt; to read from.
+     * @return the newly created Document instance
+     * @throws DocumentException              if an error occurs during parsing.
+     * @throws IOException if an error occurs during reading
+     * @throws XmlPullParserException if an error occurs creating a pull parser
+     */
+    public Document read(File file) throws DocumentException, IOException, XmlPullParserException {
+<span class="nc" id="L87">        String systemID = file.getAbsolutePath();</span>
+<span class="nc" id="L88">        return read(new BufferedReader(new FileReader(file)), systemID);</span>
+    }
+
+    /**
+     * &lt;p&gt;Reads a Document from the given &lt;code&gt;URL&lt;/code&gt;&lt;/p&gt;
+     *
+     * @param url &lt;code&gt;URL&lt;/code&gt; to read from.
+     * @return the newly created Document instance
+     * @throws DocumentException if an error occurs during parsing.
+     * @throws IOException if an error occurs during reading
+     * @throws XmlPullParserException if an error occurs creating a pull parser
+     */
+    public Document read(URL url) throws DocumentException, IOException, XmlPullParserException {
+<span class="nc" id="L101">        String systemID = url.toExternalForm();</span>
+<span class="nc" id="L102">        return read(createReader(url.openStream()), systemID);</span>
+    }
+
+    /**
+     * &lt;p&gt;Reads a Document from the given URL or filename.&lt;/p&gt;
+     * &lt;p&gt;
+     * If the systemID contains a &lt;code&gt;':'&lt;/code&gt; character then it is
+     * assumed to be a URL otherwise its assumed to be a file name.
+     * If you want finer grained control over this mechansim then please
+     * explicitly pass in either a {@link URL} or a {@link File} instance
+     * instead of a {@link String} to denote the source of the document.
+     * &lt;/p&gt;
+     *
+     * @param systemID is a URL for a document or a file name.
+     * @return the newly created Document instance
+     * @throws DocumentException              if an error occurs during parsing.
+     * @throws IOException if an error occurs during reading
+     * @throws XmlPullParserException if an error occurs creating a pull parser
+     */
+    public Document read(String systemID) throws DocumentException, IOException, XmlPullParserException {
+<span class="nc bnc" id="L122" title="All 2 branches missed.">        if (systemID.indexOf(':') &gt;= 0) {</span>
+            // lets assume its a URL
+<span class="nc" id="L124">            return read(new URL(systemID));</span>
+        }
+        else {
+            // lets assume that we are given a file name
+<span class="nc" id="L128">            return read(new File(systemID));</span>
+        }
+    }
+
+    /**
+     * &lt;p&gt;Reads a Document from the given stream&lt;/p&gt;
+     *
+     * @param in &lt;code&gt;InputStream&lt;/code&gt; to read from.
+     * @return the newly created Document instance
+     * @throws DocumentException if an error occurs during parsing.
+     * @throws IOException if an error occurs during reading
+     * @throws XmlPullParserException if an error occurs creating a pull parser
+     */
+    public Document read(InputStream in) throws DocumentException, IOException, XmlPullParserException {
+<span class="nc" id="L142">        return read(createReader(in));</span>
+    }
+
+    /**
+     * &lt;p&gt;Reads a Document from the given stream&lt;/p&gt;
+     *
+     * @param charSet the charSet that the input is encoded in
+     * @param in &lt;code&gt;InputStream&lt;/code&gt; to read from.
+     * @return the newly created Document instance
+     * @throws DocumentException if an error occurs during parsing.
+     * @throws IOException if an error occurs during reading
+     * @throws XmlPullParserException if an error occurs creating a pull parser
+     */
+    public Document read(String charSet, InputStream in)
+            throws DocumentException, IOException, XmlPullParserException
+    {
+<span class="nc" id="L158">        return read(createReader(in, charSet));</span>
+    }
+
+    /**
+     * &lt;p&gt;Reads a Document from the given &lt;code&gt;Reader&lt;/code&gt;&lt;/p&gt;
+     *
+     * @param reader is the reader for the input
+     * @return the newly created Document instance
+     * @throws DocumentException if an error occurs during parsing.
+     * @throws IOException if an error occurs during reading
+     * @throws XmlPullParserException if an error occurs creating a pull parser
+     */
+    public Document read(Reader reader) throws DocumentException, IOException, XmlPullParserException {
+<span class="fc" id="L171">        getXPPParser().setInput(reader);</span>
+<span class="fc" id="L172">        return parseDocument();</span>
+    }
+
+    /**
+     * &lt;p&gt;Reads a Document from the given array of characters&lt;/p&gt;
+     *
+     * @param text is the text to parse
+     * @return the newly created Document instance
+     * @throws DocumentException if an error occurs during parsing.
+     * @throws IOException if an error occurs during reading
+     * @throws XmlPullParserException if an error occurs creating a pull parser
+     */
+    public Document read(char[] text) throws DocumentException, IOException, XmlPullParserException {
+<span class="nc" id="L185">        getXPPParser().setInput(new CharArrayReader(text));</span>
+<span class="nc" id="L186">        return parseDocument();</span>
+    }
+
+    /**
+     * &lt;p&gt;Reads a Document from the given stream&lt;/p&gt;
+     *
+     * @param in       &lt;code&gt;InputStream&lt;/code&gt; to read from.
+     * @param systemID is the URI for the input
+     * @return the newly created Document instance
+     * @throws DocumentException if an error occurs during parsing.
+     * @throws IOException if an error occurs during reading
+     * @throws XmlPullParserException if an error occurs creating a pull parser
+     */
+    public Document read(InputStream in, String systemID) throws DocumentException, IOException, XmlPullParserException {
+<span class="nc" id="L200">        return read(createReader(in), systemID);</span>
+    }
+
+    /**
+     * &lt;p&gt;Reads a Document from the given &lt;code&gt;Reader&lt;/code&gt;&lt;/p&gt;
+     *
+     * @param reader   is the reader for the input
+     * @param systemID is the URI for the input
+     * @return the newly created Document instance
+     * @throws DocumentException if an error occurs during parsing.
+     * @throws IOException if an error occurs during reading
+     * @throws XmlPullParserException if an error occurs creating a pull parser
+     */
+    public Document read(Reader reader, String systemID) throws DocumentException, IOException, XmlPullParserException {
+<span class="nc" id="L214">        Document document = read(reader);</span>
+<span class="nc" id="L215">        document.setName(systemID);</span>
+<span class="nc" id="L216">        return document;</span>
+    }
+
+
+    // Properties
+    //-------------------------------------------------------------------------
+
+    public MXParser getXPPParser() throws XmlPullParserException {
+<span class="fc bfc" id="L224" title="All 2 branches covered.">        if (xppParser == null) {</span>
+<span class="fc" id="L225">            xppParser = (MXParser) getXPPFactory().newPullParser();</span>
+        }
+<span class="fc" id="L227">        return xppParser;</span>
+    }
+
+    public XmlPullParserFactory getXPPFactory() throws XmlPullParserException {
+<span class="pc bpc" id="L231" title="1 of 2 branches missed.">        if (xppFactory == null) {</span>
+<span class="fc" id="L232">            xppFactory = XmlPullParserFactory.newInstance(MXParser.class.getName(), null);</span>
+        }
+<span class="fc" id="L234">        xppFactory.setNamespaceAware(true);</span>
+<span class="fc" id="L235">        return xppFactory;</span>
+    }
+
+    public void setXPPFactory(XmlPullParserFactory xppFactory) {
+<span class="nc" id="L239">        this.xppFactory = xppFactory;</span>
+<span class="nc" id="L240">    }</span>
+
+    /**
+     * @return the &lt;code&gt;DocumentFactory&lt;/code&gt; used to create document objects
+     */
+    public DocumentFactory getDocumentFactory() {
+<span class="fc bfc" id="L246" title="All 2 branches covered.">        if (factory == null) {</span>
+<span class="fc" id="L247">            factory = DocumentFactory.getInstance();</span>
+        }
+<span class="fc" id="L249">        return factory;</span>
+    }
+
+    /**
+     * &lt;p&gt;This sets the &lt;code&gt;DocumentFactory&lt;/code&gt; used to create new documents.
+     * This method allows the building of custom DOM4J tree objects to be implemented
+     * easily using a custom derivation of {@link DocumentFactory}&lt;/p&gt;
+     *
+     * @param factory &lt;code&gt;DocumentFactory&lt;/code&gt; used to create DOM4J objects
+     */
+    public void setDocumentFactory(DocumentFactory factory) {
+<span class="nc" id="L260">        this.factory = factory;</span>
+<span class="nc" id="L261">    }</span>
+
+
+    /**
+     * Adds the &lt;code&gt;ElementHandler&lt;/code&gt; to be called when the
+     * specified path is encounted.
+     *
+     * @param path    is the path to be handled
+     * @param handler is the &lt;code&gt;ElementHandler&lt;/code&gt; to be called
+     *                by the event based processor.
+     */
+    public void addHandler(String path, ElementHandler handler) {
+<span class="nc" id="L273">        getDispatchHandler().addHandler(path, handler);</span>
+<span class="nc" id="L274">    }</span>
+
+    /**
+     * Removes the &lt;code&gt;ElementHandler&lt;/code&gt; from the event based
+     * processor, for the specified path.
+     *
+     * @param path is the path to remove the &lt;code&gt;ElementHandler&lt;/code&gt; for.
+     */
+    public void removeHandler(String path) {
+<span class="nc" id="L283">        getDispatchHandler().removeHandler(path);</span>
+<span class="nc" id="L284">    }</span>
+
+    /**
+     * When multiple &lt;code&gt;ElementHandler&lt;/code&gt; instances have been
+     * registered, this will set a default &lt;code&gt;ElementHandler&lt;/code&gt;
+     * to be called for any path which does &lt;b&gt;NOT&lt;/b&gt; have a handler
+     * registered.
+     *
+     * @param handler is the &lt;code&gt;ElementHandler&lt;/code&gt; to be called
+     *                by the event based processor.
+     */
+    public void setDefaultHandler(ElementHandler handler) {
+<span class="nc" id="L296">        getDispatchHandler().setDefaultHandler(handler);</span>
+<span class="nc" id="L297">    }</span>
+
+    /**
+     * Returns the last time a full Document was read or a heartbeat was received. Hearbeats
+     * are represented as whitespaces or \n received while a Document is not being parsed.
+     *
+     * @return the time in milliseconds when the last document or heartbeat was received.
+     */
+    public long getLastActive() {
+<span class="nc" id="L306">        long lastHeartbeat = 0;</span>
+        try {
+<span class="nc" id="L308">            lastHeartbeat = getXPPParser().getLastHeartbeat();</span>
+        }
+<span class="nc" id="L310">        catch (XmlPullParserException e) {}</span>
+<span class="nc bnc" id="L311" title="All 2 branches missed.">        return lastActive &gt; lastHeartbeat ? lastActive : lastHeartbeat;</span>
+    }
+
+    /*
+     * DANIELE: Add parse document by string
+     */
+    public Document parseDocument(String xml) throws DocumentException {
+        /*
+        // Long way with reuse of DocumentFactory.
+        DocumentFactory df = getDocumentFactory();
+        SAXReader reader = new SAXReader( df );
+        Document document = reader.read( new StringReader( xml );*/
+
+        // Simple way
+        // TODO Optimize. Do not create a sax reader for each parsing
+<span class="nc" id="L326">        Document document = DocumentHelper.parseText(xml);</span>
+
+<span class="nc" id="L328">        return document;</span>
+    }
+
+    // Implementation methods
+    //-------------------------------------------------------------------------
+    public Document parseDocument() throws DocumentException, IOException, XmlPullParserException {
+<span class="fc" id="L334">        DocumentFactory df = getDocumentFactory();</span>
+<span class="fc" id="L335">        Document document = df.createDocument();</span>
+<span class="fc" id="L336">        Element parent = null;</span>
+<span class="fc" id="L337">        XmlPullParser pp = getXPPParser();</span>
+<span class="fc" id="L338">        int count = 0;</span>
+        while (true) {
+<span class="fc" id="L340">            int type = -1;</span>
+<span class="fc" id="L341">            type = pp.nextToken();</span>
+<span class="pc bpc" id="L342" title="5 of 9 branches missed.">            switch (type) {</span>
+                case XmlPullParser.PROCESSING_INSTRUCTION: {
+<span class="nc" id="L344">                    String text = pp.getText();</span>
+<span class="nc" id="L345">                    int loc = text.indexOf(&quot; &quot;);</span>
+<span class="nc bnc" id="L346" title="All 2 branches missed.">                    if (loc &gt;= 0) {</span>
+<span class="nc" id="L347">                        document.addProcessingInstruction(text.substring(0, loc),</span>
+<span class="nc" id="L348">                                text.substring(loc + 1));</span>
+                    }
+                    else {
+<span class="nc" id="L351">                        document.addProcessingInstruction(text, &quot;&quot;);</span>
+                    }
+<span class="nc" id="L353">                    break;</span>
+                }
+                case XmlPullParser.COMMENT: {
+<span class="nc bnc" id="L356" title="All 2 branches missed.">                    if (parent != null) {</span>
+<span class="nc" id="L357">                        parent.addComment(pp.getText());</span>
+                    }
+                    else {
+<span class="nc" id="L360">                        document.addComment(pp.getText());</span>
+                    }
+<span class="nc" id="L362">                    break;</span>
+                }
+                case XmlPullParser.CDSECT: {
+<span class="nc" id="L365">                    String text = pp.getText();</span>
+<span class="nc bnc" id="L366" title="All 2 branches missed.">                    if (parent != null) {</span>
+<span class="nc" id="L367">                        parent.addCDATA(text);</span>
+                    }
+                    else {
+<span class="nc bnc" id="L370" title="All 2 branches missed.">                        if (text.trim().length() &gt; 0) {</span>
+<span class="nc" id="L371">                            throw new DocumentException(&quot;Cannot have text content outside of the root document&quot;);</span>
+                        }
+                    }
+                    break;
+
+                }
+                case XmlPullParser.ENTITY_REF: {
+<span class="nc" id="L378">                    String text = pp.getText();</span>
+<span class="nc bnc" id="L379" title="All 2 branches missed.">                    if (parent != null) {</span>
+<span class="nc" id="L380">                        parent.addText(text);</span>
+                    }
+                    else {
+<span class="nc bnc" id="L383" title="All 2 branches missed.">                        if (text.trim().length() &gt; 0) {</span>
+<span class="nc" id="L384">                            throw new DocumentException(&quot;Cannot have an entityref outside of the root document&quot;);</span>
+                        }
+                    }
+                    break;
+                }
+                case XmlPullParser.END_DOCUMENT: {
+<span class="nc" id="L390">                    return document;</span>
+                }
+                case XmlPullParser.START_TAG: {
+<span class="fc bfc" id="L393" title="All 2 branches covered.">                    QName qname = (pp.getPrefix() == null) ? df.createQName(pp.getName(), pp.getNamespace()) : df.createQName(pp.getName(), pp.getPrefix(), pp.getNamespace());</span>
+                    Element newElement;
+
+                    // Strip namespace from all default-namespaced elements if
+                    // all ancestors have the same namespace and it's a content
+                    // namespace.
+<span class="fc" id="L399">                    boolean dropNamespace = false;</span>
+<span class="fc bfc" id="L400" title="All 4 branches covered.">                    if (pp.getPrefix() == null &amp;&amp; IGNORED_NAMESPACE_ON_STANZA.contains(qname.getNamespaceURI())) {</span>
+                        // Default namespaced element which is in a content namespace,
+                        // so we'll drop. Example, stanzas, &lt;message&gt;&lt;body/&gt;&lt;/message&gt;
+<span class="fc" id="L403">                        dropNamespace = true;</span>
+<span class="pc bfc" id="L404" title="All 2 branches covered.">                        for (Element el = parent; el != null; el = el.getParent()) {</span>
+<span class="fc" id="L405">                            final String defaultNS = el.getNamespaceForPrefix(&quot;&quot;).getURI();</span>
+<span class="fc bfc" id="L406" title="All 2 branches covered.">                            if (defaultNS.equals(&quot;&quot;)) {</span>
+                                // We've cleared this one already, just bail.
+<span class="fc" id="L408">                                break;</span>
+                            }
+<span class="pc bpc" id="L410" title="1 of 2 branches missed.">                            if (!defaultNS.equals(qname.getNamespaceURI())) {</span>
+                                // But if there's an ancestor element, we shouldn't drop
+                                // after all. Example: forwarded message.
+<span class="fc" id="L413">                                dropNamespace = false;</span>
+<span class="fc" id="L414">                                break;</span>
+                            }
+                        }
+                    }
+<span class="fc bfc" id="L418" title="All 2 branches covered.">                    if ( dropNamespace ) {</span>
+<span class="fc" id="L419">                        newElement = df.createElement(pp.getName());</span>
+                    }
+                    else {
+<span class="fc" id="L422">                        newElement = df.createElement(qname);</span>
+                    }
+<span class="fc" id="L424">                    int nsStart = pp.getNamespaceCount(pp.getDepth() - 1);</span>
+<span class="fc" id="L425">                    int nsEnd = pp.getNamespaceCount(pp.getDepth());</span>
+<span class="fc bfc" id="L426" title="All 2 branches covered.">                    for (int i = nsStart; i &lt; nsEnd; i++) {</span>
+<span class="fc" id="L427">                        final String namespacePrefix = pp.getNamespacePrefix( i );</span>
+<span class="fc" id="L428">                        final String namespaceUri = pp.getNamespaceUri( i );</span>
+<span class="fc bfc" id="L429" title="All 2 branches covered.">                        if ( namespacePrefix != null ) {</span>
+<span class="fc" id="L430">                            newElement.addNamespace(namespacePrefix, namespaceUri);</span>
+<span class="fc bfc" id="L431" title="All 4 branches covered.">                        } else if ( parent == null &amp;&amp; IGNORED_NAMESPACE_ON_STANZA.contains( namespaceUri ) ) {</span>
+                            // Don't copy.
+<span class="pc bpc" id="L433" title="1 of 4 branches missed.">                        } else if ( !(dropNamespace &amp;&amp; namespaceUri.equals( qname.getNamespaceURI() ) ) ) {</span>
+                            // Do not include certain default namespace on the root-element ('stream') or stanza level. This makes stanzas re-usable between, for example, c2s and s2s.
+<span class="fc" id="L435">                            newElement.addNamespace( &quot;&quot;, namespaceUri );</span>
+                        }
+                    }
+<span class="fc bfc" id="L438" title="All 2 branches covered.">                    for (int i = 0; i &lt; pp.getAttributeCount(); i++) {</span>
+<span class="fc bfc" id="L439" title="All 2 branches covered.">                        QName qa = (pp.getAttributePrefix(i) == null) ? df.createQName(pp.getAttributeName(i)) : df.createQName(pp.getAttributeName(i), pp.getAttributePrefix(i), pp.getAttributeNamespace(i));</span>
+<span class="fc" id="L440">                        newElement.addAttribute(qa, pp.getAttributeValue(i));</span>
+                    }
+<span class="fc bfc" id="L442" title="All 2 branches covered.">                    if (parent != null) {</span>
+<span class="fc" id="L443">                        parent.add(newElement);</span>
+                    }
+                    else {
+<span class="fc" id="L446">                        document.add(newElement);</span>
+                    }
+<span class="fc" id="L448">                    parent = newElement;</span>
+<span class="fc" id="L449">                    count++;</span>
+<span class="fc" id="L450">                    break;</span>
+                }
+                case XmlPullParser.END_TAG: {
+<span class="pc bpc" id="L453" title="1 of 2 branches missed.">                    if (parent != null) {</span>
+<span class="fc" id="L454">                        parent = parent.getParent();</span>
+                    }
+<span class="fc" id="L456">                    count--;</span>
+<span class="fc bfc" id="L457" title="All 2 branches covered.">                    if (count &lt; 1) {</span>
+                        // Update the last time a Document was received
+<span class="fc" id="L459">                        lastActive = System.currentTimeMillis();</span>
+<span class="fc" id="L460">                        return document;</span>
+                    }
+                    break;
+                }
+                case XmlPullParser.TEXT: {
+<span class="fc" id="L465">                    String text = pp.getText();</span>
+<span class="pc bpc" id="L466" title="1 of 2 branches missed.">                    if (parent != null) {</span>
+<span class="fc" id="L467">                        parent.addText(text);</span>
+                    }
+                    else {
+<span class="nc bnc" id="L470" title="All 2 branches missed.">                        if (text.trim().length() &gt; 0) {</span>
+<span class="nc" id="L471">                            throw new DocumentException(&quot;Cannot have text content outside of the root document&quot;);</span>
+                        }
+                    }
+                    break;
+                }
+                default:
+                {
+
+                }
+            }
+<span class="fc" id="L481">        }</span>
+    }
+
+    protected DispatchHandler getDispatchHandler() {
+<span class="nc bnc" id="L485" title="All 2 branches missed.">        if (dispatchHandler == null) {</span>
+<span class="nc" id="L486">            dispatchHandler = new DispatchHandler();</span>
+        }
+<span class="nc" id="L488">        return dispatchHandler;</span>
+    }
+
+    protected void setDispatchHandler(DispatchHandler dispatchHandler) {
+<span class="nc" id="L492">        this.dispatchHandler = dispatchHandler;</span>
+<span class="nc" id="L493">    }</span>
+
+    /**
+     * Factory method to create a Reader from the given InputStream.
+     * @param in the input stream
+     * @return the reader
+     * @throws IOException never
+     */
+    protected Reader createReader(InputStream in) throws IOException {
+<span class="nc" id="L502">        return new BufferedReader(new InputStreamReader(in));</span>
+    }
+
+    private Reader createReader(InputStream in, String charSet) throws UnsupportedEncodingException {
+<span class="nc" id="L506">        return new BufferedReader(new InputStreamReader(in, charSet));</span>
+    }
+}
+
+/*
+ * Redistribution and use of this software and associated documentation
+ * (&quot;Software&quot;), with or without modification, are permitted provided
+ * that the following conditions are met:
+ *
+ * 1. Redistributions of source code must retain copyright
+ *    statements and notices.  Redistributions must also contain a
+ *    copy of this document.
+ *
+ * 2. Redistributions in binary form must reproduce the
+ *    above copyright notice, this list of conditions and the
+ *    following disclaimer in the documentation and/or other
+ *    materials provided with the distribution.
+ *
+ * 3. The name &quot;DOM4J&quot; must not be used to endorse or promote
+ *    products derived from this Software without prior written
+ *    permission of MetaStuff, Ltd.  For written permission,
+ *    please contact dom4j-info@metastuff.com.
+ *
+ * 4. Products derived from this Software may not be called &quot;DOM4J&quot;
+ *    nor may &quot;DOM4J&quot; appear in their names without prior written
+ *    permission of MetaStuff, Ltd. DOM4J is a registered
+ *    trademark of MetaStuff, Ltd.
+ *
+ * 5. Due credit should be given to the DOM4J Project -
+ *    http://www.dom4j.org
+ *
+ * THIS SOFTWARE IS PROVIDED BY METASTUFF, LTD. AND CONTRIBUTORS
+ * ``AS IS'' AND ANY EXPRESSED OR IMPLIED WARRANTIES, INCLUDING, BUT
+ * NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND
+ * FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL
+ * METASTUFF, LTD. OR ITS CONTRIBUTORS BE LIABLE FOR ANY DIRECT,
+ * INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
+ * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
+ * OF THE POSSIBILITY OF SUCH DAMAGE.
+ *
+ * Copyright 2001-2004 (C) MetaStuff, Ltd. All Rights Reserved.
+ *
+ */
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

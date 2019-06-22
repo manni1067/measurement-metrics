@@ -1,0 +1,361 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>MINAConnectionAcceptor.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.spi</a> &gt; <span class="el_source">MINAConnectionAcceptor.java</span></div><h1>MINAConnectionAcceptor.java</h1><pre class="source lang-java linenums">package org.jivesoftware.openfire.spi;
+
+import org.apache.mina.core.filterchain.DefaultIoFilterChainBuilder;
+import org.apache.mina.core.service.IoService;
+import org.apache.mina.core.service.IoServiceListener;
+import org.apache.mina.core.session.IdleStatus;
+import org.apache.mina.core.session.IoSession;
+import org.apache.mina.filter.codec.ProtocolCodecFilter;
+import org.apache.mina.filter.executor.ExecutorFilter;
+import org.apache.mina.filter.ssl.SslFilter;
+import org.apache.mina.integration.jmx.IoServiceMBean;
+import org.apache.mina.integration.jmx.IoSessionMBean;
+import org.apache.mina.transport.socket.SocketSessionConfig;
+import org.apache.mina.transport.socket.nio.NioSocketAcceptor;
+import org.jivesoftware.openfire.Connection;
+import org.jivesoftware.openfire.JMXManager;
+import org.jivesoftware.openfire.net.StalledSessionsFilter;
+import org.jivesoftware.openfire.nio.*;
+import org.jivesoftware.util.JiveGlobals;
+import org.jivesoftware.util.NamedThreadFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import javax.management.JMException;
+import javax.management.MBeanServer;
+import javax.management.MalformedObjectNameException;
+import javax.management.ObjectName;
+import java.lang.management.ManagementFactory;
+import java.net.InetSocketAddress;
+import java.security.KeyManagementException;
+import java.security.KeyStoreException;
+import java.security.NoSuchAlgorithmException;
+import java.security.UnrecoverableKeyException;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+
+/**
+ * This class is responsible for accepting new (socket) connections, using Java NIO implementation provided by the
+ * Apache MINA framework.
+ *
+ * @author Guus der Kinderen, guus.der.kinderen@gmail.com
+ */
+class MINAConnectionAcceptor extends ConnectionAcceptor
+{
+    private final Logger Log;
+    private final String name;
+    private final ConnectionHandler connectionHandler;
+
+    private final EncryptionArtifactFactory encryptionArtifactFactory;
+
+    private NioSocketAcceptor socketAcceptor;
+
+    /**
+     * Instantiates, but not starts, a new instance.
+     */
+    public MINAConnectionAcceptor( ConnectionConfiguration configuration )
+    {
+<span class="nc" id="L59">        super( configuration );</span>
+
+<span class="nc bnc" id="L61" title="All 2 branches missed.">        this.name = configuration.getType().toString().toLowerCase() + ( configuration.getTlsPolicy() == Connection.TLSPolicy.legacyMode ? &quot;_ssl&quot; : &quot;&quot; );</span>
+<span class="nc" id="L62">        Log = LoggerFactory.getLogger( MINAConnectionAcceptor.class.getName() + &quot;[&quot; + name + &quot;]&quot; );</span>
+
+<span class="nc bnc" id="L64" title="All 5 branches missed.">        switch ( configuration.getType() )</span>
+        {
+             case SOCKET_S2S:
+<span class="nc" id="L67">                connectionHandler = new ServerConnectionHandler( configuration );</span>
+<span class="nc" id="L68">                break;</span>
+            case SOCKET_C2S:
+<span class="nc" id="L70">                connectionHandler = new ClientConnectionHandler( configuration );</span>
+<span class="nc" id="L71">                break;</span>
+            case COMPONENT:
+<span class="nc" id="L73">                connectionHandler = new ComponentConnectionHandler( configuration );</span>
+<span class="nc" id="L74">                break;</span>
+            case CONNECTION_MANAGER:
+<span class="nc" id="L76">                connectionHandler = new MultiplexerConnectionHandler( configuration );</span>
+<span class="nc" id="L77">                break;</span>
+            default:
+<span class="nc" id="L79">                throw new IllegalStateException( &quot;This implementation does not support the connection type as defined in the provided configuration: &quot; + configuration.getType() );</span>
+        }
+
+<span class="nc" id="L82">        this.encryptionArtifactFactory = new EncryptionArtifactFactory( configuration );</span>
+<span class="nc" id="L83">    }</span>
+
+    /**
+     * Starts this acceptor by binding the socket acceptor. When the acceptor is already started, a warning will be
+     * logged and the method invocation is otherwise ignored.
+     */
+    @Override
+    public synchronized void start()
+    {
+<span class="nc bnc" id="L92" title="All 2 branches missed.">        if ( socketAcceptor != null )</span>
+        {
+<span class="nc" id="L94">            Log.warn( &quot;Unable to start acceptor (it is already started!)&quot; );</span>
+<span class="nc" id="L95">            return;</span>
+        }
+
+        try
+        {
+            // Configure the thread pool that is to be used.
+<span class="nc" id="L101">            final int initialSize = ( configuration.getMaxThreadPoolSize() / 4 ) + 1;</span>
+<span class="nc" id="L102">            final ExecutorFilter executorFilter = new ExecutorFilter( initialSize, configuration.getMaxThreadPoolSize(), 60, TimeUnit.SECONDS );</span>
+<span class="nc" id="L103">            final ThreadPoolExecutor eventExecutor = (ThreadPoolExecutor) executorFilter.getExecutor();</span>
+<span class="nc" id="L104">            final ThreadFactory threadFactory = new NamedThreadFactory( name + &quot;-thread-&quot;, eventExecutor.getThreadFactory(), true, null );</span>
+<span class="nc" id="L105">            eventExecutor.setThreadFactory( threadFactory );</span>
+
+            // Construct a new socket acceptor, and configure it.
+<span class="nc" id="L108">            socketAcceptor = buildSocketAcceptor();</span>
+
+<span class="nc bnc" id="L110" title="All 2 branches missed.">            if ( JMXManager.isEnabled() )</span>
+            {
+<span class="nc" id="L112">                configureJMX( socketAcceptor, name );</span>
+            }
+
+<span class="nc" id="L115">            final DefaultIoFilterChainBuilder filterChain = socketAcceptor.getFilterChain();</span>
+<span class="nc" id="L116">            filterChain.addFirst( ConnectionManagerImpl.EXECUTOR_FILTER_NAME, executorFilter );</span>
+
+            // Add the XMPP codec filter
+<span class="nc" id="L119">            filterChain.addAfter( ConnectionManagerImpl.EXECUTOR_FILTER_NAME, ConnectionManagerImpl.XMPP_CODEC_FILTER_NAME, new ProtocolCodecFilter( new XMPPCodecFactory() ) );</span>
+
+            // Kill sessions whose outgoing queues keep growing and fail to send traffic
+<span class="nc" id="L122">            filterChain.addAfter( ConnectionManagerImpl.XMPP_CODEC_FILTER_NAME, ConnectionManagerImpl.CAPACITY_FILTER_NAME, new StalledSessionsFilter() );</span>
+
+            // Ports can be configured to start connections in SSL (as opposed to upgrade a non-encrypted socket to an encrypted one, typically using StartTLS)
+<span class="nc bnc" id="L125" title="All 2 branches missed.">            if ( configuration.getTlsPolicy() == Connection.TLSPolicy.legacyMode )</span>
+            {
+<span class="nc" id="L127">                final SslFilter sslFilter = encryptionArtifactFactory.createServerModeSslFilter();</span>
+<span class="nc" id="L128">                filterChain.addAfter( ConnectionManagerImpl.EXECUTOR_FILTER_NAME, ConnectionManagerImpl.TLS_FILTER_NAME, sslFilter );</span>
+            }
+
+            // Throttle sessions who send data too fast
+<span class="nc bnc" id="L132" title="All 2 branches missed.">            if ( configuration.getMaxBufferSize() &gt; 0 )</span>
+            {
+<span class="nc" id="L134">                socketAcceptor.getSessionConfig().setMaxReadBufferSize( configuration.getMaxBufferSize() );</span>
+<span class="nc" id="L135">                Log.debug( &quot;Throttling read buffer for connections to max={} bytes&quot;, configuration.getMaxBufferSize() );</span>
+            }
+
+            // Start accepting connections
+<span class="nc" id="L139">            socketAcceptor.setHandler( connectionHandler );</span>
+<span class="nc" id="L140">            socketAcceptor.bind( new InetSocketAddress( configuration.getBindAddress(), configuration.getPort() ) );</span>
+        }
+<span class="nc" id="L142">        catch ( Exception e )</span>
+        {
+<span class="nc" id="L144">            System.err.println( &quot;Error starting &quot; + configuration.getPort() + &quot;: &quot; + e.getMessage() );</span>
+<span class="nc" id="L145">            Log.error( &quot;Error starting: &quot; + configuration.getPort(), e );</span>
+            // Reset for future use.
+<span class="nc bnc" id="L147" title="All 2 branches missed.">            if (socketAcceptor != null) {</span>
+                try {
+<span class="nc" id="L149">                    socketAcceptor.unbind();</span>
+                } finally {
+<span class="nc" id="L151">                    socketAcceptor = null;</span>
+<span class="nc" id="L152">                }</span>
+            }
+<span class="nc" id="L154">        }</span>
+<span class="nc" id="L155">    }</span>
+
+    /**
+     * Stops this acceptor by unbinding the socket acceptor. Does nothing when the instance is not started.
+     */
+    @Override
+    public synchronized void stop()
+    {
+<span class="nc bnc" id="L163" title="All 2 branches missed.">        if ( socketAcceptor != null )</span>
+        {
+<span class="nc" id="L165">            socketAcceptor.unbind();</span>
+<span class="nc" id="L166">            socketAcceptor = null;</span>
+        }
+<span class="nc" id="L168">    }</span>
+
+    /**
+     * Determines if this instance is currently in a state where it is actively serving connections.
+     *
+     * @return false when this instance is started and is currently being used to serve connections (otherwise true)
+     */
+    @Override
+    public synchronized boolean isIdle()
+    {
+<span class="nc bnc" id="L178" title="All 4 branches missed.">        return this.socketAcceptor != null &amp;&amp; this.socketAcceptor.getManagedSessionCount() == 0;</span>
+    }
+
+    @Override
+    public synchronized void reconfigure( ConnectionConfiguration configuration )
+    {
+<span class="nc" id="L184">        this.configuration = configuration;</span>
+
+<span class="nc bnc" id="L186" title="All 2 branches missed.">        if ( socketAcceptor == null )</span>
+        {
+<span class="nc" id="L188">            return; // reconfig will occur when acceptor is started.</span>
+        }
+
+<span class="nc" id="L191">        final DefaultIoFilterChainBuilder filterChain = socketAcceptor.getFilterChain();</span>
+
+<span class="nc bnc" id="L193" title="All 2 branches missed.">        if ( filterChain.contains( ConnectionManagerImpl.EXECUTOR_FILTER_NAME ) )</span>
+        {
+<span class="nc" id="L195">            final ExecutorFilter executorFilter = (ExecutorFilter) filterChain.get( ConnectionManagerImpl.EXECUTOR_FILTER_NAME );</span>
+<span class="nc" id="L196">            ( (ThreadPoolExecutor) executorFilter.getExecutor()).setCorePoolSize( ( configuration.getMaxThreadPoolSize() / 4 ) + 1 );</span>
+<span class="nc" id="L197">            ( (ThreadPoolExecutor) executorFilter.getExecutor()).setMaximumPoolSize( ( configuration.getMaxThreadPoolSize() ) );</span>
+        }
+
+<span class="nc bnc" id="L200" title="All 2 branches missed.">        if ( configuration.getTlsPolicy() == Connection.TLSPolicy.legacyMode )</span>
+        {
+            // add or replace TLS filter (that's used only for 'direct-TLS')
+            try
+            {
+<span class="nc" id="L205">                final SslFilter sslFilter = encryptionArtifactFactory.createServerModeSslFilter();</span>
+<span class="nc bnc" id="L206" title="All 2 branches missed.">                if ( filterChain.contains( ConnectionManagerImpl.TLS_FILTER_NAME ) )</span>
+                {
+<span class="nc" id="L208">                    filterChain.replace( ConnectionManagerImpl.TLS_FILTER_NAME, sslFilter );</span>
+                }
+                else
+                {
+<span class="nc" id="L212">                    filterChain.addAfter( ConnectionManagerImpl.EXECUTOR_FILTER_NAME, ConnectionManagerImpl.TLS_FILTER_NAME, sslFilter );</span>
+                }
+            }
+<span class="nc" id="L215">            catch ( KeyManagementException | NoSuchAlgorithmException | UnrecoverableKeyException | KeyStoreException e )</span>
+            {
+<span class="nc" id="L217">                Log.error( &quot;An exception occurred while reloading the TLS configuration.&quot;, e );</span>
+<span class="nc" id="L218">            }</span>
+        }
+        else
+        {
+            // The acceptor is in 'startTLS' mode. Remove TLS filter (that's used only for 'direct-TLS')
+<span class="nc bnc" id="L223" title="All 2 branches missed.">            if ( filterChain.contains( ConnectionManagerImpl.TLS_FILTER_NAME ) )</span>
+            {
+<span class="nc" id="L225">                filterChain.remove( ConnectionManagerImpl.TLS_FILTER_NAME );</span>
+            }
+        }
+
+<span class="nc bnc" id="L229" title="All 2 branches missed.">        if ( configuration.getMaxBufferSize() &gt; 0 )</span>
+        {
+<span class="nc" id="L231">            socketAcceptor.getSessionConfig().setMaxReadBufferSize( configuration.getMaxBufferSize() );</span>
+<span class="nc" id="L232">            Log.debug( &quot;Throttling read buffer for connections to max={} bytes&quot;, configuration.getMaxBufferSize() );</span>
+        }
+<span class="nc" id="L234">    }</span>
+
+    public synchronized int getPort()
+    {
+<span class="nc" id="L238">        return configuration.getPort();</span>
+    }
+
+    // TODO see if we can avoid exposing MINA internals.
+    public synchronized NioSocketAcceptor getSocketAcceptor()
+    {
+<span class="nc" id="L244">        return socketAcceptor;</span>
+    }
+
+    private static NioSocketAcceptor buildSocketAcceptor()
+    {
+        // Create SocketAcceptor with correct number of processors
+<span class="nc" id="L250">        final int processorCount = JiveGlobals.getIntProperty( &quot;xmpp.processor.count&quot;, Runtime.getRuntime().availableProcessors() );</span>
+
+<span class="nc" id="L252">        final NioSocketAcceptor socketAcceptor = new NioSocketAcceptor( processorCount );</span>
+
+        // Set that it will be possible to bind a socket if there is a connection in the timeout state.
+<span class="nc" id="L255">        socketAcceptor.setReuseAddress( true );</span>
+
+        // Set the listen backlog (queue) length. Default is 50.
+<span class="nc" id="L258">        socketAcceptor.setBacklog( JiveGlobals.getIntProperty( &quot;xmpp.socket.backlog&quot;, 50 ) );</span>
+
+        // Set default (low level) settings for new socket connections
+<span class="nc" id="L261">        final SocketSessionConfig socketSessionConfig = socketAcceptor.getSessionConfig();</span>
+
+        //socketSessionConfig.setKeepAlive();
+<span class="nc" id="L264">        final int receiveBuffer = JiveGlobals.getIntProperty( &quot;xmpp.socket.buffer.receive&quot;, -1 );</span>
+<span class="nc bnc" id="L265" title="All 2 branches missed.">        if ( receiveBuffer &gt; 0 )</span>
+        {
+<span class="nc" id="L267">            socketSessionConfig.setReceiveBufferSize( receiveBuffer );</span>
+        }
+
+<span class="nc" id="L270">        final int sendBuffer = JiveGlobals.getIntProperty( &quot;xmpp.socket.buffer.send&quot;, -1 );</span>
+<span class="nc bnc" id="L271" title="All 2 branches missed.">        if ( sendBuffer &gt; 0 )</span>
+        {
+<span class="nc" id="L273">            socketSessionConfig.setSendBufferSize( sendBuffer );</span>
+        }
+
+<span class="nc" id="L276">        final int linger = JiveGlobals.getIntProperty( &quot;xmpp.socket.linger&quot;, -1 );</span>
+<span class="nc bnc" id="L277" title="All 2 branches missed.">        if ( linger &gt; 0 )</span>
+        {
+<span class="nc" id="L279">            socketSessionConfig.setSoLinger( linger );</span>
+        }
+
+<span class="nc" id="L282">        socketSessionConfig.setTcpNoDelay( JiveGlobals.getBooleanProperty( &quot;xmpp.socket.tcp-nodelay&quot;, socketSessionConfig.isTcpNoDelay() ) );</span>
+
+<span class="nc" id="L284">        return socketAcceptor;</span>
+    }
+
+    private void configureJMX( NioSocketAcceptor acceptor, String suffix )
+    {
+<span class="nc" id="L289">        final String prefix = IoServiceMBean.class.getPackage().getName();</span>
+
+        // monitor the IoService
+        try
+        {
+<span class="nc" id="L294">            final IoServiceMBean mbean = new IoServiceMBean( acceptor );</span>
+<span class="nc" id="L295">            final MBeanServer mbs = ManagementFactory.getPlatformMBeanServer();</span>
+<span class="nc" id="L296">            final ObjectName name = new ObjectName( prefix + &quot;:type=SocketAcceptor,name=&quot; + suffix );</span>
+<span class="nc" id="L297">            mbs.registerMBean( mbean, name );</span>
+            // mbean.startCollectingStats(JiveGlobals.getIntProperty(&quot;xmpp.socket.jmx.interval&quot;, 60000));
+        }
+<span class="nc" id="L300">        catch ( JMException ex )</span>
+        {
+<span class="nc" id="L302">            Log.warn( &quot;Failed to register MINA acceptor mbean (JMX): &quot; + ex );</span>
+<span class="nc" id="L303">        }</span>
+
+        // optionally register IoSession mbeans (one per session)
+<span class="nc bnc" id="L306" title="All 2 branches missed.">        if ( JiveGlobals.getBooleanProperty( &quot;xmpp.socket.jmx.sessions&quot;, false ) )</span>
+        {
+<span class="nc" id="L308">            acceptor.addListener( new IoServiceListener()</span>
+<span class="nc" id="L309">            {</span>
+                private ObjectName getObjectNameForSession( IoSession session ) throws MalformedObjectNameException
+                {
+<span class="nc" id="L312">                    return new ObjectName( prefix + &quot;:type=IoSession,name=&quot; + session.getRemoteAddress().toString().replace( ':', '/' ) );</span>
+                }
+
+                @Override
+                public void sessionCreated(final IoSession session)
+                {
+                    try
+                    {
+<span class="nc" id="L320">                        ManagementFactory.getPlatformMBeanServer().registerMBean(</span>
+                                new IoSessionMBean( session ),
+<span class="nc" id="L322">                                getObjectNameForSession( session )</span>
+                        );
+                    }
+<span class="nc" id="L325">                    catch ( JMException ex )</span>
+                    {
+<span class="nc" id="L327">                        Log.warn( &quot;Failed to register MINA session mbean (JMX): &quot; + ex );</span>
+<span class="nc" id="L328">                    }</span>
+<span class="nc" id="L329">                }</span>
+
+                @Override
+                public void sessionDestroyed(final IoSession session)
+                {
+                    try
+                    {
+<span class="nc" id="L336">                        ManagementFactory.getPlatformMBeanServer().unregisterMBean(</span>
+<span class="nc" id="L337">                                getObjectNameForSession( session )</span>
+                        );
+                    }
+<span class="nc" id="L340">                    catch ( JMException ex )</span>
+                    {
+<span class="nc" id="L342">                        Log.warn( &quot;Failed to unregister MINA session mbean (JMX): &quot; + ex );</span>
+<span class="nc" id="L343">                    }</span>
+<span class="nc" id="L344">                }</span>
+
+                @Override
+<span class="nc" id="L347">                public void serviceActivated(final IoService service) {}</span>
+
+                @Override
+<span class="nc" id="L350">                public void serviceDeactivated(final IoService service ) {}</span>
+
+                @Override
+<span class="nc" id="L353">                public void serviceIdle(final IoService service, final IdleStatus idleStatus) {}</span>
+
+                @Override
+<span class="nc" id="L356">                public void sessionClosed(final IoSession ioSession) {}</span>
+            } );
+        }
+<span class="nc" id="L359">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

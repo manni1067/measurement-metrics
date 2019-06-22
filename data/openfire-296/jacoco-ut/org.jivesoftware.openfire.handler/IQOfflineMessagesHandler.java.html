@@ -1,0 +1,225 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>IQOfflineMessagesHandler.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.handler</a> &gt; <span class="el_source">IQOfflineMessagesHandler.java</span></div><h1>IQOfflineMessagesHandler.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.handler;
+
+import org.dom4j.DocumentHelper;
+import org.dom4j.Element;
+import org.jivesoftware.openfire.IQHandlerInfo;
+import org.jivesoftware.openfire.OfflineMessage;
+import org.jivesoftware.openfire.OfflineMessageStore;
+import org.jivesoftware.openfire.RoutingTable;
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.auth.UnauthorizedException;
+import org.jivesoftware.openfire.disco.DiscoInfoProvider;
+import org.jivesoftware.openfire.disco.DiscoItem;
+import org.jivesoftware.openfire.disco.DiscoItemsProvider;
+import org.jivesoftware.openfire.disco.IQDiscoInfoHandler;
+import org.jivesoftware.openfire.disco.IQDiscoItemsHandler;
+import org.jivesoftware.openfire.disco.ServerFeaturesProvider;
+import org.jivesoftware.openfire.session.LocalClientSession;
+import org.jivesoftware.openfire.user.UserManager;
+import org.jivesoftware.util.XMPPDateTimeFormat;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmpp.forms.DataForm;
+import org.xmpp.forms.FormField;
+import org.xmpp.packet.IQ;
+import org.xmpp.packet.JID;
+import org.xmpp.packet.PacketError;
+
+import java.text.ParseException;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Date;
+import java.util.Iterator;
+import java.util.List;
+
+/**
+ * Implements JEP-0013: Flexible Offline Message Retrieval. Allows users to request number of
+ * messages, request message headers, retrieve specific messages, remove specific messages,
+ * retrieve all messages and remove all messages.
+ *
+ * @author Gaston Dombiak
+ */
+public class IQOfflineMessagesHandler extends IQHandler implements ServerFeaturesProvider,
+        DiscoInfoProvider, DiscoItemsProvider {
+
+<span class="nc" id="L61">    private static final Logger Log = LoggerFactory.getLogger(IQOfflineMessagesHandler.class);</span>
+
+    private static final String NAMESPACE = &quot;http://jabber.org/protocol/offline&quot;;
+
+<span class="nc" id="L65">    final private XMPPDateTimeFormat xmppDateTime = new XMPPDateTimeFormat();</span>
+    private IQHandlerInfo info;
+    private IQDiscoInfoHandler infoHandler;
+    private IQDiscoItemsHandler itemsHandler;
+
+    private RoutingTable routingTable;
+    private UserManager userManager;
+    private OfflineMessageStore messageStore;
+
+    public IQOfflineMessagesHandler() {
+<span class="nc" id="L75">        super(&quot;Flexible Offline Message Retrieval Handler&quot;);</span>
+<span class="nc" id="L76">        info = new IQHandlerInfo(&quot;offline&quot;, NAMESPACE);</span>
+<span class="nc" id="L77">    }</span>
+
+    @Override
+    public IQ handleIQ(IQ packet) throws UnauthorizedException {
+<span class="nc" id="L81">        IQ reply = IQ.createResultIQ(packet);</span>
+<span class="nc" id="L82">        Element offlineRequest = packet.getChildElement();</span>
+
+<span class="nc" id="L84">        JID from = packet.getFrom();</span>
+<span class="nc bnc" id="L85" title="All 2 branches missed.">        if (offlineRequest.element(&quot;purge&quot;) != null) {</span>
+            // User requested to delete all offline messages
+<span class="nc" id="L87">            messageStore.deleteMessages(from.getNode());</span>
+        }
+<span class="nc bnc" id="L89" title="All 2 branches missed.">        else if (offlineRequest.element(&quot;fetch&quot;) != null) {</span>
+            // Mark that offline messages shouldn't be sent when the user becomes available
+<span class="nc" id="L91">            stopOfflineFlooding(from);</span>
+            // User requested to receive all offline messages
+<span class="nc bnc" id="L93" title="All 2 branches missed.">            for (OfflineMessage offlineMessage : messageStore.getMessages(from.getNode(), false)) {</span>
+<span class="nc" id="L94">                sendOfflineMessage(from, offlineMessage);</span>
+<span class="nc" id="L95">            }</span>
+        }
+        else {
+<span class="nc bnc" id="L98" title="All 2 branches missed.">            for (Iterator it = offlineRequest.elementIterator(&quot;item&quot;); it.hasNext();) {</span>
+<span class="nc" id="L99">                Element item = (Element) it.next();</span>
+<span class="nc" id="L100">                Date creationDate = null;</span>
+                try {
+<span class="nc" id="L102">                    creationDate = xmppDateTime.parseString(item.attributeValue(&quot;node&quot;));</span>
+<span class="nc" id="L103">                } catch (ParseException e) {</span>
+<span class="nc" id="L104">                    Log.error(&quot;Error parsing date&quot;, e);</span>
+<span class="nc" id="L105">                }</span>
+<span class="nc bnc" id="L106" title="All 2 branches missed.">                if (&quot;view&quot;.equals(item.attributeValue(&quot;action&quot;))) {</span>
+                    // User requested to receive specific message
+<span class="nc" id="L108">                    OfflineMessage offlineMsg = messageStore.getMessage(from.getNode(), creationDate);</span>
+<span class="nc bnc" id="L109" title="All 2 branches missed.">                    if (offlineMsg != null) {</span>
+<span class="nc" id="L110">                        sendOfflineMessage(from, offlineMsg);</span>
+                    }
+<span class="nc" id="L112">                }</span>
+<span class="nc bnc" id="L113" title="All 2 branches missed.">                else if (&quot;remove&quot;.equals(item.attributeValue(&quot;action&quot;))) {</span>
+                    // User requested to delete specific message
+<span class="nc bnc" id="L115" title="All 2 branches missed.">                    if (messageStore.getMessage(from.getNode(), creationDate) != null) {</span>
+<span class="nc" id="L116">                        messageStore.deleteMessage(from.getNode(), creationDate);</span>
+                    } else {
+                        // If the requester is authorized but the node does not exist, the server MUST return a &lt;item-not-found/&gt; error.
+<span class="nc" id="L119">                        reply.setError(PacketError.Condition.item_not_found);</span>
+                    }
+                }
+<span class="nc" id="L122">            }</span>
+        }
+<span class="nc" id="L124">        return reply;</span>
+    }
+
+    private void sendOfflineMessage(JID receipient, OfflineMessage offlineMessage) {
+<span class="nc" id="L128">        Element offlineInfo = offlineMessage.addChildElement(&quot;offline&quot;, NAMESPACE);</span>
+<span class="nc" id="L129">        offlineInfo.addElement(&quot;item&quot;).addAttribute(&quot;node&quot;,</span>
+<span class="nc" id="L130">                XMPPDateTimeFormat.format(offlineMessage.getCreationDate()));</span>
+<span class="nc" id="L131">        routingTable.routePacket(receipient, offlineMessage, true);</span>
+<span class="nc" id="L132">    }</span>
+
+    @Override
+    public IQHandlerInfo getInfo() {
+<span class="nc" id="L136">        return info;</span>
+    }
+
+    @Override
+    public Iterator&lt;String&gt; getFeatures() {
+<span class="nc" id="L141">        return Collections.singleton(NAMESPACE).iterator();</span>
+    }
+
+    @Override
+    public Iterator&lt;Element&gt; getIdentities(String name, String node, JID senderJID) {
+<span class="nc" id="L146">        Element identity = DocumentHelper.createElement(&quot;identity&quot;);</span>
+<span class="nc" id="L147">        identity.addAttribute(&quot;category&quot;, &quot;automation&quot;);</span>
+<span class="nc" id="L148">        identity.addAttribute(&quot;type&quot;, &quot;message-list&quot;);</span>
+<span class="nc" id="L149">        return Collections.singleton(identity).iterator();</span>
+    }
+
+    @Override
+    public Iterator&lt;String&gt; getFeatures(String name, String node, JID senderJID) {
+<span class="nc" id="L154">        return Collections.singleton(NAMESPACE).iterator();</span>
+    }
+
+    @Override
+    public DataForm getExtendedInfo(String name, String node, JID senderJID) {
+        // Mark that offline messages shouldn't be sent when the user becomes available
+<span class="nc" id="L160">        stopOfflineFlooding(senderJID);</span>
+
+<span class="nc" id="L162">        final DataForm dataForm = new DataForm(DataForm.Type.result);</span>
+
+<span class="nc" id="L164">        final FormField field1 = dataForm.addField();</span>
+<span class="nc" id="L165">        field1.setVariable(&quot;FORM_TYPE&quot;);</span>
+<span class="nc" id="L166">        field1.setType(FormField.Type.hidden);</span>
+<span class="nc" id="L167">        field1.addValue(NAMESPACE);</span>
+
+<span class="nc" id="L169">        final FormField field2 = dataForm.addField();</span>
+<span class="nc" id="L170">        field2.setVariable(&quot;number_of_messages&quot;);</span>
+<span class="nc" id="L171">        field2.addValue(String.valueOf(messageStore.getMessages(senderJID.getNode(), false).size()));</span>
+
+<span class="nc" id="L173">        return dataForm;</span>
+    }
+
+    @Override
+    public boolean hasInfo(String name, String node, JID senderJID) {
+<span class="nc bnc" id="L178" title="All 4 branches missed.">        return NAMESPACE.equals(node) &amp;&amp; userManager.isRegisteredUser(senderJID.getNode());</span>
+    }
+
+    @Override
+    public Iterator&lt;DiscoItem&gt; getItems(String name, String node, JID senderJID) {
+        // Mark that offline messages shouldn't be sent when the user becomes available
+<span class="nc" id="L184">        stopOfflineFlooding(senderJID);</span>
+<span class="nc" id="L185">        List&lt;DiscoItem&gt; answer = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L186" title="All 2 branches missed.">        for (OfflineMessage offlineMessage : messageStore.getMessages(senderJID.getNode(), false)) {</span>
+<span class="nc" id="L187">            answer.add(new DiscoItem(senderJID.asBareJID(), offlineMessage.getFrom().toString(),</span>
+<span class="nc" id="L188">                    XMPPDateTimeFormat.format(offlineMessage.getCreationDate()), null));</span>
+<span class="nc" id="L189">        }</span>
+
+<span class="nc" id="L191">        return answer.iterator();</span>
+    }
+
+    @Override
+    public void initialize(XMPPServer server) {
+<span class="nc" id="L196">        super.initialize(server);</span>
+<span class="nc" id="L197">        infoHandler = server.getIQDiscoInfoHandler();</span>
+<span class="nc" id="L198">        itemsHandler = server.getIQDiscoItemsHandler();</span>
+<span class="nc" id="L199">        messageStore = server.getOfflineMessageStore();</span>
+<span class="nc" id="L200">        userManager = server.getUserManager();</span>
+<span class="nc" id="L201">        routingTable = server.getRoutingTable();</span>
+<span class="nc" id="L202">    }</span>
+
+    @Override
+    public void start() throws IllegalStateException {
+<span class="nc" id="L206">        super.start();</span>
+<span class="nc" id="L207">        infoHandler.setServerNodeInfoProvider(NAMESPACE, this);</span>
+<span class="nc" id="L208">        itemsHandler.setServerNodeInfoProvider(NAMESPACE, this);</span>
+<span class="nc" id="L209">    }</span>
+
+    @Override
+    public void stop() {
+<span class="nc" id="L213">        super.stop();</span>
+<span class="nc" id="L214">        infoHandler.removeServerNodeInfoProvider(NAMESPACE);</span>
+<span class="nc" id="L215">        itemsHandler.removeServerNodeInfoProvider(NAMESPACE);</span>
+<span class="nc" id="L216">    }</span>
+
+    private void stopOfflineFlooding(JID senderJID) {
+<span class="nc" id="L219">        LocalClientSession session = (LocalClientSession) sessionManager.getSession(senderJID);</span>
+<span class="nc bnc" id="L220" title="All 2 branches missed.">        if (session != null) {</span>
+<span class="nc" id="L221">            session.setOfflineFloodStopped(true);</span>
+        }
+<span class="nc" id="L223">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

@@ -1,0 +1,549 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>Group.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.group</a> &gt; <span class="el_source">Group.java</span></div><h1>Group.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2004-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.group;
+
+import java.io.Externalizable;
+import java.io.IOException;
+import java.io.ObjectInput;
+import java.io.ObjectOutput;
+import java.util.AbstractCollection;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentSkipListSet;
+
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.event.GroupEventDispatcher;
+import org.jivesoftware.util.PersistableMap;
+import org.jivesoftware.util.cache.CacheSizes;
+import org.jivesoftware.util.cache.Cacheable;
+import org.jivesoftware.util.cache.CannotCalculateSizeException;
+import org.jivesoftware.util.cache.ExternalizableUtil;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmpp.packet.JID;
+
+/**
+ * Groups organize users into a single entity for easier management.&lt;p&gt;
+ *
+ * The actual group implementation is controlled by the {@link GroupProvider}, which
+ * includes things like the group name, the members, and adminstrators. Each group
+ * also has properties, which are always stored in the Openfire database.
+ *
+ * @see GroupManager#createGroup(String)
+ *
+ * @author Matt Tucker
+ */
+public class Group implements Cacheable, Externalizable {
+
+<span class="nc" id="L57">    private static final Logger Log = LoggerFactory.getLogger(Group.class);</span>
+
+    private transient GroupProvider provider;
+    private transient GroupManager groupManager;
+    private transient PersistableMap&lt;String, String&gt; properties;
+    private transient GroupJID jid;
+
+    private String name;
+    private String description;
+    private ConcurrentSkipListSet&lt;JID&gt; members;
+    private ConcurrentSkipListSet&lt;JID&gt; administrators;
+
+    /**
+     * Constructor added for Externalizable. Do not use this constructor.
+     */
+<span class="nc" id="L72">    public Group() {</span>
+<span class="nc" id="L73">    }</span>
+
+    /**
+     * Constructs a new group. Note: this constructor is intended for implementors of the
+     * {@link GroupProvider} interface. To create a new group, use the
+     * {@link GroupManager#createGroup(String)} method.
+     *
+     * @param name the name.
+     * @param description the description.
+     * @param members a Collection of the group members.
+     * @param administrators a Collection of the group administrators.
+     */
+    public Group(String name, String description, Collection&lt;JID&gt; members,
+            Collection&lt;JID&gt; administrators)
+<span class="nc" id="L87">    {</span>
+<span class="nc" id="L88">        this.groupManager = GroupManager.getInstance();</span>
+<span class="nc" id="L89">        this.provider = groupManager.getProvider();</span>
+<span class="nc" id="L90">        this.name = name;</span>
+<span class="nc" id="L91">        this.description = description;</span>
+<span class="nc" id="L92">        this.members = new ConcurrentSkipListSet&lt;&gt;(members);</span>
+<span class="nc" id="L93">        this.administrators = new ConcurrentSkipListSet&lt;&gt;(administrators);</span>
+<span class="nc" id="L94">    }</span>
+
+    /**
+     * Constructs a new group. Note: this constructor is intended for implementors of the
+     * {@link GroupProvider} interface. To create a new group, use the
+     * {@link GroupManager#createGroup(String)} method.
+     *
+     * @param name the name.
+     * @param description the description.
+     * @param members a Collection of the group members.
+     * @param administrators a Collection of the group administrators.
+     * @param properties a Map of properties with names and its values.
+     */
+    public Group(String name, String description, Collection&lt;JID&gt; members,
+            Collection&lt;JID&gt; administrators, Map&lt;String, String&gt; properties)
+<span class="nc" id="L109">    {</span>
+<span class="nc" id="L110">        this.groupManager = GroupManager.getInstance();</span>
+<span class="nc" id="L111">        this.provider = groupManager.getProvider();</span>
+<span class="nc" id="L112">        this.name = name;</span>
+<span class="nc" id="L113">        this.description = description;</span>
+<span class="nc" id="L114">        this.members = new ConcurrentSkipListSet&lt;&gt;(members);</span>
+<span class="nc" id="L115">        this.administrators = new ConcurrentSkipListSet&lt;&gt;(administrators);</span>
+
+<span class="nc" id="L117">        this.properties = provider.loadProperties(this);</span>
+
+        // Apply the given properties to the group
+<span class="nc bnc" id="L120" title="All 2 branches missed.">        for (Map.Entry&lt;String, String&gt; property : properties.entrySet()) {</span>
+<span class="nc bnc" id="L121" title="All 2 branches missed.">            if (!property.getValue().equals(this.properties.get(property.getKey()))) {</span>
+<span class="nc" id="L122">                this.properties.put(property.getKey(), property.getValue());</span>
+            }
+<span class="nc" id="L124">        }</span>
+        // Remove obsolete properties
+<span class="nc" id="L126">        Iterator&lt;String&gt; oldProps = this.properties.keySet().iterator();</span>
+<span class="nc bnc" id="L127" title="All 2 branches missed.">        while (oldProps.hasNext()) {</span>
+<span class="nc bnc" id="L128" title="All 2 branches missed.">            if (!properties.containsKey(oldProps.next())) {</span>
+<span class="nc" id="L129">                oldProps.remove();</span>
+            }
+        }
+<span class="nc" id="L132">    }</span>
+
+    /**
+     * Returns a JID for the group based on the group name. This
+     * instance will be of class GroupJID to distinguish it from
+     * other types of JIDs in the system.
+     *
+     * This method is synchronized to ensure each group has only
+     * a single JID instance created via lazy instantiation.
+     *
+     * @return A JID for the group.
+     */
+    public synchronized GroupJID getJID() {
+<span class="nc bnc" id="L145" title="All 2 branches missed.">        if (jid == null) {</span>
+<span class="nc" id="L146">            jid = new GroupJID(getName());</span>
+        }
+<span class="nc" id="L148">        return jid;</span>
+    }
+
+    /**
+     * Returns the name of the group. For example, 'XYZ Admins'.
+     *
+     * @return the name of the group.
+     */
+    public String getName() {
+<span class="nc" id="L157">        return name;</span>
+    }
+
+    /**
+     * Sets the name of the group. For example, 'XYZ Admins'. This
+     * method is restricted to those with group administration permission.
+     *
+     * @param name the name for the group.
+     */
+    public void setName(String name) {
+<span class="nc bnc" id="L167" title="All 8 branches missed.">        if (name == this.name || (name != null &amp;&amp; name.equals(this.name)) || provider.isReadOnly())</span>
+        {
+            // Do nothing
+<span class="nc" id="L170">            return;</span>
+        }
+        try {
+<span class="nc" id="L173">            String originalName = this.name;</span>
+<span class="nc" id="L174">            GroupJID originalJID = getJID();</span>
+<span class="nc" id="L175">            provider.setName(originalName, name);</span>
+<span class="nc" id="L176">            this.name = name;</span>
+<span class="nc" id="L177">            this.jid = null; // rebuilt when needed</span>
+
+            // Fire event.
+<span class="nc" id="L180">            Map&lt;String, Object&gt; params = new HashMap&lt;&gt;();</span>
+<span class="nc" id="L181">            params.put(&quot;type&quot;, &quot;nameModified&quot;);</span>
+<span class="nc" id="L182">            params.put(&quot;originalValue&quot;, originalName);</span>
+<span class="nc" id="L183">            params.put(&quot;originalJID&quot;, originalJID);</span>
+<span class="nc" id="L184">            GroupEventDispatcher.dispatchEvent(this, GroupEventDispatcher.EventType.group_modified,</span>
+                    params);
+        }
+<span class="nc" id="L187">        catch (GroupAlreadyExistsException e) {</span>
+<span class="nc" id="L188">            Log.error(&quot;Failed to change group name; group already exists&quot;);</span>
+<span class="nc" id="L189">        }</span>
+<span class="nc" id="L190">    }</span>
+
+    /**
+     * Returns the description of the group. The description often
+     * summarizes a group's function, such as 'Administrators of the XYZ forum'.
+     *
+     * @return the description of the group.
+     */
+    public String getDescription() {
+<span class="nc" id="L199">        return description;</span>
+    }
+
+    /**
+     * Sets the description of the group. The description often
+     * summarizes a group's function, such as 'Administrators of
+     * the XYZ forum'. This method is restricted to those with group
+     * administration permission.
+     *
+     * @param description the description of the group.
+     */
+    public void setDescription(String description) {
+<span class="nc bnc" id="L211" title="All 6 branches missed.">        if (description == this.description || (description != null &amp;&amp; description.equals(this.description)) ||</span>
+<span class="nc bnc" id="L212" title="All 2 branches missed.">                provider.isReadOnly()) {</span>
+            // Do nothing
+<span class="nc" id="L214">            return;</span>
+        }
+        try {
+<span class="nc" id="L217">            String originalDescription = this.description;</span>
+<span class="nc" id="L218">            provider.setDescription(name, description);</span>
+<span class="nc" id="L219">            this.description = description;</span>
+            // Fire event.
+<span class="nc" id="L221">            Map&lt;String, Object&gt; params = new HashMap&lt;&gt;();</span>
+<span class="nc" id="L222">            params.put(&quot;type&quot;, &quot;descriptionModified&quot;);</span>
+<span class="nc" id="L223">            params.put(&quot;originalValue&quot;, originalDescription);</span>
+<span class="nc" id="L224">            GroupEventDispatcher.dispatchEvent(this,</span>
+                    GroupEventDispatcher.EventType.group_modified, params);
+        }
+<span class="nc" id="L227">        catch (Exception e) {</span>
+<span class="nc" id="L228">            Log.error(e.getMessage(), e);</span>
+<span class="nc" id="L229">        }</span>
+<span class="nc" id="L230">    }</span>
+
+    @Override
+    public String toString() {
+<span class="nc" id="L234">        return name;</span>
+    }
+
+    /**
+     * Returns all extended properties of the group. Groups have an arbitrary
+     * number of extended properties. The returned collection can be modified
+     * to add new properties or remove existing ones.
+     *
+     * @return the extended properties.
+     */
+    public PersistableMap&lt;String,String&gt; getProperties() {
+<span class="nc" id="L245">        synchronized (this) {</span>
+<span class="nc bnc" id="L246" title="All 2 branches missed.">            if (properties == null) {</span>
+<span class="nc" id="L247">                properties = provider.loadProperties(this);</span>
+            }
+<span class="nc" id="L249">        }</span>
+        // Return a wrapper that will intercept add and remove commands.
+<span class="nc" id="L251">        return properties;</span>
+    }
+
+    /**
+     * Returns a Collection of everyone in the group.
+     *
+     * @return a read-only Collection of the group administrators + members.
+     */
+    public Collection&lt;JID&gt; getAll() {
+<span class="nc" id="L260">        Set&lt;JID&gt; everybody = new HashSet&lt;&gt;(administrators);</span>
+<span class="nc" id="L261">        everybody.addAll(members);</span>
+<span class="nc" id="L262">        return Collections.unmodifiableSet(everybody);</span>
+    }
+
+    /**
+     * Returns a Collection of the group administrators.
+     *
+     * @return a Collection of the group administrators.
+     */
+    public Collection&lt;JID&gt; getAdmins() {
+        // Return a wrapper that will intercept add and remove commands.
+<span class="nc" id="L272">        return new MemberCollection(administrators, true);</span>
+    }
+
+    /**
+     * Returns a Collection of the group members.
+     *
+     * @return a Collection of the group members.
+     */
+    public Collection&lt;JID&gt; getMembers() {
+        // Return a wrapper that will intercept add and remove commands.
+<span class="nc" id="L282">        return new MemberCollection(members, false);</span>
+    }
+
+    /**
+     * Returns true if the provided JID belongs to a user that is part of the group.
+     *
+     * @param user the JID address of the user to check.
+     * @return true if the specified user is a group user.
+     */
+    public boolean isUser(JID user) {
+        // Make sure that we are always checking bare JIDs
+<span class="nc bnc" id="L293" title="All 4 branches missed.">        if (user != null &amp;&amp; user.getResource() != null) {</span>
+<span class="nc" id="L294">            user = user.asBareJID();</span>
+        }
+<span class="nc bnc" id="L296" title="All 6 branches missed.">        return user != null &amp;&amp; (members.contains(user) || administrators.contains(user));</span>
+    }
+
+    /**
+     * Returns true if the provided username belongs to a user of the group.
+     *
+     * @param username the username to check.
+     * @return true if the provided username belongs to a user of the group.
+     */
+    public boolean isUser(String username) {
+<span class="nc bnc" id="L306" title="All 2 branches missed.">        if  (username != null) {</span>
+<span class="nc" id="L307">            return isUser(XMPPServer.getInstance().createJID(username, null, true));</span>
+        }
+        else {
+<span class="nc" id="L310">            return false;</span>
+        }
+    }
+
+    @Override
+    public int getCachedSize()
+        throws CannotCalculateSizeException {
+        // Approximate the size of the object in bytes by calculating the size
+        // of each field.
+<span class="nc" id="L319">        int size = 0;</span>
+<span class="nc" id="L320">        size += CacheSizes.sizeOfObject();              // overhead of object</span>
+<span class="nc" id="L321">        size += CacheSizes.sizeOfString(name);</span>
+<span class="nc" id="L322">        size += CacheSizes.sizeOfString(description);</span>
+<span class="nc" id="L323">        size += CacheSizes.sizeOfMap(properties);</span>
+
+<span class="nc bnc" id="L325" title="All 2 branches missed.">        for (JID member: members) {</span>
+<span class="nc" id="L326">            size += CacheSizes.sizeOfString(member.toString());</span>
+<span class="nc" id="L327">        }</span>
+<span class="nc bnc" id="L328" title="All 2 branches missed.">        for (JID admin: administrators) {</span>
+<span class="nc" id="L329">            size += CacheSizes.sizeOfString(admin.toString());</span>
+<span class="nc" id="L330">        }</span>
+
+<span class="nc" id="L332">        return size;</span>
+    }
+
+    @Override
+    public int hashCode() {
+<span class="nc" id="L337">        return name.hashCode();</span>
+    }
+
+    @Override
+    public boolean equals(Object object) {
+<span class="nc bnc" id="L342" title="All 2 branches missed.">        if (this == object) {</span>
+<span class="nc" id="L343">            return true;</span>
+        }
+<span class="nc bnc" id="L345" title="All 4 branches missed.">        if (object != null &amp;&amp; object instanceof Group) {</span>
+<span class="nc" id="L346">            return name.equals(((Group)object).getName());</span>
+        }
+        else {
+<span class="nc" id="L349">            return false;</span>
+        }
+    }
+    /**
+     * Collection implementation that notifies the GroupProvider of any
+     * changes to the collection.
+     */
+    private class MemberCollection extends AbstractCollection&lt;JID&gt; {
+
+        private Collection&lt;JID&gt; users;
+        private boolean adminCollection;
+
+<span class="nc" id="L361">        public MemberCollection(Collection&lt;JID&gt; users, boolean adminCollection) {</span>
+<span class="nc" id="L362">            this.users = users;</span>
+<span class="nc" id="L363">            this.adminCollection = adminCollection;</span>
+<span class="nc" id="L364">        }</span>
+
+        @Override
+        public Iterator&lt;JID&gt; iterator() {
+<span class="nc" id="L368">            return new Iterator&lt;JID&gt;() {</span>
+
+<span class="nc" id="L370">                Iterator&lt;JID&gt; iter = users.iterator();</span>
+<span class="nc" id="L371">                JID current = null;</span>
+
+                @Override
+                public boolean hasNext() {
+<span class="nc" id="L375">                    return iter.hasNext();</span>
+                }
+
+                @Override
+                public JID next() {
+<span class="nc" id="L380">                    current = iter.next();</span>
+<span class="nc" id="L381">                    return current;</span>
+                }
+
+                @Override
+                public void remove() {
+<span class="nc bnc" id="L386" title="All 2 branches missed.">                    if (current == null) {</span>
+<span class="nc" id="L387">                        throw new IllegalStateException();</span>
+                    }
+                    // Do nothing if the provider is read-only.
+<span class="nc bnc" id="L390" title="All 2 branches missed.">                    if (provider.isReadOnly()) {</span>
+<span class="nc" id="L391">                        return;</span>
+                    }
+<span class="nc" id="L393">                    JID user = current;</span>
+                    // Remove the user from the collection in memory.
+<span class="nc" id="L395">                    iter.remove();</span>
+                    // Remove the group user from the backend store.
+<span class="nc" id="L397">                    provider.deleteMember(name, user);</span>
+                    // Fire event.
+<span class="nc bnc" id="L399" title="All 2 branches missed.">                    if (adminCollection) {</span>
+<span class="nc" id="L400">                        Map&lt;String, String&gt; params = new HashMap&lt;&gt;();</span>
+<span class="nc" id="L401">                        params.put(&quot;admin&quot;, user.toString());</span>
+<span class="nc" id="L402">                        GroupEventDispatcher.dispatchEvent(Group.this,</span>
+                                GroupEventDispatcher.EventType.admin_removed, params);
+<span class="nc" id="L404">                    }</span>
+                    else {
+<span class="nc" id="L406">                        Map&lt;String, String&gt; params = new HashMap&lt;&gt;();</span>
+<span class="nc" id="L407">                        params.put(&quot;member&quot;, user.toString());</span>
+<span class="nc" id="L408">                        GroupEventDispatcher.dispatchEvent(Group.this,</span>
+                                GroupEventDispatcher.EventType.member_removed, params);
+                    }
+<span class="nc" id="L411">                }</span>
+            };
+        }
+
+        @Override
+        public int size() {
+<span class="nc" id="L417">            return users.size();</span>
+        }
+
+        @Override
+        public boolean add(JID user) {
+            // Do nothing if the provider is read-only.
+<span class="nc bnc" id="L423" title="All 2 branches missed.">            if (provider.isReadOnly()) {</span>
+<span class="nc" id="L424">                return false;</span>
+            }
+            // Find out if the user was already a group user.
+            boolean alreadyGroupUser;
+<span class="nc bnc" id="L428" title="All 2 branches missed.">            if (adminCollection) {</span>
+<span class="nc" id="L429">                alreadyGroupUser = members.contains(user);</span>
+            }
+            else {
+<span class="nc" id="L432">                alreadyGroupUser = administrators.contains(user);</span>
+            }
+<span class="nc bnc" id="L434" title="All 2 branches missed.">            if (users.add(user)) {</span>
+<span class="nc bnc" id="L435" title="All 2 branches missed.">                if (alreadyGroupUser) {</span>
+                    // Update the group user privileges in the backend store.
+<span class="nc" id="L437">                    provider.updateMember(name, user, adminCollection);</span>
+                }
+                else {
+                    // Add the group user to the backend store.
+<span class="nc" id="L441">                    provider.addMember(name, user, adminCollection);</span>
+                }
+
+                // Fire event.
+<span class="nc" id="L445">                Map&lt;String, String&gt; params = new HashMap&lt;&gt;();</span>
+<span class="nc bnc" id="L446" title="All 2 branches missed.">                if (adminCollection) {</span>
+<span class="nc" id="L447">                    params.put(&quot;admin&quot;, user.toString());</span>
+<span class="nc bnc" id="L448" title="All 2 branches missed.">                    if (alreadyGroupUser) {</span>
+<span class="nc" id="L449">                        params.put(&quot;member&quot;, user.toString());</span>
+<span class="nc" id="L450">                        GroupEventDispatcher.dispatchEvent(Group.this,</span>
+                                    GroupEventDispatcher.EventType.member_removed, params);
+                    }
+<span class="nc" id="L453">                    GroupEventDispatcher.dispatchEvent(Group.this,</span>
+                                GroupEventDispatcher.EventType.admin_added, params);
+                }
+                else {
+<span class="nc" id="L457">                    params.put(&quot;member&quot;, user.toString());</span>
+<span class="nc bnc" id="L458" title="All 2 branches missed.">                    if (alreadyGroupUser) {</span>
+<span class="nc" id="L459">                        params.put(&quot;admin&quot;, user.toString());</span>
+<span class="nc" id="L460">                        GroupEventDispatcher.dispatchEvent(Group.this,</span>
+                                    GroupEventDispatcher.EventType.admin_removed, params);
+                    }
+<span class="nc" id="L463">                    GroupEventDispatcher.dispatchEvent(Group.this,</span>
+                                GroupEventDispatcher.EventType.member_added, params);
+                }
+                // If the user was a member that became an admin or vice versa then remove the
+                // user from the other collection
+<span class="nc bnc" id="L468" title="All 2 branches missed.">                if (alreadyGroupUser) {</span>
+<span class="nc bnc" id="L469" title="All 2 branches missed.">                    if (adminCollection) {</span>
+<span class="nc bnc" id="L470" title="All 2 branches missed.">                        if (members.contains(user)) {</span>
+<span class="nc" id="L471">                            members.remove(user);</span>
+                        }
+                    }
+                    else {
+<span class="nc bnc" id="L475" title="All 2 branches missed.">                        if (administrators.contains(user)) {</span>
+<span class="nc" id="L476">                            administrators.remove(user);</span>
+                        }
+                    }
+                }
+<span class="nc" id="L480">                return true;</span>
+            }
+<span class="nc" id="L482">            return false;</span>
+        }
+    }
+
+    @Override
+    public void writeExternal(ObjectOutput out) throws IOException {
+<span class="nc" id="L488">        ExternalizableUtil.getInstance().writeSafeUTF(out, name);</span>
+<span class="nc bnc" id="L489" title="All 2 branches missed.">        ExternalizableUtil.getInstance().writeBoolean(out, description != null);</span>
+<span class="nc bnc" id="L490" title="All 2 branches missed.">        if (description != null) {</span>
+<span class="nc" id="L491">            ExternalizableUtil.getInstance().writeSafeUTF(out, description);</span>
+        }
+<span class="nc" id="L493">        ExternalizableUtil.getInstance().writeSerializableCollection(out, members);</span>
+<span class="nc" id="L494">        ExternalizableUtil.getInstance().writeSerializableCollection(out, administrators);</span>
+<span class="nc" id="L495">    }</span>
+
+    @Override
+    public void readExternal(ObjectInput in) throws IOException, ClassNotFoundException {
+<span class="nc" id="L499">        groupManager = GroupManager.getInstance();</span>
+<span class="nc" id="L500">        provider = groupManager.getProvider();</span>
+
+<span class="nc" id="L502">        name = ExternalizableUtil.getInstance().readSafeUTF(in);</span>
+<span class="nc bnc" id="L503" title="All 2 branches missed.">        if (ExternalizableUtil.getInstance().readBoolean(in)) {</span>
+<span class="nc" id="L504">            description = ExternalizableUtil.getInstance().readSafeUTF(in);</span>
+        }
+<span class="nc" id="L506">        members= new ConcurrentSkipListSet&lt;&gt;();</span>
+<span class="nc" id="L507">        administrators = new ConcurrentSkipListSet&lt;&gt;();</span>
+<span class="nc" id="L508">        ExternalizableUtil.getInstance().readSerializableCollection(in, members, getClass().getClassLoader());</span>
+<span class="nc" id="L509">        ExternalizableUtil.getInstance().readSerializableCollection(in, administrators, getClass().getClassLoader());</span>
+<span class="nc" id="L510">    }</span>
+
+    /**
+     * Search for a JID within a group. If the given haystack is not resolvable
+     * to a group, this method returns false.
+     *
+     * @param needle A JID, possibly a member/admin of the given group
+     * @param haystack Presumably a Group, a Group name, or a JID that represents a Group
+     * @return true if the JID (needle) is found in the group (haystack)
+     */
+    public static boolean search(JID needle, Object haystack) {
+<span class="nc" id="L521">        Group group = resolveFrom(haystack);</span>
+<span class="nc bnc" id="L522" title="All 4 branches missed.">        return (group != null &amp;&amp; group.isUser(needle));</span>
+    }
+
+    /**
+     * Attempt to resolve the given object into a Group.
+     *
+     * @param proxy Presumably a Group, a Group name, or a JID that represents a Group
+     * @return The corresponding group, or null if the proxy cannot be resolved as a group
+     */
+    public static Group resolveFrom(Object proxy) {
+<span class="nc" id="L532">        Group result = null;</span>
+        try {
+<span class="nc" id="L534">            GroupManager groupManger = GroupManager.getInstance();</span>
+<span class="nc bnc" id="L535" title="All 2 branches missed.">            if (proxy instanceof JID) {</span>
+<span class="nc" id="L536">                result = groupManger.getGroup((JID)proxy);</span>
+<span class="nc bnc" id="L537" title="All 2 branches missed.">            } else if (proxy instanceof String) {</span>
+<span class="nc" id="L538">                result = groupManger.getGroup((String)proxy);</span>
+<span class="nc bnc" id="L539" title="All 2 branches missed.">            } else if (proxy instanceof Group) {</span>
+<span class="nc" id="L540">                result = (Group) proxy;</span>
+            }
+<span class="nc" id="L542">        } catch (GroupNotFoundException gnfe) {</span>
+            // ignore
+<span class="nc" id="L544">        }</span>
+<span class="nc" id="L545">        return result;</span>
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

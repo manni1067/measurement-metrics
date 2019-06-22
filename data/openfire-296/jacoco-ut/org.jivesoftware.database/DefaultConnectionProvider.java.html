@@ -1,0 +1,457 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>DefaultConnectionProvider.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.database</a> &gt; <span class="el_source">DefaultConnectionProvider.java</span></div><h1>DefaultConnectionProvider.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.database;
+
+import org.apache.commons.dbcp2.ConnectionFactory;
+import org.apache.commons.dbcp2.DriverManagerConnectionFactory;
+import org.apache.commons.dbcp2.PoolableConnection;
+import org.apache.commons.dbcp2.PoolableConnectionFactory;
+import org.apache.commons.dbcp2.PoolingDataSource;
+import org.apache.commons.pool2.impl.GenericObjectPool;
+import org.apache.commons.pool2.impl.GenericObjectPoolConfig;
+import org.jivesoftware.util.JiveConstants;
+import org.jivesoftware.util.JiveGlobals;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.sql.Connection;
+import java.sql.SQLException;
+
+/**
+ * Default Jive connection provider, which uses an internal connection pool.&lt;p&gt;
+ *
+ * @author Jive Software
+ */
+public class DefaultConnectionProvider implements ConnectionProvider {
+
+<span class="fc" id="L41">    private static final Logger Log = LoggerFactory.getLogger(DefaultConnectionProvider.class);</span>
+
+    private String driver;
+    private String serverURL;
+    private String username;
+    private String password;
+<span class="fc" id="L47">    private int minConnections = 3;</span>
+<span class="fc" id="L48">    private int maxConnections = 10;</span>
+<span class="fc" id="L49">    private String testSQL = &quot;&quot;;</span>
+<span class="fc" id="L50">    private Boolean testBeforeUse = true;</span>
+<span class="fc" id="L51">    private Boolean testAfterUse = true;</span>
+<span class="fc" id="L52">    private int testTimeout = (int) JiveConstants.SECOND / 2;</span>
+<span class="fc" id="L53">    private long timeBetweenEvictionRuns = 30 * JiveConstants.SECOND;</span>
+<span class="fc" id="L54">    private long minIdleTime = 15 * JiveConstants.MINUTE;</span>
+<span class="fc" id="L55">    private long maxWaitTime = (int) JiveConstants.SECOND / 2;</span>
+<span class="fc" id="L56">    private long refusedCount = 0;</span>
+    private PoolingDataSource&lt;PoolableConnection&gt; dataSource;
+    private GenericObjectPool&lt;PoolableConnection&gt; connectionPool;
+
+    /**
+     * Maximum time a connection can be open before it's reopened (in days)
+     */
+<span class="fc" id="L63">    private double connectionTimeout = 0.5;</span>
+
+    /**
+     * MySQL doesn't currently support Unicode. However, a workaround is
+     * implemented in the mm.mysql JDBC driver. Setting the Jive property
+     * database.mysql.useUnicode to true will turn this feature on.
+     */
+    private boolean mysqlUseUnicode;
+
+    /**
+     * Creates a new DefaultConnectionProvider.
+     */
+<span class="fc" id="L75">    public DefaultConnectionProvider() {</span>
+<span class="fc" id="L76">        loadProperties();</span>
+<span class="fc" id="L77">    }</span>
+
+    @Override
+    public boolean isPooled() {
+<span class="nc" id="L81">        return true;</span>
+    }
+
+    @Override
+    public Connection getConnection() throws SQLException {
+<span class="pc bpc" id="L86" title="1 of 2 branches missed.">        if (dataSource == null) {</span>
+<span class="fc" id="L87">            throw new SQLException(&quot;Check JDBC properties; data source was not be initialised&quot;);</span>
+        }
+        // DBCP doesn't expose the number of refused connections, so count them ourselves
+        try {
+<span class="nc" id="L91">            return dataSource.getConnection();</span>
+<span class="nc" id="L92">        } catch (final SQLException e) {</span>
+<span class="nc" id="L93">            refusedCount++;</span>
+<span class="nc" id="L94">            throw e;</span>
+        }
+    }
+
+    @Override
+    public void start() {
+
+        try {
+<span class="nc" id="L102">            Class.forName(driver);</span>
+<span class="nc" id="L103">        } catch (final ClassNotFoundException e) {</span>
+<span class="nc" id="L104">            throw new RuntimeException(&quot;Unable to find JDBC driver &quot; + driver, e);</span>
+<span class="nc" id="L105">        }</span>
+
+<span class="nc" id="L107">        final ConnectionFactory connectionFactory = new DriverManagerConnectionFactory(serverURL, username, password);</span>
+<span class="nc" id="L108">        final PoolableConnectionFactory poolableConnectionFactory = new PoolableConnectionFactory(connectionFactory, null);</span>
+<span class="nc" id="L109">        poolableConnectionFactory.setValidationQuery(testSQL);</span>
+<span class="nc" id="L110">        poolableConnectionFactory.setValidationQueryTimeout(testTimeout);</span>
+<span class="nc" id="L111">        poolableConnectionFactory.setMaxConnLifetimeMillis((long) (connectionTimeout * JiveConstants.DAY));</span>
+
+<span class="nc" id="L113">        final GenericObjectPoolConfig poolConfig = new GenericObjectPoolConfig();</span>
+<span class="nc" id="L114">        poolConfig.setTestOnBorrow(testBeforeUse);</span>
+<span class="nc" id="L115">        poolConfig.setTestOnReturn(testAfterUse);</span>
+<span class="nc" id="L116">        poolConfig.setMinIdle(minConnections);</span>
+<span class="nc bnc" id="L117" title="All 2 branches missed.">        if( minConnections &gt; GenericObjectPoolConfig.DEFAULT_MAX_IDLE )</span>
+        {
+<span class="nc" id="L119">            poolConfig.setMaxIdle(minConnections);</span>
+        }
+<span class="nc" id="L121">        poolConfig.setMaxTotal(maxConnections);</span>
+<span class="nc" id="L122">        poolConfig.setTimeBetweenEvictionRunsMillis(timeBetweenEvictionRuns);</span>
+<span class="nc" id="L123">        poolConfig.setSoftMinEvictableIdleTimeMillis(minIdleTime);</span>
+<span class="nc" id="L124">        poolConfig.setMaxWaitMillis(maxWaitTime);</span>
+<span class="nc" id="L125">        connectionPool = new GenericObjectPool&lt;&gt;(poolableConnectionFactory, poolConfig);</span>
+<span class="nc" id="L126">        poolableConnectionFactory.setPool(connectionPool);</span>
+<span class="nc" id="L127">        dataSource = new PoolingDataSource&lt;&gt;(connectionPool);</span>
+<span class="nc" id="L128">    }</span>
+
+    @Override
+    public void restart() {
+<span class="nc" id="L132">    }</span>
+
+    @Override
+    public void destroy() {
+        try {
+<span class="nc" id="L137">            dataSource.close();</span>
+<span class="nc" id="L138">        } catch (final Exception e) {</span>
+<span class="nc" id="L139">            Log.error(&quot;Unable to close the data source&quot;, e);</span>
+<span class="nc" id="L140">        }</span>
+<span class="nc" id="L141">    }</span>
+
+    /**
+     * Returns the JDBC driver classname used to make database connections.
+     * For example: com.mysql.jdbc.Driver
+     *
+     * @return the JDBC driver classname.
+     */
+    public String getDriver() {
+<span class="nc" id="L150">        return driver;</span>
+    }
+
+    /**
+     * Sets the JDBC driver classname used to make database connections.
+     * For example: com.mysql.jdbc.Driver
+     *
+     * @param driver the fully qualified JDBC driver name.
+     */
+    public void setDriver(String driver) {
+<span class="nc" id="L160">        this.driver = driver;</span>
+<span class="nc" id="L161">        saveProperties();</span>
+<span class="nc" id="L162">    }</span>
+
+    /**
+     * Returns the JDBC connection URL used to make database connections.
+     *
+     * @return the JDBC connection URL.
+     */
+    public String getServerURL() {
+<span class="nc" id="L170">        return serverURL;</span>
+    }
+
+    /**
+     * Sets the JDBC connection URL used to make database connections.
+     *
+     * @param serverURL the JDBC connection URL.
+     */
+    public void setServerURL(String serverURL) {
+<span class="nc" id="L179">        this.serverURL = serverURL;</span>
+<span class="nc" id="L180">        saveProperties();</span>
+<span class="nc" id="L181">    }</span>
+
+    /**
+     * Returns the username used to connect to the database. In some cases,
+     * a username is not needed so this method will return null.
+     *
+     * @return the username used to connect to the datbase.
+     */
+    public String getUsername() {
+<span class="nc" id="L190">        return username;</span>
+    }
+
+    /**
+     * Sets the username used to connect to the database. In some cases, a
+     * username is not needed so null should be passed in.
+     *
+     * @param username the username used to connect to the database.
+     */
+    public void setUsername(String username) {
+<span class="nc" id="L200">        this.username = username;</span>
+<span class="nc" id="L201">        saveProperties();</span>
+<span class="nc" id="L202">    }</span>
+
+    /**
+     * Returns the password used to connect to the database. In some cases,
+     * a password is not needed so this method will return null.
+     *
+     * @return the password used to connect to the database.
+     */
+    public String getPassword() {
+<span class="nc" id="L211">        return password;</span>
+    }
+
+    /**
+     * Sets the password used to connect to the database. In some cases, a
+     * password is not needed so null should be passed in.
+     *
+     * @param password the password used to connect to the database.
+     */
+    public void setPassword(String password) {
+<span class="nc" id="L221">        this.password = password;</span>
+<span class="nc" id="L222">        saveProperties();</span>
+<span class="nc" id="L223">    }</span>
+
+    /**
+     * Returns the minimum number of connections that the pool will use. This
+     * should probably be at least three.
+     *
+     * @return the minimum number of connections in the pool.
+     */
+    public int getMinConnections() {
+<span class="nc" id="L232">        return minConnections;</span>
+    }
+
+    /**
+     * Sets the minimum number of connections that the pool will use. This
+     * should probably be at least three.
+     *
+     * @param minConnections the minimum number of connections in the pool.
+     */
+    public void setMinConnections(int minConnections) {
+<span class="nc" id="L242">        this.minConnections = minConnections;</span>
+<span class="nc" id="L243">        saveProperties();</span>
+<span class="nc" id="L244">    }</span>
+
+    /**
+     * Returns the maximum number of connections that the pool will use. The
+     * actual number of connections in the pool will vary between this value
+     * and the minimum based on the current load.
+     *
+     * @return the max possible number of connections in the pool.
+     */
+    public int getMaxConnections() {
+<span class="nc" id="L254">        return maxConnections;</span>
+    }
+
+    /**
+     * Sets the maximum number of connections that the pool will use. The
+     * actual number of connections in the pool will vary between this value
+     * and the minimum based on the current load.
+     *
+     * @param maxConnections the max possible number of connections in the pool.
+     */
+    public void setMaxConnections(int maxConnections) {
+<span class="nc" id="L265">        this.maxConnections = maxConnections;</span>
+<span class="nc" id="L266">        saveProperties();</span>
+<span class="nc" id="L267">    }</span>
+
+    /**
+     * Returns the amount of time between connection recycles in days. For
+     * example, a value of .5 would correspond to recycling the connections
+     * in the pool once every half day.
+     *
+     * @return the amount of time in days between connection recycles.
+     */
+    public double getConnectionTimeout() {
+<span class="nc" id="L277">        return connectionTimeout;</span>
+    }
+
+    /**
+     * Sets the amount of time between connection recycles in days. For
+     * example, a value of .5 would correspond to recycling the connections
+     * in the pool once every half day.
+     *
+     * @param connectionTimeout the amount of time in days between connection
+     *                          recycles.
+     */
+    public void setConnectionTimeout(double connectionTimeout) {
+<span class="nc" id="L289">        this.connectionTimeout = connectionTimeout;</span>
+<span class="nc" id="L290">        saveProperties();</span>
+<span class="nc" id="L291">    }</span>
+
+    /**
+     * Returns the SQL statement used to test if a connection is valid.
+     *
+     * @return the SQL statement that will be run to test a connection.
+     */
+    public String getTestSQL() {
+<span class="nc" id="L299">        return testSQL;</span>
+    }
+
+    public int getTestTimeout() {
+<span class="nc" id="L303">        return testTimeout;</span>
+    }
+
+    public long getTimeBetweenEvictionRunsMillis() {
+<span class="nc" id="L307">        return connectionPool.getTimeBetweenEvictionRunsMillis();</span>
+    }
+
+    public long getMinIdleTime() {
+<span class="nc" id="L311">        return connectionPool.getSoftMinEvictableIdleTimeMillis();</span>
+    }
+
+    public int getActiveConnections() {
+<span class="nc" id="L315">        return connectionPool.getNumActive();</span>
+    }
+
+    public int getIdleConnections() {
+<span class="nc" id="L319">        return connectionPool.getNumIdle();</span>
+    }
+
+    public long getConnectionsServed() {
+<span class="nc" id="L323">        return connectionPool.getBorrowedCount();</span>
+    }
+
+    public long getRefusedCount() {
+<span class="nc" id="L327">        return refusedCount;</span>
+    }
+
+    public long getMaxWaitTime() {
+<span class="nc" id="L331">        return connectionPool.getMaxWaitMillis();</span>
+    }
+
+    public long getMeanBorrowWaitTime() {
+<span class="nc" id="L335">        return connectionPool.getMeanBorrowWaitTimeMillis();</span>
+    }
+
+    public long getMaxBorrowWaitTime() {
+<span class="nc" id="L339">        return connectionPool.getMaxBorrowWaitTimeMillis();</span>
+    }
+
+    /**
+     * Sets the SQL statement used to test if a connection is valid.  House keeping
+     * and before/after connection tests make use of this.  This
+     * should be something that causes the minimal amount of work by the database
+     * server and is as quick as possible.
+     *
+     * @param testSQL the SQL statement that will be run to test a connection.
+     */
+    public void setTestSQL(String testSQL) {
+<span class="nc" id="L351">        this.testSQL = testSQL;</span>
+<span class="nc" id="L352">    }</span>
+
+    /**
+     * Returns whether returned connections will be tested before being handed over
+     * to be used.
+     *
+     * @return True if connections are tested before use.
+     */
+    public Boolean getTestBeforeUse() {
+<span class="nc" id="L361">        return testBeforeUse;</span>
+    }
+
+    /**
+     * Sets whether connections will be tested before being handed over to be used.
+     *
+     * @param testBeforeUse True or false if connections are to be tested before use.
+     */
+    public void setTestBeforeUse(Boolean testBeforeUse) {
+<span class="nc" id="L370">        this.testBeforeUse = testBeforeUse;</span>
+<span class="nc" id="L371">    }</span>
+
+    /**
+     * Returns whether returned connections will be tested after being returned to
+     * the pool.
+     *
+     * @return True if connections are tested after use.
+     */
+    public Boolean getTestAfterUse() {
+<span class="nc" id="L380">        return testAfterUse;</span>
+    }
+
+    /**
+     * Sets whether connections will be tested after being returned to the pool.
+     *
+     * @param testAfterUse True or false if connections are to be tested after use.
+     */
+    public void setTestAfterUse(Boolean testAfterUse) {
+<span class="nc" id="L389">        this.testAfterUse = testAfterUse;</span>
+<span class="nc" id="L390">    }</span>
+
+    public boolean isMysqlUseUnicode() {
+<span class="nc" id="L393">        return mysqlUseUnicode;</span>
+    }
+
+    /**
+     * Load properties that already exist from Jive properties.
+     */
+    private void loadProperties() {
+
+<span class="fc" id="L401">        driver = JiveGlobals.getXMLProperty(&quot;database.defaultProvider.driver&quot;);</span>
+<span class="fc" id="L402">        serverURL = JiveGlobals.getXMLProperty(&quot;database.defaultProvider.serverURL&quot;);</span>
+<span class="fc" id="L403">        username = JiveGlobals.getXMLProperty(&quot;database.defaultProvider.username&quot;);</span>
+<span class="fc" id="L404">        password = JiveGlobals.getXMLProperty(&quot;database.defaultProvider.password&quot;);</span>
+<span class="fc" id="L405">        String minCons = JiveGlobals.getXMLProperty(&quot;database.defaultProvider.minConnections&quot;);</span>
+<span class="fc" id="L406">        String maxCons = JiveGlobals.getXMLProperty(&quot;database.defaultProvider.maxConnections&quot;);</span>
+<span class="fc" id="L407">        String conTimeout = JiveGlobals.getXMLProperty(&quot;database.defaultProvider.connectionTimeout&quot;);</span>
+<span class="fc" id="L408">        testSQL = JiveGlobals.getXMLProperty(&quot;database.defaultProvider.testSQL&quot;, DbConnectionManager.getTestSQL(driver));</span>
+<span class="fc" id="L409">        testBeforeUse = JiveGlobals.getXMLProperty(&quot;database.defaultProvider.testBeforeUse&quot;, false);</span>
+<span class="fc" id="L410">        testAfterUse = JiveGlobals.getXMLProperty(&quot;database.defaultProvider.testAfterUse&quot;, false);</span>
+<span class="fc" id="L411">        testTimeout = JiveGlobals.getXMLProperty(&quot;database.defaultProvider.testTimeout&quot;, (int) JiveConstants.SECOND / 2);</span>
+<span class="fc" id="L412">        timeBetweenEvictionRuns = JiveGlobals.getXMLProperty(&quot;database.defaultProvider.timeBetweenEvictionRuns&quot;, (int) (30 * JiveConstants.SECOND));</span>
+<span class="fc" id="L413">        minIdleTime = JiveGlobals.getXMLProperty(&quot;database.defaultProvider.minIdleTime&quot;, (int) (15 * JiveConstants.MINUTE));</span>
+<span class="fc" id="L414">        maxWaitTime = JiveGlobals.getXMLProperty(&quot;database.defaultProvider.maxWaitTime&quot;, (int) JiveConstants.SECOND / 2);</span>
+
+        // See if we should use Unicode under MySQL
+<span class="fc" id="L417">        mysqlUseUnicode = Boolean.valueOf(JiveGlobals.getXMLProperty(&quot;database.mysql.useUnicode&quot;));</span>
+        try {
+<span class="pc bpc" id="L419" title="1 of 2 branches missed.">            if (minCons != null) {</span>
+<span class="nc" id="L420">                minConnections = Integer.parseInt(minCons);</span>
+            }
+<span class="pc bpc" id="L422" title="1 of 2 branches missed.">            if (maxCons != null) {</span>
+<span class="nc" id="L423">                maxConnections = Integer.parseInt(maxCons);</span>
+            }
+<span class="pc bpc" id="L425" title="1 of 2 branches missed.">            if (conTimeout != null) {</span>
+<span class="nc" id="L426">                connectionTimeout = Double.parseDouble(conTimeout);</span>
+            }
+        }
+<span class="nc" id="L429">        catch (Exception e) {</span>
+<span class="nc" id="L430">            Log.error(&quot;Error: could not parse default pool properties. &quot; +</span>
+                    &quot;Make sure the values exist and are correct.&quot;, e);
+<span class="fc" id="L432">        }</span>
+<span class="fc" id="L433">    }</span>
+
+    /**
+     * Save properties as Jive properties.
+     */
+    private void saveProperties() {
+
+<span class="nc" id="L440">        JiveGlobals.setXMLProperty(&quot;database.defaultProvider.driver&quot;, driver);</span>
+<span class="nc" id="L441">        JiveGlobals.setXMLProperty(&quot;database.defaultProvider.serverURL&quot;, serverURL);</span>
+<span class="nc" id="L442">        JiveGlobals.setXMLProperty(&quot;database.defaultProvider.username&quot;, username);</span>
+<span class="nc" id="L443">        JiveGlobals.setXMLProperty(&quot;database.defaultProvider.password&quot;, password);</span>
+<span class="nc" id="L444">        JiveGlobals.setXMLProperty(&quot;database.defaultProvider.testSQL&quot;, testSQL);</span>
+<span class="nc" id="L445">        JiveGlobals.setXMLProperty(&quot;database.defaultProvider.testBeforeUse&quot;, testBeforeUse.toString());</span>
+<span class="nc" id="L446">        JiveGlobals.setXMLProperty(&quot;database.defaultProvider.testAfterUse&quot;, testAfterUse.toString());</span>
+<span class="nc" id="L447">        JiveGlobals.setXMLProperty(&quot;database.defaultProvider.testTimeout&quot;, String.valueOf(testTimeout));</span>
+<span class="nc" id="L448">        JiveGlobals.setXMLProperty(&quot;database.defaultProvider.timeBetweenEvictionRuns&quot;, String.valueOf(timeBetweenEvictionRuns));</span>
+<span class="nc" id="L449">        JiveGlobals.setXMLProperty(&quot;database.defaultProvider.minIdleTime&quot;, String.valueOf(minIdleTime));</span>
+<span class="nc" id="L450">        JiveGlobals.setXMLProperty(&quot;database.defaultProvider.maxWaitTime&quot;, String.valueOf(maxWaitTime));</span>
+
+<span class="nc" id="L452">        JiveGlobals.setXMLProperty(&quot;database.defaultProvider.minConnections&quot;, Integer.toString(minConnections));</span>
+<span class="nc" id="L453">        JiveGlobals.setXMLProperty(&quot;database.defaultProvider.maxConnections&quot;, Integer.toString(maxConnections));</span>
+<span class="nc" id="L454">        JiveGlobals.setXMLProperty(&quot;database.defaultProvider.connectionTimeout&quot;, Double.toString(connectionTimeout));</span>
+<span class="nc" id="L455">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

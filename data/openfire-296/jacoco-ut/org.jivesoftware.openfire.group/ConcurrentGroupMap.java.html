@@ -1,0 +1,313 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>ConcurrentGroupMap.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.group</a> &gt; <span class="el_source">ConcurrentGroupMap.java</span></div><h1>ConcurrentGroupMap.java</h1><pre class="source lang-java linenums">package org.jivesoftware.openfire.group;
+
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+
+import org.xmpp.packet.JID;
+
+/**
+ * This extension class provides additional methods that understand groups among 
+ * the entries in the map.
+ * 
+ * @author Tom Evans
+ */
+
+<span class="nc" id="L19">public class ConcurrentGroupMap&lt;K, V&gt; extends ConcurrentHashMap&lt;K, V&gt;  implements GroupAwareMap&lt;K, V&gt; {</span>
+
+    private static final long serialVersionUID = 5479781418678223200L;
+
+    // These sets are used to optimize group operations within this map.
+    // We only populate these sets when they are needed to dereference the
+    // groups in the base map, but once they exist we keep them in sync
+    // via the various put/remove operations.
+    // NOTE: added volatile keyword for double-check idiom (lazy instantiation)
+    private volatile transient Set&lt;String&gt; knownGroupNamesFromKeys;
+    private volatile transient Set&lt;String&gt; knownGroupNamesFromValues;
+
+    /**
+     * Returns true if the key list contains the given JID. If the JID is not found in the 
+     * key list (exact match), search the key list for groups and look for the JID in 
+     * each of the corresponding groups (implied match).
+     * 
+     * @param key The target, presumably a JID
+     * @return True if the target is in the key list, or in any groups in the key list
+     */
+    @Override
+    public boolean includesKey(Object key) {
+<span class="nc" id="L41">        boolean found = false;</span>
+<span class="nc bnc" id="L42" title="All 2 branches missed.">        if (containsKey(key)) {</span>
+<span class="nc" id="L43">            found = true;</span>
+<span class="nc bnc" id="L44" title="All 2 branches missed.">        } else if (key instanceof JID) {</span>
+            // look for group JIDs in the list of keys and dereference as needed
+<span class="nc" id="L46">            JID target = (JID) key;</span>
+<span class="nc" id="L47">            Iterator&lt;Group&gt; iterator = getGroupsFromKeys().iterator();</span>
+<span class="nc bnc" id="L48" title="All 4 branches missed.">            while (!found &amp;&amp; iterator.hasNext()) {</span>
+<span class="nc" id="L49">                Group next = iterator.next();</span>
+<span class="nc bnc" id="L50" title="All 2 branches missed.">                if(next != null)</span>
+<span class="nc" id="L51">                    found = next.isUser(target);</span>
+<span class="nc" id="L52">            }</span>
+        }
+<span class="nc" id="L54">        return found;</span>
+    }
+
+
+    /**
+     * Returns true if the map has an entry value matching the given JID. If the JID is not 
+     * found in the value set (exact match), search the value set for groups and look for the 
+     * JID in each of the corresponding groups (implied match).
+     * 
+     * @param value The target, presumably a JID
+     * @return True if the target is in the value set, or in any groups in the value set
+     */
+    @Override
+    public boolean includesValue(Object value) {
+<span class="nc" id="L68">        boolean found = false;</span>
+<span class="nc bnc" id="L69" title="All 2 branches missed.">        if (containsValue(value)) {</span>
+<span class="nc" id="L70">            found = true;</span>
+<span class="nc bnc" id="L71" title="All 2 branches missed.">        } else if (value instanceof JID) {</span>
+            // look for group JIDs in the list of values and dereference as needed
+<span class="nc" id="L73">            JID target = (JID) value;</span>
+<span class="nc" id="L74">            Iterator&lt;Group&gt; iterator = getGroupsFromValues().iterator();</span>
+<span class="nc bnc" id="L75" title="All 4 branches missed.">            while (!found &amp;&amp; iterator.hasNext()) {</span>
+<span class="nc" id="L76">                found = iterator.next().isUser(target);</span>
+            }
+        }
+<span class="nc" id="L79">        return found;</span>
+    }
+
+    /**
+     * Returns the groups that are implied (resolvable) from the keys in the map.
+     * 
+     * @return A Set containing the groups among the keys
+     */
+    @Override
+    public synchronized Set&lt;Group&gt; getGroupsFromKeys() {
+<span class="nc" id="L89">        Set&lt;Group&gt; result = new HashSet&lt;&gt;();</span>
+<span class="nc bnc" id="L90" title="All 2 branches missed.">        for(String groupName : getKnownGroupNamesFromKeys()) {</span>
+<span class="nc" id="L91">            Group resolved = Group.resolveFrom(groupName);</span>
+<span class="nc bnc" id="L92" title="All 2 branches missed.">            if(resolved != null)</span>
+<span class="nc" id="L93">                result.add(resolved);</span>
+<span class="nc" id="L94">        }</span>
+<span class="nc" id="L95">        return result;</span>
+    }
+
+    /**
+     * Returns the groups that are implied (resolvable) from the values in the map.
+     * 
+     * @return A Set containing the groups among the values
+     */
+    @Override
+    public synchronized Set&lt;Group&gt; getGroupsFromValues() {
+<span class="nc" id="L105">        Set&lt;Group&gt; result = new HashSet&lt;&gt;();</span>
+<span class="nc bnc" id="L106" title="All 2 branches missed.">        for(String groupName : getKnownGroupNamesFromValues()) {</span>
+<span class="nc" id="L107">            result.add(Group.resolveFrom(groupName));</span>
+<span class="nc" id="L108">        }</span>
+<span class="nc" id="L109">        return result;</span>
+    }
+
+    
+    /**
+     * Accessor uses the  &quot;double-check idiom&quot; (j2se 5.0+) for proper lazy instantiation.
+     * Additionally, nothing is cached until there is at least one group in the map's keys.
+     * 
+     * @return the known group names among the items in the list
+     */
+    private Set&lt;String&gt; getKnownGroupNamesFromKeys() {
+<span class="nc" id="L120">        Set&lt;String&gt; result = knownGroupNamesFromKeys;</span>
+<span class="nc bnc" id="L121" title="All 2 branches missed.">        if (result == null) {</span>
+<span class="nc" id="L122">            synchronized(this) {</span>
+<span class="nc" id="L123">                result = knownGroupNamesFromKeys;</span>
+<span class="nc bnc" id="L124" title="All 2 branches missed.">                if (result == null) {</span>
+<span class="nc" id="L125">                    result = new HashSet&lt;&gt;();</span>
+                    // add all the groups into the group set
+<span class="nc" id="L127">                    Iterator&lt;K&gt; iterator = keySet().iterator();</span>
+<span class="nc bnc" id="L128" title="All 2 branches missed.">                    while (iterator.hasNext()) {</span>
+<span class="nc" id="L129">                        K key = iterator.next();</span>
+<span class="nc" id="L130">                        Group group = Group.resolveFrom(key);</span>
+<span class="nc bnc" id="L131" title="All 2 branches missed.">                        if (group != null) {</span>
+<span class="nc" id="L132">                            result.add(group.getName());</span>
+                        };
+<span class="nc" id="L134">                    }</span>
+<span class="nc bnc" id="L135" title="All 2 branches missed.">                    knownGroupNamesFromKeys = result.isEmpty() ? null : result;</span>
+                }
+<span class="nc" id="L137">            }</span>
+        }
+<span class="nc" id="L139">        return result;</span>
+    }
+
+    
+    /**
+     * Accessor uses the  &quot;double-check idiom&quot; (j2se 5.0+) for proper lazy instantiation.
+     * Additionally, nothing is cached until there is at least one group in the map's value set.
+     * 
+     * @return the known group names among the items in the list
+     */
+    private Set&lt;String&gt; getKnownGroupNamesFromValues() {
+<span class="nc" id="L150">        Set&lt;String&gt; result = knownGroupNamesFromValues;</span>
+<span class="nc bnc" id="L151" title="All 2 branches missed.">        if (result == null) {</span>
+<span class="nc" id="L152">            synchronized(this) {</span>
+<span class="nc" id="L153">                result = knownGroupNamesFromValues;</span>
+<span class="nc bnc" id="L154" title="All 2 branches missed.">                if (result == null) {</span>
+<span class="nc" id="L155">                    result = new HashSet&lt;&gt;();</span>
+                    // add all the groups into the group set
+<span class="nc" id="L157">                    Iterator&lt;V&gt; iterator = values().iterator();</span>
+<span class="nc bnc" id="L158" title="All 2 branches missed.">                    while (iterator.hasNext()) {</span>
+<span class="nc" id="L159">                        V key = iterator.next();</span>
+<span class="nc" id="L160">                        Group group = Group.resolveFrom(key);</span>
+<span class="nc bnc" id="L161" title="All 2 branches missed.">                        if (group != null) {</span>
+<span class="nc" id="L162">                            result.add(group.getName());</span>
+                        };
+<span class="nc" id="L164">                    }</span>
+<span class="nc bnc" id="L165" title="All 2 branches missed.">                    knownGroupNamesFromValues = result.isEmpty() ? null : result;</span>
+                }
+<span class="nc" id="L167">            }</span>
+        }
+<span class="nc" id="L169">        return result;</span>
+    }
+
+    /**
+     * This method is called from several of the mutators to keep
+     * the group set in sync with the keys in the map. 
+     * 
+     * @param item The item to be added or removed if it is in the group set
+     * @param keyOrValue True for keys, false for values
+     * @param addOrRemove True to add, false to remove
+     * @return true if the given item is a group
+     */
+    private synchronized boolean syncGroups(Object item, boolean keyOrValue, boolean addOrRemove) {
+<span class="nc" id="L182">        boolean result = false;</span>
+<span class="nc bnc" id="L183" title="All 2 branches missed.">        Set&lt;String&gt; groupSet = (keyOrValue == KEYS) ? knownGroupNamesFromKeys : knownGroupNamesFromValues;</span>
+        // only sync if the group list has been instantiated
+<span class="nc bnc" id="L185" title="All 2 branches missed.">        if (groupSet != null) {</span>
+<span class="nc" id="L186">            Group group = Group.resolveFrom(item);</span>
+<span class="nc bnc" id="L187" title="All 2 branches missed.">            if (group != null) {</span>
+<span class="nc" id="L188">                result = true;</span>
+<span class="nc bnc" id="L189" title="All 2 branches missed.">                if (addOrRemove == ADD) {</span>
+<span class="nc" id="L190">                    groupSet.add(group.getName());</span>
+<span class="nc bnc" id="L191" title="All 2 branches missed.">                } else if (addOrRemove == REMOVE) {</span>
+<span class="nc" id="L192">                    groupSet.remove(group.getName());</span>
+<span class="nc bnc" id="L193" title="All 2 branches missed.">                    if (groupSet.isEmpty()) {</span>
+<span class="nc bnc" id="L194" title="All 2 branches missed.">                        if (keyOrValue == KEYS) {</span>
+<span class="nc" id="L195">                            knownGroupNamesFromKeys = null;</span>
+                        } else {
+<span class="nc" id="L197">                            knownGroupNamesFromValues = null;</span>
+                        }
+                    }
+                }
+            }
+        }
+<span class="nc" id="L203">        return result;</span>
+    }
+    
+    // below are overrides for the various mutators
+    
+    @Override
+    public V put(K key, V value) {
+<span class="nc" id="L210">        V priorValue = super.put(key, value);</span>
+<span class="nc" id="L211">        syncGroups(value, VALUES, ADD);</span>
+<span class="nc bnc" id="L212" title="All 2 branches missed.">        if (priorValue == null) {</span>
+<span class="nc" id="L213">            syncGroups(key, KEYS, ADD);</span>
+        } else {
+<span class="nc" id="L215">            syncGroups(priorValue, VALUES, REMOVE);</span>
+        }
+<span class="nc" id="L217">        return priorValue;</span>
+    }
+
+
+    @Override
+    public V putIfAbsent(K key, V value) {
+<span class="nc" id="L223">        V priorValue = super.putIfAbsent(key, value);</span>
+        // if the map already contains the key, there was no change
+<span class="nc bnc" id="L225" title="All 2 branches missed.">        if (!value.equals(priorValue)) {</span>
+<span class="nc" id="L226">            syncGroups(value, VALUES, ADD);</span>
+<span class="nc bnc" id="L227" title="All 2 branches missed.">            if (priorValue == null) {</span>
+<span class="nc" id="L228">                syncGroups(key, KEYS, ADD);</span>
+            } else {
+<span class="nc" id="L230">                syncGroups(priorValue, VALUES, REMOVE);</span>
+            }
+        }
+<span class="nc" id="L233">        return priorValue;</span>
+    }
+
+
+    @Override
+    public void putAll(Map&lt;? extends K, ? extends V&gt; m) {
+<span class="nc" id="L239">        super.putAll(m);</span>
+        // drop the transient sets; will be rebuilt when/if needed
+<span class="nc" id="L241">        clearCache();</span>
+<span class="nc" id="L242">    }</span>
+
+
+    @Override
+    public V remove(Object key) {
+<span class="nc" id="L247">        V priorValue = super.remove(key);</span>
+<span class="nc bnc" id="L248" title="All 2 branches missed.">        if (priorValue != null) {</span>
+<span class="nc" id="L249">            syncGroups(key, KEYS, REMOVE);</span>
+<span class="nc" id="L250">            syncGroups(priorValue, VALUES, REMOVE);</span>
+        }
+<span class="nc" id="L252">        return priorValue;</span>
+    }
+
+
+    @Override
+    public boolean remove(Object key, Object value) {
+<span class="nc" id="L258">        boolean removed = super.remove(key, value);</span>
+<span class="nc bnc" id="L259" title="All 2 branches missed.">        if (removed) {</span>
+<span class="nc" id="L260">            syncGroups(key, KEYS, REMOVE);</span>
+<span class="nc" id="L261">            syncGroups(value, VALUES, REMOVE);</span>
+        }
+<span class="nc" id="L263">        return removed;</span>
+    }
+
+
+    @Override
+    public boolean replace(K key, V oldValue, V newValue) {
+<span class="nc" id="L269">        boolean replaced = super.replace(key, oldValue, newValue);</span>
+<span class="nc bnc" id="L270" title="All 2 branches missed.">        if (replaced) {</span>
+<span class="nc" id="L271">            syncGroups(oldValue, VALUES, REMOVE);</span>
+<span class="nc" id="L272">            syncGroups(newValue, VALUES, ADD);</span>
+        }
+<span class="nc" id="L274">        return replaced;</span>
+    }
+
+
+    @Override
+    public V replace(K key, V value) {
+<span class="nc" id="L280">        V priorValue = super.replace(key, value);</span>
+<span class="nc bnc" id="L281" title="All 2 branches missed.">        if (priorValue != null) {</span>
+<span class="nc" id="L282">            syncGroups(value, VALUES, ADD);</span>
+<span class="nc" id="L283">            syncGroups(priorValue, VALUES, REMOVE);</span>
+        }
+<span class="nc" id="L285">        return priorValue;</span>
+    }
+
+
+    @Override
+    public void clear() {
+<span class="nc" id="L291">        super.clear();</span>
+<span class="nc" id="L292">        clearCache();</span>
+<span class="nc" id="L293">    }</span>
+    
+    /**
+     * Certain operations imply that our locally cached group list(s) should
+     * be dropped and recreated. For example, when an ad-hoc client command
+     * is used to add a member to a group, the underlying group instance is
+     * actually dropped from the global Group cache, with the effect that our
+     * cache would be referring to an orphaned Group instance.
+     */
+    private synchronized void clearCache() {
+<span class="nc" id="L303">        knownGroupNamesFromKeys = null;</span>
+<span class="nc" id="L304">        knownGroupNamesFromValues = null;</span>
+<span class="nc" id="L305">    }</span>
+
+    private static final boolean KEYS = true;
+    private static final boolean VALUES = false;
+    private static final boolean ADD = true;
+    private static final boolean REMOVE = false;
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

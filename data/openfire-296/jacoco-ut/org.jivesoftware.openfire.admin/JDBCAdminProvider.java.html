@@ -1,0 +1,182 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>JDBCAdminProvider.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.admin</a> &gt; <span class="el_source">JDBCAdminProvider.java</span></div><h1>JDBCAdminProvider.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ * Copyright 2008-2016 Robert Marcano
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.jivesoftware.openfire.admin;
+
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.List;
+
+import org.jivesoftware.database.DbConnectionManager;
+import org.jivesoftware.openfire.XMPPServerInfo;
+import org.jivesoftware.util.JiveGlobals;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmpp.packet.JID;
+
+/**
+ * The JDBC admin provider allows you to use an external database to define the administrators
+ * users. It is best used with the JDBCAuthProvider &amp;amp; JDBCGroupProvider to provide integration
+ * between your external system and Openfire. All data is treated as read-only so any
+ * set operations will result in an exception.&lt;p&gt;
+ *
+ * To enable this provider, set the following in the system properties:
+ *
+ * &lt;ul&gt;
+ * &lt;li&gt;{@code provider.admin.className = org.jivesoftware.openfire.admin.JDBCAdminProvider}&lt;/li&gt;
+ * &lt;/ul&gt;
+ *
+ * Then you need to set your driver, connection string and SQL statements:
+ * &lt;ul&gt;
+ * &lt;li&gt;{@code jdbcProvider.driver = com.mysql.jdbc.Driver}&lt;/li&gt;
+ * &lt;li&gt;{@code jdbcProvider.connectionString = jdbc:mysql://localhost/dbname?user=username&amp;amp;password=secret}&lt;/li&gt;
+ * &lt;li&gt;{@code jdbcAdminProvider.getAdminsSQL = SELECT user FROM myAdmins}&lt;/li&gt;
+ * &lt;/ul&gt;
+ * &lt;p&gt;
+ * If you want to be able to update the admin users via the UI, add the following properties:
+ * &lt;ul&gt;
+ * &lt;li&gt;{@code jdbcAdminProvider.insertAdminsSQL = INSERT INTO myAdmins (user) VALUES (?)}&lt;/li&gt;
+ * &lt;li&gt;{@code jdbcAdminProvider.deleteAdminsSQL = DELETE FROM myAdmins WHERE user = ?}&lt;/li&gt;
+ * &lt;/ul&gt;
+ * &lt;p&gt;
+ * In order to use the configured JDBC connection provider do not use a JDBC
+ * connection string, set the following property
+ *
+ * &lt;ul&gt;
+ * &lt;li&gt;{@code jdbcAdminProvider.useConnectionProvider = true}&lt;/li&gt;
+ * &lt;/ul&gt;
+ *
+ *
+ * @author Robert Marcano
+ */
+public class JDBCAdminProvider implements AdminProvider {
+
+<span class="nc" id="L71">    private static final Logger Log = LoggerFactory.getLogger(JDBCAdminProvider.class);</span>
+
+    private final String getAdminsSQL;
+    private final String insertAdminsSQL;
+    private final String deleteAdminsSQL;
+    private final String xmppDomain;
+    private final boolean useConnectionProvider;
+
+    private String connectionString;
+
+    /**
+     * Constructs a new JDBC admin provider.
+     */
+<span class="nc" id="L84">    public JDBCAdminProvider() {</span>
+        // Convert XML based provider setup to Database based
+<span class="nc" id="L86">        JiveGlobals.migrateProperty(&quot;jdbcProvider.driver&quot;);</span>
+<span class="nc" id="L87">        JiveGlobals.migrateProperty(&quot;jdbcProvider.connectionString&quot;);</span>
+<span class="nc" id="L88">        JiveGlobals.migrateProperty(&quot;jdbcAdminProvider.getAdminsSQL&quot;);</span>
+
+<span class="nc" id="L90">        xmppDomain = XMPPServerInfo.XMPP_DOMAIN.getValue();</span>
+<span class="nc" id="L91">        useConnectionProvider = JiveGlobals.getBooleanProperty(&quot;jdbcAdminProvider.useConnectionProvider&quot;);</span>
+
+        // Load database statement for reading admin list
+<span class="nc" id="L94">        getAdminsSQL = JiveGlobals.getProperty(&quot;jdbcAdminProvider.getAdminsSQL&quot;);</span>
+<span class="nc" id="L95">        insertAdminsSQL = JiveGlobals.getProperty(&quot;jdbcAdminProvider.insertAdminsSQL&quot;, &quot;&quot;);</span>
+<span class="nc" id="L96">        deleteAdminsSQL = JiveGlobals.getProperty(&quot;jdbcAdminProvider.deleteAdminsSQL&quot;, &quot;&quot;);</span>
+
+        // Load the JDBC driver and connection string
+<span class="nc bnc" id="L99" title="All 2 branches missed.">        if (!useConnectionProvider) {</span>
+<span class="nc" id="L100">            String jdbcDriver = JiveGlobals.getProperty(&quot;jdbcProvider.driver&quot;);</span>
+            try {
+<span class="nc" id="L102">                Class.forName(jdbcDriver).newInstance();</span>
+<span class="nc" id="L103">            } catch (Exception e) {</span>
+<span class="nc" id="L104">                Log.error(&quot;Unable to load JDBC driver: &quot; + jdbcDriver, e);</span>
+<span class="nc" id="L105">                return;</span>
+<span class="nc" id="L106">            }</span>
+<span class="nc" id="L107">            connectionString = JiveGlobals.getProperty(&quot;jdbcProvider.connectionString&quot;);</span>
+        }
+<span class="nc" id="L109">    }</span>
+
+    @Override
+    public List&lt;JID&gt; getAdmins() {
+<span class="nc" id="L113">        Connection con = null;</span>
+<span class="nc" id="L114">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L115">        ResultSet rs = null;</span>
+
+<span class="nc" id="L117">        List&lt;JID&gt; jids = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L118">        synchronized (getAdminsSQL) {</span>
+        try {
+<span class="nc" id="L120">            con = getConnection();</span>
+<span class="nc" id="L121">            pstmt = con.prepareStatement(getAdminsSQL);</span>
+<span class="nc" id="L122">            rs = pstmt.executeQuery();</span>
+<span class="nc bnc" id="L123" title="All 2 branches missed.">            while (rs.next()) {</span>
+<span class="nc" id="L124">                String name = rs.getString(1);</span>
+<span class="nc" id="L125">                jids.add(new JID(name + &quot;@&quot; + xmppDomain));</span>
+<span class="nc" id="L126">            }</span>
+<span class="nc" id="L127">            return jids;</span>
+<span class="nc" id="L128">        } catch (SQLException e) {</span>
+<span class="nc" id="L129">            throw new RuntimeException(e);</span>
+        } finally {
+<span class="nc" id="L131">            DbConnectionManager.closeConnection(rs, pstmt, con);</span>
+<span class="nc" id="L132">        }</span>
+<span class="nc" id="L133">        }</span>
+    }
+
+    private void changeAdmins(final Connection con, final String sql, final List&lt;JID&gt; admins) throws SQLException {
+<span class="nc bnc" id="L137" title="All 2 branches missed.">        if (!admins.isEmpty()) {</span>
+<span class="nc" id="L138">            try (final PreparedStatement pstmt = con.prepareStatement(sql)) {</span>
+<span class="nc bnc" id="L139" title="All 2 branches missed.">                for (final JID jid : admins) {</span>
+<span class="nc" id="L140">                    pstmt.setString(1, jid.getNode());</span>
+<span class="nc" id="L141">                    pstmt.execute();</span>
+<span class="nc" id="L142">                }</span>
+<span class="nc bnc" id="L143" title="All 8 branches missed.">            }</span>
+        }
+<span class="nc" id="L145">    }</span>
+
+    @Override
+    public void setAdmins(List&lt;JID&gt; newAdmins) {
+<span class="nc bnc" id="L149" title="All 2 branches missed.">        if (isReadOnly()) {</span>
+            // Reject the operation since the provider is read-only
+<span class="nc" id="L151">            throw new UnsupportedOperationException();</span>
+        }
+
+<span class="nc" id="L154">        synchronized (getAdminsSQL) {</span>
+<span class="nc" id="L155">            final List&lt;JID&gt; currentAdmins = getAdmins();</span>
+            // Get a list of everyone in the new list not in the current list
+<span class="nc" id="L157">            final List&lt;JID&gt; adminsToAdd = new ArrayList&lt;&gt;(newAdmins);</span>
+<span class="nc" id="L158">            adminsToAdd.removeAll(currentAdmins);</span>
+            // Get a list of everyone in the current list not in the new list
+<span class="nc" id="L160">            currentAdmins.removeAll(newAdmins);</span>
+<span class="nc" id="L161">            try (final Connection con = getConnection()) {</span>
+<span class="nc" id="L162">                changeAdmins(con, insertAdminsSQL, adminsToAdd);</span>
+<span class="nc" id="L163">                changeAdmins(con, deleteAdminsSQL, currentAdmins);</span>
+<span class="nc bnc" id="L164" title="All 8 branches missed.">            } catch (SQLException e) {</span>
+<span class="nc" id="L165">                throw new RuntimeException(e);</span>
+<span class="nc" id="L166">            }</span>
+<span class="nc" id="L167">        }</span>
+<span class="nc" id="L168">    }</span>
+
+    @Override
+    public boolean isReadOnly() {
+<span class="nc bnc" id="L172" title="All 4 branches missed.">        return insertAdminsSQL.isEmpty() || deleteAdminsSQL.isEmpty();</span>
+    }
+
+    private Connection getConnection() throws SQLException {
+<span class="nc bnc" id="L176" title="All 2 branches missed.">        if (useConnectionProvider) {</span>
+<span class="nc" id="L177">            return DbConnectionManager.getConnection();</span>
+        }
+<span class="nc" id="L179">        return DriverManager.getConnection(connectionString);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

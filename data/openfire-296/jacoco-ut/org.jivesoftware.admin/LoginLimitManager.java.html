@@ -1,0 +1,193 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>LoginLimitManager.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.admin</a> &gt; <span class="el_source">LoginLimitManager.java</span></div><h1>LoginLimitManager.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2004-2009 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.admin;
+
+import java.util.Map;
+import java.util.TimerTask;
+import java.util.concurrent.ConcurrentHashMap;
+
+import org.jivesoftware.openfire.security.SecurityAuditManager;
+import org.jivesoftware.util.JiveGlobals;
+import org.jivesoftware.util.TaskEngine;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Handles recording admin console login attempts and handling temporary lockouts where necessary.
+ *
+ * @author Daniel Henninger
+ */
+public class LoginLimitManager {
+
+<span class="fc" id="L36">    private static final Logger Log = LoggerFactory.getLogger(LoginLimitManager.class);</span>
+    private final SecurityAuditManager securityAuditManager;
+
+    // Wrap this guy up so we can mock out the LoginLimitManager class.
+<span class="nc" id="L40">    private static class LoginLimitManagerContainer {</span>
+<span class="nc" id="L41">        private static LoginLimitManager instance = new LoginLimitManager();</span>
+    }
+
+    /**
+     * Returns a singleton instance of LoginLimitManager.
+     *
+     * @return a LoginLimitManager instance.
+     */
+    public static LoginLimitManager getInstance() {
+<span class="nc" id="L50">        return LoginLimitManagerContainer.instance;</span>
+    }
+
+    // Max number of attempts per ip address that can be performed in given time frame
+    private long maxAttemptsPerIP;
+    // Time frame before attempts per ip addresses are reset
+    private long millisecondsBetweenPerIP;
+
+    // Max number of attempts per username that can be performed in a given time frame
+    private long maxAttemptsPerUsername;
+    // Time frame before attempts per username are reset
+    private long millisecondsBetweenPerUsername;
+
+    // Record of attempts per IP address
+    private Map&lt;String,Long&gt; attemptsPerIP;
+    // Record of attempts per username
+    private Map&lt;String,Long&gt; attemptsPerUsername;
+
+    /**
+     * Constructs a new login limit manager.
+     */
+    private LoginLimitManager() {
+<span class="nc" id="L72">        this(SecurityAuditManager.getInstance(), TaskEngine.getInstance());</span>
+<span class="nc" id="L73">    }</span>
+
+    /**
+     * Constructs a new login limit manager. Exposed for test use only.
+     */
+<span class="fc" id="L78">    LoginLimitManager(final SecurityAuditManager securityAuditManager, final TaskEngine taskEngine) {</span>
+<span class="fc" id="L79">        this.securityAuditManager = securityAuditManager;</span>
+        // Set up initial maps
+<span class="fc" id="L81">        attemptsPerIP = new ConcurrentHashMap&lt;&gt;();</span>
+<span class="fc" id="L82">        attemptsPerUsername = new ConcurrentHashMap&lt;&gt;();</span>
+
+        // Max number of attempts per ip address that can be performed in given time frame (10 attempts default)
+<span class="fc" id="L85">        maxAttemptsPerIP = JiveGlobals.getLongProperty(&quot;adminConsole.maxAttemptsPerIP&quot;, 10);</span>
+        // Time frame before attempts per ip addresses are reset (15 minutes default)
+<span class="fc" id="L87">        millisecondsBetweenPerIP = JiveGlobals.getLongProperty(&quot;adminConsole.perIPAttemptResetInterval&quot;, 900000);</span>
+        // Max number of attempts per username that can be performed in a given time frame (10 attempts default)
+<span class="fc" id="L89">        maxAttemptsPerUsername = JiveGlobals.getLongProperty(&quot;adminConsole.maxAttemptsPerUsername&quot;, 10);</span>
+        // Time frame before attempts per ip addresses are reset (15 minutes default)
+<span class="fc" id="L91">        millisecondsBetweenPerUsername = JiveGlobals.getLongProperty(&quot;adminConsole.perUsernameAttemptResetInterval&quot;, 900000);</span>
+        // Set up per username attempt reset task
+<span class="fc" id="L93">        taskEngine.scheduleAtFixedRate(new PerUsernameTask(), 0, millisecondsBetweenPerUsername);</span>
+        // Set up per IP attempt reset task
+<span class="fc" id="L95">        taskEngine.scheduleAtFixedRate(new PerIPAddressTask(), 0, millisecondsBetweenPerIP);</span>
+<span class="fc" id="L96">    }</span>
+
+    /**
+     * Returns true of the entered username or connecting IP address has hit it's attempt limit.
+     *
+     * @param username Username being checked.
+     * @param address IP address that is connecting.
+     * @return True if the login attempt limit has been hit.
+     */
+    public boolean hasHitConnectionLimit(String username, String address) {
+<span class="nc bnc" id="L106" title="All 4 branches missed.">        if (attemptsPerIP.get(address) != null &amp;&amp; attemptsPerIP.get(address) &gt; maxAttemptsPerIP) {</span>
+<span class="nc" id="L107">            return true;</span>
+        }
+<span class="nc bnc" id="L109" title="All 4 branches missed.">        if (attemptsPerUsername.get(username) != null &amp;&amp; attemptsPerUsername.get(username) &gt; maxAttemptsPerUsername) {</span>
+<span class="nc" id="L110">            return true;</span>
+        }
+        // No problem then, no limit hit.
+<span class="nc" id="L113">        return false;</span>
+    }
+
+    /**
+     * Records a failed connection attempt.
+     *
+     * @param username Username being attempted.
+     * @param address IP address that is attempting.
+     */
+    public void recordFailedAttempt(String username, String address) {
+<span class="fc" id="L123">        Log.warn(&quot;Failed admin console login attempt by &quot;+username+&quot; from &quot;+address);</span>
+
+<span class="fc" id="L125">        Long cnt = (long)0;</span>
+<span class="fc bfc" id="L126" title="All 2 branches covered.">        if (attemptsPerIP.get(address) != null) {</span>
+<span class="fc" id="L127">            cnt = attemptsPerIP.get(address);</span>
+        }
+<span class="fc" id="L129">        cnt++;</span>
+<span class="fc" id="L130">        attemptsPerIP.put(address, cnt);</span>
+<span class="fc" id="L131">        final StringBuilder sb = new StringBuilder();</span>
+<span class="fc bfc" id="L132" title="All 2 branches covered.">        if (cnt &gt; maxAttemptsPerIP) {</span>
+<span class="fc" id="L133">            Log.warn(&quot;Login attempt limit breached for address &quot;+address);</span>
+<span class="fc" id="L134">            sb.append(&quot;Future login attempts from this address will be temporarily locked out. &quot;);</span>
+        }
+
+<span class="fc" id="L137">        cnt = (long)0;</span>
+<span class="fc bfc" id="L138" title="All 2 branches covered.">        if (attemptsPerUsername.get(username) != null) {</span>
+<span class="fc" id="L139">            cnt = attemptsPerUsername.get(username);</span>
+        }
+<span class="fc" id="L141">        cnt++;</span>
+<span class="fc" id="L142">        attemptsPerUsername.put(username, cnt);</span>
+<span class="fc bfc" id="L143" title="All 2 branches covered.">        if (cnt &gt; maxAttemptsPerUsername) {</span>
+<span class="fc" id="L144">            Log.warn(&quot;Login attempt limit breached for username &quot;+username);</span>
+<span class="fc" id="L145">            sb.append(&quot;Future login attempts for this user will be temporarily locked out. &quot;);</span>
+        }
+
+<span class="fc" id="L148">        securityAuditManager.logEvent(username, &quot;Failed admin console login attempt&quot;, &quot;A failed login attempt to the admin console was made from address &quot; + address + &quot;. &quot; + sb);</span>
+
+<span class="fc" id="L150">    }</span>
+
+    /**
+     * Clears failed login attempts if a success occurs.
+     *
+     * @param username Username being attempted.
+     * @param address IP address that is attempting.
+     */
+    public void recordSuccessfulAttempt(String username, String address) {
+<span class="fc" id="L159">        attemptsPerIP.remove(address);</span>
+<span class="fc" id="L160">        attemptsPerUsername.remove(username);</span>
+<span class="fc" id="L161">        securityAuditManager.logEvent(username, &quot;Successful admin console login attempt&quot;, &quot;The user logged in successfully to the admin console from address &quot; + address + &quot;. &quot;);</span>
+<span class="fc" id="L162">    }</span>
+
+    /**
+     * Runs at configured interval to clear out attempts per username, thereby wiping lockouts.
+     */
+<span class="fc" id="L167">    private class PerUsernameTask extends TimerTask {</span>
+
+        /**
+         * Wipes failed attempt list for usernames.
+         */
+        @Override
+        public void run() {
+<span class="nc" id="L174">            attemptsPerUsername.clear();</span>
+<span class="nc" id="L175">        }</span>
+    }
+
+    /**
+     * Runs at configured interval to clear out attempts per ip address, thereby wiping lockouts.
+     */
+<span class="fc" id="L181">    private class PerIPAddressTask extends TimerTask {</span>
+
+        /**
+         * Wipes failed attempt list for ip addresses.
+         */
+        @Override
+        public void run() {
+<span class="nc" id="L188">            attemptsPerIP.clear();</span>
+<span class="nc" id="L189">        }</span>
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

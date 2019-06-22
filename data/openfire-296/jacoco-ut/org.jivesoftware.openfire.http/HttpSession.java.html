@@ -1,0 +1,1359 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>HttpSession.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.http</a> &gt; <span class="el_source">HttpSession.java</span></div><h1>HttpSession.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.http;
+
+import org.dom4j.DocumentHelper;
+import org.dom4j.Element;
+import org.dom4j.Namespace;
+import org.dom4j.QName;
+import org.dom4j.io.XMPPPacketReader;
+import org.jivesoftware.openfire.PacketDeliverer;
+import org.jivesoftware.openfire.SessionPacketRouter;
+import org.jivesoftware.openfire.StreamID;
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.auth.UnauthorizedException;
+import org.jivesoftware.openfire.multiplex.UnknownStanzaException;
+import org.jivesoftware.openfire.net.MXParser;
+import org.jivesoftware.openfire.net.SASLAuthentication;
+import org.jivesoftware.openfire.net.VirtualConnection;
+import org.jivesoftware.openfire.session.LocalClientSession;
+import org.jivesoftware.openfire.spi.ConnectionConfiguration;
+import org.jivesoftware.openfire.spi.ConnectionManagerImpl;
+import org.jivesoftware.openfire.spi.ConnectionType;
+import org.jivesoftware.util.JiveConstants;
+import org.jivesoftware.util.JiveGlobals;
+import org.jivesoftware.util.TaskEngine;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmlpull.v1.XmlPullParserException;
+import org.xmlpull.v1.XmlPullParserFactory;
+import org.xmpp.packet.IQ;
+import org.xmpp.packet.Message;
+import org.xmpp.packet.Packet;
+import org.xmpp.packet.Presence;
+
+import javax.servlet.AsyncContext;
+import javax.servlet.AsyncEvent;
+import javax.servlet.AsyncListener;
+import java.io.IOException;
+import java.io.StringReader;
+import java.net.InetAddress;
+import java.net.UnknownHostException;
+import java.security.cert.Certificate;
+import java.security.cert.X509Certificate;
+import java.util.*;
+import java.util.concurrent.CopyOnWriteArraySet;
+
+/**
+ * A session represents a series of interactions with an XMPP client sending packets using the HTTP
+ * Binding protocol specified in &lt;a href=&quot;http://www.xmpp.org/extensions/xep-0124.html&quot;&gt;XEP-0124&lt;/a&gt;.
+ * A session can have several client connections open simultaneously while awaiting packets bound
+ * for the client from the server.
+ *
+ * @author Alexander Wenckus
+ */
+public class HttpSession extends LocalClientSession {
+
+<span class="nc" id="L71">    private static final Logger Log = LoggerFactory.getLogger(HttpSession.class);</span>
+
+<span class="nc" id="L73">    private static XmlPullParserFactory factory = null;</span>
+<span class="nc" id="L74">    private static ThreadLocal&lt;XMPPPacketReader&gt; localParser = null;</span>
+    static {
+        try {
+<span class="nc" id="L77">            factory = XmlPullParserFactory.newInstance(MXParser.class.getName(), null);</span>
+<span class="nc" id="L78">            factory.setNamespaceAware(true);</span>
+        }
+<span class="nc" id="L80">        catch (XmlPullParserException e) {</span>
+<span class="nc" id="L81">            Log.error(&quot;Error creating a parser factory&quot;, e);</span>
+<span class="nc" id="L82">        }</span>
+        // Create xmpp parser to keep in each thread
+<span class="nc" id="L84">        localParser = new ThreadLocal&lt;XMPPPacketReader&gt;() {</span>
+            @Override
+            protected XMPPPacketReader initialValue() {
+<span class="nc" id="L87">                XMPPPacketReader parser = new XMPPPacketReader();</span>
+<span class="nc" id="L88">                factory.setNamespaceAware(true);</span>
+<span class="nc" id="L89">                parser.setXPPFactory(factory);</span>
+<span class="nc" id="L90">                return parser;</span>
+            }
+        };
+    }
+
+    private int wait;
+<span class="nc" id="L96">    private int hold = 0;</span>
+    private String language;
+<span class="nc" id="L98">    private final List&lt;HttpConnection&gt; connectionQueue = Collections.synchronizedList(new LinkedList&lt;HttpConnection&gt;());</span>
+<span class="nc" id="L99">    private final List&lt;Deliverable&gt; pendingElements = Collections.synchronizedList(new ArrayList&lt;Deliverable&gt;());</span>
+<span class="nc" id="L100">    private final List&lt;Delivered&gt; sentElements = Collections.synchronizedList(new ArrayList&lt;Delivered&gt;());</span>
+    private boolean isSecure;
+    private int maxPollingInterval;
+<span class="nc" id="L103">    private long lastPoll = -1;</span>
+<span class="nc" id="L104">    private Set&lt;SessionListener&gt; listeners = new CopyOnWriteArraySet&lt;&gt;();</span>
+    private volatile boolean isClosed;
+    private int inactivityTimeout;
+    private int defaultInactivityTimeout;
+    private long lastActivity;
+    private long lastRequestID;
+    private boolean lastResponseEmpty;
+    private int maxRequests;
+    private int maxPause;
+    private PacketDeliverer backupDeliverer;
+<span class="nc" id="L114">    private int majorVersion = -1;</span>
+<span class="nc" id="L115">    private int minorVersion = -1;</span>
+    private X509Certificate[] sslCertificates;
+
+<span class="nc" id="L118">    private final Queue&lt;Collection&lt;Element&gt;&gt; packetsToSend = new LinkedList&lt;&gt;();</span>
+    // Semaphore which protects the packets to send, so, there can only be one consumer at a time.
+    private SessionPacketRouter router;
+
+<span class="nc" id="L122">    private static final Comparator&lt;HttpConnection&gt; connectionComparator</span>
+<span class="nc" id="L123">            = new Comparator&lt;HttpConnection&gt;() {</span>
+        @Override
+        public int compare(HttpConnection o1, HttpConnection o2) {
+<span class="nc" id="L126">            return (int) (o1.getRequestId() - o2.getRequestId());</span>
+        }
+    };
+
+    public HttpSession(PacketDeliverer backupDeliverer, String serverName,
+                       StreamID streamID, HttpConnection connection, Locale language) throws UnknownHostException
+    {
+<span class="nc" id="L133">        super(serverName, new HttpVirtualConnection(connection.getRemoteAddr(), ConnectionType.SOCKET_C2S), streamID, language);</span>
+<span class="nc" id="L134">        this.isClosed = false;</span>
+<span class="nc" id="L135">        this.lastActivity = System.currentTimeMillis();</span>
+<span class="nc" id="L136">        this.lastRequestID = connection.getRequestId();</span>
+<span class="nc" id="L137">        this.backupDeliverer = backupDeliverer;</span>
+<span class="nc" id="L138">        this.sslCertificates = connection.getPeerCertificates();</span>
+<span class="nc bnc" id="L139" title="All 2 branches missed.">        if (JiveGlobals.getBooleanProperty(&quot;log.httpbind.enabled&quot;, false)) {</span>
+<span class="nc" id="L140">            Log.info(&quot;Session &quot; + getStreamID() + &quot; being opened with initial connection &quot; +</span>
+<span class="nc" id="L141">                    connection.toString());</span>
+        }
+<span class="nc" id="L143">    }</span>
+
+    /**
+     * Returns the stream features which are available for this session.
+     *
+     * @return the stream features which are available for this session.
+     */
+    public Collection&lt;Element&gt; getAvailableStreamFeaturesElements() {
+<span class="nc" id="L151">        List&lt;Element&gt; elements = new ArrayList&lt;&gt;();</span>
+
+<span class="nc bnc" id="L153" title="All 2 branches missed.">        if (getAuthToken() == null) {</span>
+<span class="nc" id="L154">            Element sasl = SASLAuthentication.getSASLMechanismsElement(this);</span>
+<span class="nc bnc" id="L155" title="All 2 branches missed.">            if (sasl != null) {</span>
+<span class="nc" id="L156">                elements.add(sasl);</span>
+            }
+        }
+
+<span class="nc bnc" id="L160" title="All 2 branches missed.">        if (XMPPServer.getInstance().getIQRegisterHandler().isInbandRegEnabled()) {</span>
+<span class="nc" id="L161">            elements.add(DocumentHelper.createElement(new QName(&quot;register&quot;,</span>
+                    new Namespace(&quot;&quot;, &quot;http://jabber.org/features/iq-register&quot;))));
+        }
+<span class="nc" id="L164">        Element bind = DocumentHelper.createElement(new QName(&quot;bind&quot;,</span>
+                new Namespace(&quot;&quot;, &quot;urn:ietf:params:xml:ns:xmpp-bind&quot;)));
+<span class="nc" id="L166">        elements.add(bind);</span>
+
+<span class="nc" id="L168">        Element session = DocumentHelper.createElement(new QName(&quot;session&quot;,</span>
+                new Namespace(&quot;&quot;, &quot;urn:ietf:params:xml:ns:xmpp-session&quot;)));
+<span class="nc" id="L170">        session.addElement(&quot;optional&quot;);</span>
+<span class="nc" id="L171">        elements.add(session);</span>
+<span class="nc" id="L172">        return elements;</span>
+    }
+
+    @Override
+    public String getAvailableStreamFeatures() {
+<span class="nc" id="L177">        StringBuilder sb = new StringBuilder(200);</span>
+<span class="nc bnc" id="L178" title="All 2 branches missed.">        for (Element element : getAvailableStreamFeaturesElements()) {</span>
+<span class="nc" id="L179">            sb.append(element.asXML());</span>
+<span class="nc" id="L180">        }</span>
+<span class="nc" id="L181">        return sb.toString();</span>
+    }
+
+    /**
+     * Closes the session. After a session has been closed it will no longer accept new connections
+     * on the session ID.
+     */
+    @Override
+    public void close() {
+<span class="nc bnc" id="L190" title="All 2 branches missed.">        if (isClosed) {</span>
+<span class="nc" id="L191">            return;</span>
+        }
+<span class="nc bnc" id="L193" title="All 2 branches missed.">        if (JiveGlobals.getBooleanProperty(&quot;log.httpbind.enabled&quot;, false)) {</span>
+<span class="nc" id="L194">            Log.info(&quot;Session &quot; + getStreamID() + &quot; being closed&quot;);</span>
+        }
+<span class="nc" id="L196">        conn.close();</span>
+<span class="nc" id="L197">    }</span>
+
+    /**
+     * Returns true if this session has been closed and no longer actively accepting connections.
+     *
+     * @return true if this session has been closed and no longer actively accepting connections.
+     */
+    @Override
+    public boolean isClosed() {
+<span class="nc" id="L206">        return isClosed;</span>
+    }
+
+    /**
+     * Specifies the longest time (in seconds) that the connection manager is allowed to wait before
+     * responding to any request during the session. This enables the client to prevent its TCP
+     * connection from expiring due to inactivity, as well as to limit the delay before it discovers
+     * any network failure.
+     *
+     * @param wait the longest time it is permissible to wait for a response.
+     */
+    public void setWait(int wait) {
+<span class="nc" id="L218">        this.wait = wait;</span>
+<span class="nc" id="L219">    }</span>
+
+    /**
+     * Specifies the longest time (in seconds) that the connection manager is allowed to wait before
+     * responding to any request during the session. This enables the client to prevent its TCP
+     * connection from expiring due to inactivity, as well as to limit the delay before it discovers
+     * any network failure.
+     *
+     * @return the longest time it is permissible to wait for a response.
+     */
+    public int getWait() {
+<span class="nc" id="L230">        return wait;</span>
+    }
+
+    /**
+     * Specifies the maximum number of requests the connection manager is allowed to keep waiting at
+     * any one time during the session. (For example, if a constrained client is unable to keep open
+     * more than two HTTP connections to the same HTTP server simultaneously, then it SHOULD specify
+     * a value of &quot;1&quot;.)
+     *
+     * @param hold the maximum number of simultaneous waiting requests.
+     */
+    public void setHold(int hold) {
+<span class="nc" id="L242">        this.hold = hold;</span>
+<span class="nc" id="L243">    }</span>
+
+    /**
+     * Specifies the maximum number of requests the connection manager is allowed to keep waiting at
+     * any one time during the session. (For example, if a constrained client is unable to keep open
+     * more than two HTTP connections to the same HTTP server simultaneously, then it SHOULD specify
+     * a value of &quot;1&quot;.)
+     *
+     * @return the maximum number of simultaneous waiting requests
+     */
+    public int getHold() {
+<span class="nc" id="L254">        return hold;</span>
+    }
+
+    /**
+     * Sets the max interval within which a client can send polling requests. If more than one
+     * request occurs in the interval the session will be terminated.
+     *
+     * @param maxPollingInterval time in seconds a client needs to wait before sending polls to the
+     * server, a negative &lt;i&gt;int&lt;/i&gt; indicates that there is no limit.
+     */
+    public void setMaxPollingInterval(int maxPollingInterval) {
+<span class="nc" id="L265">        this.maxPollingInterval = maxPollingInterval;</span>
+<span class="nc" id="L266">    }</span>
+
+    /**
+     * Returns the max interval within which a client can send polling requests. If more than one
+     * request occurs in the interval the session will be terminated.
+     *
+     * @return the max interval within which a client can send polling requests. If more than one
+     *         request occurs in the interval the session will be terminated.
+     */
+    public int getMaxPollingInterval() {
+<span class="nc" id="L276">        return this.maxPollingInterval;</span>
+    }
+
+    /**
+     * The max number of requests it is permissible for this session to have open at any one time.
+     *
+     * @param maxRequests The max number of requests it is permissible for this session to have open
+     * at any one time.
+     */
+    public void setMaxRequests(int maxRequests) {
+<span class="nc" id="L286">        this.maxRequests = maxRequests;</span>
+<span class="nc" id="L287">    }</span>
+
+    /**
+     * Returns the max number of requests it is permissible for this session to have open at any one
+     * time.
+     *
+     * @return the max number of requests it is permissible for this session to have open at any one
+     *         time.
+     */
+    public int getMaxRequests() {
+<span class="nc" id="L297">        return this.maxRequests;</span>
+    }
+
+    /**
+     * Sets the maximum length of a temporary session pause (in seconds) that the client MAY
+     * request.
+     *
+     * @param maxPause the maximum length of a temporary session pause (in seconds) that the client
+     * MAY request.
+     */
+    public void setMaxPause(int maxPause) {
+<span class="nc" id="L308">        this.maxPause = maxPause;</span>
+<span class="nc" id="L309">    }</span>
+
+    /**
+     * Returns the maximum length of a temporary session pause (in seconds) that the client MAY
+     * request.
+     *
+     * @return the maximum length of a temporary session pause (in seconds) that the client MAY
+     *         request.
+     */
+    public int getMaxPause() {
+<span class="nc" id="L319">        return this.maxPause;</span>
+    }
+
+    /**
+     * Returns true if all connections on this session should be secured, and false if they should
+     * not.
+     *
+     * @return true if all connections on this session should be secured, and false if they should
+     *         not.
+     */
+    @Override
+    public boolean isSecure() {
+<span class="nc" id="L331">        return isSecure;</span>
+    }
+
+    /**
+     * Returns true if this session is a polling session. Some clients may be restricted to open
+     * only one connection to the server. In this case the client SHOULD inform the server by
+     * setting the values of the 'wait' and/or 'hold' attributes in its session creation request
+     * to &quot;0&quot;, and then &quot;poll&quot; the server at regular intervals throughout the session for stanzas
+     * it may have received from the server.
+     *
+     * @return true if this session is a polling session.
+     */
+    public boolean isPollingSession() {
+<span class="nc bnc" id="L344" title="All 4 branches missed.">        return (this.wait == 0 || this.hold == 0);</span>
+    }
+
+    /**
+     * Adds a {@link org.jivesoftware.openfire.http.SessionListener} to this session. The listener
+     * will be notified of changes to the session.
+     *
+     * @param listener the listener which is being added to the session.
+     */
+    public void addSessionCloseListener(SessionListener listener) {
+<span class="nc" id="L354">        listeners.add(listener);</span>
+<span class="nc" id="L355">    }</span>
+
+    /**
+     * Removes a {@link org.jivesoftware.openfire.http.SessionListener} from this session. The
+     * listener will no longer be updated when an event occurs on the session.
+     *
+     * @param listener the session listener that is to be removed.
+     */
+    public void removeSessionCloseListener(SessionListener listener) {
+<span class="nc" id="L364">        listeners.remove(listener);</span>
+<span class="nc" id="L365">    }</span>
+
+    /**
+     * Sets the default inactivity timeout of this session. A session's inactivity timeout can
+     * be temporarily changed using session pause requests.
+     *
+     * @see #pause(int)
+     *
+     * @param defaultInactivityTimeout the default inactivity timeout of this session.
+     */
+    public void setDefaultInactivityTimeout(int defaultInactivityTimeout) {
+<span class="nc" id="L376">        this.defaultInactivityTimeout = defaultInactivityTimeout;</span>
+<span class="nc" id="L377">    }</span>
+
+    /**
+     * Sets the time, in seconds, after which this session will be considered inactive and be be
+     * terminated.
+     *
+     * @param inactivityTimeout the time, in seconds, after which this session will be considered
+     * inactive and be terminated.
+     */
+    public void setInactivityTimeout(int inactivityTimeout) {
+<span class="nc" id="L387">        this.inactivityTimeout = inactivityTimeout;</span>
+<span class="nc" id="L388">    }</span>
+
+    /**
+     * Resets the inactivity timeout of this session to default. A session's inactivity timeout can
+     * be temporarily changed using session pause requests.
+     *
+     * @see #pause(int)
+     */
+    public void resetInactivityTimeout() {
+<span class="nc" id="L397">        this.inactivityTimeout = this.defaultInactivityTimeout;</span>
+<span class="nc" id="L398">    }</span>
+
+    /**
+     * Returns the time, in seconds, after which this session will be considered inactive and
+     * terminated.
+     *
+     * @return the time, in seconds, after which this session will be considered inactive and
+     *         terminated.
+     */
+    public int getInactivityTimeout() {
+<span class="nc" id="L408">        return inactivityTimeout;</span>
+    }
+
+    /**
+     * Pauses the session for the given amount of time. If a client encounters an exceptional
+     * temporary situation during which it will be unable to send requests to the connection
+     * manager for a period of time greater than the maximum inactivity period, then the client MAY
+     * request a temporary increase to the maximum inactivity period by including a 'pause'
+     * attribute in a request.
+     *
+     * @param duration the time, in seconds, after which this session will be considered inactive
+     *        and terminated.
+     */
+    public void pause(int duration) {
+        // Respond immediately to all pending requests
+<span class="nc" id="L423">        synchronized (connectionQueue) {</span>
+<span class="nc bnc" id="L424" title="All 2 branches missed.">            for (HttpConnection toClose : connectionQueue) {</span>
+<span class="nc bnc" id="L425" title="All 2 branches missed.">                if (!toClose.isClosed()) {</span>
+<span class="nc" id="L426">                    toClose.close();</span>
+<span class="nc" id="L427">                    lastRequestID = toClose.getRequestId();</span>
+                }
+<span class="nc" id="L429">            }</span>
+<span class="nc" id="L430">        }</span>
+<span class="nc" id="L431">        setInactivityTimeout(duration);</span>
+<span class="nc" id="L432">    }</span>
+
+    /**
+     * Returns the time in milliseconds since the epoch that this session was last active. Activity
+     * is a request was either made or responded to. If the session is currently active, meaning
+     * there are connections awaiting a response, the current time is returned.
+     *
+     * @return the time in milliseconds since the epoch that this session was last active.
+     */
+    public long getLastActivity() {
+<span class="nc bnc" id="L442" title="All 2 branches missed.">        if (!connectionQueue.isEmpty()) {</span>
+<span class="nc" id="L443">            synchronized (connectionQueue) {</span>
+<span class="nc bnc" id="L444" title="All 2 branches missed.">                for (HttpConnection connection : connectionQueue) {</span>
+                    // The session is currently active, set the last activity to the current time.
+<span class="nc bnc" id="L446" title="All 2 branches missed.">                    if (!(connection.isClosed())) {</span>
+<span class="nc" id="L447">                        lastActivity = System.currentTimeMillis();</span>
+<span class="nc" id="L448">                        break;</span>
+                    }
+<span class="nc" id="L450">                }</span>
+<span class="nc" id="L451">            }</span>
+        }
+<span class="nc" id="L453">        return lastActivity;</span>
+    }
+
+    /**
+     * Returns the highest 'rid' attribute the server has received where it has also received
+     * all requests with lower 'rid' values. When responding to a request that it has been
+     * holding, if the server finds it has already received another request with a higher 'rid'
+     * attribute (typically while it was holding the first request), then it MAY acknowledge the
+     * reception to the client.
+     *
+     * @return the highest 'rid' attribute the server has received where it has also received
+     * all requests with lower 'rid' values.
+     */
+    public long getLastAcknowledged() {
+<span class="nc" id="L467">        long ack = lastRequestID;</span>
+<span class="nc" id="L468">        Collections.sort(connectionQueue, connectionComparator);</span>
+<span class="nc" id="L469">        synchronized (connectionQueue) {</span>
+<span class="nc bnc" id="L470" title="All 2 branches missed.">            for (HttpConnection connection : connectionQueue) {</span>
+<span class="nc bnc" id="L471" title="All 2 branches missed.">                if (connection.getRequestId() == ack + 1) {</span>
+<span class="nc" id="L472">                    ack++;</span>
+                }
+<span class="nc" id="L474">            }</span>
+<span class="nc" id="L475">        }</span>
+<span class="nc" id="L476">        return ack;</span>
+    }
+
+    /**
+     * Sets the major version of BOSH which the client implements. Currently, the only versions
+     * supported by Openfire are 1.5 and 1.6.
+     *
+     * @param majorVersion the major version of BOSH which the client implements.
+     */
+    public void setMajorVersion(int majorVersion) {
+<span class="nc bnc" id="L486" title="All 2 branches missed.">        if(majorVersion != 1) {</span>
+<span class="nc" id="L487">            return;</span>
+        }
+<span class="nc" id="L489">        this.majorVersion = majorVersion;</span>
+<span class="nc" id="L490">    }</span>
+
+    /**
+     * Returns the major version of BOSH which this session utilizes. The version refers to the
+     * version of the XEP which the connecting client implements. If the client did not specify
+     * a version 1 is returned as 1.5 is the last version of the &lt;a
+     * href=&quot;http://www.xmpp.org/extensions/xep-0124.html&quot;&gt;XEP&lt;/a&gt; that the client was not
+     * required to pass along its version information when creating a session.
+     *
+     * @return the major version of the BOSH XEP which the client is utilizing.
+     */
+    public int getMajorVersion() {
+<span class="nc bnc" id="L502" title="All 2 branches missed.">        if (this.majorVersion != -1) {</span>
+<span class="nc" id="L503">            return this.majorVersion;</span>
+        }
+        else {
+<span class="nc" id="L506">            return 1;</span>
+        }
+    }
+
+    /**
+     * Sets the minor version of BOSH which the client implements. Currently, the only versions
+     * supported by Openfire are 1.5 and 1.6. Any versions less than or equal to 5 will be
+     * interpreted as 5 and any values greater than or equal to 6 will be interpreted as 6.
+     *
+     * @param minorVersion the minor version of BOSH which the client implements.
+     */
+    public void setMinorVersion(int minorVersion) {
+<span class="nc bnc" id="L518" title="All 2 branches missed.">        if(minorVersion &lt;= 5) {</span>
+<span class="nc" id="L519">            this.minorVersion = 5;</span>
+        }
+<span class="nc bnc" id="L521" title="All 2 branches missed.">        else if(minorVersion &gt;= 6) {</span>
+<span class="nc" id="L522">            this.minorVersion = 6;</span>
+        }
+<span class="nc" id="L524">    }</span>
+
+    /**
+     * Returns the major version of BOSH which this session utilizes. The version refers to the
+     * version of the XEP which the connecting client implements. If the client did not specify
+     * a version 5 is returned as 1.5 is the last version of the &lt;a
+     * href=&quot;http://www.xmpp.org/extensions/xep-0124.html&quot;&gt;XEP&lt;/a&gt; that the client was not
+     * required to pass along its version information when creating a session.
+     *
+     * @return the minor version of the BOSH XEP which the client is utilizing.
+     */
+    public int getMinorVersion() {
+<span class="nc bnc" id="L536" title="All 2 branches missed.">        if (this.minorVersion != -1) {</span>
+<span class="nc" id="L537">            return this.minorVersion;</span>
+        }
+        else {
+<span class="nc" id="L540">            return 5;</span>
+        }
+    }
+
+    /**
+     * lastResponseEmpty true if last response of this session is an empty body element. This
+     * is used in overactivity checking.
+     *
+     * @param lastResponseEmpty true if last response of this session is an empty body element.
+     */
+    public void setLastResponseEmpty(boolean lastResponseEmpty) {
+<span class="nc" id="L551">        this.lastResponseEmpty = lastResponseEmpty;</span>
+<span class="nc" id="L552">    }</span>
+
+    /**
+     * Sets whether the initial request on the session was secure.
+     *
+     * @param isSecure true if the initial request was secure and false if it wasn't.
+     */
+    protected void setSecure(boolean isSecure) {
+<span class="nc" id="L560">        this.isSecure = isSecure;</span>
+<span class="nc" id="L561">    }</span>
+
+    /**
+     * Forwards a client request, which is related to a session, to the server. A connection is
+     * created and queued up in the provided session. When a connection reaches the top of a queue
+     * any pending packets bound for the client will be forwarded to the client through the
+     * connection.
+     *
+     * @param body the body element that was sent containing the request for a new session.
+     * @param context the context of the asynchronous servlet call leading up to this method call.
+     *
+     * @throws org.jivesoftware.openfire.http.HttpBindException for several reasons: if the encoding inside of an auth packet is
+     * not recognized by the server, or if the packet type is not recognized.
+     * @throws org.jivesoftware.openfire.http.HttpConnectionClosedException if the session is no longer available.
+     * @throws IOException if an input or output exception occurred
+     */
+    public void forwardRequest(HttpBindBody body, AsyncContext context)
+            throws HttpBindException, HttpConnectionClosedException, IOException
+    {
+<span class="nc" id="L580">        HttpConnection connection = this.createConnection(body.getRid(), body.isPoll(), context);</span>
+<span class="nc bnc" id="L581" title="All 2 branches missed.">        if (!body.isEmpty()) {</span>
+            // creates the runnable to forward the packets
+<span class="nc" id="L583">            synchronized (packetsToSend) {</span>
+<span class="nc" id="L584">                packetsToSend.add(body.getStanzaElements());</span>
+<span class="nc" id="L585">            }</span>
+<span class="nc" id="L586">            new HttpPacketSender(this).init();</span>
+        }
+
+<span class="nc" id="L589">        final String type = body.getType();</span>
+
+<span class="nc bnc" id="L591" title="All 2 branches missed.">        if (&quot;terminate&quot;.equals(type)) {</span>
+<span class="nc" id="L592">            connection.deliverBody(createEmptyBody(true), true);</span>
+<span class="nc" id="L593">            close();</span>
+<span class="nc" id="L594">            lastRequestID = connection.getRequestId();</span>
+        }
+<span class="nc bnc" id="L596" title="All 4 branches missed.">        else if (body.isRestart() &amp;&amp; body.isEmpty() ) {</span>
+<span class="nc" id="L597">            connection.deliverBody(createSessionRestartResponse(), true);</span>
+<span class="nc" id="L598">            lastRequestID = connection.getRequestId();</span>
+        }
+<span class="nc bnc" id="L600" title="All 4 branches missed.">        else if (body.getPause() &gt; 0 &amp;&amp; body.getPause() &lt;= getMaxPause()) {</span>
+<span class="nc" id="L601">            pause(body.getPause());</span>
+<span class="nc" id="L602">            connection.deliverBody(createEmptyBody(false), true);</span>
+<span class="nc" id="L603">            lastRequestID = connection.getRequestId();</span>
+<span class="nc" id="L604">            setLastResponseEmpty(true);</span>
+        }
+        else {
+<span class="nc" id="L607">            resetInactivityTimeout();</span>
+        }
+<span class="nc" id="L609">    }</span>
+
+    /**
+     * This methods sends any pending packets in the session. If no packets are
+     * pending, this method simply returns. The method is internally synchronized
+     * to avoid simultaneous sending operations on this Session. If two
+     * threads try to run this method simultaneously, the first one will trigger
+     * the pending packets to be sent, while the second one will simply return
+     * (as there are no packets left to send).
+     */
+    protected void sendPendingPackets() {
+        // access blocked only on send to prevent deadlocks
+<span class="nc" id="L621">        synchronized (packetsToSend) {</span>
+<span class="nc bnc" id="L622" title="All 2 branches missed.">            if (packetsToSend.isEmpty()) {</span>
+<span class="nc" id="L623">                return;</span>
+            }
+
+<span class="nc bnc" id="L626" title="All 2 branches missed.">            if (router == null) {</span>
+<span class="nc" id="L627">                router = new SessionPacketRouter(this);</span>
+            }
+
+            do {
+<span class="nc" id="L631">                Collection&lt;Element&gt; packets = packetsToSend.remove();</span>
+<span class="nc bnc" id="L632" title="All 2 branches missed.">                for (Element packet : packets) {</span>
+                    try {
+<span class="nc" id="L634">                        router.route(packet);</span>
+<span class="nc" id="L635">                    } catch (UnknownStanzaException e) {</span>
+<span class="nc" id="L636">                        Log.error( &quot;On session &quot; + getStreamID() + &quot; client provided unknown packet type&quot;, e);</span>
+<span class="nc" id="L637">                    }</span>
+<span class="nc" id="L638">                }</span>
+            }
+<span class="nc bnc" id="L640" title="All 2 branches missed.">            while( !packetsToSend.isEmpty() );</span>
+<span class="nc" id="L641">        }</span>
+<span class="nc" id="L642">    }</span>
+
+    /**
+     * Return the X509Certificates associated with this session.
+     *
+     * @return the X509Certificate associated with this session.
+     */
+    @Override
+    public X509Certificate[] getPeerCertificates() {
+<span class="nc" id="L651">        return sslCertificates;</span>
+    }
+
+    /**
+     * Creates a new connection on this session. If a response is currently available for this
+     * session the connection is responded to immediately, otherwise it is queued awaiting a
+     * response.
+     *
+     * @param rid the request id related to the connection.
+     * @return the created {@link org.jivesoftware.openfire.http.HttpConnection} which represents
+     *         the connection.
+     *
+     * @throws HttpConnectionClosedException if the connection was closed before a response could be
+     * delivered.
+     * @throws HttpBindException if the connection has violated a facet of the HTTP binding
+     * protocol.
+     */
+    synchronized HttpConnection createConnection(long rid, boolean isPoll, AsyncContext context)
+            throws HttpConnectionClosedException, HttpBindException, IOException
+    {
+<span class="nc" id="L671">        final HttpConnection connection = new HttpConnection(rid, context);</span>
+<span class="nc" id="L672">        final StreamID streamID = getStreamID();</span>
+<span class="nc" id="L673">        boolean logHttpbindEnabled = JiveGlobals.getBooleanProperty(&quot;log.httpbind.enabled&quot;, false);</span>
+<span class="nc bnc" id="L674" title="All 2 branches missed.">        if (logHttpbindEnabled) {</span>
+<span class="nc" id="L675">            Log.info( &quot;Creating connection for rid: &quot; + rid + &quot; in session &quot; + streamID );</span>
+        }
+<span class="nc" id="L677">        connection.setSession(this);</span>
+<span class="nc" id="L678">        context.setTimeout(getWait() * JiveConstants.SECOND);</span>
+<span class="nc" id="L679">        context.addListener(new AsyncListener() {</span>
+            @Override
+            public void onComplete(AsyncEvent asyncEvent) throws IOException {
+<span class="nc bnc" id="L682" title="All 2 branches missed.">                if (Log.isDebugEnabled()) {</span>
+<span class="nc" id="L683">                    Log.debug(&quot;complete event &quot; + asyncEvent + &quot; for &quot; + rid + &quot; in session &quot; + streamID);</span>
+                }
+<span class="nc" id="L685">                connectionQueue.remove(connection);</span>
+<span class="nc" id="L686">                lastActivity = System.currentTimeMillis();</span>
+<span class="nc" id="L687">                SessionEventDispatcher.dispatchEvent( HttpSession.this, SessionEventDispatcher.EventType.connection_closed, connection, context );</span>
+<span class="nc" id="L688">            }</span>
+
+            @Override
+            public void onTimeout(AsyncEvent asyncEvent) throws IOException {
+<span class="nc bnc" id="L692" title="All 2 branches missed.">                if( Log.isDebugEnabled()) {</span>
+<span class="nc" id="L693">                    Log.debug(&quot;timeout event &quot; + asyncEvent + &quot; for &quot; + rid + &quot; in session &quot; + streamID);</span>
+                }
+                try {
+                    // If onTimeout does not result in a complete(), the container falls back to default behavior.
+                    // This is why this body is to be delivered in a non-async fashion.
+<span class="nc" id="L698">                    deliverOnTimeout(connection);</span>
+<span class="nc" id="L699">                    setLastResponseEmpty(true);</span>
+
+                    // This connection timed out we need to increment the request count
+<span class="nc bnc" id="L702" title="All 2 branches missed.">                    if (connection.getRequestId() != lastRequestID + 1) {</span>
+<span class="nc bnc" id="L703" title="All 2 branches missed.">                        if (logHttpbindEnabled) {</span>
+<span class="nc" id="L704">                            Log.info( &quot;Unexpected RID error &quot; + rid + &quot; for session &quot; + streamID);</span>
+                        }
+<span class="nc" id="L706">                        throw new IOException(&quot;Unexpected RID error.&quot;);</span>
+                    }
+<span class="nc" id="L708">                    lastRequestID = connection.getRequestId();</span>
+<span class="nc" id="L709">                } catch (HttpConnectionClosedException e) {</span>
+<span class="nc" id="L710">                    Log.warn(&quot;Unexpected exception while processing connection timeout.&quot;, e);</span>
+<span class="nc" id="L711">                }</span>
+
+                // Note that 'onComplete' will be invoked.
+<span class="nc" id="L714">            }</span>
+
+            @Override
+            public void onError(AsyncEvent asyncEvent) throws IOException {
+<span class="nc bnc" id="L718" title="All 4 branches missed.">                if (logHttpbindEnabled &amp;&amp; Log.isDebugEnabled()) {</span>
+<span class="nc" id="L719">                    Log.debug(&quot;error event &quot; + asyncEvent + &quot; for &quot; + rid + &quot; in session &quot; + streamID);</span>
+                }
+<span class="nc" id="L721">                Log.warn(&quot;For session &quot; + streamID + &quot; unhandled AsyncListener error: &quot; + asyncEvent.getThrowable());</span>
+<span class="nc" id="L722">                connectionQueue.remove(connection);</span>
+<span class="nc" id="L723">                SessionEventDispatcher.dispatchEvent( HttpSession.this, SessionEventDispatcher.EventType.connection_closed, connection, context );</span>
+<span class="nc" id="L724">            }</span>
+
+            @Override
+<span class="nc" id="L727">            public void onStartAsync(AsyncEvent asyncEvent) throws IOException {}</span>
+        });
+
+<span class="nc bnc" id="L730" title="All 2 branches missed.">        if (rid &lt;= lastRequestID) {</span>
+<span class="nc" id="L731">            Delivered deliverable = retrieveDeliverable(rid);</span>
+<span class="nc bnc" id="L732" title="All 2 branches missed.">            if (deliverable == null) {</span>
+<span class="nc" id="L733">                Log.warn(&quot;Deliverable unavailable for &quot; + rid + &quot; in session &quot; + streamID);</span>
+<span class="nc" id="L734">                throw new HttpBindException(&quot;Unexpected RID error.&quot;,</span>
+                        BoshBindingError.itemNotFound);
+            }
+<span class="nc" id="L737">            connection.deliverBody(createDeliverable(deliverable.deliverables), true);</span>
+<span class="nc" id="L738">            addConnection(connection, context, isPoll);</span>
+<span class="nc" id="L739">            return connection;</span>
+        }
+<span class="nc bnc" id="L741" title="All 2 branches missed.">        else if (rid &gt; (lastRequestID + maxRequests)) {</span>
+<span class="nc" id="L742">            Log.warn(&quot;Request &quot; + rid + &quot; &gt; &quot; + (lastRequestID + maxRequests) + &quot;, ending session &quot; + streamID);</span>
+<span class="nc" id="L743">                throw new HttpBindException(&quot;Unexpected RID error.&quot;,</span>
+                        BoshBindingError.itemNotFound);
+        }
+
+<span class="nc" id="L747">        addConnection(connection, context, isPoll);</span>
+<span class="nc" id="L748">        return connection;</span>
+    }
+
+    private Delivered retrieveDeliverable(long rid) {
+<span class="nc" id="L752">        Delivered result = null;</span>
+<span class="nc" id="L753">        synchronized (sentElements) {</span>
+<span class="nc bnc" id="L754" title="All 2 branches missed.">            for (Delivered delivered : sentElements) {</span>
+<span class="nc bnc" id="L755" title="All 2 branches missed.">                if (delivered.getRequestID() == rid) {</span>
+<span class="nc" id="L756">                    result = delivered;</span>
+<span class="nc" id="L757">                    break;</span>
+                }
+<span class="nc" id="L759">            }</span>
+<span class="nc" id="L760">        }</span>
+<span class="nc" id="L761">        return result;</span>
+    }
+
+    private void addConnection(HttpConnection connection, AsyncContext context, boolean isPoll) throws HttpBindException,
+            HttpConnectionClosedException, IOException {
+<span class="nc bnc" id="L766" title="All 2 branches missed.">        if (connection == null) {</span>
+<span class="nc" id="L767">            throw new IllegalArgumentException(&quot;Connection cannot be null.&quot;);</span>
+        }
+
+<span class="nc bnc" id="L770" title="All 4 branches missed.">        if (isSecure &amp;&amp; !connection.isSecure()) {</span>
+<span class="nc" id="L771">            throw new HttpBindException(&quot;Session was started from secure connection, all &quot; +</span>
+                    &quot;connections on this session must be secured.&quot;, BoshBindingError.badRequest);
+        }
+
+<span class="nc" id="L775">        final long rid = connection.getRequestId();</span>
+<span class="nc" id="L776">        final StreamID streamid = getStreamID();</span>
+<span class="nc" id="L777">        boolean logHttpbindEnabled = JiveGlobals.getBooleanProperty(&quot;log.httpbind.enabled&quot;, false);</span>
+<span class="nc bnc" id="L778" title="All 2 branches missed.">        if (logHttpbindEnabled) {</span>
+<span class="nc" id="L779">            Log.info( &quot;Adding connection to stream &quot; + streamid + &quot; with rid &quot; + rid );</span>
+        }
+
+        /*
+         * Search through the connection queue to see if this rid already exists on it. If it does then we
+         * will close and deliver the existing connection (if appropriate), and close and deliver the same
+         * deliverable on the new connection. This is under the assumption that a connection has been dropped,
+         * and re-requested before jetty has realised.
+         */
+<span class="nc" id="L788">        synchronized (connectionQueue) {</span>
+<span class="nc bnc" id="L789" title="All 2 branches missed.">            for (HttpConnection queuedConnection : connectionQueue) {</span>
+<span class="nc bnc" id="L790" title="All 2 branches missed.">                if (queuedConnection.getRequestId() == rid) {</span>
+<span class="nc bnc" id="L791" title="All 4 branches missed.">                    if(logHttpbindEnabled &amp;&amp; Log.isDebugEnabled()) {</span>
+<span class="nc" id="L792">                        Log.debug(&quot;Found previous connection in queue with rid &quot; + rid);</span>
+                    }
+<span class="nc bnc" id="L794" title="All 2 branches missed.">                    if(queuedConnection.isClosed()) {</span>
+<span class="nc bnc" id="L795" title="All 4 branches missed.">                        if(logHttpbindEnabled &amp;&amp; Log.isDebugEnabled()) {</span>
+<span class="nc" id="L796">                            Log.debug(&quot;It's closed - copying deliverables&quot;);</span>
+                        }
+
+<span class="nc" id="L799">                        Delivered deliverable = retrieveDeliverable(rid);</span>
+<span class="nc bnc" id="L800" title="All 2 branches missed.">                        if (deliverable == null) {</span>
+<span class="nc bnc" id="L801" title="All 2 branches missed.">                            if(logHttpbindEnabled) {</span>
+<span class="nc" id="L802">                                Log.warn(&quot;In session &quot; + streamid + &quot; deliverable unavailable for &quot; + rid);</span>
+                            }
+<span class="nc" id="L804">                            throw new HttpBindException(&quot;Unexpected RID error.&quot;,</span>
+                                    BoshBindingError.itemNotFound);
+                        }
+<span class="nc" id="L807">                        connection.deliverBody(createDeliverable(deliverable.deliverables), true);</span>
+<span class="nc" id="L808">                    } else {</span>
+<span class="nc bnc" id="L809" title="All 4 branches missed.">                        if(logHttpbindEnabled &amp;&amp; Log.isDebugEnabled()) {</span>
+<span class="nc" id="L810">                            Log.debug(&quot;For session &quot; + streamid + &quot; queued connection is still open - calling close()&quot;);</span>
+                        }
+<span class="nc" id="L812">                        deliver(queuedConnection, Collections.singleton(new Deliverable(&quot;&quot;)));</span>
+<span class="nc" id="L813">                        connection.close();</span>
+
+<span class="nc bnc" id="L815" title="All 2 branches missed.">                        if(rid == (lastRequestID + 1)) {</span>
+<span class="nc" id="L816">                            lastRequestID = rid;</span>
+<span class="nc bnc" id="L817" title="All 2 branches missed.">                            if( logHttpbindEnabled ) {</span>
+<span class="nc" id="L818">                                Log.info( &quot;Updated session &quot; + streamid + &quot; to rid = &quot; + rid );</span>
+                            }
+                        }
+                    }
+                    break;
+                }
+<span class="nc" id="L824">            }</span>
+<span class="nc" id="L825">        }</span>
+
+<span class="nc" id="L827">        checkOveractivity(isPoll,streamid,rid,logHttpbindEnabled);</span>
+
+<span class="nc" id="L829">        sslCertificates = connection.getPeerCertificates();</span>
+
+        // We aren't supposed to hold connections open or we already have some packets waiting
+        // to be sent to the client.
+<span class="nc bnc" id="L833" title="All 6 branches missed.">        if (isPollingSession() || (pendingElements.size() &gt; 0 &amp;&amp; connection.getRequestId() == lastRequestID + 1)) {</span>
+<span class="nc" id="L834">            lastActivity = System.currentTimeMillis();</span>
+<span class="nc" id="L835">            SessionEventDispatcher.dispatchEvent( this, SessionEventDispatcher.EventType.connection_opened, connection, context );</span>
+<span class="nc" id="L836">            synchronized(pendingElements) {</span>
+<span class="nc" id="L837">                deliver(connection, pendingElements);</span>
+<span class="nc" id="L838">                lastRequestID = connection.getRequestId();</span>
+<span class="nc" id="L839">                pendingElements.clear();</span>
+<span class="nc" id="L840">            }</span>
+        }
+        else {
+            // With this connection we need to check if we will have too many connections open,
+            // closing any extras.
+
+<span class="nc" id="L846">            connectionQueue.add(connection);</span>
+<span class="nc" id="L847">            Collections.sort(connectionQueue, connectionComparator);</span>
+
+<span class="nc" id="L849">            synchronized (connectionQueue) {</span>
+                int connectionsToClose;
+<span class="nc bnc" id="L851" title="All 2 branches missed.">                if(connectionQueue.get(connectionQueue.size() - 1) != connection) {</span>
+                    // Current connection does not have the greatest rid. That means
+                    // requests were received out of order, respond to all.
+<span class="nc" id="L854">                    connectionsToClose = connectionQueue.size();</span>
+                }
+                else {
+                    // Everything's fine, number of current connections open tells us
+                    // how many that we need to close.
+<span class="nc" id="L859">                    connectionsToClose = getOpenConnectionCount() - hold;</span>
+                }
+<span class="nc" id="L861">                int closed = 0;</span>
+<span class="nc bnc" id="L862" title="All 4 branches missed.">                for (int i = 0; i &lt; connectionQueue.size() &amp;&amp; closed &lt; connectionsToClose; i++) {</span>
+<span class="nc" id="L863">                    HttpConnection toClose = connectionQueue.get(i);</span>
+<span class="nc bnc" id="L864" title="All 4 branches missed.">                    if (!toClose.isClosed() &amp;&amp; toClose.getRequestId() == lastRequestID + 1) {</span>
+<span class="nc bnc" id="L865" title="All 2 branches missed.">                        if(toClose == connection) {</span>
+                            // Current connection has no continuation yet, just deliver.
+<span class="nc" id="L867">                            deliver(&quot;&quot;);</span>
+                        }
+                        else {
+<span class="nc" id="L870">                            toClose.close();</span>
+                        }
+<span class="nc" id="L872">                        lastRequestID = toClose.getRequestId();</span>
+<span class="nc" id="L873">                        closed++;</span>
+                    }
+                }
+<span class="nc" id="L876">            }</span>
+        }
+<span class="nc" id="L878">    }</span>
+
+    private int getOpenConnectionCount() {
+<span class="nc" id="L881">        int count = 0;</span>
+        // NOTE: synchronized by caller
+<span class="nc bnc" id="L883" title="All 2 branches missed.">        for (HttpConnection connection : connectionQueue) {</span>
+<span class="nc bnc" id="L884" title="All 2 branches missed.">            if (!connection.isClosed()) {</span>
+<span class="nc" id="L885">                count++;</span>
+            }
+<span class="nc" id="L887">        }</span>
+<span class="nc" id="L888">        return count;</span>
+    }
+
+    private void deliver(HttpConnection connection, Collection&lt;Deliverable&gt; deliverable)
+            throws HttpConnectionClosedException, IOException {
+<span class="nc" id="L893">        connection.deliverBody(createDeliverable(deliverable), true);</span>
+
+<span class="nc" id="L895">        Delivered delivered = new Delivered(deliverable);</span>
+<span class="nc" id="L896">        delivered.setRequestID(connection.getRequestId());</span>
+<span class="nc bnc" id="L897" title="All 2 branches missed.">        while (sentElements.size() &gt; maxRequests) {</span>
+<span class="nc" id="L898">            sentElements.remove(0);</span>
+        }
+
+<span class="nc" id="L901">        sentElements.add(delivered);</span>
+<span class="nc" id="L902">    }</span>
+
+<span class="nc" id="L904">    private enum OveractivityType {</span>
+<span class="nc" id="L905">        NONE,</span>
+<span class="nc" id="L906">        TOO_MANY_SIM_REQS,</span>
+<span class="nc" id="L907">        POLLING_TOO_QUICK;</span>
+    };
+
+    /**
+     * Check that the client SHOULD NOT make more simultaneous requests than specified
+     * by the 'requests' attribute in the connection manager's Session Creation Response.
+     * However the client MAY make one additional request if it is to pause or terminate a session.
+     *
+     * @see &lt;a href=&quot;http://www.xmpp.org/extensions/xep-0124.html#overactive&quot;&gt;overactive&lt;/a&gt;
+     * @param isPoll true if the session is using polling.
+     * @throws HttpBindException if the connection has violated a facet of the HTTP binding
+     *         protocol.
+     */
+    private void checkOveractivity(boolean isPoll,
+            StreamID streamID,
+            long originRid,
+            boolean logHttpbindEnabled) throws HttpBindException {
+<span class="nc" id="L924">        int pendingConnections = 0;</span>
+<span class="nc" id="L925">        OveractivityType overactivity = OveractivityType.NONE;</span>
+
+<span class="nc" id="L927">        synchronized (connectionQueue) {</span>
+<span class="nc bnc" id="L928" title="All 2 branches missed.">            for (HttpConnection conn : connectionQueue) {</span>
+<span class="nc bnc" id="L929" title="All 2 branches missed.">                if (!conn.isClosed()) {</span>
+<span class="nc" id="L930">                    pendingConnections++;</span>
+<span class="nc bnc" id="L931" title="All 2 branches missed.">                    if (logHttpbindEnabled) {</span>
+<span class="nc" id="L932">                        Log.info(&quot;For session &quot; + streamID + &quot; and origin rid &quot; + originRid +</span>
+<span class="nc" id="L933">                                &quot; an open connection is pending with rid &quot; + conn.getRequestId());</span>
+                    }
+                }
+<span class="nc" id="L936">            }</span>
+<span class="nc" id="L937">        }</span>
+
+<span class="nc" id="L939">        long time = System.currentTimeMillis();</span>
+<span class="nc" id="L940">        long deltaFromLastPoll = time - lastPoll;</span>
+<span class="nc bnc" id="L941" title="All 2 branches missed.">        if(pendingConnections &gt;= maxRequests) {</span>
+<span class="nc" id="L942">            overactivity = OveractivityType.TOO_MANY_SIM_REQS;</span>
+        }
+<span class="nc bnc" id="L944" title="All 2 branches missed.">        else if(isPoll) {</span>
+<span class="nc" id="L945">            boolean localIsPollingSession = isPollingSession();</span>
+<span class="nc bnc" id="L946" title="All 2 branches missed.">            if (deltaFromLastPoll &lt; maxPollingInterval * JiveConstants.SECOND) {</span>
+<span class="nc bnc" id="L947" title="All 2 branches missed.">                if (localIsPollingSession) {</span>
+<span class="nc bnc" id="L948" title="All 2 branches missed.">                    overactivity = lastResponseEmpty ? OveractivityType.POLLING_TOO_QUICK : OveractivityType.NONE;</span>
+                } else {
+<span class="nc bnc" id="L950" title="All 2 branches missed.">                    overactivity = pendingConnections &gt;= maxRequests ? OveractivityType.POLLING_TOO_QUICK : OveractivityType.NONE;</span>
+                }
+            }
+<span class="nc" id="L953">            lastPoll = time;</span>
+<span class="nc bnc" id="L954" title="All 4 branches missed.">            if (logHttpbindEnabled &amp;&amp; Log.isDebugEnabled()) {</span>
+<span class="nc" id="L955">                Log.debug(&quot;Updated session &quot; + streamID +</span>
+                        &quot; lastPoll to &quot; + lastPoll +
+                        &quot; with rid &quot; + originRid +
+                        &quot; lastResponseEmpty = &quot; + lastResponseEmpty  +
+                        &quot; overactivity = &quot; + overactivity +
+                        &quot; deltaFromlastPoll = &quot; + deltaFromLastPoll +
+                        &quot; isPollingSession() = &quot; + localIsPollingSession +
+                        &quot; maxRequests = &quot; + maxRequests +
+                        &quot; pendingConnections = &quot; + pendingConnections);
+            }
+        }
+<span class="nc" id="L966">        setLastResponseEmpty(false);</span>
+
+<span class="nc bnc" id="L968" title="All 2 branches missed.">        if( overactivity != OveractivityType.NONE) {</span>
+<span class="nc" id="L969">            StringBuilder errorMessage = new StringBuilder(&quot;Overactivity detected&quot;);</span>
+<span class="nc bnc" id="L970" title="All 3 branches missed.">            switch (overactivity) {</span>
+                case TOO_MANY_SIM_REQS: {
+<span class="nc" id="L972">                    errorMessage.append(&quot;, too many simultaneous requests.&quot;);</span>
+<span class="nc" id="L973">                    break;</span>
+                }
+                case POLLING_TOO_QUICK: {
+<span class="nc" id="L976">                    errorMessage.append(&quot;, minimum polling interval is &quot;);</span>
+<span class="nc" id="L977">                    errorMessage.append(maxPollingInterval);</span>
+<span class="nc" id="L978">                    errorMessage.append(&quot;, current session &quot;);</span>
+<span class="nc" id="L979">                    errorMessage.append(&quot; interval &quot;);</span>
+<span class="nc" id="L980">                    errorMessage.append(deltaFromLastPoll / 1000);</span>
+<span class="nc" id="L981">                    break;</span>
+                }
+                default: {
+<span class="nc" id="L984">                    throw new HttpBindException(&quot;Unhandled overactivity type: &quot; + overactivity, BoshBindingError.internalServerError);</span>
+                }
+            }
+<span class="nc" id="L987">            String errorMessageStr = errorMessage.toString();</span>
+<span class="nc bnc" id="L988" title="All 4 branches missed.">            if (logHttpbindEnabled &amp;&amp; Log.isInfoEnabled()) {</span>
+<span class="nc" id="L989">                Log.info(errorMessageStr);</span>
+            }
+<span class="nc bnc" id="L991" title="All 2 branches missed.">            if (!JiveGlobals.getBooleanProperty(&quot;xmpp.httpbind.client.requests.ignoreOveractivity&quot;, false)) {</span>
+<span class="nc" id="L992">                throw new HttpBindException(errorMessageStr, BoshBindingError.policyViolation);</span>
+            }
+        }
+<span class="nc" id="L995">    }</span>
+
+    private void deliver(String text) {
+<span class="nc bnc" id="L998" title="All 2 branches missed.">        if (text == null) {</span>
+            // Do nothing if someone asked to send nothing :)
+<span class="nc" id="L1000">            return;</span>
+        }
+<span class="nc" id="L1002">        deliver(new Deliverable(text));</span>
+<span class="nc" id="L1003">    }</span>
+
+    private void deliverOnTimeout(HttpConnection connection) throws HttpConnectionClosedException, IOException {
+<span class="nc" id="L1006">        final Deliverable td = new Deliverable(&quot;&quot;);</span>
+<span class="nc" id="L1007">        final Collection&lt;Deliverable&gt; deliverable = Arrays.asList(td);</span>
+
+        // Not async - we're closing it afterwards
+<span class="nc" id="L1010">        connection.deliverBody(createDeliverable(deliverable), false);</span>
+
+<span class="nc" id="L1012">        final Delivered delivered = new Delivered(deliverable);</span>
+<span class="nc" id="L1013">        delivered.setRequestID(connection.getRequestId());</span>
+<span class="nc bnc" id="L1014" title="All 2 branches missed.">        while (sentElements.size() &gt; maxRequests) {</span>
+<span class="nc" id="L1015">            final Delivered d = sentElements.remove(0);</span>
+<span class="nc" id="L1016">        }</span>
+<span class="nc" id="L1017">        sentElements.add(delivered);</span>
+<span class="nc" id="L1018">    }</span>
+
+    @Override
+    public void deliver(Packet stanza) {
+<span class="nc" id="L1022">        deliver(new Deliverable(Arrays.asList(stanza)));</span>
+<span class="nc" id="L1023">    }</span>
+
+    private void deliver(Deliverable stanza) {
+<span class="nc" id="L1026">        Collection&lt;Deliverable&gt; deliverable = Arrays.asList(stanza);</span>
+<span class="nc" id="L1027">        boolean delivered = false;</span>
+<span class="nc" id="L1028">        int pendingConnections = 0;</span>
+<span class="nc" id="L1029">        synchronized (connectionQueue) {</span>
+<span class="nc bnc" id="L1030" title="All 2 branches missed.">            for (HttpConnection connection : connectionQueue) {</span>
+<span class="nc bnc" id="L1031" title="All 2 branches missed.">                if (connection.isClosed()) {</span>
+<span class="nc" id="L1032">                    continue;</span>
+                }
+<span class="nc" id="L1034">                pendingConnections++;</span>
+                try {
+<span class="nc bnc" id="L1036" title="All 2 branches missed.">                    if (connection.getRequestId() == lastRequestID + 1) {</span>
+<span class="nc" id="L1037">                        lastRequestID = connection.getRequestId();</span>
+<span class="nc" id="L1038">                        deliver(connection, deliverable);</span>
+<span class="nc" id="L1039">                        delivered = true;</span>
+<span class="nc" id="L1040">                        break;</span>
+                    }
+                }
+<span class="nc" id="L1043">                catch (HttpConnectionClosedException e) {</span>
+                    /* Connection was closed, try the next one. Indicates a (concurrency?) bug. */
+<span class="nc" id="L1045">                    StreamID streamID = getStreamID();</span>
+<span class="nc" id="L1046">                    Log.warn(&quot;Iterating over a connection that was closed for session &quot; + streamID +</span>
+                            &quot;. Openfire will recover from this problem, but it should not occur in the first place.&quot;);
+<span class="nc" id="L1048">                } catch (IOException e) {</span>
+<span class="nc" id="L1049">                    StreamID streamID = getStreamID();</span>
+<span class="nc" id="L1050">                    Log.warn(&quot;An unexpected exception occurred while iterating over connections for session &quot; + streamID +</span>
+                            &quot;. Openfire will attempt to recover by ignoring this connection.&quot;, e);
+<span class="nc" id="L1052">                }</span>
+<span class="nc" id="L1053">            }</span>
+<span class="nc" id="L1054">        }</span>
+
+<span class="nc bnc" id="L1056" title="All 2 branches missed.">        if (!delivered) {</span>
+<span class="nc bnc" id="L1057" title="All 2 branches missed.">            if (pendingConnections &gt; 0) {</span>
+<span class="nc" id="L1058">                StreamID streamID = getStreamID();</span>
+<span class="nc" id="L1059">                Log.warn(&quot;Unable to deliver a stanza on session &quot; + streamID +</span>
+                        &quot;(it is being queued instead), although there are available connections! RID / Connection processing is out of sync!&quot;);
+            }
+<span class="nc" id="L1062">            synchronized(pendingElements) {</span>
+<span class="nc" id="L1063">                pendingElements.add( stanza );</span>
+<span class="nc" id="L1064">            }</span>
+        }
+<span class="nc" id="L1066">    }</span>
+
+    private String createDeliverable(Collection&lt;Deliverable&gt; elements) {
+<span class="nc" id="L1069">        StringBuilder builder = new StringBuilder();</span>
+<span class="nc" id="L1070">        builder.append(&quot;&lt;body xmlns='http://jabber.org/protocol/httpbind' ack='&quot;)</span>
+<span class="nc" id="L1071">                .append(getLastAcknowledged()).append(&quot;'&gt;&quot;);</span>
+
+<span class="nc bnc" id="L1073" title="All 2 branches missed.">        setLastResponseEmpty(elements.size() == 0);</span>
+<span class="nc" id="L1074">        synchronized (elements) {</span>
+<span class="nc bnc" id="L1075" title="All 2 branches missed.">            for (Deliverable child : elements) {</span>
+<span class="nc" id="L1076">                builder.append(child.getDeliverable());</span>
+<span class="nc" id="L1077">            }</span>
+<span class="nc" id="L1078">        }</span>
+<span class="nc" id="L1079">        builder.append(&quot;&lt;/body&gt;&quot;);</span>
+<span class="nc" id="L1080">        return builder.toString();</span>
+    }
+
+    private void closeSession() {
+<span class="nc bnc" id="L1084" title="All 2 branches missed.">        if (isClosed) { return; }</span>
+<span class="nc" id="L1085">        isClosed = true;</span>
+
+        try {
+            // close connection(s) and deliver pending elements (if any)
+<span class="nc" id="L1089">            synchronized (connectionQueue) {</span>
+<span class="nc bnc" id="L1090" title="All 2 branches missed.">                for (HttpConnection toClose : connectionQueue) {</span>
+                    try {
+<span class="nc bnc" id="L1092" title="All 2 branches missed.">                        if (!toClose.isClosed()) {</span>
+<span class="nc bnc" id="L1093" title="All 4 branches missed.">                            if (!pendingElements.isEmpty() &amp;&amp; toClose.getRequestId() == lastRequestID + 1) {</span>
+<span class="nc" id="L1094">                                synchronized(pendingElements) {</span>
+<span class="nc" id="L1095">                                    deliver(toClose, pendingElements);</span>
+<span class="nc" id="L1096">                                    lastRequestID = toClose.getRequestId();</span>
+<span class="nc" id="L1097">                                    pendingElements.clear();</span>
+<span class="nc" id="L1098">                                }</span>
+                            } else {
+<span class="nc" id="L1100">                                toClose.deliverBody(null, true);</span>
+                            }
+                        }
+<span class="nc" id="L1103">                    } catch (HttpConnectionClosedException e) {</span>
+                        /* ignore ... already closed */
+<span class="nc" id="L1105">                    } catch (IOException e) {</span>
+                        // Likely caused by closing a stale session / connection.
+<span class="nc" id="L1107">                        Log.debug(&quot;An unexpected exception occurred while closing a session.&quot;, e);</span>
+<span class="nc" id="L1108">                    }</span>
+<span class="nc" id="L1109">                }</span>
+<span class="nc" id="L1110">            }</span>
+
+<span class="nc" id="L1112">            synchronized (pendingElements) {</span>
+<span class="nc bnc" id="L1113" title="All 2 branches missed.">                for (Deliverable deliverable : pendingElements) {</span>
+<span class="nc" id="L1114">                    failDelivery(deliverable.getPackets());</span>
+<span class="nc" id="L1115">                }</span>
+<span class="nc" id="L1116">                pendingElements.clear();</span>
+<span class="nc" id="L1117">            }</span>
+        } finally { // ensure the session is removed from the session map
+<span class="nc" id="L1119">            SessionEventDispatcher.dispatchEvent( this, SessionEventDispatcher.EventType.session_closed, null, null );</span>
+<span class="nc" id="L1120">        }</span>
+<span class="nc" id="L1121">    }</span>
+
+    private void failDelivery(final Collection&lt;Packet&gt; packets) {
+<span class="nc bnc" id="L1124" title="All 2 branches missed.">        if (packets == null) {</span>
+            // Do nothing if someone asked to deliver nothing :)
+<span class="nc" id="L1126">            return;</span>
+        }
+        // use a separate thread to schedule backup delivery
+<span class="nc" id="L1129">        TaskEngine.getInstance().submit(new Runnable() {</span>
+            @Override
+            public void run() {
+<span class="nc bnc" id="L1132" title="All 2 branches missed.">                for (Packet packet : packets) {</span>
+                    try {
+<span class="nc" id="L1134">                        backupDeliverer.deliver(packet);</span>
+                    }
+<span class="nc" id="L1136">                    catch (UnauthorizedException e) {</span>
+<span class="nc" id="L1137">                        Log.error(&quot;On session &quot; + getStreamID() + &quot; unable to deliver message to backup deliverer&quot;, e);</span>
+<span class="nc" id="L1138">                    }</span>
+<span class="nc" id="L1139">                }</span>
+<span class="nc" id="L1140">            }</span>
+        });
+<span class="nc" id="L1142">    }</span>
+
+    protected String createEmptyBody(boolean terminate)
+    {
+<span class="nc" id="L1146">        final Element body = DocumentHelper.createElement( QName.get( &quot;body&quot;, &quot;http://jabber.org/protocol/httpbind&quot; ) );</span>
+<span class="nc bnc" id="L1147" title="All 2 branches missed.">        if (terminate) { body.addAttribute(&quot;type&quot;, &quot;terminate&quot;); }</span>
+<span class="nc" id="L1148">        body.addAttribute(&quot;ack&quot;, String.valueOf(getLastAcknowledged()));</span>
+<span class="nc" id="L1149">        return body.asXML();</span>
+    }
+
+    private String createSessionRestartResponse()
+    {
+<span class="nc" id="L1154">        final Element response = DocumentHelper.createElement( QName.get( &quot;body&quot;, &quot;http://jabber.org/protocol/httpbind&quot; ) );</span>
+<span class="nc" id="L1155">        response.addNamespace(&quot;stream&quot;, &quot;http://etherx.jabber.org/streams&quot;);</span>
+
+<span class="nc" id="L1157">        final Element features = response.addElement(&quot;stream:features&quot;);</span>
+<span class="nc bnc" id="L1158" title="All 2 branches missed.">        for (Element feature : getAvailableStreamFeaturesElements()) {</span>
+<span class="nc" id="L1159">            features.add(feature);</span>
+<span class="nc" id="L1160">        }</span>
+
+<span class="nc" id="L1162">        return response.asXML();</span>
+    }
+
+    /**
+     * A virtual server connection relates to a http session which its self can relate to many http
+     * connections.
+     */
+    public static class HttpVirtualConnection extends VirtualConnection {
+
+        private InetAddress address;
+        private ConnectionConfiguration configuration;
+        private ConnectionType connectionType;
+
+<span class="nc" id="L1175">        public HttpVirtualConnection(InetAddress address) {</span>
+<span class="nc" id="L1176">            this.address = address;</span>
+<span class="nc" id="L1177">            this.connectionType = ConnectionType.SOCKET_C2S;</span>
+<span class="nc" id="L1178">        }</span>
+
+<span class="nc" id="L1180">        public HttpVirtualConnection(InetAddress address, ConnectionType connectionType) {</span>
+<span class="nc" id="L1181">            this.address = address;</span>
+<span class="nc" id="L1182">            this.connectionType = connectionType;</span>
+<span class="nc" id="L1183">        }</span>
+
+        @Override
+        public void closeVirtualConnection() {
+<span class="nc" id="L1187">            ((HttpSession) session).closeSession();</span>
+<span class="nc" id="L1188">        }</span>
+
+        @Override
+        public byte[] getAddress() throws UnknownHostException {
+<span class="nc" id="L1192">            return address.getAddress();</span>
+        }
+
+        @Override
+        public String getHostAddress() throws UnknownHostException {
+<span class="nc" id="L1197">            return address.getHostAddress();</span>
+        }
+
+        @Override
+        public String getHostName() throws UnknownHostException {
+<span class="nc" id="L1202">            return address.getHostName();</span>
+        }
+
+        @Override
+        public void systemShutdown() {
+<span class="nc" id="L1207">            close();</span>
+<span class="nc" id="L1208">        }</span>
+
+        @Override
+        public void deliver(Packet packet) throws UnauthorizedException {
+<span class="nc" id="L1212">            ((HttpSession) session).deliver(packet);</span>
+<span class="nc" id="L1213">        }</span>
+
+        @Override
+        public void deliverRawText(String text) {
+<span class="nc" id="L1217">            ((HttpSession) session).deliver(text);</span>
+<span class="nc" id="L1218">        }</span>
+
+        @Override
+        public ConnectionConfiguration getConfiguration() {
+<span class="nc bnc" id="L1222" title="All 2 branches missed.">            if (configuration == null) {</span>
+<span class="nc" id="L1223">                final ConnectionManagerImpl connectionManager = ((ConnectionManagerImpl) XMPPServer.getInstance().getConnectionManager());</span>
+<span class="nc" id="L1224">                configuration = connectionManager.getListener( connectionType, true ).generateConnectionConfiguration();</span>
+            }
+<span class="nc" id="L1226">            return configuration;</span>
+        }
+
+        @Override
+        public Certificate[] getPeerCertificates() {
+<span class="nc" id="L1231">            return ((HttpSession) session).getPeerCertificates();</span>
+        }
+    }
+
+    static class Deliverable {
+        private final String text;
+        private final Collection&lt;String&gt; packets;
+
+<span class="nc" id="L1239">        public Deliverable(String text) {</span>
+<span class="nc" id="L1240">            this.text = text;</span>
+<span class="nc" id="L1241">            this.packets = null;</span>
+<span class="nc" id="L1242">        }</span>
+
+<span class="nc" id="L1244">        public Deliverable(Collection&lt;Packet&gt; elements) {</span>
+<span class="nc" id="L1245">            this.text = null;</span>
+<span class="nc" id="L1246">            this.packets = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L1247" title="All 2 branches missed.">            for (Packet packet : elements) {</span>
+                // Append packet namespace according XEP-0206 if needed
+<span class="nc bnc" id="L1249" title="All 2 branches missed.">                if (Namespace.NO_NAMESPACE.equals(packet.getElement().getNamespace())) {</span>
+                    // use string-based operation here to avoid cascading xmlns wonkery
+<span class="nc" id="L1251">                    StringBuilder packetXml = new StringBuilder(packet.toXML());</span>
+<span class="nc" id="L1252">                    final int noslash = packetXml.indexOf( &quot;&gt;&quot; );</span>
+<span class="nc" id="L1253">                    final int slash = packetXml.indexOf( &quot;/&gt;&quot; );</span>
+<span class="nc bnc" id="L1254" title="All 2 branches missed.">                    final int insertAt = ( noslash - 1 == slash ? slash : noslash );</span>
+<span class="nc" id="L1255">                    packetXml.insert( insertAt, &quot; xmlns=\&quot;jabber:client\&quot;&quot;);</span>
+<span class="nc" id="L1256">                    this.packets.add(packetXml.toString());</span>
+<span class="nc" id="L1257">                } else {</span>
+<span class="nc" id="L1258">                    this.packets.add(packet.toXML());</span>
+                }
+<span class="nc" id="L1260">            }</span>
+<span class="nc" id="L1261">        }</span>
+
+        public String getDeliverable() {
+<span class="nc bnc" id="L1264" title="All 2 branches missed.">            if (text == null) {</span>
+<span class="nc" id="L1265">                StringBuilder builder = new StringBuilder();</span>
+<span class="nc bnc" id="L1266" title="All 2 branches missed.">                for (String packet : packets) {</span>
+<span class="nc" id="L1267">                    builder.append(packet);</span>
+<span class="nc" id="L1268">                }</span>
+<span class="nc" id="L1269">                return builder.toString();</span>
+            }
+            else {
+<span class="nc" id="L1272">                return text;</span>
+            }
+        }
+
+        public Collection&lt;Packet&gt; getPackets() {
+            // Check if the Deliverable is about Packets or raw XML
+<span class="nc bnc" id="L1278" title="All 2 branches missed.">            if (packets == null) {</span>
+                // No packets here (should be just raw XML like &lt;stream&gt; so return nothing
+<span class="nc" id="L1280">                return null;</span>
+            }
+<span class="nc" id="L1282">            List&lt;Packet&gt; answer = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L1283" title="All 2 branches missed.">            for (String packetXML : packets) {</span>
+                try {
+<span class="nc" id="L1285">                    Packet packet = null;</span>
+                    // Parse the XML stanza
+<span class="nc" id="L1287">                    Element element = localParser.get().read(new StringReader(packetXML)).getRootElement();</span>
+<span class="nc" id="L1288">                    String tag = element.getName();</span>
+<span class="nc bnc" id="L1289" title="All 2 branches missed.">                    if (&quot;message&quot;.equals(tag)) {</span>
+<span class="nc" id="L1290">                        packet = new Message(element, true);</span>
+                    }
+<span class="nc bnc" id="L1292" title="All 2 branches missed.">                    else if (&quot;presence&quot;.equals(tag)) {</span>
+<span class="nc" id="L1293">                        packet = new Presence(element, true);</span>
+                    }
+<span class="nc bnc" id="L1295" title="All 2 branches missed.">                    else if (&quot;iq&quot;.equals(tag)) {</span>
+<span class="nc" id="L1296">                        packet = new IQ(element, true);</span>
+                    }
+                    // Add the reconstructed packet to the result
+<span class="nc" id="L1299">                    answer.add(packet);</span>
+                }
+<span class="nc" id="L1301">                catch (Exception e) {</span>
+<span class="nc" id="L1302">                    Log.error(&quot;Error while parsing Privacy Property&quot;, e);</span>
+<span class="nc" id="L1303">                }</span>
+<span class="nc" id="L1304">            }</span>
+<span class="nc" id="L1305">            return answer;</span>
+        }
+    }
+
+    private class Delivered {
+        private long requestID;
+        private Collection&lt;Deliverable&gt; deliverables;
+
+<span class="nc" id="L1313">        public Delivered(Collection&lt;Deliverable&gt; deliverables) {</span>
+<span class="nc" id="L1314">            this.deliverables = deliverables;</span>
+<span class="nc" id="L1315">        }</span>
+
+        public void setRequestID(long requestID) {
+<span class="nc" id="L1318">            this.requestID = requestID;</span>
+<span class="nc" id="L1319">        }</span>
+
+        public long getRequestID() {
+<span class="nc" id="L1322">            return requestID;</span>
+        }
+
+        public Collection&lt;Packet&gt; getPackets() {
+<span class="nc" id="L1326">            List&lt;Packet&gt; packets = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L1327">            synchronized (deliverables) {</span>
+<span class="nc bnc" id="L1328" title="All 2 branches missed.">                for (Deliverable deliverable : deliverables) {</span>
+<span class="nc bnc" id="L1329" title="All 2 branches missed.">                    if (deliverable.packets != null) {</span>
+<span class="nc" id="L1330">                        packets.addAll(deliverable.getPackets());</span>
+                    }
+<span class="nc" id="L1332">                }</span>
+<span class="nc" id="L1333">            }</span>
+<span class="nc" id="L1334">            return packets;</span>
+        }
+    }
+
+    /**
+     * A runner that guarantees that the packets per a session will be sent and
+     * processed in the order in which they were received.
+     */
+    private class HttpPacketSender implements Runnable {
+        private HttpSession session;
+
+<span class="nc" id="L1345">        HttpPacketSender(HttpSession session) {</span>
+<span class="nc" id="L1346">            this.session = session;</span>
+<span class="nc" id="L1347">        }</span>
+
+        @Override
+        public void run() {
+<span class="nc" id="L1351">            session.sendPendingPackets();</span>
+<span class="nc" id="L1352">        }</span>
+
+        private void init() {
+<span class="nc" id="L1355">            HttpBindManager.getInstance().getSessionManager().execute(this);</span>
+<span class="nc" id="L1356">        }</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

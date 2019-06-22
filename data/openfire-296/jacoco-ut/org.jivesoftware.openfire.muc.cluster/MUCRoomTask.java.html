@@ -1,0 +1,118 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>MUCRoomTask.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.muc.cluster</a> &gt; <span class="el_source">MUCRoomTask.java</span></div><h1>MUCRoomTask.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.muc.cluster;
+
+import java.io.IOException;
+import java.io.ObjectInput;
+import java.io.ObjectOutput;
+
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.cluster.ClusterManager;
+import org.jivesoftware.openfire.muc.MultiUserChatService;
+import org.jivesoftware.openfire.muc.spi.LocalMUCRoom;
+import org.jivesoftware.util.cache.ClusterTask;
+import org.jivesoftware.util.cache.ExternalizableUtil;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Task related to a room to be executed in a cluster node. This is a base
+ * class to specific room tasks. The base class just keeps track of the room
+ * related to the task.
+ *
+ * @author Gaston Dombiak
+ */
+public abstract class MUCRoomTask&lt;V&gt; implements ClusterTask&lt;V&gt; {
+    
+<span class="nc" id="L41">    private static final Logger Log = LoggerFactory.getLogger(MUCRoomTask.class);</span>
+
+    private boolean originator;
+    private String roomName;
+    private String subdomain;
+
+<span class="nc" id="L47">    protected MUCRoomTask() {</span>
+<span class="nc" id="L48">    }</span>
+
+<span class="nc" id="L50">    protected MUCRoomTask(LocalMUCRoom room) {</span>
+<span class="nc" id="L51">        this.roomName = room.getName();</span>
+<span class="nc" id="L52">        this.subdomain = room.getMUCService().getServiceName();</span>
+<span class="nc" id="L53">    }</span>
+
+    public LocalMUCRoom getRoom() {
+<span class="nc" id="L56">        MultiUserChatService mucService = XMPPServer.getInstance().getMultiUserChatManager().getMultiUserChatService(subdomain);</span>
+<span class="nc bnc" id="L57" title="All 2 branches missed.">        if (mucService == null) {</span>
+<span class="nc" id="L58">            throw new IllegalArgumentException(&quot;MUC service not found for subdomain: &quot;+subdomain);</span>
+        }
+<span class="nc" id="L60">        LocalMUCRoom room = (LocalMUCRoom) mucService.getChatRoom(roomName);</span>
+<span class="nc bnc" id="L61" title="All 2 branches missed.">        if (room == null) {</span>
+<span class="nc" id="L62">            throw new IllegalArgumentException(&quot;Room not found: &quot; + roomName);</span>
+        }
+<span class="nc" id="L64">        return room;</span>
+    }
+
+    /**
+     * Executes the requested task considering that this JVM may still be joining the cluster.
+     * This means that events regarding rooms that were not loaded yet will be stored for later
+     * processing. Once the JVM is done joining the cluster queued tasks will be processed.
+     *
+     * @param runnable the task to execute.
+     */
+    protected void execute(Runnable runnable) {
+        // Check if we are joining a cluster
+<span class="nc" id="L76">        boolean clusterStarting = ClusterManager.isClusteringStarting();</span>
+        try {
+            // Check that the room exists
+<span class="nc" id="L79">            getRoom();</span>
+            // Room was found so now execute the task
+<span class="nc" id="L81">            runnable.run();</span>
+        }
+<span class="nc" id="L83">        catch (IllegalArgumentException e) {</span>
+            // Room not found so check if we are still joining the cluster
+<span class="nc bnc" id="L85" title="All 2 branches missed.">            if (clusterStarting) {</span>
+                // Queue task in case the cluster
+<span class="nc" id="L87">                QueuedTasksManager.getInstance().addTask(this);</span>
+            }
+            else {
+                // Task failed since room was not found
+<span class="nc" id="L91">                Log.error(e.getMessage(), e);</span>
+            }
+<span class="nc" id="L93">        }</span>
+<span class="nc" id="L94">    }</span>
+
+    public boolean isOriginator() {
+<span class="nc" id="L97">        return originator;</span>
+    }
+
+    public void setOriginator(boolean originator) {
+<span class="nc" id="L101">        this.originator = originator;</span>
+<span class="nc" id="L102">    }</span>
+
+    @Override
+    public void writeExternal(ObjectOutput out) throws IOException {
+<span class="nc" id="L106">        ExternalizableUtil.getInstance().writeBoolean(out, originator);</span>
+<span class="nc" id="L107">        ExternalizableUtil.getInstance().writeSafeUTF(out, roomName);</span>
+<span class="nc" id="L108">        ExternalizableUtil.getInstance().writeSafeUTF(out, subdomain);</span>
+<span class="nc" id="L109">    }</span>
+
+    @Override
+    public void readExternal(ObjectInput in) throws IOException, ClassNotFoundException {
+<span class="nc" id="L113">        originator = ExternalizableUtil.getInstance().readBoolean(in);</span>
+<span class="nc" id="L114">        roomName = ExternalizableUtil.getInstance().readSafeUTF(in);</span>
+<span class="nc" id="L115">        subdomain = ExternalizableUtil.getInstance().readSafeUTF(in);</span>
+<span class="nc" id="L116">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

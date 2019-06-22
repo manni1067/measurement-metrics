@@ -1,0 +1,165 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>MultiplexerStanzaHandler.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.net</a> &gt; <span class="el_source">MultiplexerStanzaHandler.java</span></div><h1>MultiplexerStanzaHandler.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.net;
+
+import org.dom4j.Element;
+import org.jivesoftware.openfire.Connection;
+import org.jivesoftware.openfire.PacketRouter;
+import org.jivesoftware.openfire.auth.UnauthorizedException;
+import org.jivesoftware.openfire.multiplex.MultiplexerPacketHandler;
+import org.jivesoftware.openfire.multiplex.Route;
+import org.jivesoftware.openfire.session.LocalConnectionMultiplexerSession;
+import org.jivesoftware.openfire.session.Session;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmlpull.v1.XmlPullParser;
+import org.xmlpull.v1.XmlPullParserException;
+import org.xmpp.packet.IQ;
+import org.xmpp.packet.Message;
+import org.xmpp.packet.PacketError;
+import org.xmpp.packet.Presence;
+
+/**
+ * Handler of XML stanzas sent by Connection Managers.
+ *
+ * @author Gaston Dombiak
+ */
+public class MultiplexerStanzaHandler extends StanzaHandler {
+
+<span class="nc" id="L43">    private static final Logger Log = LoggerFactory.getLogger( MultiplexerStanzaHandler.class );</span>
+
+    /**
+     * Handler of IQ packets sent from the Connection Manager to the server.
+     */
+    private MultiplexerPacketHandler packetHandler;
+
+    public MultiplexerStanzaHandler(PacketRouter router, Connection connection) {
+<span class="nc" id="L51">        super(router, connection);</span>
+<span class="nc" id="L52">    }</span>
+
+    @Deprecated
+    public MultiplexerStanzaHandler(PacketRouter router, String serverName, Connection connection) {
+<span class="nc" id="L56">        super(router, serverName, connection);</span>
+<span class="nc" id="L57">    }</span>
+
+    @Override
+    protected void processIQ(final IQ packet) {
+<span class="nc bnc" id="L61" title="All 2 branches missed.">        if (session.getStatus() != Session.STATUS_AUTHENTICATED) {</span>
+            // Session is not authenticated so return error
+<span class="nc" id="L63">            IQ reply = new IQ();</span>
+<span class="nc" id="L64">            reply.setChildElement(packet.getChildElement().createCopy());</span>
+<span class="nc" id="L65">            reply.setID(packet.getID());</span>
+<span class="nc" id="L66">            reply.setTo(packet.getFrom());</span>
+<span class="nc" id="L67">            reply.setFrom(packet.getTo());</span>
+<span class="nc" id="L68">            reply.setError(PacketError.Condition.not_authorized);</span>
+<span class="nc" id="L69">            session.process(reply);</span>
+<span class="nc" id="L70">            return;</span>
+        }
+        // Process the packet
+<span class="nc" id="L73">        packetHandler.handle(packet);</span>
+<span class="nc" id="L74">    }</span>
+
+    @Override
+    protected void processMessage(final Message packet) throws UnauthorizedException {
+<span class="nc" id="L78">        throw new UnauthorizedException(&quot;Message packets are not supported. Original packets &quot; +</span>
+                &quot;should be wrapped by route packets.&quot;);
+    }
+
+    @Override
+    protected void processPresence(final Presence packet) throws UnauthorizedException {
+<span class="nc" id="L84">        throw new UnauthorizedException(&quot;Message packets are not supported. Original packets &quot; +</span>
+                &quot;should be wrapped by route packets.&quot;);
+    }
+
+    /**
+     * Process stanza sent by a client that is connected to a connection manager. The
+     * original stanza is wrapped in the route element. Only a single stanza must be
+     * wrapped in the route element.
+     *
+     * @param packet the route element.
+     */
+    private void processRoute(final Route packet) {
+<span class="nc bnc" id="L96" title="All 2 branches missed.">        if (session.getStatus() != Session.STATUS_AUTHENTICATED) {</span>
+            // Session is not authenticated so return error
+<span class="nc" id="L98">            Route reply = new Route(packet.getStreamID());</span>
+<span class="nc" id="L99">            reply.setID(packet.getID());</span>
+<span class="nc" id="L100">            reply.setTo(packet.getFrom());</span>
+<span class="nc" id="L101">            reply.setFrom(packet.getTo());</span>
+<span class="nc" id="L102">            reply.setError(PacketError.Condition.not_authorized);</span>
+<span class="nc" id="L103">            session.process(reply);</span>
+<span class="nc" id="L104">            return;</span>
+        }
+        // Process the packet
+<span class="nc" id="L107">        packetHandler.route(packet);</span>
+<span class="nc" id="L108">    }</span>
+
+    @Override
+    boolean processUnknowPacket(Element doc) {
+<span class="nc" id="L112">        String tag = doc.getName();</span>
+<span class="nc bnc" id="L113" title="All 2 branches missed.">        if (&quot;route&quot;.equals(tag)) {</span>
+            // Process stanza wrapped by the route packet
+<span class="nc" id="L115">            processRoute(new Route(doc));</span>
+<span class="nc" id="L116">            return true;</span>
+<span class="nc bnc" id="L117" title="All 2 branches missed.">        } else if (&quot;handshake&quot;.equals(tag)) {</span>
+<span class="nc bnc" id="L118" title="All 2 branches missed.">            if (!((LocalConnectionMultiplexerSession) session).authenticate(doc.getStringValue())) {</span>
+<span class="nc" id="L119">                Log.debug( &quot;Closing session that failed to authenticate: {}&quot;, session );</span>
+<span class="nc" id="L120">                session.close();</span>
+            }
+<span class="nc" id="L122">            return true;</span>
+<span class="nc bnc" id="L123" title="All 4 branches missed.">        } else if (&quot;error&quot;.equals(tag) &amp;&amp; &quot;stream&quot;.equals(doc.getNamespacePrefix())) {</span>
+<span class="nc" id="L124">            Log.debug( &quot;Closing session because of received stream error {}. Affected session: {}&quot;, doc.asXML(), session );</span>
+<span class="nc" id="L125">            session.close();</span>
+<span class="nc" id="L126">            return true;</span>
+        }
+<span class="nc" id="L128">        return false;</span>
+    }
+
+    @Override
+    String getNamespace() {
+<span class="nc" id="L133">        return &quot;jabber:connectionmanager&quot;;</span>
+    }
+
+    @Override
+    boolean validateHost() {
+<span class="nc" id="L138">        return false;</span>
+    }
+
+    @Override
+    boolean validateJIDs() {
+<span class="nc" id="L143">        return false;</span>
+    }
+
+    @Override
+    boolean createSession(String namespace, String serverName, XmlPullParser xpp, Connection connection)
+            throws XmlPullParserException {
+<span class="nc bnc" id="L149" title="All 2 branches missed.">        if (getNamespace().equals(namespace)) {</span>
+            // The connected client is a connection manager so create a ConnectionMultiplexerSession
+<span class="nc" id="L151">            session = LocalConnectionMultiplexerSession.createSession(serverName, xpp, connection);</span>
+<span class="nc bnc" id="L152" title="All 2 branches missed.">            if (session != null) {</span>
+<span class="nc" id="L153">                packetHandler = new MultiplexerPacketHandler(session.getAddress().getDomain());</span>
+            }
+<span class="nc" id="L155">            return true;</span>
+        }
+<span class="nc" id="L157">        return false;</span>
+    }
+
+    @Override
+    void startTLS() throws Exception {
+<span class="nc" id="L162">        connection.startTLS(false, false);</span>
+<span class="nc" id="L163">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

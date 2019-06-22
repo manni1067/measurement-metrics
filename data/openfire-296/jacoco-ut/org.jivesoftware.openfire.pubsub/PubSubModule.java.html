@@ -1,0 +1,879 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>PubSubModule.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.pubsub</a> &gt; <span class="el_source">PubSubModule.java</span></div><h1>PubSubModule.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.pubsub;
+
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
+
+import org.dom4j.DocumentHelper;
+import org.dom4j.Element;
+import org.jivesoftware.openfire.PacketRouter;
+import org.jivesoftware.openfire.RoutableChannelHandler;
+import org.jivesoftware.openfire.RoutingTable;
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.commands.AdHocCommandManager;
+import org.jivesoftware.openfire.component.InternalComponentManager;
+import org.jivesoftware.openfire.container.BasicModule;
+import org.jivesoftware.openfire.disco.DiscoInfoProvider;
+import org.jivesoftware.openfire.disco.DiscoItem;
+import org.jivesoftware.openfire.disco.DiscoItemsProvider;
+import org.jivesoftware.openfire.disco.DiscoServerItem;
+import org.jivesoftware.openfire.disco.IQDiscoInfoHandler;
+import org.jivesoftware.openfire.disco.IQDiscoItemsHandler;
+import org.jivesoftware.openfire.disco.ServerItemsProvider;
+import org.jivesoftware.openfire.pubsub.models.AccessModel;
+import org.jivesoftware.openfire.pubsub.models.PublisherModel;
+import org.jivesoftware.util.JiveGlobals;
+import org.jivesoftware.util.LocaleUtils;
+import org.jivesoftware.util.PropertyEventDispatcher;
+import org.jivesoftware.util.PropertyEventListener;
+import org.jivesoftware.util.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmpp.forms.DataForm;
+import org.xmpp.packet.IQ;
+import org.xmpp.packet.JID;
+import org.xmpp.packet.Message;
+import org.xmpp.packet.Packet;
+import org.xmpp.packet.PacketError;
+import org.xmpp.packet.Presence;
+
+/**
+ * Module that implements JEP-60: Publish-Subscribe. By default node collections and
+ * instant nodes are supported.
+ *
+ * @author Matt Tucker
+ */
+public class PubSubModule extends BasicModule implements ServerItemsProvider, DiscoInfoProvider,
+        DiscoItemsProvider, RoutableChannelHandler, PubSubService, PropertyEventListener {
+
+<span class="nc" id="L69">    private static final Logger Log = LoggerFactory.getLogger(PubSubModule.class);</span>
+
+    /**
+     * the chat service's hostname
+     */
+<span class="nc" id="L74">    private String serviceName = null;</span>
+
+    /**
+     * Collection node that acts as the root node of the entire node hierarchy.
+     */
+<span class="nc" id="L79">    private CollectionNode rootCollectionNode = null;</span>
+
+    /**
+     * Nodes managed by this manager, table: key nodeID (String); value Node
+     */
+<span class="nc" id="L84">    private Map&lt;String, Node&gt; nodes = new ConcurrentHashMap&lt;&gt;();</span>
+    
+    /**
+     * Keep a registry of the presence's show value of users that subscribed to a node of
+     * the pubsub service and for which the node only delivers notifications for online users
+     * or node subscriptions deliver events based on the user presence show value. Offline
+     * users will not have an entry in the map. Note: Key-&gt; bare JID and Value-&gt; Map whose key
+     * is full JID of connected resource and value is show value of the last received presence.
+     */
+<span class="nc" id="L93">    private Map&lt;String, Map&lt;String, String&gt;&gt; barePresences =</span>
+            new ConcurrentHashMap&lt;&gt;();
+    
+    /**
+     * Manager that keeps the list of ad-hoc commands and processing command requests.
+     */
+    private AdHocCommandManager manager;
+    
+    /**
+     * Returns the permission policy for creating nodes. A true value means that not anyone can
+     * create a node, only the JIDs listed in &lt;code&gt;allowedToCreate&lt;/code&gt; are allowed to create
+     * nodes.
+     */
+<span class="nc" id="L106">    private boolean nodeCreationRestricted = false;</span>
+
+    /**
+     * Flag that indicates if a user may have more than one subscription with the node. When multiple
+     * subscriptions is enabled each subscription request, event notification and unsubscription request
+     * should include a subid attribute.
+     */
+<span class="nc" id="L113">    private boolean multipleSubscriptionsEnabled = true;</span>
+
+    /**
+     * Bare jids of users that are allowed to create nodes. An empty list means that anyone can
+     * create nodes.
+     */
+<span class="nc" id="L119">    private Collection&lt;String&gt; allowedToCreate = new CopyOnWriteArrayList&lt;&gt;();</span>
+
+    /**
+     * Bare jids of users that are system administrators of the PubSub service. A sysadmin
+     * has the same permissions as a node owner.
+     */
+<span class="nc" id="L125">    private Collection&lt;String&gt; sysadmins = new CopyOnWriteArrayList&lt;&gt;();</span>
+
+    /**
+     * The packet router for the server.
+     */
+<span class="nc" id="L130">    private PacketRouter router = null;</span>
+
+<span class="nc" id="L132">    private RoutingTable routingTable = null;</span>
+
+    /**
+     * The disco info handler for this module
+     */
+<span class="nc" id="L137">    private IQDiscoInfoHandler iqDiscoInfoHandler = null;</span>
+   /**
+    * The disco items handler for this module
+    */ 
+<span class="nc" id="L141">    private IQDiscoItemsHandler iqDiscoItemsHandler = null;</span>
+
+    /**
+     * Default configuration to use for newly created leaf nodes.
+     */
+    private DefaultNodeConfiguration leafDefaultConfiguration;
+    /**
+     * Default configuration to use for newly created collection nodes.
+     */
+    private DefaultNodeConfiguration collectionDefaultConfiguration;
+
+    /**
+     * Private component that actually performs the pubsub work.
+     */
+<span class="nc" id="L155">    private PubSubEngine engine = null;</span>
+
+    /**
+     * Flag that indicates if the service is enabled.
+     */
+<span class="nc" id="L160">    private boolean serviceEnabled = true;</span>
+
+    public PubSubModule() {
+<span class="nc" id="L163">        super(&quot;Publish Subscribe Service&quot;);</span>
+        
+        // Initialize the ad-hoc commands manager to use for this pubsub service
+<span class="nc" id="L166">        manager = new AdHocCommandManager();</span>
+<span class="nc" id="L167">        manager.addCommand(new PendingSubscriptionsCommand(this));</span>
+<span class="nc" id="L168">    }</span>
+
+    @Override
+    public void process(Packet packet) {
+        try {
+            // Check if the packet is a disco request or a packet with namespace iq:register
+<span class="nc bnc" id="L174" title="All 2 branches missed.">            if (packet instanceof IQ) {</span>
+<span class="nc bnc" id="L175" title="All 2 branches missed.">                if (engine.process(this, (IQ) packet) == null) {</span>
+<span class="nc" id="L176">                    process((IQ) packet);</span>
+                }
+            }
+<span class="nc bnc" id="L179" title="All 2 branches missed.">            else if (packet instanceof Presence) {</span>
+<span class="nc" id="L180">                engine.process(this, (Presence) packet);</span>
+            }
+            else {
+<span class="nc" id="L183">                engine.process(this, (Message) packet);</span>
+            }
+        }
+<span class="nc" id="L186">        catch (Exception e) {</span>
+<span class="nc" id="L187">            Log.error(LocaleUtils.getLocalizedString(&quot;admin.error&quot;), e);</span>
+<span class="nc bnc" id="L188" title="All 2 branches missed.">            if (packet instanceof IQ) {</span>
+                // Send internal server error
+<span class="nc" id="L190">                IQ reply = IQ.createResultIQ((IQ) packet);</span>
+<span class="nc" id="L191">                reply.setError(PacketError.Condition.internal_server_error);</span>
+<span class="nc" id="L192">                send(reply);</span>
+            }
+<span class="nc" id="L194">        }</span>
+<span class="nc" id="L195">    }</span>
+
+    private void sendServiceUnavailablePacket(IQ iq) {
+<span class="nc" id="L198">        engine.sendErrorPacket(iq, PacketError.Condition.service_unavailable, null);</span>
+<span class="nc" id="L199">    }</span>
+
+    private void process(IQ iq) {
+        // Ignore IQs of type ERROR
+<span class="nc bnc" id="L203" title="All 2 branches missed.">        if (IQ.Type.error == iq.getType()) {</span>
+<span class="nc" id="L204">            return;</span>
+        }
+<span class="nc" id="L206">        Element childElement = iq.getChildElement();</span>
+<span class="nc" id="L207">        String namespace = null;</span>
+
+<span class="nc bnc" id="L209" title="All 2 branches missed.">        if (childElement != null) {</span>
+<span class="nc" id="L210">            namespace = childElement.getNamespaceURI();</span>
+        }
+<span class="nc bnc" id="L212" title="All 2 branches missed.">        if (&quot;http://jabber.org/protocol/disco#info&quot;.equals(namespace)) {</span>
+<span class="nc bnc" id="L213" title="All 2 branches missed.">            if (iqDiscoInfoHandler != null) {</span>
+<span class="nc" id="L214">                IQ reply = iqDiscoInfoHandler.handleIQ(iq);</span>
+<span class="nc" id="L215">                router.route(reply);</span>
+<span class="nc" id="L216">            } else {</span>
+<span class="nc" id="L217">                sendServiceUnavailablePacket(iq);</span>
+<span class="nc" id="L218">                return;</span>
+            }
+        }
+<span class="nc bnc" id="L221" title="All 2 branches missed.">        else if (&quot;http://jabber.org/protocol/disco#items&quot;.equals(namespace)) {</span>
+<span class="nc bnc" id="L222" title="All 2 branches missed.">            if (iqDiscoItemsHandler != null) {</span>
+<span class="nc" id="L223">                IQ reply = iqDiscoItemsHandler.handleIQ(iq);</span>
+<span class="nc" id="L224">                router.route(reply);</span>
+<span class="nc" id="L225">            } else {</span>
+<span class="nc" id="L226">                sendServiceUnavailablePacket(iq);</span>
+<span class="nc" id="L227">                return;</span>
+            }
+            
+        }
+        else {
+            // Unknown namespace requested so return error to sender
+<span class="nc" id="L233">            sendServiceUnavailablePacket(iq);</span>
+        }
+<span class="nc" id="L235">    }</span>
+
+    @Override
+    public String getServiceID() {
+<span class="nc" id="L239">        return &quot;pubsub&quot;;</span>
+    }
+
+    @Override
+    public boolean canCreateNode(JID creator) {
+        // Node creation is always allowed for sysadmin
+<span class="nc bnc" id="L245" title="All 4 branches missed.">        if (isNodeCreationRestricted() &amp;&amp; !isServiceAdmin(creator)) {</span>
+            // The user is not allowed to create nodes
+<span class="nc" id="L247">            return false;</span>
+        }
+<span class="nc" id="L249">        return true;</span>
+    }
+
+    @Override
+    public boolean isServiceAdmin(JID user) {
+<span class="nc bnc" id="L254" title="All 4 branches missed.">        return sysadmins.contains(user.toBareJID()) || allowedToCreate.contains(user.toBareJID()) ||</span>
+<span class="nc bnc" id="L255" title="All 2 branches missed.">                InternalComponentManager.getInstance().hasComponent(user);</span>
+    }
+
+    @Override
+    public boolean isInstantNodeSupported() {
+<span class="nc" id="L260">        return true;</span>
+    }
+
+    @Override
+    public boolean isCollectionNodesSupported() {
+<span class="nc" id="L265">        return true;</span>
+    }
+
+    @Override
+    public CollectionNode getRootCollectionNode() {
+<span class="nc" id="L270">        return rootCollectionNode;</span>
+    }
+
+    @Override
+    public DefaultNodeConfiguration getDefaultNodeConfiguration(boolean leafType) {
+<span class="nc bnc" id="L275" title="All 2 branches missed.">        if (leafType) {</span>
+<span class="nc" id="L276">            return leafDefaultConfiguration;</span>
+        }
+<span class="nc" id="L278">        return collectionDefaultConfiguration;</span>
+    }
+
+    @Override
+    public Collection&lt;String&gt; getShowPresences(JID subscriber) {
+<span class="nc" id="L283">        return PubSubEngine.getShowPresences(this, subscriber);</span>
+    }
+
+    @Override
+    public void presenceSubscriptionNotRequired(Node node, JID user) {
+<span class="nc" id="L288">        PubSubEngine.presenceSubscriptionNotRequired(this, node, user);</span>
+<span class="nc" id="L289">    }</span>
+
+    @Override
+    public void presenceSubscriptionRequired(Node node, JID user) {
+<span class="nc" id="L293">        PubSubEngine.presenceSubscriptionRequired(this, node, user);</span>
+<span class="nc" id="L294">    }</span>
+
+    public String getServiceName() {
+<span class="nc" id="L297">        return serviceName;</span>
+    }
+
+    public String getServiceDomain() {
+<span class="nc" id="L301">        return serviceName + &quot;.&quot; + XMPPServer.getInstance().getServerInfo().getXMPPDomain();</span>
+    }
+
+    @Override
+    public JID getAddress() {
+        // TODO Cache this JID for performance?
+<span class="nc" id="L307">        return new JID(null, getServiceDomain(), null);</span>
+    }
+
+    public Collection&lt;String&gt; getUsersAllowedToCreate() {
+<span class="nc" id="L311">        return allowedToCreate;</span>
+    }
+
+    public Collection&lt;String&gt; getSysadmins() {
+<span class="nc" id="L315">        return sysadmins;</span>
+    }
+
+    public void setSysadmins(Collection&lt;String&gt; userJIDs) {
+<span class="nc" id="L319">        sysadmins.clear();</span>
+<span class="nc bnc" id="L320" title="All 2 branches missed.">        for (String JID : userJIDs) {</span>
+<span class="nc" id="L321">            sysadmins.add(JID.trim().toLowerCase());</span>
+<span class="nc" id="L322">        }</span>
+<span class="nc" id="L323">        updateSysadminProperty();</span>
+<span class="nc" id="L324">    }</span>
+
+    public void addSysadmin(String userJID) {
+<span class="nc" id="L327">        sysadmins.add(userJID.trim().toLowerCase());</span>
+        // Update the config.
+<span class="nc" id="L329">        updateSysadminProperty();</span>
+<span class="nc" id="L330">    }</span>
+
+    public void removeSysadmin(String userJID) {
+<span class="nc" id="L333">        sysadmins.remove(userJID.trim().toLowerCase());</span>
+        // Update the config.
+<span class="nc" id="L335">        updateSysadminProperty();</span>
+<span class="nc" id="L336">    }</span>
+
+    private void updateSysadminProperty() {
+<span class="nc" id="L339">        String[] jids = new String[sysadmins.size()];</span>
+<span class="nc" id="L340">        jids = sysadmins.toArray(jids);</span>
+<span class="nc" id="L341">        JiveGlobals.setProperty(&quot;xmpp.pubsub.sysadmin.jid&quot;, fromArray(jids));</span>
+<span class="nc" id="L342">    }</span>
+
+    public boolean isNodeCreationRestricted() {
+<span class="nc" id="L345">        return nodeCreationRestricted;</span>
+    }
+
+    @Override
+    public boolean isMultipleSubscriptionsEnabled() {
+<span class="nc" id="L350">        return multipleSubscriptionsEnabled;</span>
+    }
+
+    public void setNodeCreationRestricted(boolean nodeCreationRestricted) {
+<span class="nc" id="L354">        this.nodeCreationRestricted = nodeCreationRestricted;</span>
+<span class="nc bnc" id="L355" title="All 2 branches missed.">        JiveGlobals.setProperty(&quot;xmpp.pubsub.create.anyone&quot;, Boolean.toString(!nodeCreationRestricted));</span>
+<span class="nc" id="L356">    }</span>
+
+    public void setUserAllowedToCreate(Collection&lt;String&gt; userJIDs) {
+<span class="nc" id="L359">        allowedToCreate.clear();</span>
+<span class="nc bnc" id="L360" title="All 2 branches missed.">        for (String JID : userJIDs) {</span>
+<span class="nc" id="L361">            allowedToCreate.add(JID.trim().toLowerCase());</span>
+<span class="nc" id="L362">        }</span>
+<span class="nc" id="L363">        updateUserAllowedToCreateProperty();</span>
+<span class="nc" id="L364">    }</span>
+
+    public void addUserAllowedToCreate(String userJID) {
+        // Update the list of allowed JIDs to create nodes.
+<span class="nc" id="L368">        allowedToCreate.add(userJID.trim().toLowerCase());</span>
+        // Update the config.
+<span class="nc" id="L370">        updateUserAllowedToCreateProperty();</span>
+<span class="nc" id="L371">    }</span>
+
+    public void removeUserAllowedToCreate(String userJID) {
+        // Update the list of allowed JIDs to create nodes.
+<span class="nc" id="L375">        allowedToCreate.remove(userJID.trim().toLowerCase());</span>
+        // Update the config.
+<span class="nc" id="L377">        updateUserAllowedToCreateProperty();</span>
+<span class="nc" id="L378">    }</span>
+
+    private void updateUserAllowedToCreateProperty() {
+<span class="nc" id="L381">        String[] jids = new String[allowedToCreate.size()];</span>
+<span class="nc" id="L382">        jids = allowedToCreate.toArray(jids);</span>
+<span class="nc" id="L383">        JiveGlobals.setProperty(&quot;xmpp.pubsub.create.jid&quot;, fromArray(jids));</span>
+<span class="nc" id="L384">    }</span>
+
+    @Override
+    public void initialize(XMPPServer server) {
+<span class="nc" id="L388">        super.initialize(server);</span>
+        
+<span class="nc" id="L390">        JiveGlobals.migrateProperty(&quot;xmpp.pubsub.enabled&quot;);</span>
+<span class="nc" id="L391">        JiveGlobals.migrateProperty(&quot;xmpp.pubsub.service&quot;);</span>
+<span class="nc" id="L392">        JiveGlobals.migrateProperty(&quot;xmpp.pubsub.root.nodeID&quot;);</span>
+<span class="nc" id="L393">        JiveGlobals.migrateProperty(&quot;xmpp.pubsub.root.creator&quot;);</span>
+<span class="nc" id="L394">        JiveGlobals.migrateProperty(&quot;xmpp.pubsub.multiple-subscriptions&quot;);</span>
+
+        // Listen to property events so that the template is always up to date
+<span class="nc" id="L397">        PropertyEventDispatcher.addListener(this);</span>
+
+<span class="nc" id="L399">        setIQDiscoItemsHandler(XMPPServer.getInstance().getIQDiscoItemsHandler());</span>
+<span class="nc" id="L400">        setIQDiscoInfoHandler(XMPPServer.getInstance().getIQDiscoInfoHandler());</span>
+<span class="nc" id="L401">        serviceEnabled = JiveGlobals.getBooleanProperty(&quot;xmpp.pubsub.enabled&quot;, true);</span>
+<span class="nc" id="L402">        serviceName = JiveGlobals.getProperty(&quot;xmpp.pubsub.service&quot;);</span>
+<span class="nc bnc" id="L403" title="All 2 branches missed.">        if (serviceName == null) {</span>
+<span class="nc" id="L404">            serviceName = &quot;pubsub&quot;;</span>
+        }
+        // Load the list of JIDs that are sysadmins of the PubSub service
+<span class="nc" id="L407">        String property = JiveGlobals.getProperty(&quot;xmpp.pubsub.sysadmin.jid&quot;);</span>
+        String[] jids;
+<span class="nc bnc" id="L409" title="All 4 branches missed.">        if (property != null &amp;&amp; !property.isEmpty()) {</span>
+<span class="nc" id="L410">            jids = property.split(&quot;,&quot;);</span>
+<span class="nc bnc" id="L411" title="All 2 branches missed.">            for (String jid : jids) {</span>
+<span class="nc" id="L412">                sysadmins.add(jid.trim().toLowerCase());</span>
+            }
+        }
+<span class="nc bnc" id="L415" title="All 2 branches missed.">        nodeCreationRestricted = !JiveGlobals.getBooleanProperty(&quot;xmpp.pubsub.create.anyone&quot;, true);</span>
+        // Load the list of JIDs that are allowed to create nodes
+<span class="nc" id="L417">        property = JiveGlobals.getProperty(&quot;xmpp.pubsub.create.jid&quot;);</span>
+<span class="nc bnc" id="L418" title="All 4 branches missed.">        if (property != null &amp;&amp; !property.isEmpty()) {</span>
+<span class="nc" id="L419">            jids = property.split(&quot;,&quot;);</span>
+<span class="nc bnc" id="L420" title="All 2 branches missed.">            for (String jid : jids) {</span>
+<span class="nc" id="L421">                allowedToCreate.add(jid.trim().toLowerCase());</span>
+            }
+        }
+
+<span class="nc" id="L425">        multipleSubscriptionsEnabled = JiveGlobals.getBooleanProperty(&quot;xmpp.pubsub.multiple-subscriptions&quot;, true);</span>
+
+<span class="nc" id="L427">        routingTable = server.getRoutingTable();</span>
+<span class="nc" id="L428">        router = server.getPacketRouter();</span>
+
+<span class="nc" id="L430">        engine = new PubSubEngine(router);</span>
+
+        // Load default configuration for leaf nodes
+<span class="nc" id="L433">        leafDefaultConfiguration = PubSubPersistenceManager.loadDefaultConfiguration(this, true);</span>
+<span class="nc bnc" id="L434" title="All 2 branches missed.">        if (leafDefaultConfiguration == null) {</span>
+            // Create and save default configuration for leaf nodes;
+<span class="nc" id="L436">            leafDefaultConfiguration = new DefaultNodeConfiguration(true);</span>
+<span class="nc" id="L437">            leafDefaultConfiguration.setAccessModel(AccessModel.open);</span>
+<span class="nc" id="L438">            leafDefaultConfiguration.setPublisherModel(PublisherModel.publishers);</span>
+<span class="nc" id="L439">            leafDefaultConfiguration.setDeliverPayloads(true);</span>
+<span class="nc" id="L440">            leafDefaultConfiguration.setLanguage(&quot;English&quot;);</span>
+<span class="nc" id="L441">            leafDefaultConfiguration.setMaxPayloadSize(5120);</span>
+<span class="nc" id="L442">            leafDefaultConfiguration.setNotifyConfigChanges(true);</span>
+<span class="nc" id="L443">            leafDefaultConfiguration.setNotifyDelete(true);</span>
+<span class="nc" id="L444">            leafDefaultConfiguration.setNotifyRetract(true);</span>
+<span class="nc" id="L445">            leafDefaultConfiguration.setPersistPublishedItems(false);</span>
+<span class="nc" id="L446">            leafDefaultConfiguration.setMaxPublishedItems(1);</span>
+<span class="nc" id="L447">            leafDefaultConfiguration.setPresenceBasedDelivery(false);</span>
+<span class="nc" id="L448">            leafDefaultConfiguration.setSendItemSubscribe(true);</span>
+<span class="nc" id="L449">            leafDefaultConfiguration.setSubscriptionEnabled(true);</span>
+<span class="nc" id="L450">            leafDefaultConfiguration.setReplyPolicy(null);</span>
+<span class="nc" id="L451">            PubSubPersistenceManager.createDefaultConfiguration(this, leafDefaultConfiguration);</span>
+        }
+        // Load default configuration for collection nodes
+<span class="nc" id="L454">        collectionDefaultConfiguration =</span>
+<span class="nc" id="L455">                PubSubPersistenceManager.loadDefaultConfiguration(this, false);</span>
+<span class="nc bnc" id="L456" title="All 2 branches missed.">        if (collectionDefaultConfiguration == null ) {</span>
+            // Create and save default configuration for collection nodes;
+<span class="nc" id="L458">            collectionDefaultConfiguration = new DefaultNodeConfiguration(false);</span>
+<span class="nc" id="L459">            collectionDefaultConfiguration.setAccessModel(AccessModel.open);</span>
+<span class="nc" id="L460">            collectionDefaultConfiguration.setPublisherModel(PublisherModel.publishers);</span>
+<span class="nc" id="L461">            collectionDefaultConfiguration.setDeliverPayloads(false);</span>
+<span class="nc" id="L462">            collectionDefaultConfiguration.setLanguage(&quot;English&quot;);</span>
+<span class="nc" id="L463">            collectionDefaultConfiguration.setNotifyConfigChanges(true);</span>
+<span class="nc" id="L464">            collectionDefaultConfiguration.setNotifyDelete(true);</span>
+<span class="nc" id="L465">            collectionDefaultConfiguration.setNotifyRetract(true);</span>
+<span class="nc" id="L466">            collectionDefaultConfiguration.setPresenceBasedDelivery(false);</span>
+<span class="nc" id="L467">            collectionDefaultConfiguration.setSubscriptionEnabled(true);</span>
+<span class="nc" id="L468">            collectionDefaultConfiguration.setReplyPolicy(null);</span>
+<span class="nc" id="L469">            collectionDefaultConfiguration</span>
+<span class="nc" id="L470">                    .setAssociationPolicy(CollectionNode.LeafNodeAssociationPolicy.all);</span>
+<span class="nc" id="L471">            collectionDefaultConfiguration.setMaxLeafNodes(-1);</span>
+<span class="nc" id="L472">            PubSubPersistenceManager</span>
+<span class="nc" id="L473">                    .createDefaultConfiguration(this, collectionDefaultConfiguration);</span>
+        }
+
+        // Load nodes to memory
+<span class="nc" id="L477">        PubSubPersistenceManager.loadNodes(this);</span>
+        // Ensure that we have a root collection node
+<span class="nc" id="L479">        String rootNodeID = JiveGlobals.getProperty(&quot;xmpp.pubsub.root.nodeID&quot;, &quot;&quot;);</span>
+<span class="nc bnc" id="L480" title="All 2 branches missed.">        if (nodes.isEmpty()) {</span>
+            // Create root collection node
+<span class="nc" id="L482">            String creator = JiveGlobals.getProperty(&quot;xmpp.pubsub.root.creator&quot;);</span>
+//            JID creatorJID = creator != null ? new JID(creator) : server.getAdmins().iterator().next();
+<span class="nc bnc" id="L484" title="All 2 branches missed.">            JID creatorJID = creator != null ? new JID(creator) : new JID(server.getServerInfo().getXMPPDomain());</span>
+<span class="nc" id="L485">            rootCollectionNode = new CollectionNode(this, null, rootNodeID, creatorJID);</span>
+            // Add the creator as the node owner
+<span class="nc" id="L487">            rootCollectionNode.addOwner(creatorJID);</span>
+            // Save new root node
+<span class="nc" id="L489">            rootCollectionNode.saveToDB();</span>
+<span class="nc" id="L490">        }</span>
+        else {
+<span class="nc" id="L492">            rootCollectionNode = (CollectionNode) getNode(rootNodeID);</span>
+        }
+<span class="nc" id="L494">    }</span>
+
+    @Override
+    public void start() {
+        // Check that the service is enabled
+<span class="nc bnc" id="L499" title="All 2 branches missed.">        if (!isServiceEnabled()) {</span>
+<span class="nc" id="L500">            return;</span>
+        }
+<span class="nc" id="L502">        super.start();</span>
+        // Add the route to this service
+<span class="nc" id="L504">        routingTable.addComponentRoute(getAddress(), this);</span>
+        // Start the pubsub engine
+<span class="nc" id="L506">        engine.start(this);</span>
+<span class="nc" id="L507">        ArrayList&lt;String&gt; params = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L508">        params.clear();</span>
+<span class="nc" id="L509">        params.add(getServiceDomain());</span>
+<span class="nc" id="L510">        Log.info(LocaleUtils.getLocalizedString(&quot;startup.starting.pubsub&quot;, params));</span>
+<span class="nc" id="L511">    }</span>
+
+    @Override
+    public void stop() {
+<span class="nc" id="L515">        super.stop();</span>
+        // Remove the route to this service
+<span class="nc" id="L517">        routingTable.removeComponentRoute(getAddress());</span>
+        // Stop the pubsub engine. This will gives us the chance to
+        // save queued items to the database.
+<span class="nc" id="L520">        engine.shutdown(this);</span>
+<span class="nc" id="L521">    }</span>
+
+    public void setIQDiscoItemsHandler(IQDiscoItemsHandler iqDiscoItemsHandler) {
+<span class="nc" id="L524">        this.iqDiscoItemsHandler = iqDiscoItemsHandler;</span>
+<span class="nc" id="L525">    }</span>
+    
+    public void setIQDiscoInfoHandler(IQDiscoInfoHandler iqDiscoInfoHandler) {
+<span class="nc" id="L528">        this.iqDiscoInfoHandler = iqDiscoInfoHandler ;</span>
+<span class="nc" id="L529">    }</span>
+
+    private void enableService(boolean enabled) {
+<span class="nc bnc" id="L532" title="All 2 branches missed.">        if (serviceEnabled == enabled) {</span>
+            // Do nothing if the service status has not changed
+<span class="nc" id="L534">            return;</span>
+        }
+<span class="nc bnc" id="L536" title="All 2 branches missed.">        if (!enabled) {</span>
+            // Disable disco information
+<span class="nc bnc" id="L538" title="All 2 branches missed.">            if (iqDiscoItemsHandler != null) {</span>
+<span class="nc" id="L539">                iqDiscoItemsHandler.removeServerItemsProvider(this);</span>
+            }
+            // Stop the service/module
+<span class="nc" id="L542">            stop();</span>
+        }
+<span class="nc" id="L544">        serviceEnabled = enabled;</span>
+<span class="nc bnc" id="L545" title="All 2 branches missed.">        if (enabled) {</span>
+            // Start the service/module
+<span class="nc" id="L547">            start();</span>
+            // Enable disco information
+<span class="nc bnc" id="L549" title="All 2 branches missed.">            if (iqDiscoItemsHandler != null) {</span>
+<span class="nc" id="L550">                iqDiscoItemsHandler.addServerItemsProvider(this);</span>
+            }
+        }
+<span class="nc" id="L553">    }</span>
+
+    public void setServiceEnabled(boolean enabled) {
+        // Enable/disable the service
+<span class="nc" id="L557">        enableService(enabled);</span>
+        // Store the new setting
+<span class="nc" id="L559">        JiveGlobals.setProperty(&quot;xmpp.pubsub.enabled&quot;, Boolean.toString(enabled));</span>
+<span class="nc" id="L560">    }</span>
+
+    /**
+     * Returns true if the service is available. Use {@link #setServiceEnabled(boolean)} to
+     * enable or disable the service.
+     *
+     * @return true if the MUC service is available.
+     */
+    public boolean isServiceEnabled() {
+<span class="nc" id="L569">        return serviceEnabled;</span>
+    }
+
+    public void markedAsSeniorClusterMember() {
+        // Offer the service since we are the senior cluster member
+        // enableService(true);
+<span class="nc" id="L575">    }</span>
+
+    @Override
+    public Iterator&lt;DiscoServerItem&gt; getItems() {
+        // Check if the service is disabled. Info is not available when disabled.
+<span class="nc bnc" id="L580" title="All 2 branches missed.">        if (!isServiceEnabled()) {</span>
+<span class="nc" id="L581">            return null;</span>
+        }
+<span class="nc" id="L583">        ArrayList&lt;DiscoServerItem&gt; items = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L584">        final DiscoServerItem item = new DiscoServerItem(new JID(</span>
+<span class="nc" id="L585">            getServiceDomain()), &quot;Publish-Subscribe service&quot;, null, null, this,</span>
+            this);
+<span class="nc" id="L587">        items.add(item);</span>
+<span class="nc" id="L588">        return items.iterator();</span>
+    }
+
+    @Override
+    public Iterator&lt;Element&gt; getIdentities(String name, String node, JID senderJID) {
+<span class="nc" id="L593">        ArrayList&lt;Element&gt; identities = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L594" title="All 4 branches missed.">        if (name == null &amp;&amp; node == null) {</span>
+            // Answer the identity of the PubSub service
+<span class="nc" id="L596">            Element identity = DocumentHelper.createElement(&quot;identity&quot;);</span>
+<span class="nc" id="L597">            identity.addAttribute(&quot;category&quot;, &quot;pubsub&quot;);</span>
+<span class="nc" id="L598">            identity.addAttribute(&quot;name&quot;, &quot;Publish-Subscribe service&quot;);</span>
+<span class="nc" id="L599">            identity.addAttribute(&quot;type&quot;, &quot;service&quot;);</span>
+
+<span class="nc" id="L601">            identities.add(identity);</span>
+<span class="nc" id="L602">        }</span>
+<span class="nc bnc" id="L603" title="All 2 branches missed.">        else if (name == null) {</span>
+            // Answer the identity of a given node
+<span class="nc" id="L605">            Node pubNode = getNode(node);</span>
+<span class="nc bnc" id="L606" title="All 2 branches missed.">            if (canDiscoverNode(pubNode)) {</span>
+<span class="nc" id="L607">                Element identity = DocumentHelper.createElement(&quot;identity&quot;);</span>
+<span class="nc" id="L608">                identity.addAttribute(&quot;category&quot;, &quot;pubsub&quot;);</span>
+<span class="nc bnc" id="L609" title="All 2 branches missed.">                identity.addAttribute(&quot;type&quot;, pubNode.isCollectionNode() ? &quot;collection&quot; : &quot;leaf&quot;);</span>
+
+<span class="nc" id="L611">                identities.add(identity);</span>
+            }
+        }
+<span class="nc" id="L614">        return identities.iterator();</span>
+    }
+
+    @Override
+    public Iterator&lt;String&gt; getFeatures(String name, String node, JID senderJID) {
+<span class="nc" id="L619">        ArrayList&lt;String&gt; features = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L620" title="All 4 branches missed.">        if (name == null &amp;&amp; node == null) {</span>
+            // Answer the features of the PubSub service
+<span class="nc" id="L622">            features.add(&quot;http://jabber.org/protocol/pubsub&quot;);</span>
+            // Default access model for nodes created on the service
+<span class="nc" id="L624">            String modelName = getDefaultNodeConfiguration(true).getAccessModel().getName();</span>
+<span class="nc" id="L625">            features.add(&quot;http://jabber.org/protocol/pubsub#access-&quot; + modelName);</span>
+<span class="nc bnc" id="L626" title="All 2 branches missed.">            if (isCollectionNodesSupported()) {</span>
+                // Collection nodes are supported
+<span class="nc" id="L628">                features.add(&quot;http://jabber.org/protocol/pubsub#collections&quot;);</span>
+            }
+            // Configuration of node options is supported
+<span class="nc" id="L631">            features.add(&quot;http://jabber.org/protocol/pubsub#config-node&quot;);</span>
+            // Simultaneous creation and configuration of nodes is supported
+<span class="nc" id="L633">            features.add(&quot;http://jabber.org/protocol/pubsub#create-and-configure&quot;);</span>
+            // Creation of nodes is supported
+<span class="nc" id="L635">            features.add(&quot;http://jabber.org/protocol/pubsub#create-nodes&quot;);</span>
+            // Deletion of nodes is supported
+<span class="nc" id="L637">            features.add(&quot;http://jabber.org/protocol/pubsub#delete-nodes&quot;);</span>
+            // Retrieval of pending subscription approvals is supported
+<span class="nc" id="L639">            features.add(&quot;http://jabber.org/protocol/pubsub#get-pending&quot;);</span>
+<span class="nc bnc" id="L640" title="All 2 branches missed.">            if (isInstantNodeSupported()) {</span>
+                // Creation of instant nodes is supported
+<span class="nc" id="L642">                features.add(&quot;http://jabber.org/protocol/pubsub#instant-nodes&quot;);</span>
+            }
+            // Publishers may specify item identifiers
+<span class="nc" id="L645">            features.add(&quot;http://jabber.org/protocol/pubsub#item-ids&quot;);</span>
+            // TODO Time-based subscriptions are supported (clean up thread missing, rest is supported)
+            //features.add(&quot;http://jabber.org/protocol/pubsub#leased-subscription&quot;);
+            // Node meta-data is supported
+<span class="nc" id="L649">            features.add(&quot;http://jabber.org/protocol/pubsub#meta-data&quot;);</span>
+            // Node owners may modify affiliations
+<span class="nc" id="L651">            features.add(&quot;http://jabber.org/protocol/pubsub#modify-affiliations&quot;);</span>
+            // Node owners may manage subscriptions.
+<span class="nc" id="L653">            features.add(&quot;http://jabber.org/protocol/pubsub#manage-subscriptions&quot;);</span>
+            // A single entity may subscribe to a node multiple times
+<span class="nc" id="L655">            features.add(&quot;http://jabber.org/protocol/pubsub#multi-subscribe&quot;);</span>
+            // The outcast affiliation is supported
+<span class="nc" id="L657">            features.add(&quot;http://jabber.org/protocol/pubsub#outcast-affiliation&quot;);</span>
+            // Persistent items are supported
+<span class="nc" id="L659">            features.add(&quot;http://jabber.org/protocol/pubsub#persistent-items&quot;);</span>
+            // Presence-based delivery of event notifications is supported
+<span class="nc" id="L661">            features.add(&quot;http://jabber.org/protocol/pubsub#presence-notifications&quot;);</span>
+            // Publishing items is supported (note: not valid for collection nodes)
+<span class="nc" id="L663">            features.add(&quot;http://jabber.org/protocol/pubsub#publish&quot;);</span>
+            // The publisher affiliation is supported
+<span class="nc" id="L665">            features.add(&quot;http://jabber.org/protocol/pubsub#publisher-affiliation&quot;);</span>
+            // Purging of nodes is supported
+<span class="nc" id="L667">            features.add(&quot;http://jabber.org/protocol/pubsub#purge-nodes&quot;);</span>
+            // Item retraction is supported
+<span class="nc" id="L669">            features.add(&quot;http://jabber.org/protocol/pubsub#retract-items&quot;);</span>
+            // Retrieval of current affiliations is supported
+<span class="nc" id="L671">            features.add(&quot;http://jabber.org/protocol/pubsub#retrieve-affiliations&quot;);</span>
+            // Retrieval of default node configuration is supported.
+<span class="nc" id="L673">            features.add(&quot;http://jabber.org/protocol/pubsub#retrieve-default&quot;);</span>
+            // Item retrieval is supported
+<span class="nc" id="L675">            features.add(&quot;http://jabber.org/protocol/pubsub#retrieve-items&quot;);</span>
+            // Retrieval of current subscriptions is supported.
+<span class="nc" id="L677">            features.add(&quot;http://jabber.org/protocol/pubsub#retrieve-subscriptions&quot;);</span>
+            // Subscribing and unsubscribing are supported
+<span class="nc" id="L679">            features.add(&quot;http://jabber.org/protocol/pubsub#subscribe&quot;);</span>
+            // Configuration of subscription options is supported
+<span class="nc" id="L681">            features.add(&quot;http://jabber.org/protocol/pubsub#subscription-options&quot;);</span>
+            // Publishing options are supported.
+<span class="nc" id="L683">            features.add(&quot;http://jabber.org/protocol/pubsub#publish-options&quot;);</span>
+<span class="nc" id="L684">        }</span>
+<span class="nc bnc" id="L685" title="All 2 branches missed.">        else if (name == null) {</span>
+            // Answer the features of a given node
+<span class="nc" id="L687">            Node pubNode = getNode(node);</span>
+<span class="nc bnc" id="L688" title="All 2 branches missed.">            if (canDiscoverNode(pubNode)) {</span>
+                // Answer the features of the PubSub service
+<span class="nc" id="L690">                features.add(&quot;http://jabber.org/protocol/pubsub&quot;);</span>
+            }
+        }
+<span class="nc" id="L693">        return features.iterator();</span>
+    }
+
+    @Override
+    public DataForm getExtendedInfo(String name, String node, JID senderJID) {
+<span class="nc bnc" id="L698" title="All 4 branches missed.">        if (name == null &amp;&amp; node != null) {</span>
+            // Answer the extended info of a given node
+<span class="nc" id="L700">            Node pubNode = getNode(node);</span>
+<span class="nc bnc" id="L701" title="All 2 branches missed.">            if (canDiscoverNode(pubNode)) {</span>
+                // Get the metadata data form
+<span class="nc" id="L703">                return pubNode.getMetadataForm();</span>
+            }
+        }
+<span class="nc" id="L706">        return null;</span>
+    }
+
+    @Override
+    public boolean hasInfo(String name, String node, JID senderJID) {
+        // Check if the service is disabled. Info is not available when disabled.
+<span class="nc bnc" id="L712" title="All 2 branches missed.">        if (!isServiceEnabled()) {</span>
+<span class="nc" id="L713">            return false;</span>
+        }
+<span class="nc bnc" id="L715" title="All 4 branches missed.">        if (name == null &amp;&amp; node == null) {</span>
+            // We always have info about the Pubsub service
+<span class="nc" id="L717">            return true;</span>
+        }
+<span class="nc bnc" id="L719" title="All 2 branches missed.">        else if (name == null) {</span>
+            // We only have info if the node exists
+<span class="nc" id="L721">            return hasNode(node);</span>
+        }
+<span class="nc" id="L723">        return false;</span>
+    }
+
+    @Override
+    public Iterator&lt;DiscoItem&gt; getItems(String name, String node, JID senderJID) {
+        // Check if the service is disabled. Info is not available when disabled.
+<span class="nc bnc" id="L729" title="All 2 branches missed.">        if (!isServiceEnabled()) {</span>
+<span class="nc" id="L730">            return null;</span>
+        }
+<span class="nc" id="L732">        List&lt;DiscoItem&gt; answer = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L733">        String serviceDomain = getServiceDomain();</span>
+<span class="nc bnc" id="L734" title="All 4 branches missed.">        if (name == null &amp;&amp; node == null) {</span>
+            // Answer all first level nodes
+<span class="nc bnc" id="L736" title="All 2 branches missed.">            for (Node pubNode : rootCollectionNode.getNodes()) {</span>
+<span class="nc bnc" id="L737" title="All 2 branches missed.">                if (canDiscoverNode(pubNode)) {</span>
+<span class="nc" id="L738">                    final DiscoItem item = new DiscoItem(</span>
+<span class="nc" id="L739">                        new JID(serviceDomain), pubNode.getName(),</span>
+<span class="nc" id="L740">                        pubNode.getNodeID(), null);</span>
+<span class="nc" id="L741">                    answer.add(item);</span>
+                }
+<span class="nc" id="L743">            }</span>
+        }
+<span class="nc bnc" id="L745" title="All 2 branches missed.">        else if (name == null) {</span>
+<span class="nc" id="L746">            Node pubNode = getNode(node);</span>
+<span class="nc bnc" id="L747" title="All 4 branches missed.">            if (pubNode != null &amp;&amp; canDiscoverNode(pubNode)) {</span>
+<span class="nc bnc" id="L748" title="All 2 branches missed.">                if (pubNode.isCollectionNode()) {</span>
+                    // Answer all nested nodes as items
+<span class="nc bnc" id="L750" title="All 2 branches missed.">                    for (Node nestedNode : pubNode.getNodes()) {</span>
+<span class="nc bnc" id="L751" title="All 2 branches missed.">                        if (canDiscoverNode(nestedNode)) {</span>
+<span class="nc" id="L752">                            final DiscoItem item = new DiscoItem(new JID(serviceDomain), nestedNode.getName(),</span>
+<span class="nc" id="L753">                                nestedNode.getNodeID(), null);</span>
+<span class="nc" id="L754">                            answer.add(item);</span>
+                        }
+<span class="nc" id="L756">                    }</span>
+                }
+                else {
+                    // This is a leaf node so answer the published items which exist on the service
+<span class="nc bnc" id="L760" title="All 2 branches missed.">                    for (PublishedItem publishedItem : pubNode.getPublishedItems()) {</span>
+<span class="nc" id="L761">                        answer.add(new DiscoItem(new JID(serviceDomain), publishedItem.getID(), null, null));</span>
+<span class="nc" id="L762">                    }</span>
+                }
+            }
+            else {
+                // Answer null to indicate that specified item was not found
+<span class="nc" id="L767">                return null;</span>
+            }
+        }
+<span class="nc" id="L770">        return answer.iterator();</span>
+    }
+
+    @Override
+    public void broadcast(Node node, Message message, Collection&lt;JID&gt; jids) {
+        // TODO Possibly use a thread pool for sending packets (based on the jids size)
+<span class="nc" id="L776">        message.setFrom(getAddress());</span>
+<span class="nc bnc" id="L777" title="All 2 branches missed.">        for (JID jid : jids) {</span>
+<span class="nc" id="L778">            message.setTo(jid);</span>
+<span class="nc" id="L779">            message.setID(StringUtils.randomString(8));</span>
+<span class="nc" id="L780">            router.route(message);</span>
+<span class="nc" id="L781">        }</span>
+<span class="nc" id="L782">    }</span>
+
+    @Override
+    public void send(Packet packet) {
+<span class="nc" id="L786">        router.route(packet);</span>
+<span class="nc" id="L787">    }</span>
+
+    @Override
+    public void sendNotification(Node node, Message message, JID jid) {
+<span class="nc" id="L791">        message.setFrom(getAddress());</span>
+<span class="nc" id="L792">        message.setTo(jid);</span>
+<span class="nc" id="L793">        message.setID(StringUtils.randomString(8));</span>
+<span class="nc" id="L794">        router.route(message);</span>
+<span class="nc" id="L795">    }</span>
+
+    @Override
+    public Node getNode(String nodeID) {
+<span class="nc" id="L799">        return nodes.get(nodeID);</span>
+    }
+
+    @Override
+    public Collection&lt;Node&gt; getNodes() {
+<span class="nc" id="L804">        return nodes.values();</span>
+    }
+
+    private boolean hasNode(String nodeID) {
+<span class="nc bnc" id="L808" title="All 2 branches missed.">        return getNode(nodeID) != null;</span>
+    }
+
+    @Override
+    public void addNode(Node node) {
+<span class="nc" id="L813">        nodes.put(node.getNodeID(), node);</span>
+<span class="nc" id="L814">    }</span>
+
+    @Override
+    public void removeNode(String nodeID) {
+<span class="nc" id="L818">        nodes.remove(nodeID);</span>
+<span class="nc" id="L819">    }</span>
+
+    private boolean canDiscoverNode(Node pubNode) {
+<span class="nc" id="L822">        return true;</span>
+    }
+
+    /**
+     * Converts an array to a comma-delimitted String.
+     *
+     * @param array the array.
+     * @return a comma delimtted String of the array values.
+     */
+    private static String fromArray(String [] array) {
+<span class="nc" id="L832">        StringBuilder buf = new StringBuilder();</span>
+<span class="nc bnc" id="L833" title="All 2 branches missed.">        for (int i=0; i&lt;array.length; i++) {</span>
+<span class="nc" id="L834">            buf.append(array[i]);</span>
+<span class="nc bnc" id="L835" title="All 2 branches missed.">            if (i != array.length-1) {</span>
+<span class="nc" id="L836">                buf.append(',');</span>
+            }
+        }
+<span class="nc" id="L839">        return buf.toString();</span>
+    }
+
+    @Override
+    public Map&lt;String, Map&lt;String, String&gt;&gt; getBarePresences() {
+<span class="nc" id="L844">        return barePresences;</span>
+    }
+
+    @Override
+    public AdHocCommandManager getManager() {
+<span class="nc" id="L849">        return manager;</span>
+    }
+
+    @Override
+    public void propertySet(String property, Map&lt;String, Object&gt; params) {
+<span class="nc bnc" id="L854" title="All 2 branches missed.">        if (property.equals(&quot;xmpp.pubsub.enabled&quot;)) {</span>
+<span class="nc" id="L855">            boolean enabled = Boolean.parseBoolean((String)params.get(&quot;value&quot;));</span>
+            // Enable/disable the service
+<span class="nc" id="L857">            enableService(enabled);</span>
+        }
+<span class="nc" id="L859">    }</span>
+
+    @Override
+    public void propertyDeleted(String property, Map&lt;String, Object&gt; params) {
+<span class="nc bnc" id="L863" title="All 2 branches missed.">        if (property.equals(&quot;xmpp.pubsub.enabled&quot;)) {</span>
+            // Enable/disable the service
+<span class="nc" id="L865">            enableService(true);</span>
+        }
+<span class="nc" id="L867">    }</span>
+
+    @Override
+    public void xmlPropertySet(String property, Map&lt;String, Object&gt; params) {
+        // Do nothing
+<span class="nc" id="L872">    }</span>
+
+    @Override
+    public void xmlPropertyDeleted(String property, Map&lt;String, Object&gt; params) {
+        // Do nothing
+<span class="nc" id="L877">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

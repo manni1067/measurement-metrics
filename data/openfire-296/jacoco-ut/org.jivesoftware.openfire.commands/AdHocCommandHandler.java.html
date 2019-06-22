@@ -1,0 +1,245 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>AdHocCommandHandler.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.commands</a> &gt; <span class="el_source">AdHocCommandHandler.java</span></div><h1>AdHocCommandHandler.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.commands;
+
+import org.dom4j.DocumentHelper;
+import org.dom4j.Element;
+import org.jivesoftware.openfire.IQHandlerInfo;
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.auth.UnauthorizedException;
+import org.jivesoftware.openfire.commands.admin.*;
+import org.jivesoftware.openfire.commands.admin.group.*;
+import org.jivesoftware.openfire.commands.admin.user.AddUser;
+import org.jivesoftware.openfire.commands.admin.user.DeleteUser;
+import org.jivesoftware.openfire.commands.admin.user.AuthenticateUser;
+import org.jivesoftware.openfire.commands.admin.user.ChangeUserPassword;
+import org.jivesoftware.openfire.commands.admin.user.UserProperties;
+import org.jivesoftware.openfire.commands.event.*;
+import org.jivesoftware.openfire.disco.*;
+import org.jivesoftware.openfire.handler.IQHandler;
+import org.xmpp.forms.DataForm;
+import org.xmpp.packet.IQ;
+import org.xmpp.packet.JID;
+
+import java.util.*;
+
+/**
+ * An AdHocCommandHandler is responsbile for providing discoverable information about the
+ * supported commands and for handling commands requests. This is an implementation of JEP-50:
+ * Ad-Hoc Commands.&lt;p&gt;
+ *
+ * Ad-hoc commands that require user interaction will have one or more stages. For each stage the
+ * user will complete a data form and send it back to the server. The data entered by the user is
+ * kept in a SessionData. Instances of {@link AdHocCommand} are stateless. In order to prevent
+ * &quot;bad&quot; users from consuming all system memory there exists a limit of simultaneous commands that
+ * a user might perform. Configure the system property {@code &quot;xmpp.command.limit&quot;} to control
+ * this limit. User sessions will also timeout and their data destroyed if they have not been
+ * executed within a time limit since the session was created. The default timeout value is 10
+ * minutes. The timeout value can be modified by setting the system property
+ * {@code &quot;xmpp.command.timeout&quot;}.&lt;p&gt;
+ *
+ * New commands can be added dynamically by sending the message {@link #addCommand(AdHocCommand)}.
+ * The command will immediatelly appear in the disco#items list and might be executed by those
+ * users with enough execution permissions.
+ *
+ * @author Gaston Dombiak
+ */
+public class AdHocCommandHandler extends IQHandler
+        implements ServerFeaturesProvider, DiscoInfoProvider, DiscoItemsProvider {
+
+    private static final String NAMESPACE = &quot;http://jabber.org/protocol/commands&quot;;
+
+    private String serverName;
+    private IQHandlerInfo info;
+    private IQDiscoInfoHandler infoHandler;
+    private IQDiscoItemsHandler itemsHandler;
+    /**
+     * Manager that keeps the list of ad-hoc commands and processing command requests.
+     */
+    private AdHocCommandManager manager;
+
+    public AdHocCommandHandler() {
+<span class="nc" id="L76">        super(&quot;Ad-Hoc Commands Handler&quot;);</span>
+<span class="nc" id="L77">        info = new IQHandlerInfo(&quot;command&quot;, NAMESPACE);</span>
+<span class="nc" id="L78">        manager = new AdHocCommandManager();</span>
+<span class="nc" id="L79">    }</span>
+
+    @Override
+    public IQ handleIQ(IQ packet) throws UnauthorizedException {
+<span class="nc" id="L83">        return manager.process(packet);</span>
+    }
+
+    @Override
+    public IQHandlerInfo getInfo() {
+<span class="nc" id="L88">        return info;</span>
+    }
+
+    @Override
+    public Iterator&lt;String&gt; getFeatures() {
+<span class="nc" id="L93">        return Collections.singleton(NAMESPACE).iterator();</span>
+    }
+
+    @Override
+    public Iterator&lt;Element&gt; getIdentities(String name, String node, JID senderJID) {
+<span class="nc" id="L98">        Element identity = DocumentHelper.createElement(&quot;identity&quot;);</span>
+<span class="nc" id="L99">        identity.addAttribute(&quot;category&quot;, &quot;automation&quot;);</span>
+<span class="nc bnc" id="L100" title="All 2 branches missed.">        identity.addAttribute(&quot;type&quot;, NAMESPACE.equals(node) ? &quot;command-list&quot; : &quot;command-node&quot;);</span>
+<span class="nc" id="L101">        return Collections.singleton(identity).iterator();</span>
+    }
+
+    @Override
+    public Iterator&lt;String&gt; getFeatures(String name, String node, JID senderJID) {
+<span class="nc" id="L106">        return Arrays.asList(NAMESPACE, &quot;jabber:x:data&quot;).iterator();</span>
+    }
+
+    @Override
+    public DataForm getExtendedInfo(String name, String node, JID senderJID) {
+<span class="nc" id="L111">        return null;</span>
+    }
+
+    @Override
+    public boolean hasInfo(String name, String node, JID senderJID) {
+<span class="nc bnc" id="L116" title="All 2 branches missed.">        if (NAMESPACE.equals(node)) {</span>
+<span class="nc" id="L117">            return true;</span>
+        }
+        else {
+            // Only include commands that the sender can execute
+<span class="nc" id="L121">            AdHocCommand command = manager.getCommand(node);</span>
+<span class="nc bnc" id="L122" title="All 4 branches missed.">            return command != null &amp;&amp; command.hasPermission(senderJID);</span>
+        }
+    }
+
+    @Override
+    public Iterator&lt;DiscoItem&gt; getItems(String name, String node, JID senderJID) {
+<span class="nc" id="L128">        List&lt;DiscoItem&gt; answer = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L129" title="All 2 branches missed.">        if (!NAMESPACE.equals(node)) {</span>
+<span class="nc" id="L130">            answer = Collections.emptyList();</span>
+        }
+        else {
+<span class="nc bnc" id="L133" title="All 2 branches missed.">            for (AdHocCommand command : manager.getCommands()) {</span>
+                // Only include commands that the sender can invoke (i.e. has enough permissions)
+<span class="nc bnc" id="L135" title="All 2 branches missed.">                if (command.hasPermission(senderJID)) {</span>
+<span class="nc" id="L136">                    final DiscoItem item = new DiscoItem(new JID(serverName),</span>
+<span class="nc" id="L137">                            command.getLabel(), command.getCode(), null);</span>
+<span class="nc" id="L138">                    answer.add(item);</span>
+                }
+<span class="nc" id="L140">            }</span>
+        }
+<span class="nc" id="L142">        return answer.iterator();</span>
+    }
+
+    @Override
+    public void initialize(XMPPServer server) {
+<span class="nc" id="L147">        super.initialize(server);</span>
+<span class="nc" id="L148">        serverName = server.getServerInfo().getXMPPDomain();</span>
+<span class="nc" id="L149">        infoHandler = server.getIQDiscoInfoHandler();</span>
+<span class="nc" id="L150">        itemsHandler = server.getIQDiscoItemsHandler();</span>
+<span class="nc" id="L151">    }</span>
+
+    @Override
+    public void start() throws IllegalStateException {
+<span class="nc" id="L155">        super.start();</span>
+<span class="nc" id="L156">        infoHandler.setServerNodeInfoProvider(NAMESPACE, this);</span>
+<span class="nc" id="L157">        itemsHandler.setServerNodeInfoProvider(NAMESPACE, this);</span>
+        // Add the &quot;out of the box&quot; commands
+<span class="nc" id="L159">        addDefaultCommands();</span>
+<span class="nc" id="L160">    }</span>
+
+    @Override
+    public void stop() {
+<span class="nc" id="L164">        super.stop();</span>
+<span class="nc" id="L165">        infoHandler.removeServerNodeInfoProvider(NAMESPACE);</span>
+<span class="nc" id="L166">        itemsHandler.removeServerNodeInfoProvider(NAMESPACE);</span>
+        // Stop commands
+<span class="nc bnc" id="L168" title="All 2 branches missed.">        for (AdHocCommand command : manager.getCommands()) {</span>
+<span class="nc" id="L169">            stopCommand(command);</span>
+<span class="nc" id="L170">        }</span>
+<span class="nc" id="L171">    }</span>
+
+    /**
+     * Adds a new command to the list of supported ad-hoc commands by this server. The new
+     * command will appear in the discoverable items list and will be executed for those users
+     * with enough permission.
+     *
+     * @param command the new ad-hoc command to add.
+     */
+    public void addCommand(AdHocCommand command) {
+<span class="nc" id="L181">        manager.addCommand(command);</span>
+<span class="nc" id="L182">        startCommand(command);</span>
+<span class="nc" id="L183">    }</span>
+
+    /**
+     * Removes the command from the list of ad-hoc commands supported by this server. The command
+     * will no longer appear in the discoverable items list.
+     *
+     * @param command the ad-hoc command to remove.
+     */
+    public void removeCommand(AdHocCommand command) {
+<span class="nc bnc" id="L192" title="All 2 branches missed.">        if (manager.removeCommand(command)) {</span>
+<span class="nc" id="L193">            stopCommand(command);</span>
+        }
+<span class="nc" id="L195">    }</span>
+
+    private void addDefaultCommands() {
+        // TODO Complete when out of the box commands are implemented
+<span class="nc" id="L199">        addCommand(new GetNumberActiveUsers());</span>
+<span class="nc" id="L200">        addCommand(new GetNumberOnlineUsers());</span>
+<span class="nc" id="L201">        addCommand(new GetNumberUserSessions());</span>
+<span class="nc" id="L202">        addCommand(new GetListActiveUsers());</span>
+<span class="nc" id="L203">        addCommand(new GetUsersPresence());</span>
+<span class="nc" id="L204">        addCommand(new GetListGroups());</span>
+<span class="nc" id="L205">        addCommand(new GetListGroupUsers());</span>
+<span class="nc" id="L206">        addCommand(new AddGroupUsers());</span>
+<span class="nc" id="L207">        addCommand(new DeleteGroupUsers());</span>
+<span class="nc" id="L208">        addCommand(new AddGroup());</span>
+<span class="nc" id="L209">        addCommand(new UpdateGroup());</span>
+<span class="nc" id="L210">        addCommand(new DeleteGroup());</span>
+<span class="nc" id="L211">        addCommand(new AddUser());</span>
+<span class="nc" id="L212">        addCommand(new DeleteUser());</span>
+<span class="nc" id="L213">        addCommand(new AuthenticateUser());</span>
+<span class="nc" id="L214">        addCommand(new ChangeUserPassword());</span>
+<span class="nc" id="L215">        addCommand(new UserProperties());</span>
+<span class="nc" id="L216">        addCommand(new PacketsNotification());</span>
+<span class="nc" id="L217">        addCommand(new GetServerStats());</span>
+<span class="nc" id="L218">        addCommand(new HttpBindStatus());</span>
+<span class="nc" id="L219">        addCommand(new UserCreated());</span>
+<span class="nc" id="L220">        addCommand(new UserModified());</span>
+<span class="nc" id="L221">        addCommand(new UserDeleting());</span>
+<span class="nc" id="L222">        addCommand(new GroupCreated());</span>
+<span class="nc" id="L223">        addCommand(new GroupDeleting());</span>
+<span class="nc" id="L224">        addCommand(new GroupModified());</span>
+<span class="nc" id="L225">        addCommand(new GroupMemberAdded());</span>
+<span class="nc" id="L226">        addCommand(new GroupMemberRemoved());</span>
+<span class="nc" id="L227">        addCommand(new GroupAdminAdded());</span>
+<span class="nc" id="L228">        addCommand(new GroupAdminRemoved());</span>
+<span class="nc" id="L229">        addCommand(new VCardCreated());</span>
+<span class="nc" id="L230">        addCommand(new VCardDeleting());</span>
+<span class="nc" id="L231">        addCommand(new VCardModified());</span>
+<span class="nc" id="L232">        addCommand(new GetAdminConsoleInfo());</span>
+<span class="nc" id="L233">    }</span>
+
+    private void startCommand(AdHocCommand command) {
+<span class="nc" id="L236">        infoHandler.setServerNodeInfoProvider(command.getCode(), this);</span>
+<span class="nc" id="L237">        itemsHandler.setServerNodeInfoProvider(command.getCode(), this);</span>
+<span class="nc" id="L238">    }</span>
+
+    private void stopCommand(AdHocCommand command) {
+<span class="nc" id="L241">        infoHandler.removeServerNodeInfoProvider(command.getCode());</span>
+<span class="nc" id="L242">        itemsHandler.removeServerNodeInfoProvider(command.getCode());</span>
+<span class="nc" id="L243">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

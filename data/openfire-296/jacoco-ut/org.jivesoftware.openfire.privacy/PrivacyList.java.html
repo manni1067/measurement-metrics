@@ -1,0 +1,321 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>PrivacyList.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.privacy</a> &gt; <span class="el_source">PrivacyList.java</span></div><h1>PrivacyList.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.privacy;
+
+import java.io.Externalizable;
+import java.io.IOException;
+import java.io.ObjectInput;
+import java.io.ObjectOutput;
+import java.io.StringReader;
+import java.util.*;
+
+import org.dom4j.DocumentFactory;
+import org.dom4j.Element;
+import org.dom4j.io.XMPPPacketReader;
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.net.MXParser;
+import org.jivesoftware.openfire.roster.Roster;
+import org.jivesoftware.openfire.user.UserNotFoundException;
+import org.jivesoftware.util.cache.CacheSizes;
+import org.jivesoftware.util.cache.Cacheable;
+import org.jivesoftware.util.cache.CannotCalculateSizeException;
+import org.jivesoftware.util.cache.ExternalizableUtil;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmlpull.v1.XmlPullParserException;
+import org.xmlpull.v1.XmlPullParserFactory;
+import org.xmpp.packet.JID;
+import org.xmpp.packet.Packet;
+
+/**
+ * A privacy list contains a set of rules that define if communication with the list owner
+ * is allowed or denied. Users may have zero, one or more privacy lists. When a list is the
+ * default list then that list is going to be used by default for all user sessions or analyze,
+ * when user is offline, if communication may proceed (e.g. define if a message should be stored
+ * offline). A user may configure is he wants to have a default list or not. When no default list
+ * is defined then communication will not be blocked. However, users may define an active list
+ * for a particular session. Active lists override default list (if there is one) and will be used
+ * only for the duration of the session.
+ *
+ * @author Gaston Dombiak
+ */
+public class PrivacyList implements Cacheable, Externalizable {
+
+<span class="nc" id="L58">    private static final Logger Log = LoggerFactory.getLogger(PrivacyList.class);</span>
+
+    /**
+     * Reuse the same factory for all the connections.
+     */
+<span class="nc" id="L63">    private static XmlPullParserFactory factory = null;</span>
+<span class="nc" id="L64">    private static ThreadLocal&lt;XMPPPacketReader&gt; localParser = null;</span>
+
+    static {
+        try {
+<span class="nc" id="L68">            factory = XmlPullParserFactory.newInstance(MXParser.class.getName(), null);</span>
+<span class="nc" id="L69">            factory.setNamespaceAware(true);</span>
+        }
+<span class="nc" id="L71">        catch (XmlPullParserException e) {</span>
+<span class="nc" id="L72">            Log.error(&quot;Error creating a parser factory&quot;, e);</span>
+<span class="nc" id="L73">        }</span>
+        // Create xmpp parser to keep in each thread
+<span class="nc" id="L75">        localParser = new ThreadLocal&lt;XMPPPacketReader&gt;() {</span>
+            @Override
+            protected XMPPPacketReader initialValue() {
+<span class="nc" id="L78">                XMPPPacketReader parser = new XMPPPacketReader();</span>
+<span class="nc" id="L79">                factory.setNamespaceAware(true);</span>
+<span class="nc" id="L80">                parser.setXPPFactory(factory);</span>
+<span class="nc" id="L81">                return parser;</span>
+            }
+        };
+<span class="nc" id="L84">    }</span>
+
+    private JID userJID;
+    private String name;
+    private boolean isDefault;
+<span class="nc" id="L89">    private List&lt;PrivacyItem&gt; items = new ArrayList&lt;&gt;();</span>
+
+    /**
+     * Constructor added for Externalizable. Do not use this constructor.
+     */
+<span class="nc" id="L94">    public PrivacyList() {</span>
+<span class="nc" id="L95">    }</span>
+
+<span class="nc" id="L97">    public PrivacyList(String username, String name, boolean isDefault, Element listElement) {</span>
+<span class="nc" id="L98">        this.userJID = XMPPServer.getInstance().createJID(username, null, true);</span>
+<span class="nc" id="L99">        this.name = name;</span>
+<span class="nc" id="L100">        this.isDefault = isDefault;</span>
+        // Set the new list items
+<span class="nc" id="L102">        updateList(listElement);</span>
+<span class="nc" id="L103">    }</span>
+
+    /**
+     * Returns the JID of the user that owns this privacy list.
+     *
+     * @return the JID of the user that owns this privacy list.
+     */
+    public JID getUserJID() {
+<span class="nc" id="L111">        return userJID;</span>
+    }
+
+    /**
+     * Returns the name that uniquely identifies this list among the users lists.
+     *
+     * @return the name that uniquely identifies this list among the users lists.
+     */
+    public String getName() {
+<span class="nc" id="L120">        return name;</span>
+    }
+
+    /**
+     * Returns true if this privacy list is the default list to apply for the user. Default
+     * privacy lists can be overriden per session by setting an active privacy list.
+     *
+     * @return true if this privacy list is the default list to apply for the user.
+     */
+    public boolean isDefault() {
+<span class="nc" id="L130">        return isDefault;</span>
+    }
+
+    /**
+     * Sets if this privacy list is the default list to apply for the user. Default
+     * privacy lists can be overriden per session by setting an active privacy list.
+     *
+     * @param isDefault true if this privacy list is the default list to apply for the user.
+     */
+    public void setDefaultList(boolean isDefault) {
+<span class="nc" id="L140">        this.isDefault = isDefault;</span>
+        // Trigger event that this list has been modified
+<span class="nc" id="L142">        PrivacyListManager.getInstance().dispatchModifiedEvent(this);</span>
+<span class="nc" id="L143">    }</span>
+
+    /**
+     * Returns true if the specified packet must be blocked based on this privacy list rules.
+     * Rules are going to be analyzed based on their order (in ascending order). When a rule
+     * is matched then communication will be blocked or allowed based on that rule. No more
+     * further analysis is going to be made.
+     *
+     * @param packet the packet to analyze if it must be blocked.
+     * @return true if the specified packet must be blocked based on this privacy list rules.
+     */
+    public boolean shouldBlockPacket(Packet packet) {
+<span class="nc bnc" id="L155" title="All 2 branches missed.">        if (packet.getFrom() == null) {</span>
+            // Sender is the server so it's not denied
+<span class="nc" id="L157">            return false;</span>
+        }
+        // Iterate over the rules and check each rule condition
+<span class="nc" id="L160">        Roster roster = getRoster();</span>
+<span class="nc bnc" id="L161" title="All 2 branches missed.">        for (PrivacyItem item : items) {</span>
+<span class="nc bnc" id="L162" title="All 2 branches missed.">            if (item.matchesCondition(packet, roster, userJID)) {</span>
+<span class="nc bnc" id="L163" title="All 2 branches missed.">                if (item.isAllow()) {</span>
+<span class="nc" id="L164">                    return false;</span>
+                }
+<span class="nc bnc" id="L166" title="All 2 branches missed.">                if (Log.isDebugEnabled()) {</span>
+<span class="nc" id="L167">                    Log.debug(&quot;PrivacyList: Packet was blocked: &quot; + packet);</span>
+                }
+<span class="nc" id="L169">                return true;</span>
+            }
+<span class="nc" id="L171">        }</span>
+        // If no rule blocked the communication then allow the packet to flow
+<span class="nc" id="L173">        return false;</span>
+    }
+
+    /**
+     * Returns all JIDs that are on the blocklist (as defined in XEP-0191).
+     *
+     * @return a collection of JIDs (possibly empty, never null)
+     */
+    public Set&lt;JID&gt; getBlockedJIDs()
+    {
+<span class="nc" id="L183">        final Set&lt;JID&gt; result = new HashSet&lt;&gt;();</span>
+
+<span class="nc bnc" id="L185" title="All 2 branches missed.">        for ( final PrivacyItem item : items )</span>
+        {
+<span class="nc bnc" id="L187" title="All 4 branches missed.">            if ( !item.isAllow() &amp;&amp; item.isType( PrivacyItem.Type.jid ) )</span>
+            {
+<span class="nc bnc" id="L189" title="All 2 branches missed.">                if ( item.getJID() != null )</span>
+                {
+<span class="nc" id="L191">                    result.add( item.getJID() );</span>
+                }
+            }
+<span class="nc" id="L194">        }</span>
+
+<span class="nc" id="L196">        return result;</span>
+    }
+
+    /**
+     * Returns an Element with the privacy list XML representation.
+     *
+     * @return an Element with the privacy list XML representation.
+     */
+    public Element asElement() {
+        //Element listElement = DocumentFactory.getInstance().createDocument().addElement(&quot;list&quot;);
+<span class="nc" id="L206">        Element listElement = DocumentFactory.getInstance().createDocument()</span>
+<span class="nc" id="L207">                .addElement(&quot;list&quot;, &quot;jabber:iq:privacy&quot;);</span>
+<span class="nc" id="L208">        listElement.addAttribute(&quot;name&quot;, getName());</span>
+        // Add the list items to the result
+<span class="nc bnc" id="L210" title="All 2 branches missed.">        for (PrivacyItem item : items) {</span>
+<span class="nc" id="L211">            listElement.add(item.asElement());</span>
+<span class="nc" id="L212">        }</span>
+<span class="nc" id="L213">        return listElement;</span>
+    }
+
+    /**
+     * Sets the new list items based on the specified Element. The Element must contain
+     * a list of item elements.
+     *
+     * @param listElement the element containing a list of items.
+     */
+    public void updateList(Element listElement) {
+<span class="nc" id="L223">        updateList(listElement, true);</span>
+<span class="nc" id="L224">    }</span>
+
+    /**
+     * Sets the new list items based on the specified Element. The Element must contain
+     * a list of item elements.
+     *
+     * @param listElement the element containing a list of items.
+     * @param notify true if a provicy list modified event will be triggered.
+     */
+    private void updateList(Element listElement, boolean notify) {
+        // Reset the list of items of this list
+<span class="nc" id="L235">        items = new ArrayList&lt;&gt;();</span>
+
+<span class="nc" id="L237">        List&lt;Element&gt; itemsElements = listElement.elements(&quot;item&quot;);</span>
+<span class="nc bnc" id="L238" title="All 2 branches missed.">        for (Element itemElement : itemsElements) {</span>
+<span class="nc" id="L239">            PrivacyItem newItem = new PrivacyItem(itemElement);</span>
+<span class="nc" id="L240">            items.add(newItem);</span>
+            // If the user's roster is required to evaluation whether a packet must be blocked
+            // then ensure that the roster is available
+<span class="nc bnc" id="L243" title="All 2 branches missed.">            if (newItem.isRosterRequired()) {</span>
+<span class="nc" id="L244">                Roster roster = getRoster();</span>
+<span class="nc bnc" id="L245" title="All 2 branches missed.">                if (roster == null) {</span>
+<span class="nc" id="L246">                    Log.warn(&quot;Privacy item removed since roster of user was not found: &quot; + userJID.getNode());</span>
+<span class="nc" id="L247">                    items.remove(newItem);</span>
+                }
+            }
+<span class="nc" id="L250">        }</span>
+        // Sort items collections
+<span class="nc" id="L252">        Collections.sort(items);</span>
+<span class="nc bnc" id="L253" title="All 2 branches missed.">        if (notify) {</span>
+            // Trigger event that this list has been modified
+<span class="nc" id="L255">            PrivacyListManager.getInstance().dispatchModifiedEvent(this);</span>
+        }
+<span class="nc" id="L257">    }</span>
+
+    private Roster getRoster() {
+        try {
+<span class="nc" id="L261">            return XMPPServer.getInstance().getRosterManager().getRoster(userJID.getNode());</span>
+<span class="nc" id="L262">        } catch (UserNotFoundException e) {</span>
+<span class="nc" id="L263">            Log.warn(&quot;Roster not found for user: &quot; + userJID);</span>
+        }
+<span class="nc" id="L265">        return null;</span>
+    }
+
+    @Override
+    public int getCachedSize() throws CannotCalculateSizeException {
+        // Approximate the size of the object in bytes by calculating the size
+        // of each field.
+<span class="nc" id="L272">        int size = 0;</span>
+<span class="nc" id="L273">        size += CacheSizes.sizeOfObject();                      // overhead of object</span>
+<span class="nc" id="L274">        size += CacheSizes.sizeOfString(userJID.toString());    // userJID</span>
+<span class="nc" id="L275">        size += CacheSizes.sizeOfString(name);                  // name</span>
+<span class="nc" id="L276">        size += CacheSizes.sizeOfBoolean();                     // isDefault</span>
+<span class="nc" id="L277">        size += CacheSizes.sizeOfCollection(items);             // items of the list</span>
+<span class="nc" id="L278">        return size;</span>
+    }
+
+    @Override
+    public int hashCode() {
+<span class="nc" id="L283">        return name.hashCode();</span>
+    }
+
+    @Override
+    public boolean equals(Object object) {
+<span class="nc bnc" id="L288" title="All 2 branches missed.">        if (this == object) {</span>
+<span class="nc" id="L289">            return true;</span>
+        }
+<span class="nc bnc" id="L291" title="All 4 branches missed.">        if (object != null &amp;&amp; object instanceof PrivacyList) {</span>
+<span class="nc" id="L292">            return name.equals(((PrivacyList)object).getName());</span>
+        }
+        else {
+<span class="nc" id="L295">            return false;</span>
+        }
+    }
+
+    @Override
+    public void writeExternal(ObjectOutput out) throws IOException {
+<span class="nc" id="L301">        ExternalizableUtil.getInstance().writeSerializable(out, userJID);</span>
+<span class="nc" id="L302">        ExternalizableUtil.getInstance().writeSafeUTF(out, name);</span>
+<span class="nc" id="L303">        ExternalizableUtil.getInstance().writeBoolean(out, isDefault);</span>
+<span class="nc" id="L304">        ExternalizableUtil.getInstance().writeSafeUTF(out, asElement().asXML());</span>
+<span class="nc" id="L305">    }</span>
+
+    @Override
+    public void readExternal(ObjectInput in) throws IOException, ClassNotFoundException {
+<span class="nc" id="L309">        userJID = (JID) ExternalizableUtil.getInstance().readSerializable(in);</span>
+<span class="nc" id="L310">        name = ExternalizableUtil.getInstance().readSafeUTF(in);</span>
+<span class="nc" id="L311">        isDefault = ExternalizableUtil.getInstance().readBoolean(in);</span>
+<span class="nc" id="L312">        String xml = ExternalizableUtil.getInstance().readSafeUTF(in);</span>
+        try {
+<span class="nc" id="L314">            Element element = localParser.get().read(new StringReader(xml)).getRootElement();</span>
+<span class="nc" id="L315">            updateList(element, false);</span>
+<span class="nc" id="L316">        } catch (Exception e) {</span>
+<span class="nc" id="L317">            Log.error(&quot;Error while parsing Privacy Property&quot;, e);</span>
+<span class="nc" id="L318">        }</span>
+<span class="nc" id="L319">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

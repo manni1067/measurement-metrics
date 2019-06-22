@@ -1,0 +1,2968 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>LocalMUCRoom.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.muc.spi</a> &gt; <span class="el_source">LocalMUCRoom.java</span></div><h1>LocalMUCRoom.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2004-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.muc.spi;
+
+import java.io.IOException;
+import java.io.ObjectInput;
+import java.io.ObjectOutput;
+import java.text.MessageFormat;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Date;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.ReadWriteLock;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
+
+import org.dom4j.Element;
+import org.jivesoftware.database.SequenceManager;
+import org.jivesoftware.openfire.PacketRouter;
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.auth.UnauthorizedException;
+import org.jivesoftware.openfire.cluster.NodeID;
+import org.jivesoftware.openfire.event.GroupEventListener;
+import org.jivesoftware.openfire.group.ConcurrentGroupList;
+import org.jivesoftware.openfire.group.ConcurrentGroupMap;
+import org.jivesoftware.openfire.group.Group;
+import org.jivesoftware.openfire.group.GroupAwareList;
+import org.jivesoftware.openfire.group.GroupAwareMap;
+import org.jivesoftware.openfire.group.GroupJID;
+import org.jivesoftware.openfire.group.GroupManager;
+import org.jivesoftware.openfire.group.GroupNotFoundException;
+import org.jivesoftware.openfire.muc.CannotBeInvitedException;
+import org.jivesoftware.openfire.muc.ConflictException;
+import org.jivesoftware.openfire.muc.ForbiddenException;
+import org.jivesoftware.openfire.muc.HistoryRequest;
+import org.jivesoftware.openfire.muc.HistoryStrategy;
+import org.jivesoftware.openfire.muc.MUCEventDispatcher;
+import org.jivesoftware.openfire.muc.MUCRole;
+import org.jivesoftware.openfire.muc.MUCRoom;
+import org.jivesoftware.openfire.muc.MUCRoomHistory;
+import org.jivesoftware.openfire.muc.MultiUserChatService;
+import org.jivesoftware.openfire.muc.NotAcceptableException;
+import org.jivesoftware.openfire.muc.NotAllowedException;
+import org.jivesoftware.openfire.muc.RegistrationRequiredException;
+import org.jivesoftware.openfire.muc.RoomLockedException;
+import org.jivesoftware.openfire.muc.ServiceUnavailableException;
+import org.jivesoftware.openfire.muc.cluster.AddAffiliation;
+import org.jivesoftware.openfire.muc.cluster.AddMember;
+import org.jivesoftware.openfire.muc.cluster.BroadcastMessageRequest;
+import org.jivesoftware.openfire.muc.cluster.BroadcastPresenceRequest;
+import org.jivesoftware.openfire.muc.cluster.ChangeNickname;
+import org.jivesoftware.openfire.muc.cluster.DestroyRoomRequest;
+import org.jivesoftware.openfire.muc.cluster.OccupantAddedEvent;
+import org.jivesoftware.openfire.muc.cluster.OccupantLeftEvent;
+import org.jivesoftware.openfire.muc.cluster.RoomUpdatedEvent;
+import org.jivesoftware.openfire.muc.cluster.UpdateOccupant;
+import org.jivesoftware.openfire.muc.cluster.UpdateOccupantRequest;
+import org.jivesoftware.openfire.muc.cluster.UpdatePresence;
+import org.jivesoftware.openfire.user.UserAlreadyExistsException;
+import org.jivesoftware.openfire.user.UserNotFoundException;
+import org.jivesoftware.util.JiveConstants;
+import org.jivesoftware.util.LocaleUtils;
+import org.jivesoftware.util.NotFoundException;
+import org.jivesoftware.util.cache.CacheFactory;
+import org.jivesoftware.util.cache.ExternalizableUtil;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmpp.packet.IQ;
+import org.xmpp.packet.JID;
+import org.xmpp.packet.Message;
+import org.xmpp.packet.Packet;
+import org.xmpp.packet.PacketError;
+import org.xmpp.packet.Presence;
+
+/**
+ * Implementation of a chatroom that is being hosted by this JVM. A LocalMUCRoom could represent
+ * a persistent room which means that its configuration will be maintained in synch with its
+ * representation in the database.&lt;p&gt;
+ *
+ * When running in a cluster each cluster node will have its own copy of local rooms. Persistent
+ * rooms will be loaded by each cluster node when starting up. Not persistent rooms will be copied
+ * from the senior cluster member. All room occupants will be copied from the senior cluster member
+ * too.
+ *
+ * @author Gaston Dombiak
+ */
+public class LocalMUCRoom implements MUCRoom, GroupEventListener {
+
+<span class="fc" id="L106">    private static final Logger Log = LoggerFactory.getLogger(LocalMUCRoom.class);</span>
+
+    /**
+     * The service hosting the room.
+     */
+    private MultiUserChatService mucService;
+
+    /**
+     * The occupants of the room accessible by the occupants nickname.
+     */
+<span class="nc" id="L116">    private Map&lt;String, List&lt;MUCRole&gt;&gt; occupantsByNickname = new ConcurrentHashMap&lt;&gt;();</span>
+
+    /**
+     * The occupants of the room accessible by the occupants bare JID.
+     */
+<span class="nc" id="L121">    private Map&lt;JID, List&lt;MUCRole&gt;&gt; occupantsByBareJID = new ConcurrentHashMap&lt;&gt;();</span>
+
+    /**
+     * The occupants of the room accessible by the occupants full JID.
+     */
+<span class="nc" id="L126">    private Map&lt;JID, MUCRole&gt; occupantsByFullJID = new ConcurrentHashMap&lt;&gt;();</span>
+
+    /**
+     * The name of the room.
+     */
+    private String name;
+
+    /**
+     * A lock to protect the room occupants.
+     */
+<span class="nc" id="L136">    ReadWriteLock lock = new ReentrantReadWriteLock();</span>
+
+    /**
+     * The role of the room itself.
+     */
+<span class="nc" id="L141">    private MUCRole role = new RoomRole(this);</span>
+
+    /**
+     * The router used to send packets for the room.
+     */
+    private PacketRouter router;
+
+    /**
+     * The start time of the chat.
+     */
+    long startTime;
+
+    /**
+     * The end time of the chat.
+     */
+    long endTime;
+
+    /**
+     * After a room has been destroyed it may remain in memory but it won't be possible to use it.
+     * When a room is destroyed it is immediately removed from the MultiUserChatService but it's
+     * possible that while the room was being destroyed it was being used by another thread so we
+     * need to protect the room under these rare circumstances.
+     */
+<span class="nc" id="L164">    boolean isDestroyed = false;</span>
+
+    /**
+     * ChatRoomHistory object.
+     */
+    private MUCRoomHistory roomHistory;
+
+    /**
+     * Time when the room was locked. A value of zero means that the room is unlocked.
+     */
+    private long lockedTime;
+
+    /**
+     * List of chatroom's owner. The list contains only bare jid.
+     */
+<span class="nc" id="L179">    GroupAwareList&lt;JID&gt; owners = new ConcurrentGroupList&lt;&gt;();</span>
+
+    /**
+     * List of chatroom's admin. The list contains only bare jid.
+     */
+<span class="nc" id="L184">    GroupAwareList&lt;JID&gt; admins = new ConcurrentGroupList&lt;&gt;();</span>
+
+    /**
+     * List of chatroom's members. The list contains only bare jid, mapped to a nickname.
+     */
+<span class="nc" id="L189">    GroupAwareMap&lt;JID, String&gt; members = new ConcurrentGroupMap&lt;&gt;();</span>
+
+    /**
+     * List of chatroom's outcast. The list contains only bare jid of not allowed users.
+     */
+<span class="nc" id="L194">    private GroupAwareList&lt;JID&gt; outcasts = new ConcurrentGroupList&lt;&gt;();</span>
+
+    /**
+     * The natural language name of the room.
+     */
+    private String naturalLanguageName;
+
+    /**
+     * Description of the room. The owner can change the description using the room configuration
+     * form.
+     */
+    private String description;
+
+    /**
+     * Indicates if occupants are allowed to change the subject of the room.
+     */
+    private boolean canOccupantsChangeSubject;
+
+    /**
+     * Maximum number of occupants that could be present in the room. If the limit's been reached
+     * and a user tries to join, a not-allowed error will be returned.
+     */
+    private int maxUsers;
+
+    /**
+     * List of roles of which presence will be broadcasted to the rest of the occupants. This
+     * feature is useful for implementing &quot;invisible&quot; occupants.
+     */
+<span class="nc" id="L222">    private List&lt;String&gt; rolesToBroadcastPresence = new ArrayList&lt;&gt;();</span>
+
+    /**
+     * A public room means that the room is searchable and visible. This means that the room can be
+     * located using disco requests.
+     */
+    private boolean publicRoom;
+
+    /**
+     * Persistent rooms are saved to the database to make sure that rooms configurations can be
+     * restored in case the server goes down.
+     */
+    private boolean persistent;
+
+    /**
+     * Moderated rooms enable only participants to speak. Users that join the room and aren't
+     * participants can't speak (they are just visitors).
+     */
+    private boolean moderated;
+
+    /**
+     * A room is considered members-only if an invitation is required in order to enter the room.
+     * Any user that is not a member of the room won't be able to join the room unless the user
+     * decides to register with the room (thus becoming a member).
+     */
+    private boolean membersOnly;
+
+    /**
+     * Some rooms may restrict the occupants that are able to send invitations. Sending an
+     * invitation in a members-only room adds the invitee to the members list.
+     */
+    private boolean canOccupantsInvite;
+
+    /**
+     * The password that every occupant should provide in order to enter the room.
+     */
+<span class="nc" id="L258">    private String password = null;</span>
+
+    /**
+     * Every presence packet can include the JID of every occupant unless the owner deactives this
+     * configuration.
+     */
+    private boolean canAnyoneDiscoverJID;
+
+    /**
+     * The minimal role of persons that are allowed to send private messages in the room.
+     */
+    private String canSendPrivateMessage;
+
+    /**
+     * Enables the logging of the conversation. The conversation in the room will be saved to the
+     * database.
+     */
+    private boolean logEnabled;
+
+    /**
+     * Enables the logging of the conversation. The conversation in the room will be saved to the
+     * database.
+     */
+    private boolean loginRestrictedToNickname;
+
+    /**
+     * Enables the logging of the conversation. The conversation in the room will be saved to the
+     * database.
+     */
+    private boolean canChangeNickname;
+
+    /**
+     * Enables the logging of the conversation. The conversation in the room will be saved to the
+     * database.
+     */
+    private boolean registrationEnabled;
+
+    /**
+     * Internal component that handles IQ packets sent by the room owners.
+     */
+    private IQOwnerHandler iqOwnerHandler;
+
+    /**
+     * Internal component that handles IQ packets sent by moderators, admins and owners.
+     */
+    private IQAdminHandler iqAdminHandler;
+
+    /**
+     * The last known subject of the room. This information is used to respond disco requests. The
+     * MUCRoomHistory class holds the history of the room together with the last message that set
+     * the room's subject.
+     */
+<span class="nc" id="L310">    private String subject = &quot;&quot;;</span>
+
+    /**
+     * The ID of the room. If the room is temporary and does not log its conversation then the value
+     * will always be -1. Otherwise a value will be obtained from the database.
+     */
+<span class="nc" id="L316">    private long roomID = -1;</span>
+
+    /**
+     * The date when the room was created.
+     */
+    private Date creationDate;
+
+    /**
+     * The last date when the room's configuration was modified.
+     */
+    private Date modificationDate;
+
+    /**
+     * The date when the last occupant left the room. A null value means that there are occupants
+     * in the room at the moment.
+     */
+    private Date emptyDate;
+
+    /**
+     * Indicates if the room is present in the database.
+     */
+<span class="nc" id="L337">    private boolean savedToDB = false;</span>
+
+    /**
+     * Do not use this constructor. It was added to implement the Externalizable
+     * interface required to work inside of a cluster.
+     */
+<span class="nc" id="L343">    public LocalMUCRoom() {</span>
+<span class="nc" id="L344">    }</span>
+
+    /**
+     * Create a new chat room.
+     *
+     * @param chatservice the service hosting the room.
+     * @param roomname the name of the room.
+     * @param packetRouter the router for sending packets from the room.
+     */
+<span class="nc" id="L353">    LocalMUCRoom(MultiUserChatService chatservice, String roomname, PacketRouter packetRouter) {</span>
+<span class="nc" id="L354">        this.mucService = chatservice;</span>
+<span class="nc" id="L355">        this.name = roomname;</span>
+<span class="nc" id="L356">        this.naturalLanguageName = roomname;</span>
+<span class="nc" id="L357">        this.description = roomname;</span>
+<span class="nc" id="L358">        this.router = packetRouter;</span>
+<span class="nc" id="L359">        this.startTime = System.currentTimeMillis();</span>
+<span class="nc" id="L360">        this.creationDate = new Date(startTime);</span>
+<span class="nc" id="L361">        this.modificationDate = new Date(startTime);</span>
+<span class="nc" id="L362">        this.emptyDate = new Date(startTime);</span>
+<span class="nc" id="L363">        this.canOccupantsChangeSubject = MUCPersistenceManager.getBooleanProperty(mucService.getServiceName(), &quot;room.canOccupantsChangeSubject&quot;, false);</span>
+<span class="nc" id="L364">        this.maxUsers = MUCPersistenceManager.getIntProperty(mucService.getServiceName(), &quot;room.maxUsers&quot;, 30);</span>
+<span class="nc" id="L365">        this.publicRoom = MUCPersistenceManager.getBooleanProperty(mucService.getServiceName(), &quot;room.publicRoom&quot;, true);</span>
+<span class="nc" id="L366">        this.persistent = MUCPersistenceManager.getBooleanProperty(mucService.getServiceName(), &quot;room.persistent&quot;, false);</span>
+<span class="nc" id="L367">        this.moderated = MUCPersistenceManager.getBooleanProperty(mucService.getServiceName(), &quot;room.moderated&quot;, false);</span>
+<span class="nc" id="L368">        this.membersOnly = MUCPersistenceManager.getBooleanProperty(mucService.getServiceName(), &quot;room.membersOnly&quot;, false);</span>
+<span class="nc" id="L369">        this.canOccupantsInvite = MUCPersistenceManager.getBooleanProperty(mucService.getServiceName(), &quot;room.canOccupantsInvite&quot;, false);</span>
+<span class="nc" id="L370">        this.canAnyoneDiscoverJID = MUCPersistenceManager.getBooleanProperty(mucService.getServiceName(), &quot;room.canAnyoneDiscoverJID&quot;, true);</span>
+<span class="nc" id="L371">        this.logEnabled = MUCPersistenceManager.getBooleanProperty(mucService.getServiceName(), &quot;room.logEnabled&quot;, true);</span>
+<span class="nc" id="L372">        this.loginRestrictedToNickname = MUCPersistenceManager.getBooleanProperty(mucService.getServiceName(), &quot;room.loginRestrictedToNickname&quot;, false);</span>
+<span class="nc" id="L373">        this.canChangeNickname = MUCPersistenceManager.getBooleanProperty(mucService.getServiceName(), &quot;room.canChangeNickname&quot;, true);</span>
+<span class="nc" id="L374">        this.registrationEnabled = MUCPersistenceManager.getBooleanProperty(mucService.getServiceName(), &quot;room.registrationEnabled&quot;, true);</span>
+        // TODO Allow to set the history strategy from the configuration form?
+<span class="nc" id="L376">        roomHistory = new MUCRoomHistory(this, new HistoryStrategy(mucService.getHistoryStrategy()));</span>
+<span class="nc" id="L377">        this.iqOwnerHandler = new IQOwnerHandler(this, packetRouter);</span>
+<span class="nc" id="L378">        this.iqAdminHandler = new IQAdminHandler(this, packetRouter);</span>
+        // No one can join the room except the room's owner
+<span class="nc" id="L380">        this.lockedTime = startTime;</span>
+        // Set the default roles for which presence is broadcast
+<span class="nc" id="L382">        rolesToBroadcastPresence.add(&quot;moderator&quot;);</span>
+<span class="nc" id="L383">        rolesToBroadcastPresence.add(&quot;participant&quot;);</span>
+<span class="nc" id="L384">        rolesToBroadcastPresence.add(&quot;visitor&quot;);</span>
+<span class="nc" id="L385">    }</span>
+
+    @Override
+    public String getName() {
+<span class="nc" id="L389">        return name;</span>
+    }
+
+    @Override
+    public JID getJID() {
+<span class="nc" id="L394">        return new JID(getName(), getMUCService().getServiceDomain(), null);</span>
+    }
+
+    @Override
+    public MultiUserChatService getMUCService() {
+<span class="nc" id="L399">        return mucService;</span>
+    }
+
+    @Override
+    public void setMUCService(MultiUserChatService service) {
+<span class="nc" id="L404">        this.mucService = service;</span>
+<span class="nc" id="L405">    }</span>
+
+    @Override
+    public long getID() {
+<span class="nc bnc" id="L409" title="All 4 branches missed.">        if (isPersistent() || isLogEnabled()) {</span>
+<span class="nc bnc" id="L410" title="All 2 branches missed.">            if (roomID == -1) {</span>
+<span class="nc" id="L411">                roomID = SequenceManager.nextID(JiveConstants.MUC_ROOM);</span>
+            }
+        }
+<span class="nc" id="L414">        return roomID;</span>
+    }
+
+    @Override
+    public void setID(long roomID) {
+<span class="nc" id="L419">        this.roomID = roomID;</span>
+<span class="nc" id="L420">    }</span>
+
+    @Override
+    public Date getCreationDate() {
+<span class="nc" id="L424">        return creationDate;</span>
+    }
+
+    @Override
+    public void setCreationDate(Date creationDate) {
+<span class="nc" id="L429">        this.creationDate = creationDate;</span>
+<span class="nc" id="L430">    }</span>
+
+    @Override
+    public Date getModificationDate() {
+<span class="nc" id="L434">        return modificationDate;</span>
+    }
+
+    @Override
+    public void setModificationDate(Date modificationDate) {
+<span class="nc" id="L439">        this.modificationDate = modificationDate;</span>
+<span class="nc" id="L440">    }</span>
+
+    @Override
+    public void setEmptyDate(Date emptyDate) {
+        // Do nothing if old value is same as new value
+<span class="nc bnc" id="L445" title="All 2 branches missed.">        if (this.emptyDate == emptyDate) {</span>
+<span class="nc" id="L446">            return;</span>
+        }
+<span class="nc" id="L448">        this.emptyDate = emptyDate;</span>
+<span class="nc" id="L449">        MUCPersistenceManager.updateRoomEmptyDate(this);</span>
+<span class="nc" id="L450">    }</span>
+
+    @Override
+    public Date getEmptyDate() {
+<span class="nc" id="L454">        return this.emptyDate;</span>
+    }
+
+    @Override
+    public MUCRole getRole() {
+<span class="nc" id="L459">        return role;</span>
+    }
+
+    /**
+     * @deprecated Prefer {@link #getOccupantsByNickname(String)} (user can be connected more than once)
+     */
+    @Override
+    public MUCRole getOccupant(String nickname) throws UserNotFoundException {
+<span class="nc bnc" id="L467" title="All 2 branches missed.">        if (nickname == null) {</span>
+<span class="nc" id="L468">             throw new UserNotFoundException();</span>
+        }
+<span class="nc" id="L470">        List&lt;MUCRole&gt; roles = getOccupantsByNickname(nickname);</span>
+<span class="nc bnc" id="L471" title="All 4 branches missed.">        if (roles != null &amp;&amp; roles.size() &gt; 0) {</span>
+<span class="nc" id="L472">            return roles.get(0);</span>
+        }
+<span class="nc" id="L474">        throw new UserNotFoundException();</span>
+    }
+
+    @Override
+    public List&lt;MUCRole&gt; getOccupantsByNickname(String nickname) throws UserNotFoundException {
+<span class="nc bnc" id="L479" title="All 2 branches missed.">        if (nickname == null) {</span>
+<span class="nc" id="L480">             throw new UserNotFoundException();</span>
+        }
+<span class="nc" id="L482">        List&lt;MUCRole&gt; roles = occupantsByNickname.get(nickname.toLowerCase());</span>
+<span class="nc bnc" id="L483" title="All 4 branches missed.">        if (roles != null &amp;&amp; roles.size() &gt; 0) {</span>
+<span class="nc" id="L484">            return roles;</span>
+        }
+<span class="nc" id="L486">        throw new UserNotFoundException();</span>
+    }
+
+    @Override
+    public List&lt;MUCRole&gt; getOccupantsByBareJID(JID jid) throws UserNotFoundException {
+<span class="nc" id="L491">        List&lt;MUCRole&gt; roles = occupantsByBareJID.get(jid);</span>
+<span class="nc bnc" id="L492" title="All 4 branches missed.">        if (roles != null &amp;&amp; !roles.isEmpty()) {</span>
+<span class="nc" id="L493">            return Collections.unmodifiableList(roles);</span>
+        }
+<span class="nc" id="L495">        throw new UserNotFoundException();</span>
+    }
+
+    @Override
+    public MUCRole getOccupantByFullJID(JID jid) {
+<span class="nc" id="L500">        MUCRole role = occupantsByFullJID.get(jid);</span>
+<span class="nc bnc" id="L501" title="All 2 branches missed.">        if (role != null) {</span>
+<span class="nc" id="L502">            return role;</span>
+        }
+<span class="nc" id="L504">        return null;</span>
+    }
+
+    @Override
+    public Collection&lt;MUCRole&gt; getOccupants() {
+<span class="nc" id="L509">        return Collections.unmodifiableCollection(occupantsByFullJID.values());</span>
+    }
+
+    @Override
+    public int getOccupantsCount() {
+<span class="nc" id="L514">        return occupantsByNickname.size();</span>
+    }
+
+    @Override
+    public boolean hasOccupant(String nickname) {
+<span class="nc" id="L519">        return occupantsByNickname.containsKey(nickname.toLowerCase());</span>
+    }
+
+    @Override
+    public String getReservedNickname(JID jid) {
+<span class="nc" id="L524">        final JID bareJID = jid.asBareJID();</span>
+<span class="nc" id="L525">        String answer = members.get(bareJID);</span>
+<span class="nc bnc" id="L526" title="All 4 branches missed.">        if (answer == null || answer.trim().length() == 0) {</span>
+<span class="nc" id="L527">            return null;</span>
+        }
+<span class="nc" id="L529">        return answer;</span>
+    }
+
+    @Override
+    public MUCRole.Affiliation getAffiliation(JID jid) {
+<span class="nc" id="L534">        final JID bareJID = jid.asBareJID();</span>
+
+<span class="nc bnc" id="L536" title="All 2 branches missed.">        if (owners.includes(bareJID)) {</span>
+<span class="nc" id="L537">            return MUCRole.Affiliation.owner;</span>
+        }
+<span class="nc bnc" id="L539" title="All 2 branches missed.">        else if (admins.includes(bareJID)) {</span>
+<span class="nc" id="L540">            return MUCRole.Affiliation.admin;</span>
+        }
+<span class="nc bnc" id="L542" title="All 2 branches missed.">        else if (members.includesKey(bareJID)) {</span>
+<span class="nc" id="L543">            return MUCRole.Affiliation.member;</span>
+        }
+<span class="nc bnc" id="L545" title="All 2 branches missed.">        else if (outcasts.includes(bareJID)) {</span>
+<span class="nc" id="L546">            return MUCRole.Affiliation.outcast;</span>
+        }
+<span class="nc" id="L548">        return MUCRole.Affiliation.none;</span>
+    }
+
+    @Override
+    public LocalMUCRole joinRoom(String nickname, String password, HistoryRequest historyRequest,
+            LocalMUCUser user, Presence presence) throws UnauthorizedException,
+            UserAlreadyExistsException, RoomLockedException, ForbiddenException,
+            RegistrationRequiredException, ConflictException, ServiceUnavailableException,
+            NotAcceptableException {
+<span class="nc bnc" id="L557" title="All 2 branches missed.">        if (((MultiUserChatServiceImpl)mucService).getMUCDelegate() != null) {</span>
+<span class="nc bnc" id="L558" title="All 2 branches missed.">            if (!((MultiUserChatServiceImpl)mucService).getMUCDelegate().joiningRoom(this, user.getAddress())) {</span>
+                // Delegate said no, reject join.
+<span class="nc" id="L560">                throw new UnauthorizedException();</span>
+            }
+        }
+<span class="nc" id="L563">        LocalMUCRole joinRole = null;</span>
+<span class="nc" id="L564">        lock.writeLock().lock();</span>
+<span class="nc" id="L565">        boolean clientOnlyJoin = false;</span>
+        // A &quot;client only join&quot; here is one where the client is already joined, but has re-joined.
+        try {
+            // If the room has a limit of max user then check if the limit has been reached
+<span class="nc bnc" id="L569" title="All 2 branches missed.">            if (!canJoinRoom(user)) {</span>
+<span class="nc" id="L570">                throw new ServiceUnavailableException();</span>
+            }
+<span class="nc" id="L572">            final JID bareJID = user.getAddress().asBareJID();</span>
+<span class="nc" id="L573">            boolean isOwner = owners.includes(bareJID);</span>
+            // If the room is locked and this user is not an owner raise a RoomLocked exception
+<span class="nc bnc" id="L575" title="All 2 branches missed.">            if (isLocked()) {</span>
+<span class="nc bnc" id="L576" title="All 2 branches missed.">                if (!isOwner) {</span>
+<span class="nc" id="L577">                    throw new RoomLockedException();</span>
+                }
+            }
+            // Check if the nickname is already used in the room
+<span class="nc bnc" id="L581" title="All 2 branches missed.">            if (occupantsByNickname.containsKey(nickname.toLowerCase())) {</span>
+<span class="nc" id="L582">                List&lt;MUCRole&gt; occupants = occupantsByNickname.get(nickname.toLowerCase());</span>
+<span class="nc bnc" id="L583" title="All 2 branches missed.">                MUCRole occupant = occupants.size() &gt; 0 ? occupants.get(0) : null;</span>
+<span class="nc bnc" id="L584" title="All 4 branches missed.">                if (occupant != null &amp;&amp; !occupant.getUserAddress().toBareJID().equals(bareJID.toBareJID())) {</span>
+                    // Nickname is already used, and not by the same JID
+<span class="nc" id="L586">                    throw new UserAlreadyExistsException();</span>
+                }
+                // Is this client already joined with this nickname?
+<span class="nc bnc" id="L589" title="All 2 branches missed.">                for (MUCRole mucRole : occupants) {</span>
+<span class="nc bnc" id="L590" title="All 2 branches missed.">                    if (mucRole.getUserAddress().equals(user.getAddress())) {</span>
+<span class="nc" id="L591">                        clientOnlyJoin = true;</span>
+<span class="nc" id="L592">                        break;</span>
+                    }
+<span class="nc" id="L594">                }</span>
+            }
+            // If the room is password protected and the provided password is incorrect raise a
+            // Unauthorized exception - unless the JID that is joining is a system admin.
+<span class="nc bnc" id="L598" title="All 2 branches missed.">            if (isPasswordProtected()) {</span>
+<span class="nc bnc" id="L599" title="All 4 branches missed.">                final boolean isCorrectPassword = (password != null &amp;&amp; password.equals(getPassword()));</span>
+<span class="nc" id="L600">                final boolean isSysadmin = mucService.isSysadmin(bareJID);</span>
+<span class="nc bnc" id="L601" title="All 2 branches missed.">                final boolean requirePassword = isSysadmin ? mucService.isPasswordRequiredForSysadminsToJoinRoom() : true;</span>
+<span class="nc bnc" id="L602" title="All 4 branches missed.">                if (!isCorrectPassword &amp;&amp; requirePassword ) {</span>
+<span class="nc" id="L603">                    throw new UnauthorizedException();</span>
+                }
+            }
+            // If another user attempts to join the room with a nickname reserved by the first user
+            // raise a ConflictException
+<span class="nc bnc" id="L608" title="All 2 branches missed.">            if (members.containsValue(nickname.toLowerCase())) {</span>
+<span class="nc bnc" id="L609" title="All 2 branches missed.">                if (!nickname.toLowerCase().equals(members.get(bareJID))) {</span>
+<span class="nc" id="L610">                    throw new ConflictException();</span>
+                }
+            }
+<span class="nc bnc" id="L613" title="All 2 branches missed.">            if (isLoginRestrictedToNickname()) {</span>
+<span class="nc" id="L614">                String reservedNickname = members.get(bareJID);</span>
+<span class="nc bnc" id="L615" title="All 4 branches missed.">                if (reservedNickname != null &amp;&amp; !nickname.toLowerCase().equals(reservedNickname)) {</span>
+<span class="nc" id="L616">                    throw new NotAcceptableException();</span>
+                }
+            }
+
+            // Set the corresponding role based on the user's affiliation
+            MUCRole.Role role;
+            MUCRole.Affiliation affiliation;
+<span class="nc bnc" id="L623" title="All 2 branches missed.">            if (isOwner) {</span>
+                // The user is an owner. Set the role and affiliation accordingly.
+<span class="nc" id="L625">                role = MUCRole.Role.moderator;</span>
+<span class="nc" id="L626">                affiliation = MUCRole.Affiliation.owner;</span>
+            }
+<span class="nc bnc" id="L628" title="All 2 branches missed.">            else if (mucService.isSysadmin(bareJID)) {</span>
+                // The user is a system administrator of the MUC service. Treat him as an owner
+                // although he won't appear in the list of owners
+<span class="nc" id="L631">                role = MUCRole.Role.moderator;</span>
+<span class="nc" id="L632">                affiliation = MUCRole.Affiliation.owner;</span>
+            }
+<span class="nc bnc" id="L634" title="All 2 branches missed.">            else if (admins.includes(bareJID)) {</span>
+                // The user is an admin. Set the role and affiliation accordingly.
+<span class="nc" id="L636">                role = MUCRole.Role.moderator;</span>
+<span class="nc" id="L637">                affiliation = MUCRole.Affiliation.admin;</span>
+            }
+            // explicit outcast status has higher precedence than member status
+<span class="nc bnc" id="L640" title="All 2 branches missed.">            else if (outcasts.contains(bareJID)) {</span>
+                // The user is an outcast. Raise a &quot;Forbidden&quot; exception.
+<span class="nc" id="L642">                throw new ForbiddenException();</span>
+            }
+<span class="nc bnc" id="L644" title="All 2 branches missed.">            else if (members.includesKey(bareJID)) {</span>
+                // The user is a member. Set the role and affiliation accordingly.
+<span class="nc" id="L646">                role = MUCRole.Role.participant;</span>
+<span class="nc" id="L647">                affiliation = MUCRole.Affiliation.member;</span>
+            }
+            // this checks if the user is an outcast implicitly (via a group)
+<span class="nc bnc" id="L650" title="All 2 branches missed.">            else if (outcasts.includes(bareJID)) {</span>
+                // The user is an outcast. Raise a &quot;Forbidden&quot; exception.
+<span class="nc" id="L652">                throw new ForbiddenException();</span>
+            }
+            else {
+                // The user has no affiliation (i.e. NONE). Set the role accordingly.
+<span class="nc bnc" id="L656" title="All 2 branches missed.">                if (isMembersOnly()) {</span>
+                    // The room is members-only and the user is not a member. Raise a
+                    // &quot;Registration Required&quot; exception.
+<span class="nc" id="L659">                    throw new RegistrationRequiredException();</span>
+                }
+<span class="nc bnc" id="L661" title="All 2 branches missed.">                role = (isModerated() ? MUCRole.Role.visitor : MUCRole.Role.participant);</span>
+<span class="nc" id="L662">                affiliation = MUCRole.Affiliation.none;</span>
+            }
+<span class="nc bnc" id="L664" title="All 2 branches missed.">            if (!clientOnlyJoin) {</span>
+                // Create a new role for this user in this room
+<span class="nc" id="L666">                joinRole = new LocalMUCRole(mucService, this, nickname, role,</span>
+                        affiliation, user, presence, router);
+                // Add the new user as an occupant of this room
+<span class="nc" id="L669">                List&lt;MUCRole&gt; occupants = occupantsByNickname.get(nickname.toLowerCase());</span>
+<span class="nc bnc" id="L670" title="All 2 branches missed.">                if (occupants == null) {</span>
+<span class="nc" id="L671">                    occupants = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L672">                    occupantsByNickname.put(nickname.toLowerCase(), occupants);</span>
+                }
+<span class="nc" id="L674">                occupants.add(joinRole);</span>
+                // Update the tables of occupants based on the bare and full JID
+<span class="nc" id="L676">                List&lt;MUCRole&gt; list = occupantsByBareJID.get(bareJID);</span>
+<span class="nc bnc" id="L677" title="All 2 branches missed.">                if (list == null) {</span>
+<span class="nc" id="L678">                    list = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L679">                    occupantsByBareJID.put(bareJID, list);</span>
+                }
+<span class="nc" id="L681">                list.add(joinRole);</span>
+<span class="nc" id="L682">                occupantsByFullJID.put(user.getAddress(), joinRole);</span>
+<span class="nc" id="L683">            } else {</span>
+                // Grab the existing one.
+<span class="nc" id="L685">                joinRole = (LocalMUCRole) occupantsByFullJID.get(user.getAddress());</span>
+<span class="nc" id="L686">                joinRole.setPresence( presence ); // OF-1581: Use latest presence information.</span>
+           }
+        }
+        finally {
+<span class="nc" id="L690">            lock.writeLock().unlock();</span>
+<span class="nc" id="L691">        }</span>
+        // Notify other cluster nodes that a new occupant joined the room
+<span class="nc" id="L693">        CacheFactory.doClusterTask(new OccupantAddedEvent(this, joinRole));</span>
+
+        // Send presence of existing occupants to new occupant
+<span class="nc" id="L696">        sendInitialPresences(joinRole);</span>
+        // It is assumed that the room is new based on the fact that it's locked and
+        // that it was locked when it was created.
+<span class="nc bnc" id="L699" title="All 4 branches missed.">        boolean isRoomNew = isLocked() &amp;&amp; creationDate.getTime() == lockedTime;</span>
+        try {
+            // Send the presence of this new occupant to existing occupants
+<span class="nc" id="L702">            Presence joinPresence = joinRole.getPresence().createCopy();</span>
+<span class="nc" id="L703">            broadcastPresence(joinPresence, true);</span>
+        }
+<span class="nc" id="L705">        catch (Exception e) {</span>
+<span class="nc" id="L706">            Log.error(LocaleUtils.getLocalizedString(&quot;admin.error&quot;), e);</span>
+<span class="nc" id="L707">        }</span>
+        // If the room has just been created send the &quot;room locked until configuration is
+        // confirmed&quot; message
+<span class="nc bnc" id="L710" title="All 4 branches missed.">        if (!isRoomNew &amp;&amp; isLocked()) {</span>
+            // http://xmpp.org/extensions/xep-0045.html#enter-locked
+<span class="nc" id="L712">            Presence presenceItemNotFound = new Presence(Presence.Type.error);</span>
+<span class="nc" id="L713">            presenceItemNotFound.setError(PacketError.Condition.item_not_found);</span>
+<span class="nc" id="L714">            presenceItemNotFound.setFrom(role.getRoleAddress());</span>
+<span class="nc" id="L715">            joinRole.send(presenceItemNotFound);</span>
+
+        }
+<span class="nc bnc" id="L718" title="All 2 branches missed.">        if (historyRequest == null) {</span>
+<span class="nc" id="L719">            Iterator&lt;Message&gt; history = roomHistory.getMessageHistory();</span>
+<span class="nc bnc" id="L720" title="All 2 branches missed.">            while (history.hasNext()) {</span>
+<span class="nc" id="L721">                joinRole.send(history.next());</span>
+            }
+<span class="nc" id="L723">        }</span>
+        else {
+<span class="nc" id="L725">            historyRequest.sendHistory(joinRole, roomHistory);</span>
+        }
+<span class="nc" id="L727">        Message roomSubject = roomHistory.getChangedSubject();</span>
+<span class="nc bnc" id="L728" title="All 2 branches missed.">        if (roomSubject != null) {</span>
+<span class="nc" id="L729">            joinRole.send(roomSubject);</span>
+        }
+<span class="nc bnc" id="L731" title="All 2 branches missed.">        if (!clientOnlyJoin) {</span>
+            // Update the date when the last occupant left the room
+<span class="nc" id="L733">            setEmptyDate(null);</span>
+            // Fire event that occupant joined the room
+<span class="nc" id="L735">            MUCEventDispatcher.occupantJoined(getRole().getRoleAddress(),</span>
+<span class="nc" id="L736">                    user.getAddress(), joinRole.getNickname());</span>
+       }
+<span class="nc" id="L738">        return joinRole;</span>
+    }
+
+    /**
+     * Can a user join this room
+     *
+     * @param user the user attempting to join this room
+     * @return boolean
+     */
+    private boolean canJoinRoom(LocalMUCUser user){
+<span class="nc" id="L748">        boolean isOwner = owners.includes(user.getAddress().asBareJID());</span>
+<span class="nc" id="L749">        boolean isAdmin = admins.includes(user.getAddress().asBareJID());</span>
+<span class="nc bnc" id="L750" title="All 10 branches missed.">        return (!isDestroyed &amp;&amp; (!hasOccupancyLimit() || isAdmin || isOwner || (getOccupantsCount() &lt; getMaxUsers())));</span>
+    }
+
+    /**
+     * Does this room have an occupancy limit?
+     *
+     * @return boolean
+     */
+    private boolean hasOccupancyLimit(){
+<span class="nc bnc" id="L759" title="All 2 branches missed.">        return getMaxUsers() != 0;</span>
+    }
+
+    /**
+     * Sends presence of existing occupants to new occupant.
+     *
+     * @param joinRole the role of the new occupant in the room.
+     */
+    private void sendInitialPresences(LocalMUCRole joinRole) {
+<span class="nc bnc" id="L768" title="All 2 branches missed.">        for (MUCRole occupant : occupantsByFullJID.values()) {</span>
+<span class="nc bnc" id="L769" title="All 2 branches missed.">            if (occupant == joinRole) {</span>
+<span class="nc" id="L770">                continue;</span>
+            }
+<span class="nc" id="L772">            Presence occupantPresence = occupant.getPresence();</span>
+            // Skip to the next occupant if we cannot send presence of this occupant
+<span class="nc bnc" id="L774" title="All 2 branches missed.">            if (hasToCheckRoleToBroadcastPresence()) {</span>
+<span class="nc" id="L775">                Element frag = occupantPresence.getChildElement(&quot;x&quot;,</span>
+                        &quot;http://jabber.org/protocol/muc#user&quot;);
+                // Check if we can broadcast the presence for this role
+<span class="nc bnc" id="L778" title="All 2 branches missed.">                if (!canBroadcastPresence(frag.element(&quot;item&quot;).attributeValue(&quot;role&quot;))) {</span>
+<span class="nc" id="L779">                    continue;</span>
+                }
+            }
+            // Don't include the occupant's JID if the room is semi-anon and the new occupant
+            // is not a moderator
+<span class="nc bnc" id="L784" title="All 4 branches missed.">            if (!canAnyoneDiscoverJID() &amp;&amp; MUCRole.Role.moderator != joinRole.getRole()) {</span>
+<span class="nc" id="L785">                occupantPresence = occupantPresence.createCopy();</span>
+<span class="nc" id="L786">                Element frag = occupantPresence.getChildElement(&quot;x&quot;,</span>
+                        &quot;http://jabber.org/protocol/muc#user&quot;);
+<span class="nc" id="L788">                frag.element(&quot;item&quot;).addAttribute(&quot;jid&quot;, null);</span>
+            }
+<span class="nc" id="L790">            joinRole.send(occupantPresence);</span>
+<span class="nc" id="L791">        }</span>
+<span class="nc" id="L792">    }</span>
+
+    public void occupantAdded(OccupantAddedEvent event) {
+        // Create a proxy for the occupant that joined the room from another cluster node
+<span class="nc" id="L796">        RemoteMUCRole joinRole = new RemoteMUCRole(mucService, event);</span>
+<span class="nc" id="L797">        JID bareJID = event.getUserAddress().asBareJID();</span>
+<span class="nc" id="L798">        String nickname = event.getNickname();</span>
+<span class="nc" id="L799">        List&lt;MUCRole&gt; occupants = occupantsByNickname.get(nickname.toLowerCase());</span>
+        // Do not add new occupant with one with same nickname already exists
+<span class="nc bnc" id="L801" title="All 2 branches missed.">        if (occupants == null) {</span>
+<span class="nc" id="L802">            occupants = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L803">            occupantsByNickname.put(nickname.toLowerCase(), occupants);</span>
+        } else {
+            // sanity check; make sure the nickname is owned by the same JID
+<span class="nc bnc" id="L806" title="All 2 branches missed.">            if (occupants.size() &gt; 0) {</span>
+<span class="nc" id="L807">                JID existingJID = occupants.get(0).getUserAddress().asBareJID();</span>
+<span class="nc bnc" id="L808" title="All 2 branches missed.">                if (!bareJID.equals(existingJID)) {</span>
+<span class="nc" id="L809">                    Log.warn(MessageFormat.format(&quot;Conflict detected; {0} requested nickname '{1}'; already being used by {2}&quot;, bareJID, nickname, existingJID));</span>
+<span class="nc" id="L810">                    return;</span>
+                }
+            }
+        }
+        // Add the new user as an occupant of this room
+<span class="nc" id="L815">        occupants.add(joinRole);</span>
+        // Update the tables of occupants based on the bare and full JID
+<span class="nc" id="L817">        List&lt;MUCRole&gt; list = occupantsByBareJID.get(bareJID);</span>
+<span class="nc bnc" id="L818" title="All 2 branches missed.">        if (list == null) {</span>
+<span class="nc" id="L819">            list = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L820">            occupantsByBareJID.put(bareJID, list);</span>
+        }
+<span class="nc" id="L822">        list.add(joinRole);</span>
+<span class="nc" id="L823">        occupantsByFullJID.put(event.getUserAddress(), joinRole);</span>
+
+        // Update the date when the last occupant left the room
+<span class="nc" id="L826">        setEmptyDate(null);</span>
+<span class="nc bnc" id="L827" title="All 2 branches missed.">        if (event.isOriginator()) {</span>
+            // Fire event that occupant joined the room
+<span class="nc" id="L829">            MUCEventDispatcher.occupantJoined(getRole().getRoleAddress(), event.getUserAddress(), joinRole.getNickname());</span>
+        }
+        // Check if we need to send presences of the new occupant to occupants hosted by this JVM
+<span class="nc bnc" id="L832" title="All 2 branches missed.">        if (event.isSendPresence()) {</span>
+<span class="nc bnc" id="L833" title="All 2 branches missed.">            for (MUCRole occupant : occupantsByFullJID.values()) {</span>
+<span class="nc bnc" id="L834" title="All 2 branches missed.">                if (occupant.isLocal()) {</span>
+<span class="nc" id="L835">                    occupant.send(event.getPresence().createCopy());</span>
+                }
+<span class="nc" id="L837">            }</span>
+        }
+<span class="nc" id="L839">    }</span>
+
+    @Override
+    public void leaveRoom(MUCRole leaveRole) {
+<span class="nc bnc" id="L843" title="All 2 branches missed.">        if (leaveRole.isLocal()) {</span>
+            // Ask other cluster nodes to remove occupant from room
+<span class="nc" id="L845">            OccupantLeftEvent event = new OccupantLeftEvent(this, leaveRole);</span>
+<span class="nc" id="L846">            CacheFactory.doClusterTask(event);</span>
+        }
+
+        try {
+<span class="nc" id="L850">            Presence originalPresence = leaveRole.getPresence();</span>
+<span class="nc" id="L851">            Presence presence = originalPresence.createCopy();</span>
+<span class="nc" id="L852">            presence.setType(Presence.Type.unavailable);</span>
+<span class="nc" id="L853">            presence.setStatus(null);</span>
+            // Change (or add) presence information about roles and affiliations
+<span class="nc" id="L855">            Element childElement = presence.getChildElement(&quot;x&quot;, &quot;http://jabber.org/protocol/muc#user&quot;);</span>
+<span class="nc bnc" id="L856" title="All 2 branches missed.">            if (childElement == null) {</span>
+<span class="nc" id="L857">                childElement = presence.addChildElement(&quot;x&quot;, &quot;http://jabber.org/protocol/muc#user&quot;);</span>
+            }
+<span class="nc" id="L859">            Element item = childElement.element(&quot;item&quot;);</span>
+<span class="nc bnc" id="L860" title="All 2 branches missed.">            if (item == null) {</span>
+<span class="nc" id="L861">                item = childElement.addElement(&quot;item&quot;);</span>
+            }
+<span class="nc" id="L863">            item.addAttribute(&quot;role&quot;, &quot;none&quot;);</span>
+
+            // Check to see if the user's original presence is one we should broadcast
+            // a leave packet for. Need to check the original presence because we just
+            // set the role to &quot;none&quot; above, which is always broadcast.
+<span class="nc bnc" id="L868" title="All 2 branches missed.">            if(!shouldBroadcastPresence(originalPresence)){</span>
+                // Inform the leaving user that he/she has left the room
+<span class="nc" id="L870">                leaveRole.send(presence);</span>
+            }
+            else {
+<span class="nc bnc" id="L873" title="All 2 branches missed.">                if (getOccupantsByNickname(leaveRole.getNickname()).size() &lt;= 1) {</span>
+                    // Inform the rest of the room occupants that the user has left the room
+<span class="nc" id="L875">                    broadcastPresence(presence, false);</span>
+                }
+            }
+        }
+<span class="nc" id="L879">        catch (Exception e) {</span>
+<span class="nc" id="L880">            Log.error(e.getMessage(), e);</span>
+<span class="nc" id="L881">        }</span>
+
+        // Remove occupant from room and destroy room if empty and not persistent
+<span class="nc" id="L884">        OccupantLeftEvent event = new OccupantLeftEvent(this, leaveRole);</span>
+<span class="nc" id="L885">        event.setOriginator(true);</span>
+<span class="nc" id="L886">        event.run();</span>
+<span class="nc" id="L887">    }</span>
+
+    public void leaveRoom(OccupantLeftEvent event) {
+<span class="nc" id="L890">        MUCRole leaveRole = event.getRole();</span>
+<span class="nc bnc" id="L891" title="All 2 branches missed.">        if (leaveRole == null) {</span>
+<span class="nc" id="L892">            return;</span>
+        }
+<span class="nc" id="L894">        lock.writeLock().lock();</span>
+        try {
+            // Removes the role from the room
+<span class="nc" id="L897">            removeOccupantRole(leaveRole, event.isOriginator());</span>
+
+            // TODO Implement this: If the room owner becomes unavailable for any reason before
+            // submitting the form (e.g., a lost connection), the service will receive a presence
+            // stanza of type &quot;unavailable&quot; from the owner to the room@service/nick or room@service
+            // (or both). The service MUST then destroy the room, sending a presence stanza of type
+            // &quot;unavailable&quot; from the room to the owner including a &lt;destroy/&gt; element and reason
+            // (if provided) as defined under the &quot;Destroying a Room&quot; use case.
+
+            // Remove the room from the service only if there are no more occupants and the room is
+            // not persistent
+<span class="nc bnc" id="L908" title="All 4 branches missed.">            if (occupantsByFullJID.isEmpty() &amp;&amp; !isPersistent()) {</span>
+<span class="nc" id="L909">                endTime = System.currentTimeMillis();</span>
+<span class="nc bnc" id="L910" title="All 2 branches missed.">                if (event.isOriginator()) {</span>
+<span class="nc" id="L911">                    mucService.removeChatRoom(name);</span>
+                    // Fire event that the room has been destroyed
+<span class="nc" id="L913">                    MUCEventDispatcher.roomDestroyed(getRole().getRoleAddress());</span>
+                }
+            }
+<span class="nc bnc" id="L916" title="All 2 branches missed.">            if (occupantsByFullJID.isEmpty()) {</span>
+                // Update the date when the last occupant left the room
+<span class="nc" id="L918">                setEmptyDate(new Date());</span>
+            }
+        }
+        finally {
+<span class="nc" id="L922">            lock.writeLock().unlock();</span>
+<span class="nc" id="L923">        }</span>
+<span class="nc" id="L924">    }</span>
+
+    /**
+     * Removes the role of the occupant from all the internal occupants collections. The role will
+     * also be removed from the user's roles.
+     *
+     * @param leaveRole the role to remove.
+     * @param originator true if this JVM is the one that originated the event.
+     */
+    private void removeOccupantRole(MUCRole leaveRole, boolean originator) {
+<span class="nc" id="L934">        JID userAddress = leaveRole.getUserAddress();</span>
+        // Notify the user that he/she is no longer in the room
+<span class="nc" id="L936">        leaveRole.destroy();</span>
+        // Update the tables of occupants based on the bare and full JID
+<span class="nc" id="L938">        JID bareJID = userAddress.asBareJID();</span>
+
+<span class="nc" id="L940">        String nickname = leaveRole.getNickname();</span>
+<span class="nc" id="L941">        List&lt;MUCRole&gt; occupants = occupantsByNickname.get(nickname.toLowerCase());</span>
+<span class="nc bnc" id="L942" title="All 2 branches missed.">        if (occupants != null) {</span>
+<span class="nc" id="L943">            occupants.remove(leaveRole);</span>
+<span class="nc bnc" id="L944" title="All 2 branches missed.">            if (occupants.isEmpty()) {</span>
+<span class="nc" id="L945">                occupantsByNickname.remove(nickname.toLowerCase());</span>
+            }
+        }
+<span class="nc" id="L948">        List&lt;MUCRole&gt; list = occupantsByBareJID.get(bareJID);</span>
+<span class="nc bnc" id="L949" title="All 2 branches missed.">        if (list != null) {</span>
+<span class="nc" id="L950">            list.remove(leaveRole);</span>
+<span class="nc bnc" id="L951" title="All 2 branches missed.">            if (list.isEmpty()) {</span>
+<span class="nc" id="L952">                occupantsByBareJID.remove(bareJID);</span>
+            }
+        }
+<span class="nc" id="L955">        occupantsByFullJID.remove(userAddress);</span>
+<span class="nc bnc" id="L956" title="All 2 branches missed.">        if (originator) {</span>
+            // Fire event that occupant left the room
+<span class="nc" id="L958">            MUCEventDispatcher.occupantLeft(getRole().getRoleAddress(), userAddress, nickname);</span>
+        }
+<span class="nc" id="L960">    }</span>
+
+    public void destroyRoom(DestroyRoomRequest destroyRequest) {
+<span class="nc" id="L963">        JID alternateJID = destroyRequest.getAlternateJID();</span>
+<span class="nc" id="L964">        String reason = destroyRequest.getReason();</span>
+<span class="nc" id="L965">        Collection&lt;MUCRole&gt; removedRoles = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L966">        lock.writeLock().lock();</span>
+        try {
+<span class="nc" id="L968">            boolean hasRemoteOccupants = false;</span>
+            // Remove each occupant
+<span class="nc bnc" id="L970" title="All 2 branches missed.">            for (MUCRole leaveRole : occupantsByFullJID.values()) {</span>
+
+<span class="nc bnc" id="L972" title="All 2 branches missed.">                if (leaveRole != null) {</span>
+                    // Add the removed occupant to the list of removed occupants. We are keeping a
+                    // list of removed occupants to process later outside of the lock.
+<span class="nc bnc" id="L975" title="All 2 branches missed.">                    if (leaveRole.isLocal()) {</span>
+<span class="nc" id="L976">                        removedRoles.add(leaveRole);</span>
+                    }
+                    else {
+<span class="nc" id="L979">                        hasRemoteOccupants = true;</span>
+                    }
+<span class="nc" id="L981">                    removeOccupantRole(leaveRole, destroyRequest.isOriginator());</span>
+                }
+<span class="nc" id="L983">            }</span>
+<span class="nc" id="L984">            endTime = System.currentTimeMillis();</span>
+            // Set that the room has been destroyed
+<span class="nc" id="L986">            isDestroyed = true;</span>
+<span class="nc bnc" id="L987" title="All 2 branches missed.">            if (destroyRequest.isOriginator()) {</span>
+<span class="nc bnc" id="L988" title="All 2 branches missed.">                if (hasRemoteOccupants) {</span>
+                    // Ask other cluster nodes to remove occupants since room is being destroyed
+<span class="nc" id="L990">                    CacheFactory.doClusterTask(new DestroyRoomRequest(this, alternateJID, reason));</span>
+                }
+                // Removes the room from the list of rooms hosted in the service
+<span class="nc" id="L993">                mucService.removeChatRoom(name);</span>
+            }
+        }
+        finally {
+<span class="nc" id="L997">            lock.writeLock().unlock();</span>
+<span class="nc" id="L998">        }</span>
+        // Send an unavailable presence to each removed occupant
+<span class="nc bnc" id="L1000" title="All 2 branches missed.">        for (MUCRole removedRole : removedRoles) {</span>
+            try {
+                // Send a presence stanza of type &quot;unavailable&quot; to the occupant
+<span class="nc" id="L1003">                Presence presence = createPresence(Presence.Type.unavailable);</span>
+<span class="nc" id="L1004">                presence.setFrom(removedRole.getRoleAddress());</span>
+
+                // A fragment containing the x-extension for room destruction.
+<span class="nc" id="L1007">                Element fragment = presence.addChildElement(&quot;x&quot;,</span>
+                        &quot;http://jabber.org/protocol/muc#user&quot;);
+<span class="nc" id="L1009">                Element item = fragment.addElement(&quot;item&quot;);</span>
+<span class="nc" id="L1010">                item.addAttribute(&quot;affiliation&quot;, &quot;none&quot;);</span>
+<span class="nc" id="L1011">                item.addAttribute(&quot;role&quot;, &quot;none&quot;);</span>
+<span class="nc bnc" id="L1012" title="All 2 branches missed.">                if (alternateJID != null) {</span>
+<span class="nc" id="L1013">                    fragment.addElement(&quot;destroy&quot;).addAttribute(&quot;jid&quot;, alternateJID.toString());</span>
+                }
+<span class="nc bnc" id="L1015" title="All 4 branches missed.">                if (reason != null &amp;&amp; reason.length() &gt; 0) {</span>
+<span class="nc" id="L1016">                    Element destroy = fragment.element(&quot;destroy&quot;);</span>
+<span class="nc bnc" id="L1017" title="All 2 branches missed.">                    if (destroy == null) {</span>
+<span class="nc" id="L1018">                        destroy = fragment.addElement(&quot;destroy&quot;);</span>
+                    }
+<span class="nc" id="L1020">                    destroy.addElement(&quot;reason&quot;).setText(reason);</span>
+                }
+<span class="nc" id="L1022">                removedRole.send(presence);</span>
+            }
+<span class="nc" id="L1024">            catch (Exception e) {</span>
+<span class="nc" id="L1025">                Log.error(e.getMessage(), e);</span>
+<span class="nc" id="L1026">            }</span>
+<span class="nc" id="L1027">        }</span>
+<span class="nc bnc" id="L1028" title="All 2 branches missed.">        if (destroyRequest.isOriginator()) {</span>
+            // Remove the room from the DB if the room was persistent
+<span class="nc" id="L1030">            MUCPersistenceManager.deleteFromDB(this);</span>
+            // Fire event that the room has been destroyed
+<span class="nc" id="L1032">            MUCEventDispatcher.roomDestroyed(getRole().getRoleAddress());</span>
+        }
+<span class="nc" id="L1034">    }</span>
+
+    @Override
+    public void destroyRoom(JID alternateJID, String reason) {
+<span class="nc" id="L1038">        DestroyRoomRequest destroyRequest = new DestroyRoomRequest(this, alternateJID, reason);</span>
+<span class="nc" id="L1039">        destroyRequest.setOriginator(true);</span>
+<span class="nc" id="L1040">        destroyRequest.run();</span>
+<span class="nc" id="L1041">    }</span>
+
+    @Override
+    public Presence createPresence(Presence.Type presenceType) throws UnauthorizedException {
+<span class="nc" id="L1045">        Presence presence = new Presence();</span>
+<span class="nc" id="L1046">        presence.setType(presenceType);</span>
+<span class="nc" id="L1047">        presence.setFrom(role.getRoleAddress());</span>
+<span class="nc" id="L1048">        return presence;</span>
+    }
+
+    @Override
+    public void serverBroadcast(String msg) {
+<span class="nc" id="L1053">        Message message = new Message();</span>
+<span class="nc" id="L1054">        message.setType(Message.Type.groupchat);</span>
+<span class="nc" id="L1055">        message.setBody(msg);</span>
+<span class="nc" id="L1056">        message.setFrom(role.getRoleAddress());</span>
+<span class="nc" id="L1057">        broadcast(message);</span>
+<span class="nc" id="L1058">    }</span>
+
+    @Override
+    public void sendPublicMessage(Message message, MUCRole senderRole) throws ForbiddenException {
+        // Check that if the room is moderated then the sender of the message has to have voice
+<span class="nc bnc" id="L1063" title="All 4 branches missed.">        if (isModerated() &amp;&amp; senderRole.getRole().compareTo(MUCRole.Role.participant) &gt; 0) {</span>
+<span class="nc" id="L1064">            throw new ForbiddenException();</span>
+        }
+        // Send the message to all occupants
+<span class="nc" id="L1067">        message.setFrom(senderRole.getRoleAddress());</span>
+<span class="nc" id="L1068">        send(message);</span>
+        // Fire event that message was received by the room
+<span class="nc" id="L1070">        MUCEventDispatcher.messageReceived(getRole().getRoleAddress(), senderRole.getUserAddress(),</span>
+<span class="nc" id="L1071">                senderRole.getNickname(), message);</span>
+<span class="nc" id="L1072">    }</span>
+
+    @Override
+    public void sendPrivatePacket(Packet packet, MUCRole senderRole) throws NotFoundException, ForbiddenException {
+<span class="pc bnc" id="L1076" title="All 4 branches missed.">        switch (senderRole.getRole()) { // intended fall-through</span>
+            case none:
+<span class="nc" id="L1078">                throw new ForbiddenException();</span>
+            default:
+            case visitor:
+<span class="nc bnc" id="L1081" title="All 2 branches missed.">                if (canSendPrivateMessage().equals( &quot;participants&quot; )) throw new ForbiddenException();</span>
+            case participant:
+<span class="nc bnc" id="L1083" title="All 2 branches missed.">                if (canSendPrivateMessage().equals( &quot;moderators&quot; )) throw new ForbiddenException();</span>
+            case moderator:
+<span class="nc bnc" id="L1085" title="All 2 branches missed.">                if (canSendPrivateMessage().equals( &quot;none&quot; )) throw new ForbiddenException();</span>
+        }
+<span class="nc" id="L1087">        String resource = packet.getTo().getResource();</span>
+<span class="nc" id="L1088">        List&lt;MUCRole&gt; occupants = occupantsByNickname.get(resource.toLowerCase());</span>
+<span class="nc bnc" id="L1089" title="All 4 branches missed.">        if (occupants == null || occupants.size() == 0) {</span>
+<span class="nc" id="L1090">            throw new NotFoundException();</span>
+        }
+<span class="nc bnc" id="L1092" title="All 2 branches missed.">        for (MUCRole occupant : occupants) {</span>
+<span class="nc" id="L1093">            packet.setFrom(senderRole.getRoleAddress());</span>
+<span class="nc" id="L1094">            occupant.send(packet);</span>
+<span class="nc bnc" id="L1095" title="All 2 branches missed.">            if(packet instanceof Message) {</span>
+<span class="nc" id="L1096">               Message message = (Message) packet;</span>
+<span class="nc" id="L1097">                 MUCEventDispatcher.privateMessageRecieved(occupant.getUserAddress(), senderRole.getUserAddress(),</span>
+                         message);
+            }
+<span class="nc" id="L1100">        }</span>
+<span class="nc" id="L1101">    }</span>
+
+    @Override
+    public void send(Packet packet) {
+<span class="nc bnc" id="L1105" title="All 2 branches missed.">        if (packet instanceof Message) {</span>
+<span class="nc" id="L1106">            broadcast((Message)packet);</span>
+        }
+<span class="nc bnc" id="L1108" title="All 2 branches missed.">        else if (packet instanceof Presence) {</span>
+<span class="nc" id="L1109">            broadcastPresence((Presence)packet, false);</span>
+        }
+<span class="nc bnc" id="L1111" title="All 2 branches missed.">        else if (packet instanceof IQ) {</span>
+<span class="nc" id="L1112">            IQ reply = IQ.createResultIQ((IQ) packet);</span>
+<span class="nc" id="L1113">            reply.setChildElement(((IQ) packet).getChildElement());</span>
+<span class="nc" id="L1114">            reply.setError(PacketError.Condition.bad_request);</span>
+<span class="nc" id="L1115">            router.route(reply);</span>
+        }
+<span class="nc" id="L1117">    }</span>
+
+    /**
+     * Checks the role of the sender and returns true if the given presence should be broadcasted
+     *
+     * @param presence The presence to check
+     * @return true if the presence should be broadcast to the rest of the room
+     */
+    private boolean shouldBroadcastPresence(Presence presence){
+<span class="nc bnc" id="L1126" title="All 2 branches missed.">        if (presence == null) {</span>
+<span class="nc" id="L1127">            return false;</span>
+        }
+<span class="nc bnc" id="L1129" title="All 2 branches missed.">        if (hasToCheckRoleToBroadcastPresence()) {</span>
+<span class="nc" id="L1130">            Element frag = presence.getChildElement(&quot;x&quot;, &quot;http://jabber.org/protocol/muc#user&quot;);</span>
+            // Check if we can broadcast the presence for this role
+<span class="nc bnc" id="L1132" title="All 2 branches missed.">            if (!canBroadcastPresence(frag.element(&quot;item&quot;).attributeValue(&quot;role&quot;))) {</span>
+<span class="nc" id="L1133">                return false;</span>
+            }
+        }
+<span class="nc" id="L1136">        return true;</span>
+    }
+
+    /**
+     * Broadcasts the specified presence to all room occupants. If the presence belongs to a
+     * user whose role cannot be broadcast then the presence will only be sent to the presence's
+     * user. On the other hand, the JID of the user that sent the presence won't be included if the
+     * room is semi-anon and the target occupant is not a moderator.
+     *
+     * @param presence the presence to broadcast.
+     * @param isJoinPresence If the presence is sent in the context of joining the room.
+     */
+    private void broadcastPresence(Presence presence, boolean isJoinPresence) {
+<span class="nc bnc" id="L1149" title="All 2 branches missed.">        if (presence == null) {</span>
+<span class="nc" id="L1150">            return;</span>
+        }
+<span class="nc bnc" id="L1152" title="All 2 branches missed.">        if (!shouldBroadcastPresence(presence)) {</span>
+            // Just send the presence to the sender of the presence
+            try {
+<span class="nc bnc" id="L1155" title="All 2 branches missed.">                for (MUCRole occupant : getOccupantsByNickname(presence.getFrom().getResource())) {</span>
+<span class="nc" id="L1156">                    occupant.send(presence);</span>
+<span class="nc" id="L1157">                }</span>
+            }
+<span class="nc" id="L1159">            catch (UserNotFoundException e) {</span>
+                // Do nothing
+<span class="nc" id="L1161">            }</span>
+<span class="nc" id="L1162">            return;</span>
+        }
+
+        // Broadcast presence to occupants hosted by other cluster nodes
+<span class="nc" id="L1166">        BroadcastPresenceRequest request = new BroadcastPresenceRequest(this, presence, isJoinPresence);</span>
+<span class="nc" id="L1167">        CacheFactory.doClusterTask(request);</span>
+
+        // Broadcast presence to occupants connected to this JVM
+<span class="nc" id="L1170">        request = new BroadcastPresenceRequest(this, presence, isJoinPresence);</span>
+<span class="nc" id="L1171">        request.setOriginator(true);</span>
+<span class="nc" id="L1172">        request.run();</span>
+<span class="nc" id="L1173">    }</span>
+
+    public void broadcast(BroadcastPresenceRequest presenceRequest) {
+<span class="nc" id="L1176">        String jid = null;</span>
+<span class="nc" id="L1177">        Presence presence = presenceRequest.getPresence();</span>
+<span class="nc" id="L1178">        JID to = presence.getTo();</span>
+<span class="nc" id="L1179">        Element frag = presence.getChildElement(&quot;x&quot;, &quot;http://jabber.org/protocol/muc#user&quot;);</span>
+        // Don't include the occupant's JID if the room is semi-anon and the new occupant
+        // is not a moderator
+<span class="nc bnc" id="L1182" title="All 2 branches missed.">        if (!canAnyoneDiscoverJID()) {</span>
+<span class="nc" id="L1183">            jid = frag.element(&quot;item&quot;).attributeValue(&quot;jid&quot;);</span>
+        }
+<span class="nc bnc" id="L1185" title="All 2 branches missed.">        for (MUCRole occupant : occupantsByFullJID.values()) {</span>
+            try
+            {
+<span class="nc bnc" id="L1188" title="All 2 branches missed.">                if (!occupant.isLocal()) {</span>
+<span class="nc" id="L1189">                    continue;</span>
+                }
+                // Don't include the occupant's JID if the room is semi-anon and the new occupant
+                // is not a moderator
+<span class="nc bnc" id="L1193" title="All 2 branches missed.">                if (!canAnyoneDiscoverJID()) {</span>
+<span class="nc bnc" id="L1194" title="All 2 branches missed.">                    if (MUCRole.Role.moderator == occupant.getRole()) {</span>
+<span class="nc" id="L1195">                        frag.element(&quot;item&quot;).addAttribute(&quot;jid&quot;, jid);</span>
+                    }
+                    else {
+<span class="nc" id="L1198">                        frag.element(&quot;item&quot;).addAttribute(&quot;jid&quot;, null);</span>
+                    }
+                }
+                // Some status codes should only be included in the &quot;self-presence&quot;, which is only sent to the user, but not to other occupants.
+<span class="nc bnc" id="L1202" title="All 2 branches missed.">                if (occupant.getPresence().getFrom().equals(to)) {</span>
+<span class="nc" id="L1203">                    Presence selfPresence = presence.createCopy();</span>
+<span class="nc" id="L1204">                    Element fragSelfPresence = selfPresence.getChildElement(&quot;x&quot;, &quot;http://jabber.org/protocol/muc#user&quot;);</span>
+<span class="nc" id="L1205">                    fragSelfPresence.addElement(&quot;status&quot;).addAttribute(&quot;code&quot;, &quot;110&quot;);</span>
+
+                    // Only in the context of entering the room status code 100, 201 and 210 should be sent.
+                    // http://xmpp.org/registrar/mucstatus.html
+<span class="nc bnc" id="L1209" title="All 2 branches missed.">                    if (presenceRequest.isJoinPresence()) {</span>
+<span class="nc bnc" id="L1210" title="All 4 branches missed.">                        boolean isRoomNew = isLocked() &amp;&amp; creationDate.getTime() == lockedTime;</span>
+<span class="nc bnc" id="L1211" title="All 2 branches missed.">                        if (canAnyoneDiscoverJID()) {</span>
+                            // // XEP-0045: Example 26.
+                            // If the user is entering a room that is non-anonymous (i.e., which informs all occupants of each occupant's full JID as shown above), the service MUST warn the user by including a status code of &quot;100&quot; in the initial presence that the room sends to the new occupant
+<span class="nc" id="L1214">                            fragSelfPresence.addElement(&quot;status&quot;).addAttribute(&quot;code&quot;, &quot;100&quot;);</span>
+                        }
+<span class="nc bnc" id="L1216" title="All 2 branches missed.">                        if (isRoomNew) {</span>
+<span class="nc" id="L1217">                            fragSelfPresence.addElement(&quot;status&quot;).addAttribute(&quot;code&quot;, &quot;201&quot;);</span>
+                        }
+                    }
+
+<span class="nc" id="L1221">                    occupant.send(selfPresence);</span>
+<span class="nc" id="L1222">                } else {</span>
+<span class="nc" id="L1223">                    occupant.send(presence);</span>
+                }
+            }
+<span class="nc" id="L1226">            catch ( Exception e )</span>
+            {
+<span class="nc" id="L1228">                Log.warn( &quot;An unexpected exception prevented a presence update from {} to be broadcasted to {}.&quot;, presence.getFrom(), occupant.getUserAddress(), e );</span>
+<span class="nc" id="L1229">            }</span>
+<span class="nc" id="L1230">        }</span>
+<span class="nc" id="L1231">    }</span>
+
+    private void broadcast(Message message) {
+        // Broadcast message to occupants hosted by other cluster nodes
+<span class="nc" id="L1235">        BroadcastMessageRequest request = new BroadcastMessageRequest(this, message, occupantsByFullJID.size());</span>
+<span class="nc" id="L1236">        CacheFactory.doClusterTask(request);</span>
+
+        // Broadcast message to occupants connected to this JVM
+<span class="nc" id="L1239">        request = new BroadcastMessageRequest(this, message, occupantsByFullJID.size());</span>
+<span class="nc" id="L1240">        request.setOriginator(true);</span>
+<span class="nc" id="L1241">        request.run();</span>
+<span class="nc" id="L1242">    }</span>
+
+    public void broadcast(BroadcastMessageRequest messageRequest) {
+<span class="nc" id="L1245">        Message message = messageRequest.getMessage();</span>
+        // Add message to the room history
+<span class="nc" id="L1247">        roomHistory.addMessage(message);</span>
+        // Send message to occupants connected to this JVM
+<span class="nc bnc" id="L1249" title="All 2 branches missed.">        for (MUCRole occupant : occupantsByFullJID.values()) {</span>
+            try
+            {
+                // Do not send broadcast messages to deaf occupants or occupants hosted in
+                // other cluster nodes
+<span class="nc bnc" id="L1254" title="All 4 branches missed.">                if ( occupant.isLocal() &amp;&amp; !occupant.isVoiceOnly() )</span>
+                {
+<span class="nc" id="L1256">                    occupant.send( message );</span>
+                }
+            }
+<span class="nc" id="L1259">            catch ( Exception e )</span>
+            {
+<span class="nc" id="L1261">                Log.warn( &quot;An unexpected exception prevented a message from {} to be broadcasted to {}.&quot;, message.getFrom(), occupant.getUserAddress(), e );</span>
+<span class="nc" id="L1262">            }</span>
+<span class="nc" id="L1263">        }</span>
+<span class="nc bnc" id="L1264" title="All 4 branches missed.">        if (messageRequest.isOriginator() &amp;&amp; isLogEnabled()) {</span>
+<span class="nc" id="L1265">            MUCRole senderRole = null;</span>
+            JID senderAddress;
+            // convert the MUC nickname/role JID back into a real user JID
+<span class="nc bnc" id="L1268" title="All 4 branches missed.">            if (message.getFrom() != null &amp;&amp; message.getFrom().getResource() != null) {</span>
+                // get the first MUCRole for the sender
+<span class="nc" id="L1270">                List&lt;MUCRole&gt; occupants = occupantsByNickname.get(message.getFrom().getResource().toLowerCase());</span>
+<span class="nc bnc" id="L1271" title="All 2 branches missed.">                senderRole = occupants == null ? null : occupants.get(0);</span>
+            }
+<span class="nc bnc" id="L1273" title="All 2 branches missed.">            if (senderRole == null) {</span>
+                // The room itself is sending the message
+<span class="nc" id="L1275">                senderAddress = getRole().getRoleAddress();</span>
+            }
+            else {
+                // An occupant is sending the message
+<span class="nc" id="L1279">                senderAddress = senderRole.getUserAddress();</span>
+            }
+            // Log the conversation
+<span class="nc" id="L1282">            mucService.logConversation(this, message, senderAddress);</span>
+        }
+<span class="nc" id="L1284">        mucService.messageBroadcastedTo(messageRequest.getOccupants());</span>
+<span class="nc" id="L1285">    }</span>
+
+    /**
+     * An empty role that represents the room itself in the chatroom. Chatrooms need to be able to
+     * speak (server messages) and so must have their own role in the chatroom.
+     */
+    private class RoomRole implements MUCRole {
+
+        private MUCRoom room;
+
+<span class="nc" id="L1295">        private RoomRole(MUCRoom room) {</span>
+<span class="nc" id="L1296">            this.room = room;</span>
+<span class="nc" id="L1297">        }</span>
+
+        @Override
+        public Presence getPresence() {
+<span class="nc" id="L1301">            return null;</span>
+        }
+
+        @Override
+        public void setPresence(Presence presence) {
+<span class="nc" id="L1306">        }</span>
+
+        @Override
+        public void setRole(MUCRole.Role newRole) {
+<span class="nc" id="L1310">        }</span>
+
+        @Override
+        public MUCRole.Role getRole() {
+<span class="nc" id="L1314">            return MUCRole.Role.moderator;</span>
+        }
+
+        @Override
+        public void setAffiliation(MUCRole.Affiliation newAffiliation) {
+<span class="nc" id="L1319">        }</span>
+
+        @Override
+        public MUCRole.Affiliation getAffiliation() {
+<span class="nc" id="L1323">            return MUCRole.Affiliation.owner;</span>
+        }
+
+        @Override
+        public void changeNickname(String nickname) {
+<span class="nc" id="L1328">        }</span>
+
+        @Override
+        public String getNickname() {
+<span class="nc" id="L1332">            return null;</span>
+        }
+
+        @Override
+        public boolean isVoiceOnly() {
+<span class="nc" id="L1337">            return false;</span>
+        }
+
+        @Override
+        public boolean isLocal() {
+<span class="nc" id="L1342">            return true;</span>
+        }
+
+        @Override
+        public NodeID getNodeID() {
+<span class="nc" id="L1347">            return XMPPServer.getInstance().getNodeID();</span>
+        }
+
+        @Override
+        public MUCRoom getChatRoom() {
+<span class="nc" id="L1352">            return room;</span>
+        }
+
+<span class="nc" id="L1355">        private JID crJID = null;</span>
+
+        @Override
+        public JID getRoleAddress() {
+<span class="nc bnc" id="L1359" title="All 2 branches missed.">            if (crJID == null) {</span>
+<span class="nc" id="L1360">                crJID = new JID(room.getName(), mucService.getServiceDomain(), null, true);</span>
+            }
+<span class="nc" id="L1362">            return crJID;</span>
+        }
+
+        @Override
+        public JID getUserAddress() {
+<span class="nc" id="L1367">            return null;</span>
+        }
+
+        @Override
+        public void send(Packet packet) {
+<span class="nc" id="L1372">            room.send(packet);</span>
+<span class="nc" id="L1373">        }</span>
+
+        @Override
+        public void destroy() {
+<span class="nc" id="L1377">        }</span>
+    }
+
+    @Override
+    public long getChatLength() {
+<span class="nc" id="L1382">        return endTime - startTime;</span>
+    }
+
+    /**
+     * Updates all the presences of the given user with the new affiliation and role information. Do
+     * nothing if the given jid is not present in the room. If the user has joined the room from
+     * several client resources, all his/her occupants' presences will be updated.
+     *
+     * @param jid the bare jid of the user to update his/her role.
+     * @param newAffiliation the new affiliation for the JID.
+     * @param newRole the new role for the JID.
+     * @return the list of updated presences of all the client resources that the client used to
+     *         join the room.
+     * @throws NotAllowedException If trying to change the moderator role to an owner or an admin or
+     *         if trying to ban an owner or an administrator.
+     */
+    private List&lt;Presence&gt; changeOccupantAffiliation(MUCRole senderRole, JID jid, MUCRole.Affiliation newAffiliation, MUCRole.Role newRole)
+            throws NotAllowedException {
+<span class="nc" id="L1400">        List&lt;Presence&gt; presences = new ArrayList&lt;&gt;();</span>
+        // Get all the roles (i.e. occupants) of this user based on his/her bare JID
+<span class="nc" id="L1402">        JID bareJID = jid.asBareJID();</span>
+<span class="nc" id="L1403">        List&lt;MUCRole&gt; roles = occupantsByBareJID.get(bareJID);</span>
+<span class="nc bnc" id="L1404" title="All 2 branches missed.">        if (roles == null) {</span>
+<span class="nc" id="L1405">            return presences;</span>
+        }
+        // Collect all the updated presences of these roles
+<span class="nc bnc" id="L1408" title="All 2 branches missed.">        for (MUCRole role : roles) {</span>
+// TODO
+//            if (!isPrivilegedToChangeAffiliationAndRole(senderRole.getAffiliation(), senderRole.getRole(), role.getAffiliation(), role.getRole(), newAffiliation, newRole)) {
+//                throw new NotAllowedException();
+//            }
+            // Update the presence with the new affiliation and role
+<span class="nc bnc" id="L1414" title="All 2 branches missed.">            if (role.isLocal()) {</span>
+<span class="nc" id="L1415">                role.setAffiliation(newAffiliation);</span>
+<span class="nc" id="L1416">                role.setRole(newRole);</span>
+                // Notify the other cluster nodes to update the occupant
+<span class="nc" id="L1418">                CacheFactory.doClusterTask(new UpdateOccupant(this, role));</span>
+                // Prepare a new presence to be sent to all the room occupants
+<span class="nc" id="L1420">                presences.add(role.getPresence().createCopy());</span>
+            }
+            else {
+                // Ask the cluster node hosting the occupant to make the changes. Note that if the change
+                // is not allowed a NotAllowedException will be thrown
+<span class="nc" id="L1425">                Element element = (Element) CacheFactory.doSynchronousClusterTask(</span>
+<span class="nc" id="L1426">                        new UpdateOccupantRequest(this, role.getNickname(), newAffiliation, newRole),</span>
+<span class="nc" id="L1427">                        role.getNodeID().toByteArray());</span>
+<span class="nc bnc" id="L1428" title="All 2 branches missed.">                if (element != null) {</span>
+                    // Prepare a new presence to be sent to all the room occupants
+<span class="nc" id="L1430">                    presences.add(new Presence(element, true));</span>
+                }
+                else {
+<span class="nc" id="L1433">                    throw new NotAllowedException();</span>
+                }
+            }
+<span class="nc" id="L1436">        }</span>
+        // Answer all the updated presences
+<span class="nc" id="L1438">        return presences;</span>
+    }
+
+    /**
+     * Updates the presence of the given user with the new role information. Do nothing if the given
+     * jid is not present in the room.
+     *
+     * @param jid the full jid of the user to update his/her role.
+     * @param newRole the new role for the JID.
+     * @return the updated presence of the user or null if none.
+     * @throws NotAllowedException If trying to change the moderator role to an owner or an admin.
+     */
+    private Presence changeOccupantRole(JID jid, MUCRole.Role newRole) throws NotAllowedException {
+        // Try looking the role in the bare JID list
+<span class="nc" id="L1452">        MUCRole role = occupantsByFullJID.get(jid);</span>
+// TODO
+//            if (!isPrivilegedToChangeAffiliationAndRole(senderRole.getAffiliation(), senderRole.getRole(), role.getAffiliation(), role.getRole(), newAffiliation, newRole)) {
+//                throw new NotAllowedException();
+//            }
+<span class="nc bnc" id="L1457" title="All 2 branches missed.">        if (role != null) {</span>
+<span class="nc bnc" id="L1458" title="All 2 branches missed.">            if (role.isLocal()) {</span>
+                // Update the presence with the new role
+<span class="nc" id="L1460">                role.setRole(newRole);</span>
+                // Notify the other cluster nodes to update the occupant
+<span class="nc" id="L1462">                CacheFactory.doClusterTask(new UpdateOccupant(this, role));</span>
+                // Prepare a new presence to be sent to all the room occupants
+<span class="nc" id="L1464">                return role.getPresence().createCopy();</span>
+            }
+            else {
+                // Ask the cluster node hosting the occupant to make the changes. Note that if the change
+                // is not allowed a NotAllowedException will be thrown
+<span class="nc" id="L1469">                Element element = (Element) CacheFactory.doSynchronousClusterTask(</span>
+<span class="nc" id="L1470">                        new UpdateOccupantRequest(this, role.getNickname(), null, newRole),</span>
+<span class="nc" id="L1471">                        role.getNodeID().toByteArray());</span>
+<span class="nc bnc" id="L1472" title="All 2 branches missed.">                if (element != null) {</span>
+                    // Prepare a new presence to be sent to all the room occupants
+<span class="nc" id="L1474">                    return new Presence(element, true);</span>
+                }
+                else {
+<span class="nc" id="L1477">                    throw new NotAllowedException();</span>
+                }
+            }
+        }
+<span class="nc" id="L1481">        return null;</span>
+    }
+
+    static boolean isPrivilegedToChangeAffiliationAndRole(MUCRole.Affiliation actorAffiliation, MUCRole.Role actorRole, MUCRole.Affiliation occupantAffiliation, MUCRole.Role occupantRole, MUCRole.Affiliation newAffiliation, MUCRole.Role newRole) {
+<span class="pc bfc" id="L1485" title="All 3 branches covered.">        switch (actorAffiliation) {</span>
+            case owner:
+                // An owner has all privileges
+<span class="fc" id="L1488">                return true;</span>
+            case admin:
+                // If affiliation has not changed
+<span class="fc bfc" id="L1491" title="All 2 branches covered.">                if (occupantAffiliation == newAffiliation) {</span>
+                    // Only check, if the admin wants to modify an owner (e.g. revoke an owner's moderator role).
+<span class="pc bpc" id="L1493" title="1 of 2 branches missed.">                    return occupantAffiliation != MUCRole.Affiliation.owner;</span>
+                } else {
+                    // An admin is not allowed to modify the admin or owner list.
+<span class="pc bpc" id="L1496" title="2 of 6 branches missed.">                    return occupantAffiliation != MUCRole.Affiliation.owner &amp;&amp; newAffiliation != MUCRole.Affiliation.admin &amp;&amp; newAffiliation != MUCRole.Affiliation.owner;</span>
+                }
+            default:
+                // Every other affiliation (member, none, outcast) is not allowed to change anything, except he's a moderator and he doesn't want to change affiliations.
+<span class="pc bpc" id="L1500" title="1 of 4 branches missed.">                if (actorRole == MUCRole.Role.moderator &amp;&amp; occupantAffiliation == newAffiliation) {</span>
+                    // A moderator SHOULD NOT be allowed to revoke moderation privileges from someone with a higher affiliation than themselves
+                    // (i.e., an unaffiliated moderator SHOULD NOT be allowed to revoke moderation privileges from an admin or an owner, and an admin SHOULD NOT be allowed to revoke moderation privileges from an owner).
+<span class="nc bnc" id="L1503" title="All 4 branches missed.">                    if (occupantRole == MUCRole.Role.moderator &amp;&amp; newRole != MUCRole.Role.moderator) {</span>
+<span class="nc bnc" id="L1504" title="All 4 branches missed.">                        return occupantAffiliation != MUCRole.Affiliation.owner &amp;&amp; occupantAffiliation != MUCRole.Affiliation.admin;</span>
+                    }
+                }
+<span class="fc" id="L1507">                return false;</span>
+        }
+    }
+
+    @Override
+    public void addFirstOwner(JID bareJID) {
+<span class="nc" id="L1513">        owners.add( bareJID.asBareJID() );</span>
+<span class="nc" id="L1514">    }</span>
+
+    @Override
+    public List&lt;Presence&gt; addOwner(JID jid, MUCRole sendRole) throws ForbiddenException {
+        
+<span class="nc" id="L1519">        final JID bareJID = jid.asBareJID();</span>
+<span class="nc" id="L1520">        lock.writeLock().lock();</span>
+        try {
+<span class="nc" id="L1522">            MUCRole.Affiliation oldAffiliation = MUCRole.Affiliation.none;</span>
+<span class="nc bnc" id="L1523" title="All 2 branches missed.">            if (MUCRole.Affiliation.owner != sendRole.getAffiliation()) {</span>
+<span class="nc" id="L1524">                throw new ForbiddenException();</span>
+            }
+            // Check if user is already an owner (explicitly)
+<span class="nc bnc" id="L1527" title="All 2 branches missed.">            if (owners.contains(bareJID)) {</span>
+                // Do nothing
+<span class="nc" id="L1529">                return Collections.emptyList();</span>
+            }
+<span class="nc" id="L1531">            owners.add(bareJID);</span>
+            // Remove the user from other affiliation lists
+<span class="nc bnc" id="L1533" title="All 2 branches missed.">            if (removeAdmin(bareJID)) {</span>
+<span class="nc" id="L1534">                oldAffiliation = MUCRole.Affiliation.admin;</span>
+            }
+<span class="nc bnc" id="L1536" title="All 2 branches missed.">            else if (removeMember(bareJID)) {</span>
+<span class="nc" id="L1537">                oldAffiliation = MUCRole.Affiliation.member;</span>
+            }
+<span class="nc bnc" id="L1539" title="All 2 branches missed.">            else if (removeOutcast(bareJID)) {</span>
+<span class="nc" id="L1540">                oldAffiliation = MUCRole.Affiliation.outcast;</span>
+            }
+            // Update the DB if the room is persistent
+<span class="nc" id="L1543">            MUCPersistenceManager.saveAffiliationToDB(</span>
+                this,
+                bareJID,
+                null,
+                MUCRole.Affiliation.owner,
+                oldAffiliation);
+        }
+        finally {
+<span class="nc" id="L1551">            lock.writeLock().unlock();</span>
+<span class="nc" id="L1552">        }</span>
+        // Update other cluster nodes with new affiliation
+<span class="nc" id="L1554">        CacheFactory.doClusterTask(new AddAffiliation(this, jid.toBareJID(), MUCRole.Affiliation.owner));</span>
+
+        // apply the affiliation change, assigning a new affiliation
+        // based on the group(s) of the affected user(s)
+<span class="nc" id="L1558">        return applyAffiliationChange(getRole(), bareJID, null);</span>
+    }
+
+    private boolean removeOwner(JID jid) {
+<span class="nc" id="L1562">        return owners.remove(jid.asBareJID());</span>
+    }
+
+    @Override
+    public List&lt;Presence&gt; addAdmin(JID jid, MUCRole sendRole) throws ForbiddenException,
+            ConflictException {
+<span class="nc" id="L1568">        final JID bareJID = jid.asBareJID();</span>
+<span class="nc" id="L1569">        lock.writeLock().lock();</span>
+        try {
+<span class="nc" id="L1571">            MUCRole.Affiliation oldAffiliation = MUCRole.Affiliation.none;</span>
+<span class="nc bnc" id="L1572" title="All 2 branches missed.">            if (MUCRole.Affiliation.owner != sendRole.getAffiliation()) {</span>
+<span class="nc" id="L1573">                throw new ForbiddenException();</span>
+            }
+            // Check that the room always has an owner
+<span class="nc bnc" id="L1576" title="All 4 branches missed.">            if (owners.contains(bareJID) &amp;&amp; owners.size() == 1) {</span>
+<span class="nc" id="L1577">                throw new ConflictException();</span>
+            }
+            // Check if user is already an admin
+<span class="nc bnc" id="L1580" title="All 2 branches missed.">            if (admins.contains(bareJID)) {</span>
+                // Do nothing
+<span class="nc" id="L1582">                return Collections.emptyList();</span>
+            }
+<span class="nc" id="L1584">            admins.add(bareJID);</span>
+            // Remove the user from other affiliation lists
+<span class="nc bnc" id="L1586" title="All 2 branches missed.">            if (removeOwner(bareJID)) {</span>
+<span class="nc" id="L1587">                oldAffiliation = MUCRole.Affiliation.owner;</span>
+            }
+<span class="nc bnc" id="L1589" title="All 2 branches missed.">            else if (removeMember(bareJID)) {</span>
+<span class="nc" id="L1590">                oldAffiliation = MUCRole.Affiliation.member;</span>
+            }
+<span class="nc bnc" id="L1592" title="All 2 branches missed.">            else if (removeOutcast(bareJID)) {</span>
+<span class="nc" id="L1593">                oldAffiliation = MUCRole.Affiliation.outcast;</span>
+            }
+            // Update the DB if the room is persistent
+<span class="nc" id="L1596">            MUCPersistenceManager.saveAffiliationToDB(</span>
+                this,
+                bareJID,
+                null,
+                MUCRole.Affiliation.admin,
+                oldAffiliation);
+        }
+        finally {
+<span class="nc" id="L1604">            lock.writeLock().unlock();</span>
+<span class="nc" id="L1605">        }</span>
+        // Update other cluster nodes with new affiliation
+<span class="nc" id="L1607">        CacheFactory.doClusterTask(new AddAffiliation(this, jid.toBareJID(), MUCRole.Affiliation.admin));</span>
+        
+        // apply the affiliation change, assigning a new affiliation
+        // based on the group(s) of the affected user(s)
+<span class="nc" id="L1611">        return applyAffiliationChange(getRole(), bareJID, null);</span>
+    }
+
+    private boolean removeAdmin(JID bareJID) {
+<span class="nc" id="L1615">        return admins.remove( bareJID.asBareJID() );</span>
+    }
+
+    @Override
+    public List&lt;Presence&gt; addMember(JID jid, String nickname, MUCRole sendRole)
+            throws ForbiddenException, ConflictException {
+<span class="nc" id="L1621">        final JID bareJID = jid.asBareJID();</span>
+<span class="nc" id="L1622">        lock.writeLock().lock();</span>
+        try {
+<span class="nc bnc" id="L1624" title="All 2 branches missed.">            MUCRole.Affiliation oldAffiliation = (members.containsKey(bareJID) ?</span>
+                    MUCRole.Affiliation.member : MUCRole.Affiliation.none);
+<span class="nc bnc" id="L1626" title="All 2 branches missed.">            if (isMembersOnly()) {</span>
+<span class="nc bnc" id="L1627" title="All 2 branches missed.">                if (!canOccupantsInvite()) {</span>
+<span class="nc bnc" id="L1628" title="All 2 branches missed.">                    if (MUCRole.Affiliation.admin != sendRole.getAffiliation()</span>
+<span class="nc bnc" id="L1629" title="All 2 branches missed.">                            &amp;&amp; MUCRole.Affiliation.owner != sendRole.getAffiliation()) {</span>
+<span class="nc" id="L1630">                        throw new ForbiddenException();</span>
+                    }
+                }
+            }
+            else {
+<span class="nc bnc" id="L1635" title="All 2 branches missed.">                if (MUCRole.Affiliation.admin != sendRole.getAffiliation()</span>
+<span class="nc bnc" id="L1636" title="All 2 branches missed.">                        &amp;&amp; MUCRole.Affiliation.owner != sendRole.getAffiliation()) {</span>
+<span class="nc" id="L1637">                    throw new ForbiddenException();</span>
+                }
+            }
+            // Check if the desired nickname is already reserved for another member
+<span class="nc bnc" id="L1641" title="All 6 branches missed.">            if (nickname != null &amp;&amp; nickname.trim().length() &gt; 0 &amp;&amp; members.containsValue(nickname.toLowerCase())) {</span>
+<span class="nc bnc" id="L1642" title="All 2 branches missed.">                if (!nickname.equals(members.get(bareJID))) {</span>
+<span class="nc" id="L1643">                    throw new ConflictException();</span>
+                }
+<span class="nc bnc" id="L1645" title="All 6 branches missed.">            } else if (isLoginRestrictedToNickname() &amp;&amp; (nickname == null || nickname.trim().length() == 0)) {</span>
+<span class="nc" id="L1646">                throw new ConflictException();</span>
+            }
+            // Check that the room always has an owner
+<span class="nc bnc" id="L1649" title="All 4 branches missed.">            if (owners.contains(bareJID) &amp;&amp; owners.size() == 1) {</span>
+<span class="nc" id="L1650">                throw new ConflictException();</span>
+            }
+            // Check if user is already an member
+<span class="nc bnc" id="L1653" title="All 2 branches missed.">            if (members.containsKey(bareJID)) {</span>
+                // Do nothing
+<span class="nc" id="L1655">                return Collections.emptyList();</span>
+            }
+            // Associate the reserved nickname with the bareJID. If nickname is null then associate an
+            // empty string
+<span class="nc bnc" id="L1659" title="All 2 branches missed.">            members.put(bareJID, (nickname == null ? &quot;&quot; : nickname.toLowerCase()));</span>
+            // Remove the user from other affiliation lists
+<span class="nc bnc" id="L1661" title="All 2 branches missed.">            if (removeOwner(bareJID)) {</span>
+<span class="nc" id="L1662">                oldAffiliation = MUCRole.Affiliation.owner;</span>
+            }
+<span class="nc bnc" id="L1664" title="All 2 branches missed.">            else if (removeAdmin(bareJID)) {</span>
+<span class="nc" id="L1665">                oldAffiliation = MUCRole.Affiliation.admin;</span>
+            }
+<span class="nc bnc" id="L1667" title="All 2 branches missed.">            else if (removeOutcast(bareJID)) {</span>
+<span class="nc" id="L1668">                oldAffiliation = MUCRole.Affiliation.outcast;</span>
+            }
+            // Update the DB if the room is persistent
+<span class="nc" id="L1671">            MUCPersistenceManager.saveAffiliationToDB(</span>
+                this,
+                bareJID,
+                nickname,
+                MUCRole.Affiliation.member,
+                oldAffiliation);
+        }
+        finally {
+<span class="nc" id="L1679">            lock.writeLock().unlock();</span>
+<span class="nc" id="L1680">        }</span>
+        // Update other cluster nodes with new member
+<span class="nc bnc" id="L1682" title="All 2 branches missed.">        CacheFactory.doClusterTask(new AddMember(this, jid.toBareJID(), (nickname == null ? &quot;&quot; : nickname)));</span>
+        
+        // apply the affiliation change, assigning a new affiliation
+        // based on the group(s) of the affected user(s)
+<span class="nc" id="L1686">        return applyAffiliationChange(getRole(), bareJID, null);</span>
+    }
+
+    private boolean removeMember(JID jid) {
+<span class="nc bnc" id="L1690" title="All 2 branches missed.">        return members.remove(jid.asBareJID()) != null;</span>
+    }
+
+    @Override
+    public List&lt;Presence&gt; addOutcast(JID jid, String reason, MUCRole senderRole)
+            throws NotAllowedException, ForbiddenException, ConflictException {
+<span class="nc" id="L1696">        final JID bareJID = jid.asBareJID();</span>
+<span class="nc" id="L1697">        lock.writeLock().lock();</span>
+        try {
+<span class="nc" id="L1699">            MUCRole.Affiliation oldAffiliation = MUCRole.Affiliation.none;</span>
+<span class="nc bnc" id="L1700" title="All 2 branches missed.">            if (MUCRole.Affiliation.admin != senderRole.getAffiliation()</span>
+<span class="nc bnc" id="L1701" title="All 2 branches missed.">                    &amp;&amp; MUCRole.Affiliation.owner != senderRole.getAffiliation()) {</span>
+<span class="nc" id="L1702">                throw new ForbiddenException();</span>
+            }
+            // Check that the room always has an owner
+<span class="nc bnc" id="L1705" title="All 4 branches missed.">            if (owners.contains(bareJID) &amp;&amp; owners.size() == 1) {</span>
+<span class="nc" id="L1706">                throw new ConflictException();</span>
+            }
+            // Check if user is already an outcast
+<span class="nc bnc" id="L1709" title="All 2 branches missed.">            if (outcasts.contains(bareJID)) {</span>
+                // Do nothing
+<span class="nc" id="L1711">                return Collections.emptyList();</span>
+            }
+
+            // Update the affiliation lists
+<span class="nc" id="L1715">            outcasts.add(bareJID);</span>
+            // Remove the user from other affiliation lists
+<span class="nc bnc" id="L1717" title="All 2 branches missed.">            if (removeOwner(bareJID)) {</span>
+<span class="nc" id="L1718">                oldAffiliation = MUCRole.Affiliation.owner;</span>
+            }
+<span class="nc bnc" id="L1720" title="All 2 branches missed.">            else if (removeAdmin(bareJID)) {</span>
+<span class="nc" id="L1721">                oldAffiliation = MUCRole.Affiliation.admin;</span>
+            }
+<span class="nc bnc" id="L1723" title="All 2 branches missed.">            else if (removeMember(bareJID)) {</span>
+<span class="nc" id="L1724">                oldAffiliation = MUCRole.Affiliation.member;</span>
+            }
+            // Update the DB if the room is persistent
+<span class="nc" id="L1727">            MUCPersistenceManager.saveAffiliationToDB(</span>
+                this,
+                bareJID,
+                null,
+                MUCRole.Affiliation.outcast,
+                oldAffiliation);
+        }
+        finally {
+<span class="nc" id="L1735">            lock.writeLock().unlock();</span>
+<span class="nc" id="L1736">        }</span>
+        // Update other cluster nodes with new affiliation
+<span class="nc" id="L1738">        CacheFactory.doClusterTask(new AddAffiliation(this, jid.toBareJID(), MUCRole.Affiliation.outcast));</span>
+        
+        // apply the affiliation change, assigning a new affiliation
+        // based on the group(s) of the affected user(s)
+<span class="nc" id="L1742">        return applyAffiliationChange(senderRole, bareJID, reason);</span>
+    }
+
+    private boolean removeOutcast(JID bareJID) {
+<span class="nc" id="L1746">        return outcasts.remove( bareJID.asBareJID() );</span>
+    }
+
+    @Override
+    public List&lt;Presence&gt; addNone(JID jid, MUCRole senderRole) throws ForbiddenException, ConflictException {
+        
+<span class="nc" id="L1752">        final JID bareJID = jid.asBareJID();</span>
+<span class="nc" id="L1753">        MUCRole.Affiliation oldAffiliation = MUCRole.Affiliation.none;</span>
+<span class="nc" id="L1754">        boolean jidWasAffiliated = false;</span>
+<span class="nc" id="L1755">        lock.writeLock().lock();</span>
+        try {
+<span class="nc bnc" id="L1757" title="All 2 branches missed.">            if (MUCRole.Affiliation.admin != senderRole.getAffiliation()</span>
+<span class="nc bnc" id="L1758" title="All 2 branches missed.">                    &amp;&amp; MUCRole.Affiliation.owner != senderRole.getAffiliation()) {</span>
+<span class="nc" id="L1759">                throw new ForbiddenException();</span>
+            }
+            // Check that the room always has an owner
+<span class="nc bnc" id="L1762" title="All 4 branches missed.">            if (owners.contains(bareJID) &amp;&amp; owners.size() == 1) {</span>
+<span class="nc" id="L1763">                throw new ConflictException();</span>
+            }
+            // Remove the jid from ALL the affiliation lists
+<span class="nc bnc" id="L1766" title="All 2 branches missed.">            if (removeOwner(bareJID)) {</span>
+<span class="nc" id="L1767">                oldAffiliation = MUCRole.Affiliation.owner;</span>
+<span class="nc" id="L1768">                jidWasAffiliated = true;</span>
+            }
+<span class="nc bnc" id="L1770" title="All 2 branches missed.">            else if (removeAdmin(bareJID)) {</span>
+<span class="nc" id="L1771">                oldAffiliation = MUCRole.Affiliation.admin;</span>
+<span class="nc" id="L1772">                jidWasAffiliated = true;</span>
+            }
+<span class="nc bnc" id="L1774" title="All 2 branches missed.">            else if (removeMember(bareJID)) {</span>
+<span class="nc" id="L1775">                oldAffiliation = MUCRole.Affiliation.member;</span>
+<span class="nc" id="L1776">                jidWasAffiliated = true;</span>
+            }
+<span class="nc bnc" id="L1778" title="All 2 branches missed.">            else if (removeOutcast(bareJID)) {</span>
+<span class="nc" id="L1779">                oldAffiliation = MUCRole.Affiliation.outcast;</span>
+            }
+            // Remove the affiliation of this user from the DB if the room is persistent
+<span class="nc" id="L1782">            MUCPersistenceManager.removeAffiliationFromDB(this, bareJID, oldAffiliation);</span>
+        }
+        finally {
+<span class="nc" id="L1785">            lock.writeLock().unlock();</span>
+<span class="nc" id="L1786">        }</span>
+        // Update other cluster nodes with new affiliation
+<span class="nc" id="L1788">        CacheFactory.doClusterTask(new AddAffiliation(this, jid.toBareJID(), MUCRole.Affiliation.none));</span>
+        
+<span class="nc bnc" id="L1790" title="All 2 branches missed.">        if (jidWasAffiliated) {</span>
+            // apply the affiliation change, assigning a new affiliation
+            // based on the group(s) of the affected user(s)
+<span class="nc" id="L1793">            return applyAffiliationChange(senderRole, bareJID, null);</span>
+        } else {
+            // no presence updates needed
+<span class="nc" id="L1796">            return Collections.emptyList();</span>
+        }
+    }
+
+    /**
+     * Evaluate the given JID to determine what the appropriate affiliation should be
+     * after a change has been made. Each affected user will be granted the highest
+     * affiliation they now possess, either explicitly or implicitly via membership
+     * in one or more groups. If the JID is a user, the effective affiliation is
+     * applied to each presence corresponding to that user. If the given JID is a group,
+     * each user in the group is evaluated to determine what their new affiliations will
+     * be. The returned presence updates will be broadcast to the occupants of the room.
+     * 
+     * @param senderRole Typically the room itself, or an owner/admin
+     * @param affiliationJID The JID for the user or group that has been changed
+     * @param reason An optional reason to explain why a user was kicked from the room
+     * @return List of presence updates to be delivered to the room's occupants
+     */
+    private List&lt;Presence&gt; applyAffiliationChange(MUCRole senderRole, final JID affiliationJID, String reason) {
+        
+        // Update the presence(s) for the new affiliation and inform all occupants
+<span class="nc" id="L1817">        List&lt;JID&gt; affectedOccupants = new ArrayList&lt;&gt;();</span>
+        
+        // first, determine which actual (user) JIDs are affected by the affiliation change
+<span class="nc bnc" id="L1820" title="All 2 branches missed.">        if (GroupJID.isGroup(affiliationJID)) {</span>
+            try {
+<span class="nc" id="L1822">                Group group = GroupManager.getInstance().getGroup(affiliationJID);</span>
+                // check each occupant to see if they are in the group that was changed
+                // if so, calculate a new affiliation (if any) for the occupant(s)
+<span class="nc bnc" id="L1825" title="All 2 branches missed.">                for (JID groupMember : group.getAll()) {</span>
+<span class="nc bnc" id="L1826" title="All 2 branches missed.">                    if (occupantsByBareJID.containsKey(groupMember)) {</span>
+<span class="nc" id="L1827">                        affectedOccupants.add(groupMember);</span>
+                    }
+<span class="nc" id="L1829">                }</span>
+<span class="nc" id="L1830">            } catch (GroupNotFoundException gnfe) {</span>
+<span class="nc" id="L1831">                Log.error(&quot;Error updating group presences for &quot; + affiliationJID , gnfe);</span>
+<span class="nc" id="L1832">            }</span>
+        } else {
+<span class="nc bnc" id="L1834" title="All 2 branches missed.">            if (occupantsByBareJID.containsKey(affiliationJID)) {</span>
+<span class="nc" id="L1835">                affectedOccupants.add(affiliationJID);</span>
+            }
+        }
+        
+        // now update each of the affected occupants with a new role/affiliation
+        MUCRole.Role newRole;
+        MUCRole.Affiliation newAffiliation;
+<span class="nc" id="L1842">        List&lt;Presence&gt; updatedPresences = new ArrayList&lt;&gt;();</span>
+        // new role/affiliation may be granted via group membership
+<span class="nc bnc" id="L1844" title="All 2 branches missed.">        for (JID occupantJID : affectedOccupants) {</span>
+<span class="nc" id="L1845">            Log.info(&quot;Applying affiliation change for &quot; + occupantJID);</span>
+<span class="nc" id="L1846">            boolean kickMember = false, isOutcast = false;</span>
+<span class="nc bnc" id="L1847" title="All 2 branches missed.">            if (owners.includes(occupantJID)) {</span>
+<span class="nc" id="L1848">                newRole = MUCRole.Role.moderator;</span>
+<span class="nc" id="L1849">                newAffiliation = MUCRole.Affiliation.owner;</span>
+            }
+<span class="nc bnc" id="L1851" title="All 2 branches missed.">            else if (admins.includes(occupantJID)) {</span>
+<span class="nc" id="L1852">                newRole = MUCRole.Role.moderator;</span>
+<span class="nc" id="L1853">                newAffiliation = MUCRole.Affiliation.admin;</span>
+            }
+            // outcast trumps member when an affiliation is changed
+<span class="nc bnc" id="L1856" title="All 2 branches missed.">            else if (outcasts.includes(occupantJID)) {</span>
+<span class="nc" id="L1857">                newAffiliation = MUCRole.Affiliation.outcast;</span>
+<span class="nc" id="L1858">                newRole = MUCRole.Role.none;</span>
+<span class="nc" id="L1859">                kickMember = true;</span>
+<span class="nc" id="L1860">                isOutcast = true;</span>
+            }
+<span class="nc bnc" id="L1862" title="All 2 branches missed.">            else if (members.includesKey(occupantJID)) {</span>
+<span class="nc" id="L1863">                newRole = MUCRole.Role.participant;</span>
+<span class="nc" id="L1864">                newAffiliation = MUCRole.Affiliation.member;</span>
+            }
+<span class="nc bnc" id="L1866" title="All 2 branches missed.">            else if (isMembersOnly()) {</span>
+<span class="nc" id="L1867">                newRole = MUCRole.Role.none;</span>
+<span class="nc" id="L1868">                newAffiliation = MUCRole.Affiliation.none;</span>
+<span class="nc" id="L1869">                kickMember = true;</span>
+            }
+            else {
+<span class="nc bnc" id="L1872" title="All 2 branches missed.">                newRole = isModerated() ? MUCRole.Role.visitor : MUCRole.Role.participant;</span>
+<span class="nc" id="L1873">                newAffiliation = MUCRole.Affiliation.none;</span>
+            }
+<span class="nc" id="L1875">            Log.info(&quot;New affiliation: &quot; + newAffiliation);</span>
+            try {
+<span class="nc" id="L1877">                List&lt;Presence&gt; thisOccupant = changeOccupantAffiliation(senderRole, occupantJID, newAffiliation, newRole);</span>
+<span class="nc bnc" id="L1878" title="All 2 branches missed.">                if (kickMember) {</span>
+                    // If the room is members-only, remove the user from the room including a status
+                    // code of 321 to indicate that the user was removed because of an affiliation change
+                    // a status code of 301 indicates the user was removed as an outcast
+<span class="nc bnc" id="L1882" title="All 2 branches missed.">                    for (Presence presence : thisOccupant) {</span>
+<span class="nc" id="L1883">                        presence.setType(Presence.Type.unavailable);</span>
+<span class="nc" id="L1884">                        presence.setStatus(null);</span>
+<span class="nc" id="L1885">                        Element x = presence.getChildElement(&quot;x&quot;, &quot;http://jabber.org/protocol/muc#user&quot;);</span>
+<span class="nc bnc" id="L1886" title="All 4 branches missed.">                        if (reason != null &amp;&amp; reason.trim().length() &gt; 0) {</span>
+<span class="nc" id="L1887">                            x.element(&quot;item&quot;).addElement(&quot;reason&quot;).setText(reason);</span>
+                        }
+<span class="nc bnc" id="L1889" title="All 2 branches missed.">                        x.addElement(&quot;status&quot;).addAttribute(&quot;code&quot;, isOutcast ? &quot;301&quot; : &quot;321&quot;);</span>
+<span class="nc" id="L1890">                        kickPresence(presence, senderRole.getUserAddress(), senderRole.getNickname());</span>
+<span class="nc" id="L1891">                    }</span>
+                }
+<span class="nc" id="L1893">                updatedPresences.addAll(thisOccupant);</span>
+<span class="nc" id="L1894">            } catch (NotAllowedException e) {</span>
+<span class="nc" id="L1895">                Log.error(&quot;Error updating presences for &quot; + occupantJID, e);</span>
+<span class="nc" id="L1896">            }</span>
+<span class="nc" id="L1897">        }</span>
+<span class="nc" id="L1898">        return updatedPresences;</span>
+    }
+
+    @Override
+    public boolean isLocked() {
+<span class="nc bnc" id="L1903" title="All 2 branches missed.">        return lockedTime &gt; 0;</span>
+    }
+
+    @Override
+    public boolean isManuallyLocked() {
+<span class="nc bnc" id="L1908" title="All 4 branches missed.">        return lockedTime &gt; 0 &amp;&amp; creationDate.getTime() != lockedTime;</span>
+    }
+
+    /**
+     * Handles occupants updating their presence in the chatroom. Assumes the user updates their presence whenever their
+     * availability in the room changes. This method should not be called to handle other presence related updates, such
+     * as nickname changes.
+     * {@inheritDoc}
+     */
+    @Override
+    public void presenceUpdated(final MUCRole occupantRole, final Presence newPresence) {
+<span class="nc" id="L1919">        final String occupantNickName = occupantRole.getNickname();</span>
+
+        // Update the presence of the occupant on the local node with the occupant's new availability. Updates the
+        // local node first so the remote nodes receive presence that correctly reflects the occupant's new
+        // availability and previously existing role and affiliation with the room.
+<span class="nc" id="L1924">        final UpdatePresence localUpdateRequest = new UpdatePresence(this, newPresence.createCopy(), occupantNickName);</span>
+<span class="nc" id="L1925">        localUpdateRequest.setOriginator(true);</span>
+<span class="nc" id="L1926">        localUpdateRequest.run();</span>
+
+        // Get the new, updated presence for the occupant in the room. The presence reflects the occupant's updated
+        // availability and their existing association.
+<span class="nc" id="L1930">        final Presence updatedPresence = occupantRole.getPresence().createCopy();</span>
+
+        // Ask other cluster nodes to update the presence of the occupant. Uses the updated presence from the local
+        // MUC role.
+<span class="nc" id="L1934">        final UpdatePresence clusterUpdateRequest = new UpdatePresence(this, updatedPresence, occupantNickName);</span>
+<span class="nc" id="L1935">        CacheFactory.doClusterTask(clusterUpdateRequest);</span>
+
+        // Broadcast updated presence of occupant.
+<span class="nc" id="L1938">        broadcastPresence(updatedPresence, false);</span>
+<span class="nc" id="L1939">    }</span>
+
+    /**
+     * Updates the presence of an occupant with the new presence included in the request.
+     *
+     * @param updatePresence request to update an occupant's presence.
+     */
+    public void presenceUpdated(UpdatePresence updatePresence) {
+<span class="nc" id="L1947">        List &lt;MUCRole&gt; occupants = occupantsByNickname.get(updatePresence.getNickname().toLowerCase());</span>
+<span class="nc bnc" id="L1948" title="All 4 branches missed.">        if (occupants == null || occupants.size() == 0) {</span>
+<span class="nc" id="L1949">            Log.debug(&quot;LocalMUCRoom: Failed to update presence of room occupant. Occupant nickname: &quot; + updatePresence.getNickname());</span>
+        } else {
+<span class="nc bnc" id="L1951" title="All 2 branches missed.">            for (MUCRole occupant : occupants) {</span>
+<span class="nc" id="L1952">                occupant.setPresence(updatePresence.getPresence());</span>
+<span class="nc" id="L1953">            }</span>
+        }
+<span class="nc" id="L1955">    }</span>
+
+    public void occupantUpdated(UpdateOccupant update) {
+<span class="nc" id="L1958">        List &lt;MUCRole&gt; occupants = occupantsByNickname.get(update.getNickname().toLowerCase());</span>
+<span class="nc bnc" id="L1959" title="All 4 branches missed.">        if (occupants == null || occupants.size() == 0) {</span>
+<span class="nc" id="L1960">            Log.debug(&quot;LocalMUCRoom: Failed to update information of room occupant. Occupant nickname: &quot; + update.getNickname());</span>
+        } else {
+<span class="nc bnc" id="L1962" title="All 2 branches missed.">            for (MUCRole occupant : occupants) {</span>
+<span class="nc bnc" id="L1963" title="All 2 branches missed.">                if (!occupant.isLocal()) {</span>
+<span class="nc" id="L1964">                    occupant.setPresence(update.getPresence());</span>
+                    try {
+<span class="nc" id="L1966">                        occupant.setRole(update.getRole());</span>
+<span class="nc" id="L1967">                        occupant.setAffiliation(update.getAffiliation());</span>
+<span class="nc" id="L1968">                    } catch (NotAllowedException e) {</span>
+                        // Ignore. Should never happen with remote roles
+<span class="nc" id="L1970">                    }</span>
+                }
+                else {
+<span class="nc" id="L1973">                    Log.error(MessageFormat.format(&quot;Ignoring update of local occupant with info from a remote occupant. &quot;</span>
+                            + &quot;Occupant nickname: {0} new role: {1} new affiliation: {2}&quot;,
+<span class="nc" id="L1975">                            update.getNickname(), update.getRole(), update.getAffiliation()));</span>
+                }
+<span class="nc" id="L1977">            }</span>
+        }
+<span class="nc" id="L1979">    }</span>
+
+    public Presence updateOccupant(UpdateOccupantRequest updateRequest) throws NotAllowedException {
+<span class="nc" id="L1982">        Presence result = null;</span>
+<span class="nc" id="L1983">        List &lt;MUCRole&gt; occupants = occupantsByNickname.get(updateRequest.getNickname().toLowerCase());</span>
+<span class="nc bnc" id="L1984" title="All 4 branches missed.">        if (occupants == null || occupants.size() == 0) {</span>
+<span class="nc" id="L1985">            Log.debug(&quot;Failed to update information of local room occupant; nickname: &quot; + updateRequest.getNickname());</span>
+        } else {
+<span class="nc bnc" id="L1987" title="All 2 branches missed.">            for (MUCRole occupant : occupants) {</span>
+<span class="nc bnc" id="L1988" title="All 2 branches missed.">                if (updateRequest.isAffiliationChanged()) {</span>
+<span class="nc" id="L1989">                    occupant.setAffiliation(updateRequest.getAffiliation());</span>
+                }
+<span class="nc" id="L1991">                occupant.setRole(updateRequest.getRole());</span>
+                // Notify the the cluster nodes to update the occupant
+<span class="nc" id="L1993">                CacheFactory.doClusterTask(new UpdateOccupant(this, occupant));</span>
+<span class="nc bnc" id="L1994" title="All 2 branches missed.">                if (result == null) {</span>
+<span class="nc" id="L1995">                    result = occupant.getPresence();</span>
+                }
+<span class="nc" id="L1997">            }</span>
+        }
+<span class="nc" id="L1999">        return result;</span>
+    }
+
+    public void memberAdded(AddMember addMember) {
+<span class="nc" id="L2003">        JID bareJID = addMember.getBareJID();</span>
+<span class="nc" id="L2004">        removeOwner(bareJID);</span>
+<span class="nc" id="L2005">        removeAdmin(bareJID);</span>
+<span class="nc" id="L2006">        removeOutcast(bareJID);</span>
+        // Associate the reserved nickname with the bareJID
+<span class="nc" id="L2008">        members.put(addMember.getBareJID(), addMember.getNickname().toLowerCase());</span>
+<span class="nc" id="L2009">    }</span>
+
+    public void affiliationAdded(AddAffiliation affiliation) {
+<span class="nc" id="L2012">        JID affiliationJID = affiliation.getBareJID();</span>
+<span class="nc bnc" id="L2013" title="All 4 branches missed.">        switch(affiliation.getAffiliation()) {</span>
+            case owner:
+<span class="nc" id="L2015">                removeMember(affiliationJID);</span>
+<span class="nc" id="L2016">                removeAdmin(affiliationJID);</span>
+<span class="nc" id="L2017">                removeOutcast(affiliationJID);</span>
+<span class="nc" id="L2018">                owners.add(affiliationJID);</span>
+<span class="nc" id="L2019">                break;</span>
+            case admin:
+<span class="nc" id="L2021">                removeMember(affiliationJID);</span>
+<span class="nc" id="L2022">                removeOwner(affiliationJID);</span>
+<span class="nc" id="L2023">                removeOutcast(affiliationJID);</span>
+<span class="nc" id="L2024">                admins.add(affiliationJID);</span>
+<span class="nc" id="L2025">                break;</span>
+            case outcast:
+<span class="nc" id="L2027">                removeMember(affiliationJID);</span>
+<span class="nc" id="L2028">                removeAdmin(affiliationJID);</span>
+<span class="nc" id="L2029">                removeOwner(affiliationJID);</span>
+<span class="nc" id="L2030">                outcasts.add(affiliationJID);</span>
+<span class="nc" id="L2031">                break;</span>
+            case none:
+            default:
+<span class="nc" id="L2034">                removeMember(affiliationJID);</span>
+<span class="nc" id="L2035">                removeAdmin(affiliationJID);</span>
+<span class="nc" id="L2036">                removeOwner(affiliationJID);</span>
+<span class="nc" id="L2037">                removeOutcast(affiliationJID);</span>
+                break;
+        }
+<span class="nc" id="L2040">    }</span>
+
+    @Override
+    public void nicknameChanged(MUCRole occupantRole, Presence newPresence, String oldNick, String newNick) {
+        // Ask other cluster nodes to update the nickname of the occupant
+<span class="nc" id="L2045">        ChangeNickname request = new ChangeNickname(this, oldNick,  newNick, newPresence.createCopy());</span>
+<span class="nc" id="L2046">        CacheFactory.doClusterTask(request);</span>
+
+        // Update the nickname of the occupant
+<span class="nc" id="L2049">        request = new ChangeNickname(this, oldNick,  newNick, newPresence.createCopy());</span>
+<span class="nc" id="L2050">        request.setOriginator(true);</span>
+<span class="nc" id="L2051">        request.run();</span>
+
+        // Broadcast new presence of occupant
+<span class="nc" id="L2054">        broadcastPresence(occupantRole.getPresence().createCopy(), false);</span>
+<span class="nc" id="L2055">    }</span>
+
+    public void nicknameChanged(ChangeNickname changeNickname) {
+<span class="nc" id="L2058">        List&lt;MUCRole&gt; occupants = occupantsByNickname.get(changeNickname.getOldNick().toLowerCase());</span>
+<span class="nc bnc" id="L2059" title="All 4 branches missed.">        if (occupants != null &amp;&amp; occupants.size() &gt; 0) {</span>
+<span class="nc bnc" id="L2060" title="All 2 branches missed.">            for (MUCRole occupant : occupants) {</span>
+                // Update the role with the new info
+<span class="nc" id="L2062">                occupant.setPresence(changeNickname.getPresence());</span>
+<span class="nc" id="L2063">                occupant.changeNickname(changeNickname.getNewNick());</span>
+<span class="nc" id="L2064">            }</span>
+<span class="nc bnc" id="L2065" title="All 2 branches missed.">            if (changeNickname.isOriginator()) {</span>
+                // Fire event that user changed his nickname
+<span class="nc" id="L2067">                MUCEventDispatcher.nicknameChanged(getRole().getRoleAddress(), occupants.get(0).getUserAddress(),</span>
+<span class="nc" id="L2068">                        changeNickname.getOldNick(), changeNickname.getNewNick());</span>
+            }
+            // Associate the existing MUCRole with the new nickname
+<span class="nc" id="L2071">            occupantsByNickname.put(changeNickname.getNewNick().toLowerCase(), occupants);</span>
+            // Remove the old nickname
+<span class="nc" id="L2073">            occupantsByNickname.remove(changeNickname.getOldNick().toLowerCase());</span>
+        }
+<span class="nc" id="L2075">    }</span>
+
+    @Override
+    public void changeSubject(Message packet, MUCRole role) throws ForbiddenException {
+<span class="nc bnc" id="L2079" title="All 4 branches missed.">        if ((canOccupantsChangeSubject() &amp;&amp; role.getRole().compareTo(MUCRole.Role.visitor) &lt; 0) ||</span>
+<span class="nc bnc" id="L2080" title="All 2 branches missed.">                MUCRole.Role.moderator == role.getRole()) {</span>
+            // Set the new subject to the room
+<span class="nc" id="L2082">            subject = packet.getSubject();</span>
+<span class="nc" id="L2083">            MUCPersistenceManager.updateRoomSubject(this);</span>
+            // Notify all the occupants that the subject has changed
+<span class="nc" id="L2085">            packet.setFrom(role.getRoleAddress());</span>
+<span class="nc" id="L2086">            send(packet);</span>
+
+            // Fire event signifying that the room's subject has changed.
+<span class="nc" id="L2089">            MUCEventDispatcher.roomSubjectChanged(getJID(), role.getUserAddress(), subject);</span>
+
+            // Let other cluster nodes that the room has been updated
+<span class="nc" id="L2092">            CacheFactory.doClusterTask(new RoomUpdatedEvent(this));</span>
+        }
+        else {
+<span class="nc" id="L2095">            throw new ForbiddenException();</span>
+        }
+<span class="nc" id="L2097">    }</span>
+
+    @Override
+    public String getSubject() {
+<span class="nc" id="L2101">        return subject;</span>
+    }
+
+    @Override
+    public void setSubject(String subject) {
+<span class="nc" id="L2106">        this.subject = subject;</span>
+<span class="nc" id="L2107">    }</span>
+
+    @Override
+    public void sendInvitation(JID to, String reason, MUCRole senderRole, List&lt;Element&gt; extensions)
+            throws ForbiddenException, CannotBeInvitedException {
+<span class="nc bnc" id="L2112" title="All 4 branches missed.">        if (!isMembersOnly() || canOccupantsInvite()</span>
+<span class="nc bnc" id="L2113" title="All 2 branches missed.">                || MUCRole.Affiliation.admin == senderRole.getAffiliation()</span>
+<span class="nc bnc" id="L2114" title="All 2 branches missed.">                || MUCRole.Affiliation.owner == senderRole.getAffiliation()) {</span>
+            // If the room is not members-only OR if the room is members-only and anyone can send
+            // invitations or the sender is an admin or an owner, then send the invitation
+<span class="nc" id="L2117">            Message message = new Message();</span>
+<span class="nc" id="L2118">            message.setFrom(role.getRoleAddress());</span>
+<span class="nc" id="L2119">            message.setTo(to);</span>
+
+<span class="nc bnc" id="L2121" title="All 2 branches missed.">            if (((MultiUserChatServiceImpl)mucService).getMUCDelegate() != null) {</span>
+<span class="pc bnc" id="L2122" title="All 4 branches missed.">                switch(((MultiUserChatServiceImpl)mucService).getMUCDelegate().sendingInvitation(this, to, senderRole.getUserAddress(), reason)) {</span>
+                    case HANDLED_BY_DELEGATE:
+                        //if the delegate is taking care of it, there's nothing for us to do
+<span class="nc" id="L2125">                        return;</span>
+                    case HANDLED_BY_OPENFIRE:
+                        //continue as normal if we're asked to handle it
+<span class="nc" id="L2128">                        break;</span>
+                    case REJECTED:
+                        //we can't invite that person
+<span class="nc" id="L2131">                        throw new CannotBeInvitedException();</span>
+                }
+            }
+
+            // Add a list of extensions sent with the original message invitation (if any)
+<span class="nc bnc" id="L2136" title="All 2 branches missed.">            if (extensions != null) {</span>
+<span class="nc bnc" id="L2137" title="All 2 branches missed.">                for(Element element : extensions) {</span>
+<span class="nc" id="L2138">                    element.setParent(null);</span>
+<span class="nc" id="L2139">                    message.getElement().add(element);</span>
+<span class="nc" id="L2140">                }</span>
+            }
+<span class="nc" id="L2142">            Element frag = message.addChildElement(&quot;x&quot;, &quot;http://jabber.org/protocol/muc#user&quot;);</span>
+            // ChatUser will be null if the room itself (ie. via admin console) made the request
+<span class="nc bnc" id="L2144" title="All 2 branches missed.">            if (senderRole.getUserAddress() != null) {</span>
+<span class="nc" id="L2145">                frag.addElement(&quot;invite&quot;).addAttribute(&quot;from&quot;, senderRole.getUserAddress().toBareJID());</span>
+            }
+<span class="nc bnc" id="L2147" title="All 4 branches missed.">            if (reason != null &amp;&amp; reason.length() &gt; 0) {</span>
+<span class="nc" id="L2148">                Element invite = frag.element(&quot;invite&quot;);</span>
+<span class="nc bnc" id="L2149" title="All 2 branches missed.">                if (invite == null) {</span>
+<span class="nc" id="L2150">                    invite = frag.addElement(&quot;invite&quot;);</span>
+                }
+<span class="nc" id="L2152">                invite.addElement(&quot;reason&quot;).setText(reason);</span>
+            }
+<span class="nc bnc" id="L2154" title="All 2 branches missed.">            if (isPasswordProtected()) {</span>
+<span class="nc" id="L2155">                frag.addElement(&quot;password&quot;).setText(getPassword());</span>
+            }
+
+            // Include the jabber:x:conference information for backward compatibility
+<span class="nc" id="L2159">            frag = message.addChildElement(&quot;x&quot;, &quot;jabber:x:conference&quot;);</span>
+<span class="nc" id="L2160">            frag.addAttribute(&quot;jid&quot;, role.getRoleAddress().toBareJID());</span>
+
+            // Send the message with the invitation
+<span class="nc" id="L2163">            router.route(message);</span>
+<span class="nc" id="L2164">        }</span>
+        else {
+<span class="nc" id="L2166">            throw new ForbiddenException();</span>
+        }
+<span class="nc" id="L2168">    }</span>
+
+    @Override
+    public void sendInvitationRejection(JID to, String reason, JID sender) {
+<span class="nc bnc" id="L2172" title="All 2 branches missed.">    if (((MultiUserChatServiceImpl)mucService).getMUCDelegate() != null) {</span>
+<span class="pc bnc" id="L2173" title="All 2 branches missed.">            switch(((MultiUserChatServiceImpl)mucService).getMUCDelegate().sendingInvitationRejection(this, to, sender, reason)) {</span>
+                    case HANDLED_BY_DELEGATE:
+                        //if the delegate is taking care of it, there's nothing for us to do
+<span class="nc" id="L2176">                            return;</span>
+                    case HANDLED_BY_OPENFIRE:
+                        //continue as normal if we're asked to handle it
+                            break;
+                }
+        }
+
+<span class="nc" id="L2183">        Message message = new Message();</span>
+<span class="nc" id="L2184">        message.setFrom(role.getRoleAddress());</span>
+<span class="nc" id="L2185">        message.setTo(to);</span>
+<span class="nc" id="L2186">        Element frag = message.addChildElement(&quot;x&quot;, &quot;http://jabber.org/protocol/muc#user&quot;);</span>
+<span class="nc" id="L2187">        frag.addElement(&quot;decline&quot;).addAttribute(&quot;from&quot;, sender.toBareJID());</span>
+<span class="nc bnc" id="L2188" title="All 4 branches missed.">        if (reason != null &amp;&amp; reason.length() &gt; 0) {</span>
+<span class="nc" id="L2189">            frag.element(&quot;decline&quot;).addElement(&quot;reason&quot;).setText(reason);</span>
+        }
+
+        // Send the message with the invitation
+<span class="nc" id="L2193">        router.route(message);</span>
+<span class="nc" id="L2194">    }</span>
+
+    @Override
+    public IQOwnerHandler getIQOwnerHandler() {
+<span class="nc" id="L2198">        return iqOwnerHandler;</span>
+    }
+
+    @Override
+    public IQAdminHandler getIQAdminHandler() {
+<span class="nc" id="L2203">        return iqAdminHandler;</span>
+    }
+
+    @Override
+    public MUCRoomHistory getRoomHistory() {
+<span class="nc" id="L2208">        return roomHistory;</span>
+    }
+
+    @Override
+    public Collection&lt;JID&gt; getOwners() {
+<span class="nc" id="L2213">        return Collections.unmodifiableList(owners);</span>
+    }
+
+    @Override
+    public Collection&lt;JID&gt; getAdmins() {
+<span class="nc" id="L2218">        return Collections.unmodifiableList(admins);</span>
+    }
+
+    @Override
+    public Collection&lt;JID&gt; getMembers() {
+<span class="nc" id="L2223">        return Collections.unmodifiableMap(members).keySet();</span>
+    }
+
+    @Override
+    public Collection&lt;JID&gt; getOutcasts() {
+<span class="nc" id="L2228">        return Collections.unmodifiableList(outcasts);</span>
+    }
+
+    @Override
+    public Collection&lt;MUCRole&gt; getModerators() {
+<span class="nc" id="L2233">        List&lt;MUCRole&gt; moderators = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L2234" title="All 2 branches missed.">        for (MUCRole role : occupantsByFullJID.values()) {</span>
+<span class="nc bnc" id="L2235" title="All 2 branches missed.">            if (MUCRole.Role.moderator == role.getRole()) {</span>
+<span class="nc" id="L2236">                moderators.add(role);</span>
+            }
+<span class="nc" id="L2238">        }</span>
+<span class="nc" id="L2239">        return moderators;</span>
+    }
+
+    @Override
+    public Collection&lt;MUCRole&gt; getParticipants() {
+<span class="nc" id="L2244">        List&lt;MUCRole&gt; participants = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L2245" title="All 2 branches missed.">        for (MUCRole role : occupantsByFullJID.values()) {</span>
+<span class="nc bnc" id="L2246" title="All 2 branches missed.">            if (MUCRole.Role.participant == role.getRole()) {</span>
+<span class="nc" id="L2247">                participants.add(role);</span>
+            }
+<span class="nc" id="L2249">        }</span>
+<span class="nc" id="L2250">        return participants;</span>
+    }
+
+    @Override
+    public Presence addModerator(JID jid, MUCRole senderRole) throws ForbiddenException {
+<span class="nc bnc" id="L2255" title="All 2 branches missed.">        if (MUCRole.Affiliation.admin != senderRole.getAffiliation()</span>
+<span class="nc bnc" id="L2256" title="All 2 branches missed.">                &amp;&amp; MUCRole.Affiliation.owner != senderRole.getAffiliation()) {</span>
+<span class="nc" id="L2257">            throw new ForbiddenException();</span>
+        }
+        // Update the presence with the new role and inform all occupants
+        try {
+<span class="nc" id="L2261">            return changeOccupantRole(jid, MUCRole.Role.moderator);</span>
+        }
+<span class="nc" id="L2263">        catch (NotAllowedException e) {</span>
+            // We should never receive this exception....in theory
+<span class="nc" id="L2265">            return null;</span>
+        }
+    }
+
+    @Override
+    public Presence addParticipant(JID jid, String reason, MUCRole senderRole)
+            throws NotAllowedException, ForbiddenException {
+<span class="nc bnc" id="L2272" title="All 2 branches missed.">        if (MUCRole.Role.moderator != senderRole.getRole()) {</span>
+<span class="nc" id="L2273">            throw new ForbiddenException();</span>
+        }
+        // Update the presence with the new role and inform all occupants
+<span class="nc" id="L2276">        Presence updatedPresence = changeOccupantRole(jid, MUCRole.Role.participant);</span>
+<span class="nc bnc" id="L2277" title="All 2 branches missed.">        if (updatedPresence != null) {</span>
+<span class="nc" id="L2278">            Element frag = updatedPresence.getChildElement(</span>
+                    &quot;x&quot;, &quot;http://jabber.org/protocol/muc#user&quot;);
+            // Add the reason why the user was granted voice
+<span class="nc bnc" id="L2281" title="All 4 branches missed.">            if (reason != null &amp;&amp; reason.trim().length() &gt; 0) {</span>
+<span class="nc" id="L2282">                frag.element(&quot;item&quot;).addElement(&quot;reason&quot;).setText(reason);</span>
+            }
+        }
+<span class="nc" id="L2285">        return updatedPresence;</span>
+    }
+
+    @Override
+    public Presence addVisitor(JID jid, MUCRole senderRole) throws NotAllowedException,
+            ForbiddenException {
+<span class="nc bnc" id="L2291" title="All 2 branches missed.">        if (MUCRole.Role.moderator != senderRole.getRole()) {</span>
+<span class="nc" id="L2292">            throw new ForbiddenException();</span>
+        }
+<span class="nc" id="L2294">        return changeOccupantRole(jid, MUCRole.Role.visitor);</span>
+    }
+
+    @Override
+    public Presence kickOccupant(JID jid, JID actorJID, String actorNickname, String reason)
+            throws NotAllowedException {
+        // Update the presence with the new role and inform all occupants
+<span class="nc" id="L2301">        Presence updatedPresence = changeOccupantRole(jid, MUCRole.Role.none);</span>
+<span class="nc bnc" id="L2302" title="All 2 branches missed.">        if (updatedPresence != null) {</span>
+<span class="nc" id="L2303">            Element frag = updatedPresence.getChildElement(</span>
+                    &quot;x&quot;, &quot;http://jabber.org/protocol/muc#user&quot;);
+
+            // Add the status code 307 that indicates that the user was kicked
+<span class="nc" id="L2307">            frag.addElement(&quot;status&quot;).addAttribute(&quot;code&quot;, &quot;307&quot;);</span>
+            // Add the reason why the user was kicked
+<span class="nc bnc" id="L2309" title="All 4 branches missed.">            if (reason != null &amp;&amp; reason.trim().length() &gt; 0) {</span>
+<span class="nc" id="L2310">                frag.element(&quot;item&quot;).addElement(&quot;reason&quot;).setText(reason);</span>
+            }
+
+            // Effectively kick the occupant from the room
+<span class="nc" id="L2314">            kickPresence(updatedPresence, actorJID, actorNickname);</span>
+
+            //Inform the other occupants that user has been kicked
+<span class="nc" id="L2317">            broadcastPresence(updatedPresence, false);</span>
+        }
+<span class="nc" id="L2319">        return updatedPresence;</span>
+    }
+
+    /**
+     * Kicks the occupant from the room. This means that the occupant will receive an unavailable
+     * presence with the actor that initiated the kick (if any). The occupant will also be removed
+     * from the occupants lists.
+     *
+     * @param kickPresence the presence of the occupant to kick from the room.
+     * @param actorJID The JID of the actor that initiated the kick or {@code null} if the info
+     * @param nick The actor nickname.
+     * was not provided.
+     */
+    private void kickPresence(Presence kickPresence, JID actorJID, String nick) {
+        // Get the role(s) to kick
+<span class="nc" id="L2334">        List&lt;MUCRole&gt; occupants = new ArrayList&lt;&gt;(occupantsByNickname.get(kickPresence.getFrom().getResource().toLowerCase()));</span>
+<span class="nc bnc" id="L2335" title="All 2 branches missed.">        for (MUCRole kickedRole : occupants) {</span>
+            // Add the actor's JID that kicked this user from the room
+<span class="nc bnc" id="L2337" title="All 4 branches missed.">            if (actorJID != null &amp;&amp; actorJID.toString().length() &gt; 0) {</span>
+<span class="nc" id="L2338">                Element frag = kickPresence.getChildElement(</span>
+                        &quot;x&quot;, &quot;http://jabber.org/protocol/muc#user&quot;);
+<span class="nc" id="L2340">                Element actor = frag.element(&quot;item&quot;).addElement(&quot;actor&quot;);</span>
+<span class="nc" id="L2341">                actor.addAttribute(&quot;jid&quot;, actorJID.toBareJID());</span>
+<span class="nc bnc" id="L2342" title="All 2 branches missed.">                if (nick != null) {</span>
+<span class="nc" id="L2343">                    actor.addAttribute(&quot;nick&quot;, nick);</span>
+                }
+            }
+            // Send the unavailable presence to the banned user
+<span class="nc" id="L2347">            kickedRole.send(kickPresence);</span>
+            // Remove the occupant from the room's occupants lists
+<span class="nc" id="L2349">            OccupantLeftEvent event = new OccupantLeftEvent(this, kickedRole);</span>
+<span class="nc" id="L2350">            event.setOriginator(true);</span>
+<span class="nc" id="L2351">            event.run();</span>
+
+            // Remove the occupant from the room's occupants lists
+<span class="nc" id="L2354">            event = new OccupantLeftEvent(this, kickedRole);</span>
+<span class="nc" id="L2355">            CacheFactory.doClusterTask(event);</span>
+<span class="nc" id="L2356">        }</span>
+<span class="nc" id="L2357">    }</span>
+
+    @Override
+    public boolean canAnyoneDiscoverJID() {
+<span class="nc" id="L2361">        return canAnyoneDiscoverJID;</span>
+    }
+
+    @Override
+    public void setCanAnyoneDiscoverJID(boolean canAnyoneDiscoverJID) {
+<span class="nc" id="L2366">        this.canAnyoneDiscoverJID = canAnyoneDiscoverJID;</span>
+<span class="nc" id="L2367">    }</span>
+
+    @Override
+    public String canSendPrivateMessage() {
+<span class="nc bnc" id="L2371" title="All 2 branches missed.">        return canSendPrivateMessage == null ? &quot;anyone&quot; : canSendPrivateMessage;</span>
+    }
+
+    @Override
+    public void setCanSendPrivateMessage(String role) {
+<span class="nc bnc" id="L2376" title="All 2 branches missed.">        if ( role == null ) {</span>
+<span class="nc" id="L2377">            role = &quot;(null)&quot;;</span>
+        }
+
+<span class="nc bnc" id="L2380" title="All 15 branches missed.">        switch( role.toLowerCase() ) {</span>
+            case &quot;none&quot;:
+            case &quot;moderators&quot;:
+            case &quot;participants&quot;:
+            case &quot;anyone&quot;:
+<span class="nc" id="L2385">                this.canSendPrivateMessage = role.toLowerCase();</span>
+<span class="nc" id="L2386">                break;</span>
+            default:
+<span class="nc" id="L2388">                Log.warn( &quot;Illegal value for muc#roomconfig_allowpm: '{}'. Defaulting to 'anyone'&quot;, role.toLowerCase() );</span>
+<span class="nc" id="L2389">                this.canSendPrivateMessage = &quot;anyone&quot;;</span>
+        }
+<span class="nc" id="L2391">    }</span>
+    @Override
+    public boolean canOccupantsChangeSubject() {
+<span class="nc" id="L2394">        return canOccupantsChangeSubject;</span>
+    }
+
+    @Override
+    public void setCanOccupantsChangeSubject(boolean canOccupantsChangeSubject) {
+<span class="nc" id="L2399">        this.canOccupantsChangeSubject = canOccupantsChangeSubject;</span>
+<span class="nc" id="L2400">    }</span>
+
+    @Override
+    public boolean canOccupantsInvite() {
+<span class="nc" id="L2404">        return canOccupantsInvite;</span>
+    }
+
+    @Override
+    public void setCanOccupantsInvite(boolean canOccupantsInvite) {
+<span class="nc" id="L2409">        this.canOccupantsInvite = canOccupantsInvite;</span>
+<span class="nc" id="L2410">    }</span>
+
+    @Override
+    public String getNaturalLanguageName() {
+<span class="nc" id="L2414">        return naturalLanguageName;</span>
+    }
+
+    @Override
+    public void setNaturalLanguageName(String naturalLanguageName) {
+<span class="nc" id="L2419">        this.naturalLanguageName = naturalLanguageName;</span>
+<span class="nc" id="L2420">    }</span>
+
+    @Override
+    public String getDescription() {
+<span class="nc" id="L2424">        return description;</span>
+    }
+
+    @Override
+    public void setDescription(String description) {
+<span class="nc" id="L2429">        this.description = description;</span>
+<span class="nc" id="L2430">    }</span>
+
+    @Override
+    public boolean isMembersOnly() {
+<span class="nc" id="L2434">        return membersOnly;</span>
+    }
+
+    @Override
+    public List&lt;Presence&gt; setMembersOnly(boolean membersOnly) {
+<span class="nc" id="L2439">        List&lt;Presence&gt; presences = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L2440" title="All 4 branches missed.">        if (membersOnly &amp;&amp; !this.membersOnly) {</span>
+            // If the room was not members-only and now it is, kick occupants that aren't member
+            // of the room
+<span class="nc bnc" id="L2443" title="All 2 branches missed.">            for (MUCRole occupant : occupantsByFullJID.values()) {</span>
+<span class="nc bnc" id="L2444" title="All 2 branches missed.">                if (occupant.getAffiliation().compareTo(MUCRole.Affiliation.member) &gt; 0) {</span>
+                    try {
+<span class="nc" id="L2446">                        presences.add(kickOccupant(occupant.getRoleAddress(), null, null,</span>
+<span class="nc" id="L2447">                                LocaleUtils.getLocalizedString(&quot;muc.roomIsNowMembersOnly&quot;)));</span>
+                    }
+<span class="nc" id="L2449">                    catch (NotAllowedException e) {</span>
+<span class="nc" id="L2450">                        Log.error(e.getMessage(), e);</span>
+<span class="nc" id="L2451">                    }</span>
+                }
+<span class="nc" id="L2453">            }</span>
+        }
+<span class="nc" id="L2455">        this.membersOnly = membersOnly;</span>
+<span class="nc" id="L2456">        return presences;</span>
+    }
+
+    @Override
+    public boolean isLogEnabled() {
+<span class="nc" id="L2461">        return logEnabled;</span>
+    }
+
+    @Override
+    public void setLogEnabled(boolean logEnabled) {
+<span class="nc" id="L2466">        this.logEnabled = logEnabled;</span>
+<span class="nc" id="L2467">    }</span>
+
+    @Override
+    public void setLoginRestrictedToNickname(boolean restricted) {
+<span class="nc" id="L2471">        this.loginRestrictedToNickname = restricted;</span>
+<span class="nc" id="L2472">    }</span>
+
+    @Override
+    public boolean isLoginRestrictedToNickname() {
+<span class="nc" id="L2476">        return loginRestrictedToNickname;</span>
+    }
+
+    @Override
+    public void setChangeNickname(boolean canChange) {
+<span class="nc" id="L2481">        this.canChangeNickname = canChange;</span>
+<span class="nc" id="L2482">    }</span>
+
+    @Override
+    public boolean canChangeNickname() {
+<span class="nc" id="L2486">        return canChangeNickname;</span>
+    }
+
+    @Override
+    public void setRegistrationEnabled(boolean registrationEnabled) {
+<span class="nc" id="L2491">        this.registrationEnabled = registrationEnabled;</span>
+<span class="nc" id="L2492">    }</span>
+
+    @Override
+    public boolean isRegistrationEnabled() {
+<span class="nc" id="L2496">        return registrationEnabled;</span>
+    }
+
+    @Override
+    public int getMaxUsers() {
+<span class="nc" id="L2501">        return maxUsers;</span>
+    }
+
+    @Override
+    public void setMaxUsers(int maxUsers) {
+<span class="nc" id="L2506">        this.maxUsers = maxUsers;</span>
+<span class="nc" id="L2507">    }</span>
+
+    @Override
+    public boolean isModerated() {
+<span class="nc" id="L2511">        return moderated;</span>
+    }
+
+    @Override
+    public void setModerated(boolean moderated) {
+<span class="nc" id="L2516">        this.moderated = moderated;</span>
+<span class="nc" id="L2517">    }</span>
+
+    @Override
+    public String getPassword() {
+<span class="nc" id="L2521">        return password;</span>
+    }
+
+    @Override
+    public void setPassword(String password) {
+<span class="nc" id="L2526">        this.password = password;</span>
+<span class="nc" id="L2527">    }</span>
+
+    @Override
+    public boolean isPasswordProtected() {
+<span class="nc bnc" id="L2531" title="All 4 branches missed.">        return password != null &amp;&amp; password.trim().length() &gt; 0;</span>
+    }
+
+    @Override
+    public boolean isPersistent() {
+<span class="nc" id="L2536">        return persistent;</span>
+    }
+
+    @Override
+    public boolean wasSavedToDB() {
+<span class="nc bnc" id="L2541" title="All 4 branches missed.">        return isPersistent() &amp;&amp; savedToDB;</span>
+    }
+
+    @Override
+    public void setSavedToDB(boolean saved) {
+<span class="nc" id="L2546">        this.savedToDB = saved;</span>
+<span class="nc" id="L2547">    }</span>
+
+    @Override
+    public void setPersistent(boolean persistent) {
+<span class="nc" id="L2551">        this.persistent = persistent;</span>
+<span class="nc" id="L2552">    }</span>
+
+    @Override
+    public boolean isPublicRoom() {
+<span class="nc bnc" id="L2556" title="All 4 branches missed.">        return !isDestroyed &amp;&amp; publicRoom;</span>
+    }
+
+    @Override
+    public void setPublicRoom(boolean publicRoom) {
+<span class="nc" id="L2561">        this.publicRoom = publicRoom;</span>
+<span class="nc" id="L2562">    }</span>
+
+    @Override
+    public List&lt;String&gt; getRolesToBroadcastPresence() {
+<span class="nc" id="L2566">        return Collections.unmodifiableList(rolesToBroadcastPresence);</span>
+    }
+
+    @Override
+    public void setRolesToBroadcastPresence(List&lt;String&gt; rolesToBroadcastPresence) {
+        // TODO If the list changes while there are occupants in the room we must send available or
+        // unavailable presences of the affected occupants to the rest of the occupants
+<span class="nc" id="L2573">        this.rolesToBroadcastPresence = rolesToBroadcastPresence;</span>
+<span class="nc" id="L2574">    }</span>
+
+    /**
+     * Returns true if we need to check whether a presence could be sent or not.
+     *
+     * @return true if we need to check whether a presence could be sent or not.
+     */
+    private boolean hasToCheckRoleToBroadcastPresence() {
+        // For performance reasons the check is done based on the size of the collection.
+<span class="nc bnc" id="L2583" title="All 2 branches missed.">        return rolesToBroadcastPresence.size() &lt; 3;</span>
+    }
+
+    @Override
+    public boolean canBroadcastPresence(String roleToBroadcast) {
+<span class="nc bnc" id="L2588" title="All 4 branches missed.">        return &quot;none&quot;.equals(roleToBroadcast) || rolesToBroadcastPresence.contains(roleToBroadcast);</span>
+    }
+
+    @Override
+    public void lock(MUCRole senderRole) throws ForbiddenException {
+<span class="nc bnc" id="L2593" title="All 2 branches missed.">        if (MUCRole.Affiliation.owner != senderRole.getAffiliation()) {</span>
+<span class="nc" id="L2594">            throw new ForbiddenException();</span>
+        }
+<span class="nc bnc" id="L2596" title="All 2 branches missed.">        if (isLocked()) {</span>
+            // Do nothing if the room was already locked
+<span class="nc" id="L2598">            return;</span>
+        }
+<span class="nc" id="L2600">        setLocked(true);</span>
+<span class="nc" id="L2601">    }</span>
+
+    @Override
+    public void unlock(MUCRole senderRole) throws ForbiddenException {
+<span class="nc bnc" id="L2605" title="All 2 branches missed.">        if (MUCRole.Affiliation.owner != senderRole.getAffiliation()) {</span>
+<span class="nc" id="L2606">            throw new ForbiddenException();</span>
+        }
+<span class="nc bnc" id="L2608" title="All 2 branches missed.">        if (!isLocked()) {</span>
+            // Do nothing if the room was already unlocked
+<span class="nc" id="L2610">            return;</span>
+        }
+<span class="nc" id="L2612">        setLocked(false);</span>
+<span class="nc" id="L2613">    }</span>
+
+    private void setLocked(boolean locked) {
+<span class="nc bnc" id="L2616" title="All 2 branches missed.">        if (locked) {</span>
+<span class="nc" id="L2617">            this.lockedTime = System.currentTimeMillis();</span>
+        }
+        else {
+<span class="nc" id="L2620">            this.lockedTime = 0;</span>
+        }
+<span class="nc" id="L2622">        MUCPersistenceManager.updateRoomLock(this);</span>
+<span class="nc" id="L2623">    }</span>
+
+    /**
+     * Sets the date when the room was locked. Initially when the room is created it is locked so
+     * the locked date is the creation date of the room. Afterwards, the room may be manually
+     * locked and unlocked so the locked date may be in these cases different than the creation
+     * date. A Date with time 0 means that the the room is unlocked.
+     *
+     * @param lockedTime the date when the room was locked.
+     */
+    void setLockedDate(Date lockedTime) {
+<span class="nc" id="L2634">        this.lockedTime = lockedTime.getTime();</span>
+<span class="nc" id="L2635">    }</span>
+
+    /**
+     * Returns the date when the room was locked. Initially when the room is created it is locked so
+     * the locked date is the creation date of the room. Afterwards, the room may be manually
+     * locked and unlocked so the locked date may be in these cases different than the creation
+     * date. When the room is unlocked a Date with time 0 is returned.
+     *
+     * @return the date when the room was locked.
+     */
+    Date getLockedDate() {
+<span class="nc" id="L2646">        return new Date(lockedTime);</span>
+    }
+
+    @Override
+    public List&lt;Presence&gt; addAdmins(List&lt;JID&gt; newAdmins, MUCRole senderRole)
+            throws ForbiddenException, ConflictException {
+<span class="nc" id="L2652">        List&lt;Presence&gt; answer = new ArrayList&lt;&gt;(newAdmins.size());</span>
+<span class="nc bnc" id="L2653" title="All 2 branches missed.">        for (JID newAdmin : newAdmins) {</span>
+<span class="nc" id="L2654">            final JID bareJID = newAdmin.asBareJID();</span>
+<span class="nc bnc" id="L2655" title="All 2 branches missed.">            if (!admins.contains(bareJID)) {</span>
+<span class="nc" id="L2656">                answer.addAll(addAdmin(bareJID, senderRole));</span>
+            }
+<span class="nc" id="L2658">        }</span>
+<span class="nc" id="L2659">        return answer;</span>
+    }
+
+    @Override
+    public List&lt;Presence&gt; addOwners(List&lt;JID&gt; newOwners, MUCRole senderRole)
+            throws ForbiddenException {
+<span class="nc" id="L2665">        List&lt;Presence&gt; answer = new ArrayList&lt;&gt;(newOwners.size());</span>
+<span class="nc bnc" id="L2666" title="All 2 branches missed.">        for (JID newOwner : newOwners) {</span>
+<span class="nc" id="L2667">            final JID bareJID = newOwner.asBareJID();</span>
+<span class="nc bnc" id="L2668" title="All 2 branches missed.">            if (!owners.contains(newOwner)) {</span>
+<span class="nc" id="L2669">                answer.addAll(addOwner(bareJID, senderRole));</span>
+            }
+<span class="nc" id="L2671">        }</span>
+<span class="nc" id="L2672">        return answer;</span>
+    }
+
+    @Override
+    public void saveToDB() {
+        // Make the room persistent
+<span class="nc" id="L2678">        MUCPersistenceManager.saveToDB(this);</span>
+<span class="nc bnc" id="L2679" title="All 2 branches missed.">        if (!savedToDB) {</span>
+            // Set that the room is now in the DB
+<span class="nc" id="L2681">            savedToDB = true;</span>
+            // Notify other cluster nodes that the room is now in DB
+<span class="nc" id="L2683">            CacheFactory.doClusterTask(new RoomUpdatedEvent(this)); </span>
+            // Save the existing room owners to the DB
+<span class="nc bnc" id="L2685" title="All 2 branches missed.">            for (JID owner : owners) {</span>
+<span class="nc" id="L2686">                MUCPersistenceManager.saveAffiliationToDB(</span>
+                    this,
+                    owner,
+                    null,
+                    MUCRole.Affiliation.owner,
+                    MUCRole.Affiliation.none);
+<span class="nc" id="L2692">            }</span>
+            // Save the existing room admins to the DB
+<span class="nc bnc" id="L2694" title="All 2 branches missed.">            for (JID admin : admins) {</span>
+<span class="nc" id="L2695">                MUCPersistenceManager.saveAffiliationToDB(</span>
+                    this,
+                    admin,
+                    null,
+                    MUCRole.Affiliation.admin,
+                    MUCRole.Affiliation.none);
+<span class="nc" id="L2701">            }</span>
+            // Save the existing room members to the DB
+<span class="nc bnc" id="L2703" title="All 2 branches missed.">            for (JID bareJID : members.keySet()) {</span>
+<span class="nc" id="L2704">                MUCPersistenceManager.saveAffiliationToDB(this, bareJID, members.get(bareJID),</span>
+                        MUCRole.Affiliation.member, MUCRole.Affiliation.none);
+<span class="nc" id="L2706">            }</span>
+            // Save the existing room outcasts to the DB
+<span class="nc bnc" id="L2708" title="All 2 branches missed.">            for (JID outcast : outcasts) {</span>
+<span class="nc" id="L2709">                MUCPersistenceManager.saveAffiliationToDB(</span>
+                    this,
+                    outcast,
+                    null,
+                    MUCRole.Affiliation.outcast,
+                    MUCRole.Affiliation.none);
+<span class="nc" id="L2715">            }</span>
+        }
+<span class="nc" id="L2717">    }</span>
+
+    @Override
+    public void writeExternal(ObjectOutput out) throws IOException {
+<span class="nc" id="L2721">        ExternalizableUtil.getInstance().writeSafeUTF(out, name);</span>
+<span class="nc" id="L2722">        ExternalizableUtil.getInstance().writeLong(out, startTime);</span>
+<span class="nc" id="L2723">        ExternalizableUtil.getInstance().writeLong(out, lockedTime);</span>
+<span class="nc" id="L2724">        ExternalizableUtil.getInstance().writeSerializableCollection(out, owners);</span>
+<span class="nc" id="L2725">        ExternalizableUtil.getInstance().writeSerializableCollection(out, admins);</span>
+<span class="nc" id="L2726">        ExternalizableUtil.getInstance().writeSerializableMap(out, members);</span>
+<span class="nc" id="L2727">        ExternalizableUtil.getInstance().writeSerializableCollection(out, outcasts);</span>
+<span class="nc" id="L2728">        ExternalizableUtil.getInstance().writeSafeUTF(out, naturalLanguageName);</span>
+<span class="nc" id="L2729">        ExternalizableUtil.getInstance().writeSafeUTF(out, description);</span>
+<span class="nc" id="L2730">        ExternalizableUtil.getInstance().writeBoolean(out, canOccupantsChangeSubject);</span>
+<span class="nc" id="L2731">        ExternalizableUtil.getInstance().writeInt(out, maxUsers);</span>
+<span class="nc" id="L2732">        ExternalizableUtil.getInstance().writeStringList(out, rolesToBroadcastPresence);</span>
+<span class="nc" id="L2733">        ExternalizableUtil.getInstance().writeBoolean(out, publicRoom);</span>
+<span class="nc" id="L2734">        ExternalizableUtil.getInstance().writeBoolean(out, persistent);</span>
+<span class="nc" id="L2735">        ExternalizableUtil.getInstance().writeBoolean(out, moderated);</span>
+<span class="nc" id="L2736">        ExternalizableUtil.getInstance().writeBoolean(out, membersOnly);</span>
+<span class="nc" id="L2737">        ExternalizableUtil.getInstance().writeBoolean(out, canOccupantsInvite);</span>
+<span class="nc" id="L2738">        ExternalizableUtil.getInstance().writeSafeUTF(out, password);</span>
+<span class="nc" id="L2739">        ExternalizableUtil.getInstance().writeBoolean(out, canAnyoneDiscoverJID);</span>
+<span class="nc" id="L2740">        ExternalizableUtil.getInstance().writeBoolean(out, logEnabled);</span>
+<span class="nc" id="L2741">        ExternalizableUtil.getInstance().writeBoolean(out, loginRestrictedToNickname);</span>
+<span class="nc" id="L2742">        ExternalizableUtil.getInstance().writeBoolean(out, canChangeNickname);</span>
+<span class="nc" id="L2743">        ExternalizableUtil.getInstance().writeBoolean(out, registrationEnabled);</span>
+<span class="nc" id="L2744">        ExternalizableUtil.getInstance().writeSafeUTF(out, subject);</span>
+<span class="nc" id="L2745">        ExternalizableUtil.getInstance().writeLong(out, roomID);</span>
+<span class="nc" id="L2746">        ExternalizableUtil.getInstance().writeLong(out, creationDate.getTime());</span>
+<span class="nc bnc" id="L2747" title="All 2 branches missed.">        ExternalizableUtil.getInstance().writeBoolean(out, modificationDate != null);</span>
+<span class="nc bnc" id="L2748" title="All 2 branches missed.">        if (modificationDate != null) {</span>
+<span class="nc" id="L2749">            ExternalizableUtil.getInstance().writeLong(out, modificationDate.getTime());</span>
+        }
+<span class="nc bnc" id="L2751" title="All 2 branches missed.">        ExternalizableUtil.getInstance().writeBoolean(out, emptyDate != null);</span>
+<span class="nc bnc" id="L2752" title="All 2 branches missed.">        if (emptyDate != null) {</span>
+<span class="nc" id="L2753">            ExternalizableUtil.getInstance().writeLong(out, emptyDate.getTime());</span>
+        }
+<span class="nc" id="L2755">        ExternalizableUtil.getInstance().writeBoolean(out, savedToDB);</span>
+<span class="nc" id="L2756">        ExternalizableUtil.getInstance().writeSafeUTF(out, mucService.getServiceName());</span>
+<span class="nc" id="L2757">    }</span>
+
+    @Override
+    public void readExternal(ObjectInput in) throws IOException, ClassNotFoundException {
+<span class="nc" id="L2761">        name = ExternalizableUtil.getInstance().readSafeUTF(in);</span>
+<span class="nc" id="L2762">        startTime = ExternalizableUtil.getInstance().readLong(in);</span>
+<span class="nc" id="L2763">        lockedTime = ExternalizableUtil.getInstance().readLong(in);</span>
+<span class="nc" id="L2764">        ExternalizableUtil.getInstance().readSerializableCollection(in, owners, getClass().getClassLoader());</span>
+<span class="nc" id="L2765">        ExternalizableUtil.getInstance().readSerializableCollection(in, admins, getClass().getClassLoader());</span>
+<span class="nc" id="L2766">        ExternalizableUtil.getInstance().readSerializableMap(in, members, getClass().getClassLoader());</span>
+<span class="nc" id="L2767">        ExternalizableUtil.getInstance().readSerializableCollection(in, outcasts, getClass().getClassLoader());</span>
+<span class="nc" id="L2768">        naturalLanguageName = ExternalizableUtil.getInstance().readSafeUTF(in);</span>
+<span class="nc" id="L2769">        description = ExternalizableUtil.getInstance().readSafeUTF(in);</span>
+<span class="nc" id="L2770">        canOccupantsChangeSubject = ExternalizableUtil.getInstance().readBoolean(in);</span>
+<span class="nc" id="L2771">        maxUsers = ExternalizableUtil.getInstance().readInt(in);</span>
+<span class="nc" id="L2772">        rolesToBroadcastPresence.addAll(ExternalizableUtil.getInstance().readStringList(in));</span>
+<span class="nc" id="L2773">        publicRoom = ExternalizableUtil.getInstance().readBoolean(in);</span>
+<span class="nc" id="L2774">        persistent = ExternalizableUtil.getInstance().readBoolean(in);</span>
+<span class="nc" id="L2775">        moderated = ExternalizableUtil.getInstance().readBoolean(in);</span>
+<span class="nc" id="L2776">        membersOnly = ExternalizableUtil.getInstance().readBoolean(in);</span>
+<span class="nc" id="L2777">        canOccupantsInvite = ExternalizableUtil.getInstance().readBoolean(in);</span>
+<span class="nc" id="L2778">        password = ExternalizableUtil.getInstance().readSafeUTF(in);</span>
+<span class="nc" id="L2779">        canAnyoneDiscoverJID = ExternalizableUtil.getInstance().readBoolean(in);</span>
+<span class="nc" id="L2780">        logEnabled = ExternalizableUtil.getInstance().readBoolean(in);</span>
+<span class="nc" id="L2781">        loginRestrictedToNickname = ExternalizableUtil.getInstance().readBoolean(in);</span>
+<span class="nc" id="L2782">        canChangeNickname = ExternalizableUtil.getInstance().readBoolean(in);</span>
+<span class="nc" id="L2783">        registrationEnabled = ExternalizableUtil.getInstance().readBoolean(in);</span>
+<span class="nc" id="L2784">        subject = ExternalizableUtil.getInstance().readSafeUTF(in);</span>
+<span class="nc" id="L2785">        roomID = ExternalizableUtil.getInstance().readLong(in);</span>
+<span class="nc" id="L2786">        creationDate = new Date(ExternalizableUtil.getInstance().readLong(in));</span>
+<span class="nc bnc" id="L2787" title="All 2 branches missed.">        if (ExternalizableUtil.getInstance().readBoolean(in)) {</span>
+<span class="nc" id="L2788">            modificationDate = new Date(ExternalizableUtil.getInstance().readLong(in));</span>
+        }
+<span class="nc bnc" id="L2790" title="All 2 branches missed.">        if (ExternalizableUtil.getInstance().readBoolean(in)) {</span>
+<span class="nc" id="L2791">            emptyDate = new Date(ExternalizableUtil.getInstance().readLong(in));</span>
+        }
+<span class="nc" id="L2793">        savedToDB = ExternalizableUtil.getInstance().readBoolean(in);</span>
+<span class="nc" id="L2794">        String subdomain = ExternalizableUtil.getInstance().readSafeUTF(in);</span>
+<span class="nc" id="L2795">        mucService = XMPPServer.getInstance().getMultiUserChatManager().getMultiUserChatService(subdomain);</span>
+<span class="nc bnc" id="L2796" title="All 2 branches missed.">        if (mucService == null) throw new IllegalArgumentException(&quot;MUC service not found for subdomain: &quot; + subdomain);</span>
+<span class="nc" id="L2797">        roomHistory = new MUCRoomHistory(this, new HistoryStrategy(mucService.getHistoryStrategy()));</span>
+
+<span class="nc" id="L2799">        PacketRouter packetRouter = XMPPServer.getInstance().getPacketRouter();</span>
+<span class="nc" id="L2800">        this.iqOwnerHandler = new IQOwnerHandler(this, packetRouter);</span>
+<span class="nc" id="L2801">        this.iqAdminHandler = new IQAdminHandler(this, packetRouter);</span>
+
+<span class="nc" id="L2803">        router = packetRouter;</span>
+<span class="nc" id="L2804">    }</span>
+
+    public void updateConfiguration(LocalMUCRoom otherRoom) {
+<span class="nc" id="L2807">        startTime = otherRoom.startTime;</span>
+<span class="nc" id="L2808">        lockedTime = otherRoom.lockedTime;</span>
+<span class="nc" id="L2809">        owners = otherRoom.owners;</span>
+<span class="nc" id="L2810">        admins = otherRoom.admins;</span>
+<span class="nc" id="L2811">        members = otherRoom.members;</span>
+<span class="nc" id="L2812">        outcasts = otherRoom.outcasts;</span>
+<span class="nc" id="L2813">        naturalLanguageName = otherRoom.naturalLanguageName;</span>
+<span class="nc" id="L2814">        description = otherRoom.description;</span>
+<span class="nc" id="L2815">        canOccupantsChangeSubject = otherRoom.canOccupantsChangeSubject;</span>
+<span class="nc" id="L2816">        maxUsers = otherRoom.maxUsers;</span>
+<span class="nc" id="L2817">        rolesToBroadcastPresence = otherRoom.rolesToBroadcastPresence;</span>
+<span class="nc" id="L2818">        publicRoom = otherRoom.publicRoom;</span>
+<span class="nc" id="L2819">        persistent = otherRoom.persistent;</span>
+<span class="nc" id="L2820">        moderated = otherRoom.moderated;</span>
+<span class="nc" id="L2821">        membersOnly = otherRoom.membersOnly;</span>
+<span class="nc" id="L2822">        canOccupantsInvite = otherRoom.canOccupantsInvite;</span>
+<span class="nc" id="L2823">        password = otherRoom.password;</span>
+<span class="nc" id="L2824">        canAnyoneDiscoverJID = otherRoom.canAnyoneDiscoverJID;</span>
+<span class="nc" id="L2825">        logEnabled = otherRoom.logEnabled;</span>
+<span class="nc" id="L2826">        loginRestrictedToNickname = otherRoom.loginRestrictedToNickname;</span>
+<span class="nc" id="L2827">        canChangeNickname = otherRoom.canChangeNickname;</span>
+<span class="nc" id="L2828">        registrationEnabled = otherRoom.registrationEnabled;</span>
+<span class="nc" id="L2829">        subject = otherRoom.subject;</span>
+<span class="nc" id="L2830">        roomID = otherRoom.roomID;</span>
+<span class="nc" id="L2831">        creationDate = otherRoom.creationDate;</span>
+<span class="nc" id="L2832">        modificationDate = otherRoom.modificationDate;</span>
+<span class="nc" id="L2833">        emptyDate = otherRoom.emptyDate;</span>
+<span class="nc" id="L2834">        savedToDB = otherRoom.savedToDB;</span>
+<span class="nc" id="L2835">        mucService = otherRoom.mucService;</span>
+<span class="nc" id="L2836">    }</span>
+
+    /*
+     * (non-Javadoc)
+     * @see org.jivesoftware.util.resultsetmanager.Result#getUID()
+     */
+    @Override
+    public String getUID()
+    {
+        // name is unique for each one particular MUC service.
+<span class="nc" id="L2846">        return name;</span>
+    }
+
+    @Override
+    public int hashCode() {
+<span class="nc" id="L2851">        final int prime = 31;</span>
+<span class="nc" id="L2852">        int result = 1;</span>
+<span class="nc bnc" id="L2853" title="All 2 branches missed.">        result = prime * result</span>
+<span class="nc" id="L2854">                + ((creationDate == null) ? 0 : creationDate.hashCode());</span>
+<span class="nc bnc" id="L2855" title="All 2 branches missed.">        result = prime * result</span>
+<span class="nc" id="L2856">                + ((description == null) ? 0 : description.hashCode());</span>
+<span class="nc bnc" id="L2857" title="All 2 branches missed.">        result = prime * result + ((name == null) ? 0 : name.hashCode());</span>
+<span class="nc bnc" id="L2858" title="All 2 branches missed.">        result = prime * result</span>
+<span class="nc" id="L2859">                + ((password == null) ? 0 : password.hashCode());</span>
+<span class="nc" id="L2860">        result = prime * result + (int) (roomID ^ (roomID &gt;&gt;&gt; 32));</span>
+<span class="nc" id="L2861">        return result;</span>
+    }
+
+    @Override
+    public boolean equals(Object obj) {
+<span class="nc bnc" id="L2866" title="All 2 branches missed.">        if (this == obj)</span>
+<span class="nc" id="L2867">            return true;</span>
+<span class="nc bnc" id="L2868" title="All 2 branches missed.">        if (obj == null)</span>
+<span class="nc" id="L2869">            return false;</span>
+<span class="nc bnc" id="L2870" title="All 2 branches missed.">        if (getClass() != obj.getClass())</span>
+<span class="nc" id="L2871">            return false;</span>
+<span class="nc" id="L2872">        LocalMUCRoom other = (LocalMUCRoom) obj;</span>
+<span class="nc bnc" id="L2873" title="All 2 branches missed.">        if (creationDate == null) {</span>
+<span class="nc bnc" id="L2874" title="All 2 branches missed.">            if (other.creationDate != null)</span>
+<span class="nc" id="L2875">                return false;</span>
+<span class="nc bnc" id="L2876" title="All 2 branches missed.">        } else if (!creationDate.equals(other.creationDate))</span>
+<span class="nc" id="L2877">            return false;</span>
+<span class="nc bnc" id="L2878" title="All 2 branches missed.">        if (description == null) {</span>
+<span class="nc bnc" id="L2879" title="All 2 branches missed.">            if (other.description != null)</span>
+<span class="nc" id="L2880">                return false;</span>
+<span class="nc bnc" id="L2881" title="All 2 branches missed.">        } else if (!description.equals(other.description))</span>
+<span class="nc" id="L2882">            return false;</span>
+<span class="nc bnc" id="L2883" title="All 2 branches missed.">        if (name == null) {</span>
+<span class="nc bnc" id="L2884" title="All 2 branches missed.">            if (other.name != null)</span>
+<span class="nc" id="L2885">                return false;</span>
+<span class="nc bnc" id="L2886" title="All 2 branches missed.">        } else if (!name.equals(other.name))</span>
+<span class="nc" id="L2887">            return false;</span>
+<span class="nc bnc" id="L2888" title="All 2 branches missed.">        if (password == null) {</span>
+<span class="nc bnc" id="L2889" title="All 2 branches missed.">            if (other.password != null)</span>
+<span class="nc" id="L2890">                return false;</span>
+<span class="nc bnc" id="L2891" title="All 2 branches missed.">        } else if (!password.equals(other.password))</span>
+<span class="nc" id="L2892">            return false;</span>
+<span class="nc bnc" id="L2893" title="All 2 branches missed.">        if (roomID != other.roomID)</span>
+<span class="nc" id="L2894">            return false;</span>
+<span class="nc" id="L2895">        return true;</span>
+    }
+    
+    // overrides for important Group events
+
+    @Override
+    public void groupDeleting(Group group, Map params) {
+        // remove the group from this room's affiliations
+<span class="nc" id="L2903">        GroupJID groupJID = group.getJID();</span>
+        try {
+<span class="nc" id="L2905">            addNone(groupJID, getRole());</span>
+<span class="nc" id="L2906">        } catch (Exception ex) {</span>
+<span class="nc" id="L2907">            Log.error(&quot;Failed to remove deleted group from affiliation lists: &quot; + groupJID, ex);</span>
+<span class="nc" id="L2908">        }</span>
+<span class="nc" id="L2909">    }</span>
+
+    @Override
+    public void groupModified(Group group, Map params) {
+        // check the affiliation lists for the old group jid, replace with a new group jid
+<span class="nc bnc" id="L2914" title="All 2 branches missed.">        if (&quot;nameModified&quot;.equals(params.get(&quot;type&quot;))) {</span>
+<span class="nc" id="L2915">            GroupJID originalJID = (GroupJID) params.get(&quot;originalJID&quot;);</span>
+<span class="nc" id="L2916">            GroupJID newJID = group.getJID();</span>
+            try {
+<span class="nc bnc" id="L2918" title="All 2 branches missed.">                if (owners.contains(originalJID)) {</span>
+<span class="nc" id="L2919">                    addOwner(newJID, getRole());</span>
+<span class="nc bnc" id="L2920" title="All 2 branches missed.">                } else if (admins.contains(originalJID)) {</span>
+<span class="nc" id="L2921">                    addAdmin(newJID, getRole());</span>
+<span class="nc bnc" id="L2922" title="All 2 branches missed.">                } else if (outcasts.contains(originalJID)) {</span>
+<span class="nc" id="L2923">                    addOutcast(newJID, null, getRole());</span>
+<span class="nc bnc" id="L2924" title="All 2 branches missed.">                } else if (members.containsKey(originalJID)) {</span>
+<span class="nc" id="L2925">                    addMember(newJID, null, getRole());</span>
+                }
+<span class="nc" id="L2927">                addNone(originalJID, getRole());</span>
+<span class="nc" id="L2928">            } catch (Exception ex) {</span>
+<span class="nc" id="L2929">                Log.error(&quot;Failed to update group affiliation for &quot; + newJID, ex);</span>
+<span class="nc" id="L2930">            }</span>
+        }
+<span class="nc" id="L2932">    }</span>
+
+    @Override
+    public void memberAdded(Group group, Map params) {
+<span class="nc" id="L2936">        applyAffiliationChangeAndSendPresence(new JID((String)params.get(&quot;member&quot;)));</span>
+<span class="nc" id="L2937">    }</span>
+
+    @Override
+    public void memberRemoved(Group group, Map params) {
+<span class="nc" id="L2941">        applyAffiliationChangeAndSendPresence(new JID((String)params.get(&quot;member&quot;)));</span>
+<span class="nc" id="L2942">    }</span>
+
+    @Override
+    public void adminAdded(Group group, Map params) {
+<span class="nc" id="L2946">        applyAffiliationChangeAndSendPresence(new JID((String)params.get(&quot;admin&quot;)));</span>
+<span class="nc" id="L2947">    }</span>
+
+    @Override
+    public void adminRemoved(Group group, Map params) {
+<span class="nc" id="L2951">        applyAffiliationChangeAndSendPresence(new JID((String)params.get(&quot;admin&quot;)));</span>
+<span class="nc" id="L2952">    }</span>
+    
+    private void applyAffiliationChangeAndSendPresence(JID groupMember) {
+<span class="nc" id="L2955">        List&lt;Presence&gt; presences = applyAffiliationChange(getRole(), groupMember, null);</span>
+<span class="nc bnc" id="L2956" title="All 2 branches missed.">        for (Presence presence : presences) {</span>
+<span class="nc" id="L2957">            send(presence);</span>
+<span class="nc" id="L2958">        }</span>
+<span class="nc" id="L2959">    }</span>
+
+    @Override
+    public void groupCreated(Group group, Map params) {
+        // ignore
+<span class="nc" id="L2964">    }</span>
+    
+    
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

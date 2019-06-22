@@ -1,0 +1,764 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>StanzaHandler.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.net</a> &gt; <span class="el_source">StanzaHandler.java</span></div><h1>StanzaHandler.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.net;
+
+import org.dom4j.Element;
+import org.dom4j.io.XMPPPacketReader;
+import org.jivesoftware.openfire.Connection;
+import org.jivesoftware.openfire.PacketRouter;
+import org.jivesoftware.openfire.StreamIDFactory;
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.auth.UnauthorizedException;
+import org.jivesoftware.openfire.http.FlashCrossDomainServlet;
+import org.jivesoftware.openfire.session.LocalSession;
+import org.jivesoftware.openfire.session.Session;
+import org.jivesoftware.openfire.spi.BasicStreamIDFactory;
+import org.jivesoftware.openfire.streammanagement.StreamManager;
+import org.jivesoftware.util.JiveGlobals;
+import org.jivesoftware.util.LocaleUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmlpull.v1.XmlPullParser;
+import org.xmlpull.v1.XmlPullParserException;
+import org.xmpp.packet.*;
+
+import java.io.IOException;
+import java.io.StringReader;
+import java.util.List;
+
+/**
+ * A StanzaHandler is the main responsible for handling incoming stanzas. Some stanzas like startTLS
+ * are totally managed by this class. The rest of the stanzas are just forwarded to the router.
+ *
+ * @author Gaston Dombiak
+ */
+public abstract class StanzaHandler {
+
+<span class="nc" id="L51">    private static final Logger Log = LoggerFactory.getLogger(StanzaHandler.class);</span>
+
+    /**
+     * A factory that generates random stream IDs
+     */
+<span class="nc" id="L56">    private static final StreamIDFactory STREAM_ID_FACTORY = new BasicStreamIDFactory();</span>
+
+    /**
+     * The utf-8 charset for decoding and encoding Jabber packet streams.
+     */
+<span class="nc" id="L61">    protected static String CHARSET = &quot;UTF-8&quot;;</span>
+    protected Connection connection;
+
+    // DANIELE: Indicate if a session is already created
+<span class="nc" id="L65">    private boolean sessionCreated = false;</span>
+
+    // Flag that indicates that the client requested to use TLS and TLS has been negotiated. Once the
+    // client sent a new initial stream header the value will return to false.
+<span class="nc" id="L69">    private boolean startedTLS = false;</span>
+    // Flag that indicates that the client requested to be authenticated. Once the
+    // authentication process is over the value will return to false.
+<span class="nc" id="L72">    private boolean startedSASL = false;</span>
+    /**
+     * SASL status based on the last SASL interaction
+     */
+    private SASLAuthentication.Status saslStatus;
+
+    // DANIELE: Indicate if a stream:stream is arrived to complete compression
+<span class="nc" id="L79">    private boolean waitingCompressionACK = false;</span>
+
+    /**
+     * Session associated with the socket reader.
+     */
+    protected LocalSession session;
+
+    /**
+     * Router used to route incoming packets to the correct channels.
+     */
+    private PacketRouter router;
+
+    /**
+     * Creates a dedicated reader for a socket.
+     *
+     * @param router     the router for sending packets that were read.
+     * @param connection the connection being read.
+     */
+<span class="nc" id="L97">    public StanzaHandler(PacketRouter router, Connection connection) {</span>
+<span class="nc" id="L98">        this.router = router;</span>
+<span class="nc" id="L99">        this.connection = connection;</span>
+<span class="nc" id="L100">    }</span>
+
+    @Deprecated
+<span class="nc" id="L103">    public StanzaHandler(PacketRouter router, String serverName, Connection connection) {</span>
+<span class="nc" id="L104">        this.router = router;</span>
+<span class="nc" id="L105">        this.connection = connection;</span>
+<span class="nc" id="L106">    }</span>
+
+    public void setSession(LocalSession session) {
+<span class="nc" id="L109">        this.session = session;</span>
+<span class="nc" id="L110">    }</span>
+
+    public void process(String stanza, XMPPPacketReader reader) throws Exception {
+<span class="nc bnc" id="L113" title="All 4 branches missed.">        boolean initialStream = stanza.startsWith(&quot;&lt;stream:stream&quot;) || stanza.startsWith(&quot;&lt;flash:stream&quot;);</span>
+<span class="nc bnc" id="L114" title="All 4 branches missed.">        if (!sessionCreated || initialStream) {</span>
+<span class="nc bnc" id="L115" title="All 2 branches missed.">            if (!initialStream) {</span>
+                // Allow requests for flash socket policy files directly on the client listener port
+<span class="nc bnc" id="L117" title="All 2 branches missed.">                if (stanza.startsWith(&quot;&lt;policy-file-request/&gt;&quot;)) {</span>
+<span class="nc" id="L118">                    String crossDomainText = FlashCrossDomainServlet.CROSS_DOMAIN_TEXT +</span>
+<span class="nc" id="L119">                            XMPPServer.getInstance().getConnectionManager().getClientListenerPort() +</span>
+                            FlashCrossDomainServlet.CROSS_DOMAIN_END_TEXT + '\0';
+<span class="nc" id="L121">                    connection.deliverRawText(crossDomainText);</span>
+<span class="nc" id="L122">                    return;</span>
+                }
+                else {
+                    // Ignore &lt;?xml version=&quot;1.0&quot;?&gt;
+<span class="nc" id="L126">                    return;</span>
+                }
+            }
+            // Found an stream:stream tag...
+<span class="nc bnc" id="L130" title="All 2 branches missed.">            if (!sessionCreated) {</span>
+<span class="nc" id="L131">                sessionCreated = true;</span>
+<span class="nc" id="L132">                MXParser parser = reader.getXPPParser();</span>
+<span class="nc" id="L133">                parser.setInput(new StringReader(stanza));</span>
+<span class="nc" id="L134">                createSession(parser);</span>
+<span class="nc" id="L135">            }</span>
+<span class="nc bnc" id="L136" title="All 2 branches missed.">            else if (startedTLS) {</span>
+<span class="nc" id="L137">                startedTLS = false;</span>
+<span class="nc" id="L138">                tlsNegotiated();</span>
+            }
+<span class="nc bnc" id="L140" title="All 4 branches missed.">            else if (startedSASL &amp;&amp; saslStatus == SASLAuthentication.Status.authenticated) {</span>
+<span class="nc" id="L141">                startedSASL = false;</span>
+<span class="nc" id="L142">                saslSuccessful();</span>
+            }
+<span class="nc bnc" id="L144" title="All 2 branches missed.">            else if (waitingCompressionACK) {</span>
+<span class="nc" id="L145">                waitingCompressionACK = false;</span>
+<span class="nc" id="L146">                compressionSuccessful();</span>
+            }
+<span class="nc" id="L148">            return;</span>
+        }
+
+        // Verify if end of stream was requested
+<span class="nc bnc" id="L152" title="All 2 branches missed.">        if (stanza.equals(&quot;&lt;/stream:stream&gt;&quot;)) {</span>
+<span class="nc bnc" id="L153" title="All 2 branches missed.">            if (session != null) {</span>
+<span class="nc" id="L154">                session.getStreamManager().formalClose();</span>
+<span class="nc" id="L155">                Log.debug( &quot;Closing session as an end-of-stream was received: {}&quot;, session );</span>
+<span class="nc" id="L156">                session.close();</span>
+            }
+<span class="nc" id="L158">            return;</span>
+        }
+        // Ignore &lt;?xml version=&quot;1.0&quot;?&gt; stanzas sent by clients
+<span class="nc bnc" id="L161" title="All 2 branches missed.">        if (stanza.startsWith(&quot;&lt;?xml&quot;)) {</span>
+<span class="nc" id="L162">            return;</span>
+        }
+        // Create DOM object from received stanza
+<span class="nc" id="L165">        Element doc = reader.read(new StringReader(stanza)).getRootElement();</span>
+<span class="nc bnc" id="L166" title="All 2 branches missed.">        if (doc == null) {</span>
+            // No document found.
+<span class="nc" id="L168">            return;</span>
+        }
+<span class="nc" id="L170">        String tag = doc.getName();</span>
+<span class="nc bnc" id="L171" title="All 2 branches missed.">        if (&quot;starttls&quot;.equals(tag)) {</span>
+            // Negotiate TLS
+<span class="nc bnc" id="L173" title="All 2 branches missed.">            if (negotiateTLS()) {</span>
+<span class="nc" id="L174">                startedTLS = true;</span>
+            }
+            else {
+<span class="nc" id="L177">                connection.close();</span>
+<span class="nc" id="L178">                session = null;</span>
+            }
+        }
+<span class="nc bnc" id="L181" title="All 2 branches missed.">        else if (&quot;auth&quot;.equals(tag)) {</span>
+            // User is trying to authenticate using SASL
+<span class="nc" id="L183">            startedSASL = true;</span>
+            // Process authentication stanza
+<span class="nc" id="L185">            saslStatus = SASLAuthentication.handle(session, doc);</span>
+<span class="nc bnc" id="L186" title="All 6 branches missed.">        } else if (startedSASL &amp;&amp; &quot;response&quot;.equals(tag) || &quot;abort&quot;.equals(tag)) {</span>
+            // User is responding to SASL challenge. Process response
+<span class="nc" id="L188">            saslStatus = SASLAuthentication.handle(session, doc);</span>
+        }
+<span class="nc bnc" id="L190" title="All 2 branches missed.">        else if (&quot;compress&quot;.equals(tag)) {</span>
+            // Client is trying to initiate compression
+<span class="nc bnc" id="L192" title="All 2 branches missed.">            if (compressClient(doc)) {</span>
+                // Compression was successful so open a new stream and offer
+                // resource binding and session establishment (to client sessions only)
+<span class="nc" id="L195">                waitingCompressionACK = true;</span>
+            }
+<span class="nc bnc" id="L197" title="All 2 branches missed.">        } else if (isStreamManagementStanza(doc)) {</span>
+<span class="nc" id="L198">            session.getStreamManager().process( doc );</span>
+        }
+        else {
+<span class="nc" id="L201">            process(doc);</span>
+        }
+<span class="nc" id="L203">    }</span>
+
+    private void process(Element doc) throws UnauthorizedException {
+<span class="nc bnc" id="L206" title="All 2 branches missed.">        if (doc == null) {</span>
+<span class="nc" id="L207">            return;</span>
+        }
+
+        // Ensure that connection was secured if TLS was required
+<span class="nc bnc" id="L211" title="All 2 branches missed.">        if (connection.getTlsPolicy() == Connection.TLSPolicy.required &amp;&amp;</span>
+<span class="nc bnc" id="L212" title="All 2 branches missed.">                !connection.isSecure()) {</span>
+<span class="nc" id="L213">            closeNeverSecuredConnection();</span>
+<span class="nc" id="L214">            return;</span>
+        }
+
+<span class="nc" id="L217">        String tag = doc.getName();</span>
+<span class="nc bnc" id="L218" title="All 2 branches missed.">        if (&quot;error&quot;.equals(tag)) {</span>
+<span class="nc" id="L219">            Log.info(&quot;The stream is being closed by the peer, which sent this stream error: &quot; + doc.asXML());</span>
+<span class="nc" id="L220">            session.close();</span>
+        }
+<span class="nc bnc" id="L222" title="All 2 branches missed.">        else if (&quot;message&quot;.equals(tag)) {</span>
+            Message packet;
+            try {
+<span class="nc bnc" id="L225" title="All 2 branches missed.">                packet = new Message(doc, !validateJIDs());</span>
+            }
+<span class="nc" id="L227">            catch (IllegalArgumentException e) {</span>
+<span class="nc" id="L228">                Log.debug(&quot;Rejecting packet. JID malformed&quot;, e);</span>
+                // The original packet contains a malformed JID so answer with an error.
+<span class="nc" id="L230">                Message reply = new Message();</span>
+<span class="nc" id="L231">                reply.setID(doc.attributeValue(&quot;id&quot;));</span>
+<span class="nc" id="L232">                reply.setTo(session.getAddress());</span>
+<span class="nc" id="L233">                reply.getElement().addAttribute(&quot;from&quot;, doc.attributeValue(&quot;to&quot;));</span>
+<span class="nc" id="L234">                reply.setError(PacketError.Condition.jid_malformed);</span>
+<span class="nc" id="L235">                session.process(reply);</span>
+<span class="nc" id="L236">                return;</span>
+<span class="nc" id="L237">            }</span>
+<span class="nc" id="L238">            processMessage(packet);</span>
+<span class="nc" id="L239">        }</span>
+<span class="nc bnc" id="L240" title="All 2 branches missed.">        else if (&quot;presence&quot;.equals(tag)) {</span>
+            Presence packet;
+            try {
+<span class="nc bnc" id="L243" title="All 2 branches missed.">                packet = new Presence(doc, !validateJIDs());</span>
+            }
+<span class="nc" id="L245">            catch (IllegalArgumentException e) {</span>
+<span class="nc" id="L246">                Log.debug(&quot;Rejecting packet. JID malformed&quot;, e);</span>
+                // The original packet contains a malformed JID so answer an error
+<span class="nc" id="L248">                Presence reply = new Presence();</span>
+<span class="nc" id="L249">                reply.setID(doc.attributeValue(&quot;id&quot;));</span>
+<span class="nc" id="L250">                reply.setTo(session.getAddress());</span>
+<span class="nc" id="L251">                reply.getElement().addAttribute(&quot;from&quot;, doc.attributeValue(&quot;to&quot;));</span>
+<span class="nc" id="L252">                reply.setError(PacketError.Condition.jid_malformed);</span>
+<span class="nc" id="L253">                session.process(reply);</span>
+<span class="nc" id="L254">                return;</span>
+<span class="nc" id="L255">            }</span>
+            // Check that the presence type is valid. If not then assume available type
+            try {
+<span class="nc" id="L258">                packet.getType();</span>
+            }
+<span class="nc" id="L260">            catch (IllegalArgumentException e) {</span>
+<span class="nc" id="L261">                Log.warn(&quot;Invalid presence type&quot;, e);</span>
+                // The presence packet contains an invalid presence type so replace it with
+                // an available presence type
+<span class="nc" id="L264">                packet.setType(null);</span>
+<span class="nc" id="L265">            }</span>
+            // Check that the presence show is valid. If not then assume available show value
+            try {
+<span class="nc" id="L268">                packet.getShow();</span>
+            }
+<span class="nc" id="L270">            catch (IllegalArgumentException e) {</span>
+<span class="nc" id="L271">                Log.debug(&quot;Invalid presence show for -&quot; + packet.toXML(), e);</span>
+                // The presence packet contains an invalid presence show so replace it with
+                // an available presence show
+<span class="nc" id="L274">                packet.setShow(null);</span>
+<span class="nc" id="L275">            }</span>
+<span class="nc bnc" id="L276" title="All 4 branches missed.">            if (session.getStatus() == Session.STATUS_CLOSED &amp;&amp; packet.isAvailable()) {</span>
+                // Ignore available presence packets sent from a closed session. A closed
+                // session may have buffered data pending to be processes so we want to ignore
+                // just Presences of type available
+<span class="nc" id="L280">                Log.warn(&quot;Ignoring available presence packet of closed session: &quot; + packet);</span>
+<span class="nc" id="L281">                return;</span>
+            }
+<span class="nc" id="L283">            processPresence(packet);</span>
+<span class="nc" id="L284">        }</span>
+<span class="nc bnc" id="L285" title="All 2 branches missed.">        else if (&quot;iq&quot;.equals(tag)) {</span>
+            IQ packet;
+            try {
+<span class="nc" id="L288">                packet = getIQ(doc);</span>
+            }
+<span class="nc" id="L290">            catch (IllegalArgumentException e) {</span>
+<span class="nc" id="L291">                Log.debug(&quot;Rejecting packet. JID malformed&quot;, e);</span>
+                // The original packet contains a malformed JID so answer an error
+<span class="nc" id="L293">                IQ reply = new IQ();</span>
+<span class="nc bnc" id="L294" title="All 2 branches missed.">                if (!doc.elements().isEmpty()) {</span>
+<span class="nc" id="L295">                    reply.setChildElement(((Element)doc.elements().get(0)).createCopy());</span>
+                }
+<span class="nc" id="L297">                reply.setID(doc.attributeValue(&quot;id&quot;));</span>
+<span class="nc" id="L298">                reply.setTo(session.getAddress());</span>
+<span class="nc bnc" id="L299" title="All 2 branches missed.">                if (doc.attributeValue(&quot;to&quot;) != null) {</span>
+<span class="nc" id="L300">                    reply.getElement().addAttribute(&quot;from&quot;, doc.attributeValue(&quot;to&quot;));</span>
+                }
+<span class="nc" id="L302">                reply.setError(PacketError.Condition.jid_malformed);</span>
+<span class="nc" id="L303">                session.process(reply);</span>
+<span class="nc" id="L304">                return;</span>
+<span class="nc" id="L305">            }</span>
+<span class="nc bnc" id="L306" title="All 4 branches missed.">            if (packet.getID() == null &amp;&amp; JiveGlobals.getBooleanProperty(&quot;xmpp.server.validation.enabled&quot;, false)) {</span>
+                // IQ packets MUST have an 'id' attribute so close the connection
+<span class="nc" id="L308">                Log.debug( &quot;Closing session, as it sent us an IQ packet that has no ID attribute: {}. Affected session: {}&quot;, packet.toXML(), session );</span>
+<span class="nc" id="L309">                StreamError error = new StreamError(StreamError.Condition.invalid_xml);</span>
+<span class="nc" id="L310">                session.deliverRawText(error.toXML());</span>
+<span class="nc" id="L311">                session.close();</span>
+<span class="nc" id="L312">                return;</span>
+            }
+<span class="nc" id="L314">            processIQ(packet);</span>
+<span class="nc" id="L315">        }</span>
+        else {
+<span class="nc bnc" id="L317" title="All 2 branches missed.">            if (!processUnknowPacket(doc)) {</span>
+<span class="nc" id="L318">                Log.warn(LocaleUtils.getLocalizedString(&quot;admin.error.packet.tag&quot;) + doc.asXML() + &quot;. Closing session: &quot; + session);</span>
+<span class="nc" id="L319">                session.close();</span>
+            }
+        }
+<span class="nc" id="L322">    }</span>
+
+    private IQ getIQ(Element doc) {
+<span class="nc" id="L325">        Element query = doc.element(&quot;query&quot;);</span>
+<span class="nc bnc" id="L326" title="All 4 branches missed.">        if (query != null &amp;&amp; &quot;jabber:iq:roster&quot;.equals(query.getNamespaceURI())) {</span>
+<span class="nc" id="L327">            return new Roster(doc);</span>
+<span class="nc bnc" id="L328" title="All 4 branches missed.">        }else if (query != null &amp;&amp; &quot;jabber:iq:version&quot;.equals(query.getNamespaceURI())) {</span>
+            try {
+<span class="nc" id="L330">                List&lt;Element&gt; elements =  query.elements();</span>
+<span class="nc bnc" id="L331" title="All 2 branches missed.">                if (elements.size() &gt;0){</span>
+<span class="nc bnc" id="L332" title="All 2 branches missed.">                    for (Element element : elements){</span>
+<span class="nc" id="L333">                        session.setSoftwareVersionData(element.getName(), element.getStringValue());</span>
+<span class="nc" id="L334">                    }</span>
+                }    
+<span class="nc" id="L336">            } catch (Exception e) {</span>
+<span class="nc" id="L337">                Log.error(e.getMessage(), e);</span>
+<span class="nc" id="L338">            }</span>
+<span class="nc bnc" id="L339" title="All 2 branches missed.">            return new IQ(doc, !validateJIDs());</span>
+        }
+        else {
+<span class="nc bnc" id="L342" title="All 2 branches missed.">            return new IQ(doc, !validateJIDs());</span>
+        }
+    }
+
+    /**
+     * Process the received IQ packet. Registered
+     * {@link org.jivesoftware.openfire.interceptor.PacketInterceptor} will be invoked before
+     * and after the packet was routed.
+     * &lt;p&gt;
+     * Subclasses may redefine this method for different reasons such as modifying the sender
+     * of the packet to avoid spoofing, rejecting the packet or even process the packet in
+     * another thread.&lt;/p&gt;
+     *
+     * @param packet the received packet.
+     * @throws org.jivesoftware.openfire.auth.UnauthorizedException
+     *          if service is not available to sender.
+     */
+    protected void processIQ(IQ packet) throws UnauthorizedException {
+<span class="nc" id="L360">        router.route(packet);</span>
+<span class="nc" id="L361">        session.incrementClientPacketCount();</span>
+<span class="nc" id="L362">    }</span>
+
+    /**
+     * Process the received Presence packet. Registered
+     * {@link org.jivesoftware.openfire.interceptor.PacketInterceptor} will be invoked before
+     * and after the packet was routed.
+     * &lt;p&gt;
+     * Subclasses may redefine this method for different reasons such as modifying the sender
+     * of the packet to avoid spoofing, rejecting the packet or even process the packet in
+     * another thread.&lt;/p&gt;
+     *
+     * @param packet the received packet.
+     * @throws org.jivesoftware.openfire.auth.UnauthorizedException
+     *          if service is not available to sender.
+     */
+    protected void processPresence(Presence packet) throws UnauthorizedException {
+<span class="nc" id="L378">        router.route(packet);</span>
+<span class="nc" id="L379">        session.incrementClientPacketCount();</span>
+<span class="nc" id="L380">    }</span>
+
+    /**
+     * Process the received Message packet. Registered
+     * {@link org.jivesoftware.openfire.interceptor.PacketInterceptor} will be invoked before
+     * and after the packet was routed.
+     * &lt;p&gt;
+     * Subclasses may redefine this method for different reasons such as modifying the sender
+     * of the packet to avoid spoofing, rejecting the packet or even process the packet in
+     * another thread.&lt;/p&gt;
+     *
+     * @param packet the received packet.
+     * @throws org.jivesoftware.openfire.auth.UnauthorizedException
+     *          if service is not available to sender.
+     */
+    protected void processMessage(Message packet) throws UnauthorizedException {
+<span class="nc" id="L396">        router.route(packet);</span>
+<span class="nc" id="L397">        session.incrementClientPacketCount();</span>
+<span class="nc" id="L398">    }</span>
+
+    /**
+     * Returns true if a received packet of an unkown type (i.e. not a Message, Presence
+     * or IQ) has been processed. If the packet was not processed then an exception will
+     * be thrown which will make the thread to stop processing further packets.
+     *
+     * @param doc the DOM element of an unkown type.
+     * @return true if a received packet has been processed.
+     * @throws UnauthorizedException if stanza failed to be processed. Connection will be closed.
+     */
+    abstract boolean processUnknowPacket(Element doc) throws UnauthorizedException;
+
+    /**
+     * Tries to secure the connection using TLS. If the connection is secured then reset
+     * the parser to use the new secured reader. But if the connection failed to be secured
+     * then send a &lt;failure&gt; stanza and close the connection.
+     *
+     * @return true if the connection was secured.
+     */
+    private boolean negotiateTLS() {
+<span class="nc bnc" id="L419" title="All 2 branches missed.">        if (connection.getTlsPolicy() == Connection.TLSPolicy.disabled) {</span>
+            // Set the not_authorized error
+<span class="nc" id="L421">            StreamError error = new StreamError(StreamError.Condition.not_authorized);</span>
+            // Deliver stanza
+<span class="nc" id="L423">            connection.deliverRawText(error.toXML());</span>
+            // Close the underlying connection
+<span class="nc" id="L425">            connection.close();</span>
+            // Log a warning so that admins can track this case from the server side
+<span class="nc" id="L427">            Log.warn(&quot;TLS requested by initiator when TLS was never offered by server. &quot; +</span>
+                    &quot;Closing connection : &quot; + connection);
+<span class="nc" id="L429">            return false;</span>
+        }
+        // Client requested to secure the connection using TLS. Negotiate TLS.
+        try {
+<span class="nc" id="L433">            startTLS();</span>
+        }
+<span class="nc" id="L435">        catch (Exception e) {</span>
+<span class="nc" id="L436">            Log.error(&quot;Error while negotiating TLS&quot;, e);</span>
+<span class="nc" id="L437">            connection.deliverRawText(&quot;&lt;failure xmlns=\&quot;urn:ietf:params:xml:ns:xmpp-tls\&quot;/&gt;&quot;);</span>
+<span class="nc" id="L438">            connection.close();</span>
+<span class="nc" id="L439">            return false;</span>
+<span class="nc" id="L440">        }</span>
+<span class="nc" id="L441">        return true;</span>
+    }
+
+    abstract void startTLS() throws Exception;
+
+    /**
+     * TLS negotiation was successful so open a new stream and offer the new stream features.
+     * The new stream features will include available SASL mechanisms and specific features
+     * depending on the session type such as auth for Non-SASL authentication and register
+     * for in-band registration.
+     */
+    private void tlsNegotiated() {
+        // Offer stream features including SASL Mechanisms
+<span class="nc" id="L454">        StringBuilder sb = new StringBuilder(620);</span>
+<span class="nc" id="L455">        sb.append(getStreamHeader());</span>
+<span class="nc" id="L456">        sb.append(&quot;&lt;stream:features&gt;&quot;);</span>
+        // Include available SASL Mechanisms
+<span class="nc" id="L458">        sb.append(SASLAuthentication.getSASLMechanisms(session));</span>
+        // Include specific features such as auth and register for client sessions
+<span class="nc" id="L460">        String specificFeatures = session.getAvailableStreamFeatures();</span>
+<span class="nc bnc" id="L461" title="All 2 branches missed.">        if (specificFeatures != null) {</span>
+<span class="nc" id="L462">            sb.append(specificFeatures);</span>
+        }
+<span class="nc" id="L464">        sb.append(&quot;&lt;/stream:features&gt;&quot;);</span>
+<span class="nc" id="L465">        connection.deliverRawText(sb.toString());</span>
+<span class="nc" id="L466">    }</span>
+
+    /**
+     * After SASL authentication was successful we should open a new stream and offer
+     * new stream features such as resource binding and session establishment. Notice that
+     * resource binding and session establishment should only be offered to clients (i.e. not
+     * to servers or external components)
+     */
+    private void saslSuccessful() {
+<span class="nc" id="L475">        StringBuilder sb = new StringBuilder(420);</span>
+<span class="nc" id="L476">        sb.append(getStreamHeader());</span>
+<span class="nc" id="L477">        sb.append(&quot;&lt;stream:features&gt;&quot;);</span>
+
+        // Include specific features such as resource binding and session establishment
+        // for client sessions
+<span class="nc" id="L481">        String specificFeatures = session.getAvailableStreamFeatures();</span>
+<span class="nc bnc" id="L482" title="All 2 branches missed.">        if (specificFeatures != null) {</span>
+<span class="nc" id="L483">            sb.append(specificFeatures);</span>
+        }
+<span class="nc" id="L485">        sb.append(&quot;&lt;/stream:features&gt;&quot;);</span>
+<span class="nc" id="L486">        connection.deliverRawText(sb.toString());</span>
+<span class="nc" id="L487">    }</span>
+
+    /**
+     * Start using compression but first check if the connection can and should use compression.
+     * The connection will be closed if the requested method is not supported, if the connection
+     * is already using compression or if client requested to use compression but this feature
+     * is disabled.
+     *
+     * @param doc the element sent by the client requesting compression. Compression method is
+     *            included.
+     * @return true if it was possible to use compression.
+     */
+    private boolean compressClient(Element doc) {
+<span class="nc" id="L500">        String error = null;</span>
+<span class="nc bnc" id="L501" title="All 2 branches missed.">        if (connection.getCompressionPolicy() == Connection.CompressionPolicy.disabled) {</span>
+            // Client requested compression but this feature is disabled
+<span class="nc" id="L503">            error = &quot;&lt;failure xmlns='http://jabber.org/protocol/compress'&gt;&lt;setup-failed/&gt;&lt;/failure&gt;&quot;;</span>
+            // Log a warning so that admins can track this case from the server side
+<span class="nc" id="L505">            Log.warn(&quot;Client requested compression while compression is disabled. Closing &quot; +</span>
+                    &quot;connection : &quot; + connection);
+        }
+<span class="nc bnc" id="L508" title="All 2 branches missed.">        else if (connection.isCompressed()) {</span>
+            // Client requested compression but connection is already compressed
+<span class="nc" id="L510">            error = &quot;&lt;failure xmlns='http://jabber.org/protocol/compress'&gt;&lt;setup-failed/&gt;&lt;/failure&gt;&quot;;</span>
+            // Log a warning so that admins can track this case from the server side
+<span class="nc" id="L512">            Log.warn(&quot;Client requested compression and connection is already compressed. Closing &quot; +</span>
+                    &quot;connection : &quot; + connection);
+        }
+        else {
+            // Check that the requested method is supported
+<span class="nc" id="L517">            String method = doc.elementText(&quot;method&quot;);</span>
+<span class="nc bnc" id="L518" title="All 2 branches missed.">            if (!&quot;zlib&quot;.equals(method)) {</span>
+<span class="nc" id="L519">                error = &quot;&lt;failure xmlns='http://jabber.org/protocol/compress'&gt;&lt;unsupported-method/&gt;&lt;/failure&gt;&quot;;</span>
+                // Log a warning so that admins can track this case from the server side
+<span class="nc" id="L521">                Log.warn(&quot;Requested compression method is not supported: &quot; + method +</span>
+                        &quot;. Closing connection : &quot; + connection);
+            }
+        }
+
+<span class="nc bnc" id="L526" title="All 2 branches missed.">        if (error != null) {</span>
+            // Deliver stanza
+<span class="nc" id="L528">            connection.deliverRawText(error);</span>
+<span class="nc" id="L529">            return false;</span>
+        }
+        else {
+            // Start using compression for incoming traffic
+<span class="nc" id="L533">            connection.addCompression();</span>
+
+            // Indicate client that he can proceed and compress the socket
+<span class="nc" id="L536">            connection.deliverRawText(&quot;&lt;compressed xmlns='http://jabber.org/protocol/compress'/&gt;&quot;);</span>
+
+            // Start using compression for outgoing traffic
+<span class="nc" id="L539">            connection.startCompression();</span>
+<span class="nc" id="L540">            return true;</span>
+        }
+    }
+
+    /**
+     * After compression was successful we should open a new stream and offer
+     * new stream features such as resource binding and session establishment. Notice that
+     * resource binding and session establishment should only be offered to clients (i.e. not
+     * to servers or external components)
+     */
+    private void compressionSuccessful() {
+<span class="nc" id="L551">        StringBuilder sb = new StringBuilder(340);</span>
+<span class="nc" id="L552">        sb.append(getStreamHeader());</span>
+<span class="nc" id="L553">        sb.append(&quot;&lt;stream:features&gt;&quot;);</span>
+        // Include SASL mechanisms only if client has not been authenticated
+<span class="nc bnc" id="L555" title="All 2 branches missed.">        if (session.getStatus() != Session.STATUS_AUTHENTICATED) {</span>
+            // Include available SASL Mechanisms
+<span class="nc" id="L557">            sb.append(SASLAuthentication.getSASLMechanisms(session));</span>
+        }
+        // Include specific features such as resource binding and session establishment
+        // for client sessions
+<span class="nc" id="L561">        String specificFeatures = session.getAvailableStreamFeatures();</span>
+<span class="nc bnc" id="L562" title="All 2 branches missed.">        if (specificFeatures != null) {</span>
+<span class="nc" id="L563">            sb.append(specificFeatures);</span>
+        }
+<span class="nc" id="L565">        sb.append(&quot;&lt;/stream:features&gt;&quot;);</span>
+<span class="nc" id="L566">        connection.deliverRawText(sb.toString());</span>
+<span class="nc" id="L567">    }</span>
+
+    /**
+     * Determines whether stanza's namespace matches XEP-0198 namespace
+     * @param stanza Stanza to be checked
+     * @return whether stanza's namespace matches XEP-0198 namespace
+     */
+    private boolean isStreamManagementStanza(Element stanza) {
+<span class="nc bnc" id="L575" title="All 2 branches missed.">        return StreamManager.NAMESPACE_V2.equals(stanza.getNamespace().getStringValue()) ||</span>
+<span class="nc bnc" id="L576" title="All 2 branches missed.">                StreamManager.NAMESPACE_V3.equals(stanza.getNamespace().getStringValue());</span>
+    }
+
+    private String getStreamHeader() {
+<span class="nc" id="L580">        StringBuilder sb = new StringBuilder(200);</span>
+<span class="nc" id="L581">        sb.append(&quot;&lt;?xml version='1.0' encoding='&quot;);</span>
+<span class="nc" id="L582">        sb.append(CHARSET);</span>
+<span class="nc" id="L583">        sb.append(&quot;'?&gt;&quot;);</span>
+<span class="nc bnc" id="L584" title="All 2 branches missed.">        if (connection.isFlashClient()) {</span>
+<span class="nc" id="L585">            sb.append(&quot;&lt;flash:stream xmlns:flash=\&quot;http://www.jabber.com/streams/flash\&quot; &quot;);</span>
+        }
+        else {
+<span class="nc" id="L588">            sb.append(&quot;&lt;stream:stream &quot;);</span>
+        }
+<span class="nc" id="L590">        sb.append(&quot;xmlns:stream=\&quot;http://etherx.jabber.org/streams\&quot; xmlns=\&quot;&quot;);</span>
+<span class="nc" id="L591">        sb.append(getNamespace());</span>
+<span class="nc" id="L592">        sb.append(&quot;\&quot; from=\&quot;&quot;);</span>
+<span class="nc" id="L593">        sb.append(XMPPServer.getInstance().getServerInfo().getXMPPDomain());</span>
+<span class="nc" id="L594">        sb.append(&quot;\&quot; id=\&quot;&quot;);</span>
+<span class="nc" id="L595">        sb.append(session.getStreamID());</span>
+<span class="nc" id="L596">        sb.append(&quot;\&quot; xml:lang=\&quot;&quot;);</span>
+<span class="nc" id="L597">        sb.append(session.getLanguage().toLanguageTag());</span>
+<span class="nc" id="L598">        sb.append(&quot;\&quot; version=\&quot;&quot;);</span>
+<span class="nc" id="L599">        sb.append(Session.MAJOR_VERSION).append('.').append(Session.MINOR_VERSION);</span>
+<span class="nc" id="L600">        sb.append(&quot;\&quot;&gt;&quot;);</span>
+<span class="nc" id="L601">        return sb.toString();</span>
+    }
+
+    /**
+     * Close the connection since TLS was mandatory and the entity never negotiated TLS. Before
+     * closing the connection a stream error will be sent to the entity.
+     */
+    void closeNeverSecuredConnection() {
+        // Set the not_authorized error
+<span class="nc" id="L610">        StreamError error = new StreamError(StreamError.Condition.not_authorized);</span>
+        // Deliver stanza
+<span class="nc" id="L612">        connection.deliverRawText(error.toXML());</span>
+        // Close the underlying connection
+<span class="nc" id="L614">        connection.close();</span>
+        // Log a warning so that admins can track this case from the server side
+<span class="nc" id="L616">        Log.warn(&quot;TLS was required by the server and connection was never secured. &quot; +</span>
+                &quot;Closing connection : &quot; + connection);
+<span class="nc" id="L618">    }</span>
+
+    /**
+     * Uses the XPP to grab the opening stream tag and create an active session
+     * object. The session to create will depend on the sent namespace. In all
+     * cases, the method obtains the opening stream tag, checks for errors, and
+     * either creates a session or returns an error and kills the connection.
+     * If the connection remains open, the XPP will be set to be ready for the
+     * first packet. A call to next() should result in an START_TAG state with
+     * the first packet in the stream.
+     * @param xpp the pull parser
+     * @throws XmlPullParserException if an exception occurs reading from the pull parser
+     * @throws IOException if an IO exception occurs reading from the pull parser
+     */
+    protected void createSession(XmlPullParser xpp) throws XmlPullParserException, IOException {
+<span class="nc bnc" id="L633" title="All 2 branches missed.">        for (int eventType = xpp.getEventType(); eventType != XmlPullParser.START_TAG;) {</span>
+<span class="nc" id="L634">            eventType = xpp.next();</span>
+        }
+
+<span class="nc" id="L637">        final String serverName = XMPPServer.getInstance().getServerInfo().getXMPPDomain();</span>
+
+        // Check that the TO attribute of the stream header matches the server name or a valid
+        // subdomain. If the value of the 'to' attribute is not valid then return a host-unknown
+        // error and close the underlying connection.
+<span class="nc" id="L642">        String host = xpp.getAttributeValue(&quot;&quot;, &quot;to&quot;);</span>
+<span class="nc" id="L643">        StreamError streamError = null;</span>
+<span class="nc bnc" id="L644" title="All 4 branches missed.">        if (validateHost() &amp;&amp; isHostUnknown(host)) {</span>
+<span class="nc" id="L645">            streamError = new StreamError(StreamError.Condition.host_unknown);</span>
+            // Log a warning so that admins can track this cases from the server side
+<span class="nc" id="L647">            Log.warn(&quot;Closing session due to incorrect hostname in stream header. Host: &quot; + host +</span>
+                    &quot;. Connection: &quot; + connection);
+        }
+        // Validate the stream namespace
+<span class="nc bnc" id="L651" title="All 4 branches missed.">        else if (!&quot;http://etherx.jabber.org/streams&quot;.equals(xpp.getNamespace()) &amp;&amp; !&quot;http://www.jabber.com/streams/flash&quot;.equals(xpp.getNamespace())) {</span>
+            // Include the invalid-namespace in the response
+<span class="nc" id="L653">            streamError = new StreamError(StreamError.Condition.invalid_namespace);</span>
+            // Log a warning so that admins can track this cases from the server side
+<span class="nc" id="L655">            Log.warn(&quot;Closing session due to invalid namespace in stream header. Namespace: &quot; +</span>
+<span class="nc" id="L656">                    xpp.getNamespace() + &quot;. Connection: &quot; + connection);</span>
+
+        }
+        // Create the correct session based on the sent namespace. At this point the server
+        // may offer the client to secure the connection. If the client decides to secure
+        // the connection then a &lt;starttls&gt; stanza should be received
+<span class="nc bnc" id="L662" title="All 2 branches missed.">        else if (!createSession(xpp.getNamespace(null), serverName, xpp, connection)) {</span>
+            // http://xmpp.org/rfcs/rfc6120.html#streams-error-conditions-invalid-namespace
+            // &quot;or the content namespace declared as the default namespace is not supported (e.g., something other than &quot;jabber:client&quot; or &quot;jabber:server&quot;).&quot;
+<span class="nc" id="L665">            streamError = new StreamError(StreamError.Condition.invalid_namespace);</span>
+            // Log a warning so that admins can track this cases from the server side
+<span class="nc" id="L667">            Log.warn(&quot;Closing session due to invalid namespace in stream header. Prefix: &quot; +</span>
+<span class="nc" id="L668">                    xpp.getNamespace(null) + &quot;. Connection: &quot; + connection);</span>
+        }
+
+<span class="nc bnc" id="L671" title="All 2 branches missed.">        if (streamError != null) {</span>
+<span class="nc" id="L672">            StringBuilder sb = new StringBuilder(250);</span>
+<span class="nc bnc" id="L673" title="All 2 branches missed.">            if (host == null) host = serverName;</span>
+<span class="nc" id="L674">            sb.append(&quot;&lt;?xml version='1.0' encoding='&quot;);</span>
+<span class="nc" id="L675">            sb.append(CHARSET);</span>
+<span class="nc" id="L676">            sb.append(&quot;'?&gt;&quot;);</span>
+            // Append stream header
+<span class="nc" id="L678">            sb.append(&quot;&lt;stream:stream &quot;);</span>
+<span class="nc" id="L679">            sb.append(&quot;from=\&quot;&quot;).append(host).append(&quot;\&quot; &quot;);</span>
+<span class="nc" id="L680">            sb.append(&quot;id=\&quot;&quot;).append(STREAM_ID_FACTORY.createStreamID()).append(&quot;\&quot; &quot;);</span>
+<span class="nc" id="L681">            sb.append(&quot;xmlns=\&quot;&quot;).append(xpp.getNamespace(null)).append(&quot;\&quot; &quot;);</span>
+<span class="nc" id="L682">            sb.append(&quot;xmlns:stream=\&quot;http://etherx.jabber.org/streams\&quot; &quot;);</span>
+<span class="nc" id="L683">            sb.append(&quot;version=\&quot;1.0\&quot;&gt;&quot;);</span>
+<span class="nc" id="L684">            sb.append(streamError.toXML());</span>
+            // Deliver stanza
+<span class="nc" id="L686">            connection.deliverRawText(sb.toString());</span>
+            // Close the underlying connection
+<span class="nc" id="L688">            connection.close();</span>
+        }
+
+<span class="nc" id="L691">    }</span>
+
+    private boolean isHostUnknown(String host) {
+<span class="nc bnc" id="L694" title="All 2 branches missed.">        if (host == null) {</span>
+            // Answer false since when using server dialback the stream header will not
+            // have a TO attribute
+<span class="nc" id="L697">            return false;</span>
+        }
+<span class="nc bnc" id="L699" title="All 2 branches missed.">        if (XMPPServer.getInstance().getServerInfo().getXMPPDomain().equals( host )) {</span>
+            // requested host matched the server name
+<span class="nc" id="L701">            return false;</span>
+        }
+<span class="nc" id="L703">        return true;</span>
+    }
+
+    /**
+     * Obtain the address of the XMPP entity for which this StanzaHandler
+     * handles stanzas.
+     *
+     * Note that the value that is returned for this method can
+     * change over time. For example, if no session has been established yet,
+     * this method will return {@code null}, or, if resource binding occurs,
+     * the returned value might change. Values obtained from this method are
+     * therefore best &lt;em&gt;not&lt;/em&gt; cached.
+     *
+     * @return The address of the XMPP entity for.
+     */
+    public JID getAddress() {
+<span class="nc bnc" id="L719" title="All 2 branches missed.">        if (session == null) {</span>
+<span class="nc" id="L720">            return null;</span>
+        }
+
+<span class="nc" id="L723">        return session.getAddress();</span>
+    }
+
+    /**
+     * Returns the stream namespace. (E.g. jabber:client, jabber:server, etc.).
+     *
+     * @return the stream namespace.
+     */
+    abstract String getNamespace();
+
+    /**
+     * Returns true if the value of the 'to' attribute in the stream header should be
+     * validated. If the value of the 'to' attribute is not valid then a host-unknown error
+     * will be returned and the underlying connection will be closed.
+     *
+     * @return true if the value of the 'to' attribute in the initial stream header should be
+     *         validated.
+     */
+    abstract boolean validateHost();
+
+    /**
+     * Returns true if the value of the 'to' attribute of {@link IQ}, {@link Presence} and
+     * {@link Message} must be validated. Connection Managers perform their own
+     * JID validation so there is no need to validate JIDs again but when clients are
+     * directly connected to the server then we need to validate JIDs.
+     *
+     * @return rue if the value of the 'to' attribute of IQ, Presence and Messagemust be validated.
+     */
+    abstract boolean validateJIDs();
+
+    /**
+     * Creates the appropriate {@link Session} subclass based on the specified namespace.
+     *
+     * @param namespace the namespace sent in the stream element. eg. jabber:client.
+     * @return the created session or null.
+     * @throws org.xmlpull.v1.XmlPullParserException
+     *
+     */
+    abstract boolean createSession(String namespace, String serverName, XmlPullParser xpp, Connection connection)
+            throws XmlPullParserException;
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

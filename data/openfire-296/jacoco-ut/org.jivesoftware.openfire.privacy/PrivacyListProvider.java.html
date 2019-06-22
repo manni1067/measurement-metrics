@@ -1,0 +1,396 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>PrivacyListProvider.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.privacy</a> &gt; <span class="el_source">PrivacyListProvider.java</span></div><h1>PrivacyListProvider.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.privacy;
+
+import java.io.StringReader;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+import org.dom4j.Element;
+import org.dom4j.io.SAXReader;
+import org.jivesoftware.database.DbConnectionManager;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Provider for the privacy lists system. Privacy lists are read and written
+ * from the {@code ofPrivacyList} database table.
+ *
+ * @author Gaston Dombiak
+ */
+public class PrivacyListProvider {
+
+<span class="nc" id="L44">    private static final PrivacyListProvider instance = new PrivacyListProvider();</span>
+    
+<span class="nc" id="L46">    private static final Logger Log = LoggerFactory.getLogger(PrivacyListProvider.class);</span>
+
+    private static final String PRIVACY_LIST_COUNT =
+            &quot;SELECT count(*) from ofPrivacyList&quot;;
+    private static final String LOAD_LIST_NAMES =
+            &quot;SELECT name, isDefault FROM ofPrivacyList WHERE username=?&quot;;
+    private static final String LOAD_PRIVACY_LIST =
+            &quot;SELECT isDefault, list FROM ofPrivacyList WHERE username=? AND name=?&quot;;
+    private static final String LOAD_DEFAULT_PRIVACY_LIST =
+            &quot;SELECT name, list FROM ofPrivacyList WHERE username=? AND isDefault=1&quot;;
+    private static final String DELETE_PRIVACY_LIST =
+            &quot;DELETE FROM ofPrivacyList WHERE username=? AND name=?&quot;;
+    private static final String DELETE_PRIVACY_LISTS =
+            &quot;DELETE FROM ofPrivacyList WHERE username=?&quot;;
+    private static final String UPDATE_PRIVACY_LIST =
+            &quot;UPDATE ofPrivacyList SET isDefault=?, list=? WHERE username=? AND name=?&quot;;
+    private static final String INSERT_PRIVACY_LIST =
+            &quot;INSERT INTO ofPrivacyList (username, name, isDefault, list) VALUES (?, ?, ?, ?)&quot;;
+
+    private static final int POOL_SIZE = 50;
+    /**
+     * Pool of SAX Readers. SAXReader is not thread safe so we need to have a pool of readers.
+     */
+<span class="nc" id="L69">    private BlockingQueue&lt;SAXReader&gt; xmlReaders = new LinkedBlockingQueue&lt;&gt;(POOL_SIZE);</span>
+
+    /**
+     * Boolean used to optimize getters when the database is empty
+     */
+    private AtomicBoolean databaseContainsPrivacyLists;
+
+    /**
+     * Returns the unique instance of this class.
+     *
+     * @return the unique instance of this class.
+     */
+    public static PrivacyListProvider getInstance() {
+<span class="nc" id="L82">        return instance;</span>
+    }
+    
+    private PrivacyListProvider() {
+<span class="nc" id="L86">        super();</span>
+        // Initialize the pool of sax readers
+<span class="nc bnc" id="L88" title="All 2 branches missed.">        for (int i=0; i&lt;POOL_SIZE; i++) {</span>
+<span class="nc" id="L89">            SAXReader xmlReader = new SAXReader();</span>
+<span class="nc" id="L90">            xmlReader.setEncoding(&quot;UTF-8&quot;);</span>
+<span class="nc" id="L91">            xmlReaders.add(xmlReader);</span>
+        }
+
+        // Checks if the PrivacyLists database is empty. 
+        // In that case, we can optimize away many database calls. 
+<span class="nc" id="L96">        databaseContainsPrivacyLists = new AtomicBoolean(false);</span>
+<span class="nc" id="L97">        loadDatabaseContainsPrivacyLists();</span>
+<span class="nc" id="L98">    }</span>
+
+    /**
+     * Returns the names of the existing privacy lists indicating which one is the
+     * default privacy list associated to a user.
+     *
+     * @param username the username of the user to get his privacy lists names.
+     * @return the names of the existing privacy lists with a default flag.
+     */
+    public Map&lt;String, Boolean&gt; getPrivacyLists(String username) {
+        // If there are no privacy lists stored, this method is a no-op.
+<span class="nc bnc" id="L109" title="All 2 branches missed.">        if (!databaseContainsPrivacyLists.get()) {</span>
+<span class="nc" id="L110">            return Collections.emptyMap();</span>
+        }
+
+<span class="nc" id="L113">        Map&lt;String, Boolean&gt; names = new HashMap&lt;&gt;();</span>
+<span class="nc" id="L114">        Connection con = null;</span>
+<span class="nc" id="L115">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L116">        ResultSet rs = null;</span>
+        try {
+<span class="nc" id="L118">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L119">            pstmt = con.prepareStatement(LOAD_LIST_NAMES);</span>
+<span class="nc" id="L120">            pstmt.setString(1, username);</span>
+<span class="nc" id="L121">            rs = pstmt.executeQuery();</span>
+<span class="nc bnc" id="L122" title="All 2 branches missed.">            while (rs.next()) {</span>
+<span class="nc bnc" id="L123" title="All 2 branches missed.">                names.put(rs.getString(1), rs.getInt(2) == 1);</span>
+            }
+        }
+<span class="nc" id="L126">        catch (Exception e) {</span>
+<span class="nc" id="L127">            Log.error(&quot;Error loading names of privacy lists for username: &quot; + username, e);</span>
+        }
+        finally {
+<span class="nc" id="L130">            DbConnectionManager.closeConnection(rs, pstmt, con);</span>
+<span class="nc" id="L131">        }</span>
+<span class="nc" id="L132">        return names;</span>
+    }
+
+    /**
+     * Loads the requested privacy list from the database. Returns {@code null} if a list
+     * with the specified name does not exist.
+     *
+     * @param username the username of the user to get his privacy list.
+     * @param listName name of the list to load.
+     * @return the privacy list with the specified name or {@code null} if a list
+     *         with the specified name does not exist.
+     */
+    public PrivacyList loadPrivacyList(String username, String listName) {
+        // If there are no privacy lists stored, this method is a no-op.
+<span class="nc bnc" id="L146" title="All 2 branches missed.">        if (!databaseContainsPrivacyLists.get()) {</span>
+<span class="nc" id="L147">            return null;</span>
+        }
+
+<span class="nc" id="L150">        boolean isDefault = false;</span>
+<span class="nc" id="L151">        String listValue = null;</span>
+
+<span class="nc" id="L153">        Connection con = null;</span>
+<span class="nc" id="L154">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L155">        ResultSet rs = null;</span>
+
+        try {
+<span class="nc" id="L158">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L159">            pstmt = con.prepareStatement(LOAD_PRIVACY_LIST);</span>
+<span class="nc" id="L160">            pstmt.setString(1, username);</span>
+<span class="nc" id="L161">            pstmt.setString(2, listName);</span>
+<span class="nc" id="L162">            rs = pstmt.executeQuery();</span>
+<span class="nc bnc" id="L163" title="All 2 branches missed.">            if (rs.next()) {</span>
+<span class="nc bnc" id="L164" title="All 2 branches missed.">                isDefault = rs.getInt(1) == 1;</span>
+<span class="nc" id="L165">                listValue = rs.getString(2);</span>
+            }
+            else {
+<span class="nc" id="L168">                return null;</span>
+            }
+        }
+<span class="nc" id="L171">        catch (Exception e) {</span>
+<span class="nc" id="L172">            Log.error(&quot;Error loading privacy list: &quot; + listName + &quot; of username: &quot; + username, e);</span>
+<span class="nc" id="L173">            return null;</span>
+        }
+        finally {
+<span class="nc" id="L176">            DbConnectionManager.closeConnection(rs, pstmt, con);</span>
+<span class="nc" id="L177">        }</span>
+
+<span class="nc" id="L179">        PrivacyList privacyList = null;</span>
+<span class="nc" id="L180">        SAXReader xmlReader = null;</span>
+        try {
+            // Get a sax reader from the pool
+<span class="nc" id="L183">            xmlReader = xmlReaders.take();</span>
+<span class="nc" id="L184">            Element listElement = xmlReader.read(new StringReader(listValue)).getRootElement();</span>
+<span class="nc" id="L185">            privacyList = new PrivacyList(username, listName, isDefault, listElement);</span>
+        }
+<span class="nc" id="L187">        catch (Exception e) {</span>
+<span class="nc" id="L188">            Log.error(e.getMessage(), e);</span>
+        }
+        finally {
+            // Return the sax reader to the pool
+<span class="nc bnc" id="L192" title="All 6 branches missed.">            if (xmlReader != null) {</span>
+<span class="nc" id="L193">                xmlReaders.add(xmlReader);</span>
+            }
+<span class="nc" id="L195">        }</span>
+
+
+<span class="nc" id="L198">        return privacyList;</span>
+    }
+
+    /**
+     * Loads the default privacy list of a given user from the database. Returns {@code null}
+     * if no list was found.
+     *
+     * @param username the username of the user to get his default privacy list.
+     * @return the default privacy list or {@code null} if no list was found.
+     */
+    public PrivacyList loadDefaultPrivacyList(String username) {
+        // If there are no privacy lists stored, this method is a no-op.
+<span class="nc bnc" id="L210" title="All 2 branches missed.">        if (!databaseContainsPrivacyLists.get()) {</span>
+<span class="nc" id="L211">            return null;</span>
+        }
+
+<span class="nc" id="L214">        String listName = null;</span>
+<span class="nc" id="L215">        String listValue = null;</span>
+
+<span class="nc" id="L217">        Connection con = null;</span>
+<span class="nc" id="L218">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L219">        ResultSet rs = null;</span>
+        try {
+<span class="nc" id="L221">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L222">            pstmt = con.prepareStatement(LOAD_DEFAULT_PRIVACY_LIST);</span>
+<span class="nc" id="L223">            pstmt.setString(1, username);</span>
+<span class="nc" id="L224">            rs = pstmt.executeQuery();</span>
+<span class="nc bnc" id="L225" title="All 2 branches missed.">            if (rs.next()) {</span>
+<span class="nc" id="L226">                listName = rs.getString(1);</span>
+<span class="nc" id="L227">                listValue = rs.getString(2);</span>
+            }
+            else {
+<span class="nc" id="L230">                return null;</span>
+            }
+        }
+<span class="nc" id="L233">        catch (Exception e) {</span>
+<span class="nc" id="L234">            Log.error(&quot;Error loading default privacy list of username: &quot; + username, e);</span>
+<span class="nc" id="L235">            return null;</span>
+        }
+        finally {
+<span class="nc" id="L238">            DbConnectionManager.closeConnection(rs, pstmt, con);</span>
+<span class="nc" id="L239">        }</span>
+
+<span class="nc" id="L241">        PrivacyList privacyList = null;</span>
+<span class="nc" id="L242">        SAXReader xmlReader = null;</span>
+        try {
+            // Get a sax reader from the pool
+<span class="nc" id="L245">            xmlReader = xmlReaders.take();</span>
+<span class="nc" id="L246">            Element listElement = xmlReader.read(new StringReader(listValue)).getRootElement();</span>
+<span class="nc" id="L247">            privacyList = new PrivacyList(username, listName, true, listElement);</span>
+        }
+<span class="nc" id="L249">        catch (Exception e) {</span>
+<span class="nc" id="L250">            Log.error(e.getMessage(), e);</span>
+        }
+        finally {
+            // Return the sax reader to the pool
+<span class="nc bnc" id="L254" title="All 6 branches missed.">            if (xmlReader != null) {</span>
+<span class="nc" id="L255">                xmlReaders.add(xmlReader);</span>
+            }
+<span class="nc" id="L257">        }</span>
+
+<span class="nc" id="L259">        return privacyList;</span>
+    }
+
+    /**
+     * Creates and saves the new privacy list to the database.
+     *
+     * @param username the username of the user that created a new privacy list.
+     * @param list the PrivacyList to save.
+     */
+    public void createPrivacyList(String username, PrivacyList list) {
+<span class="nc" id="L269">        Connection con = null;</span>
+<span class="nc" id="L270">        PreparedStatement pstmt = null;</span>
+        try {
+<span class="nc" id="L272">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L273">            pstmt = con.prepareStatement(INSERT_PRIVACY_LIST);</span>
+<span class="nc" id="L274">            pstmt.setString(1, username);</span>
+<span class="nc" id="L275">            pstmt.setString(2, list.getName());</span>
+<span class="nc bnc" id="L276" title="All 2 branches missed.">            pstmt.setInt(3, (list.isDefault() ? 1 : 0));</span>
+<span class="nc" id="L277">            pstmt.setString(4, list.asElement().asXML());</span>
+<span class="nc" id="L278">            pstmt.executeUpdate();</span>
+        }
+<span class="nc" id="L280">        catch (Exception e) {</span>
+<span class="nc" id="L281">            Log.error(&quot;Error adding privacy list: &quot; + list.getName() + &quot; of username: &quot; + username,</span>
+                    e);
+        }
+        finally {
+<span class="nc" id="L285">            DbConnectionManager.closeConnection(pstmt, con);</span>
+<span class="nc" id="L286">        }</span>
+<span class="nc" id="L287">        databaseContainsPrivacyLists.set(true);</span>
+<span class="nc" id="L288">    }</span>
+
+    /**
+     * Updated the existing privacy list in the database.
+     *
+     * @param username the username of the user that updated a privacy list.
+     * @param list the PrivacyList to update in the database.
+     */
+    public void updatePrivacyList(String username, PrivacyList list) {
+<span class="nc" id="L297">        Connection con = null;</span>
+<span class="nc" id="L298">        PreparedStatement pstmt = null;</span>
+        try {
+<span class="nc" id="L300">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L301">            pstmt = con.prepareStatement(UPDATE_PRIVACY_LIST);</span>
+<span class="nc bnc" id="L302" title="All 2 branches missed.">            pstmt.setInt(1, (list.isDefault() ? 1 : 0));</span>
+<span class="nc" id="L303">            pstmt.setString(2, list.asElement().asXML());</span>
+<span class="nc" id="L304">            pstmt.setString(3, username);</span>
+<span class="nc" id="L305">            pstmt.setString(4, list.getName());</span>
+<span class="nc" id="L306">            pstmt.executeUpdate();</span>
+        }
+<span class="nc" id="L308">        catch (Exception e) {</span>
+<span class="nc" id="L309">            Log.error(&quot;Error updating privacy list: &quot; + list.getName() + &quot; of username: &quot; +</span>
+                    username, e);
+        }
+        finally {
+<span class="nc" id="L313">            DbConnectionManager.closeConnection(pstmt, con);</span>
+<span class="nc" id="L314">        }</span>
+<span class="nc" id="L315">        databaseContainsPrivacyLists.set(true);</span>
+<span class="nc" id="L316">    }</span>
+
+    /**
+     * Deletes an existing privacy list from the database.
+     *
+     * @param username the username of the user that deleted a privacy list.
+     * @param listName the name of the PrivacyList to delete.
+     */
+    public void deletePrivacyList(String username, String listName) {
+        // If there are no privacy lists stored, this method is a no-op.
+<span class="nc bnc" id="L326" title="All 2 branches missed.">        if (!databaseContainsPrivacyLists.get()) {</span>
+<span class="nc" id="L327">            return;</span>
+        }
+<span class="nc" id="L329">        Connection con = null;</span>
+<span class="nc" id="L330">        PreparedStatement pstmt = null;</span>
+        try {
+<span class="nc" id="L332">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L333">            pstmt = con.prepareStatement(DELETE_PRIVACY_LIST);</span>
+<span class="nc" id="L334">            pstmt.setString(1, username);</span>
+<span class="nc" id="L335">            pstmt.setString(2, listName);</span>
+<span class="nc" id="L336">            pstmt.executeUpdate();</span>
+        }
+<span class="nc" id="L338">        catch (Exception e) {</span>
+<span class="nc" id="L339">            Log.error(&quot;Error deleting privacy list: &quot; + listName + &quot; of username: &quot; + username, e);</span>
+        }
+        finally {
+<span class="nc" id="L342">            DbConnectionManager.closeConnection(pstmt, con);</span>
+<span class="nc" id="L343">        }</span>
+<span class="nc" id="L344">        databaseContainsPrivacyLists.set(true);</span>
+<span class="nc" id="L345">    }</span>
+
+    /**
+     * Deletes all existing privacy list from the database for the given user.
+     *
+     * @param username the username of the user whose privacy lists are going to be deleted.
+     */
+    public void deletePrivacyLists(String username) {
+        // If there are no privacy lists stored, this method is a no-op.
+<span class="nc bnc" id="L354" title="All 2 branches missed.">        if (!databaseContainsPrivacyLists.get()) {</span>
+<span class="nc" id="L355">            return;</span>
+        }
+<span class="nc" id="L357">        Connection con = null;</span>
+<span class="nc" id="L358">        PreparedStatement pstmt = null;</span>
+        try {
+<span class="nc" id="L360">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L361">            pstmt = con.prepareStatement(DELETE_PRIVACY_LISTS);</span>
+<span class="nc" id="L362">            pstmt.setString(1, username);</span>
+<span class="nc" id="L363">            pstmt.executeUpdate();</span>
+        }
+<span class="nc" id="L365">        catch (Exception e) {</span>
+<span class="nc" id="L366">            Log.error(&quot;Error deleting privacy lists of username: &quot; + username, e);</span>
+        }
+        finally {
+<span class="nc" id="L369">            DbConnectionManager.closeConnection(pstmt, con);</span>
+<span class="nc" id="L370">        }</span>
+<span class="nc" id="L371">        databaseContainsPrivacyLists.set(true);</span>
+<span class="nc" id="L372">    }</span>
+
+    /**
+     * Loads the total number of privacy lists stored in the database to know if we must use them.
+     */
+    private void loadDatabaseContainsPrivacyLists() {
+<span class="nc" id="L378">        Connection con = null;</span>
+<span class="nc" id="L379">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L380">        ResultSet rs = null;</span>
+        try {
+<span class="nc" id="L382">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L383">            pstmt = con.prepareStatement(PRIVACY_LIST_COUNT);</span>
+<span class="nc" id="L384">            rs = pstmt.executeQuery();</span>
+<span class="nc" id="L385">            rs.next();</span>
+<span class="nc bnc" id="L386" title="All 2 branches missed.">            databaseContainsPrivacyLists.set(rs.getInt(1) != 0);</span>
+        }
+<span class="nc" id="L388">        catch (Exception e) {</span>
+<span class="nc" id="L389">            Log.error(e.getMessage(), e);</span>
+        }
+        finally {
+<span class="nc" id="L392">            DbConnectionManager.closeConnection(rs, pstmt, con);</span>
+<span class="nc" id="L393">        }</span>
+<span class="nc" id="L394">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

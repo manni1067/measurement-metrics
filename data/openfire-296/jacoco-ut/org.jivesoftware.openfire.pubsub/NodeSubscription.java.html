@@ -1,0 +1,943 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>NodeSubscription.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.pubsub</a> &gt; <span class="el_source">NodeSubscription.java</span></div><h1>NodeSubscription.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.pubsub;
+
+import java.text.ParseException;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Date;
+import java.util.List;
+
+import org.dom4j.Element;
+import org.jivesoftware.util.JiveGlobals;
+import org.jivesoftware.util.LocaleUtils;
+import org.jivesoftware.util.XMPPDateTimeFormat;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmpp.forms.DataForm;
+import org.xmpp.forms.FormField;
+import org.xmpp.packet.IQ;
+import org.xmpp.packet.JID;
+import org.xmpp.packet.Message;
+import org.xmpp.packet.Presence;
+
+import static org.jivesoftware.openfire.muc.spi.IQOwnerHandler.parseFirstValueAsBoolean;
+
+/**
+ * A subscription to a node. Entities may subscribe to a node to be notified when new events
+ * are published to the node. Published events may contain a {@link PublishedItem}. Only
+ * nodes that are configured to not deliver payloads with event notifications and to not
+ * persist items will let publishers to publish events without items thus not including
+ * items in the notifications sent to subscribers.&lt;p&gt;
+ *
+ * Node subscriptions may need to be configured by the subscriber or approved by a node owner
+ * to become active. The node configuration establishes whether configuration or approval are
+ * required. In any case, the subscriber will not get event notifications until the subscription
+ * is active.&lt;p&gt;
+ *
+ * Depending on the node configuration it may be possible for the same subscriber to subscribe
+ * multiple times to the node. Each subscription may have a different configuration like for
+ * instance different keywords. Keywords can be used as a way to filter the type of
+ * {@link PublishedItem} to be notified of. When the same subscriber has subscribed multiple
+ * times to the node a single notification is going to be sent to the subscriber instead of
+ * sending a notification for each subscription.
+ *
+ * @author Matt Tucker
+ */
+public class NodeSubscription {
+
+<span class="nc" id="L64">    private static final Logger Log = LoggerFactory.getLogger(NodeSubscription.class);</span>
+
+<span class="nc" id="L66">    private static final XMPPDateTimeFormat xmppDateTime = new XMPPDateTimeFormat();</span>
+
+    /**
+     * The node to which this subscription is interested in.
+     */
+    private Node node;
+    /**
+     * JID of the entity that will receive the event notifications.
+     */
+    private JID jid;
+    /**
+     * JID of the entity that owns this subscription. This JID is the JID of the
+     * NodeAffiliate that is subscribed to the node.
+     */
+    private JID owner;
+    /**
+     * ID that uniquely identifies the subscription of the user in the node.
+     */
+    private String id;
+    /**
+     * Current subscription state.
+     */
+    private State state;
+    /**
+     * Flag indicating whether an entity wants to receive or has disabled notifications.
+     */
+<span class="nc" id="L92">    private boolean deliverNotifications = true;</span>
+    /**
+     * Flag indicating whether an entity wants to receive digests (aggregations) of
+     * notifications or all notifications individually.
+     */
+<span class="nc" id="L97">    private boolean usingDigest = false;</span>
+    /**
+     * The minimum number of milliseconds between sending any two notification digests.
+     * Default is 24 hours.
+     */
+<span class="nc" id="L102">    private int digestFrequency = 86400000;</span>
+    /**
+     * The Date at which a leased subscription will end or has ended. A value of
+     * {@code null} means that the subscription will never expire.
+     */
+<span class="nc" id="L107">    private Date expire = null;</span>
+    /**
+     * Flag indicating whether an entity wants to receive an XMPP message body in
+     * addition to the payload format.
+     */
+<span class="nc" id="L112">    private boolean includingBody = false;</span>
+    /**
+     * The presence states for which an entity wants to receive notifications.
+     */
+<span class="nc" id="L116">    private Collection&lt;String&gt; presenceStates = new ArrayList&lt;&gt;();</span>
+    /**
+     * When subscribing to collection nodes it is possible to be interested in new nodes
+     * added to the collection node or new items published in the children nodes. The default
+     * value is &quot;nodes&quot;.
+     */
+<span class="nc" id="L122">    private Type type = Type.nodes;</span>
+    /**
+     * Receive notification from children up to certain depth. Possible values are 1 or 0.
+     * Zero means that there is no depth limit.
+     */
+<span class="nc" id="L127">    private int depth = 1;</span>
+    /**
+     * Keyword that the event needs to match. When {@code null} all event are going to
+     * be notified to the subscriber.
+     */
+<span class="nc" id="L132">    private String keyword = null;</span>
+    /**
+     * Indicates if the subscription is present in the database.
+     */
+<span class="nc" id="L136">    private boolean savedToDB = false;</span>
+
+    /**
+     * Creates a new subscription of the specified user with the node.
+     *
+     * @param node Node to which this subscription is interested in.
+     * @param owner the JID of the entity that owns this subscription.
+     * @param jid the JID of the user that owns the subscription.
+     * @param state the state of the subscription with the node.
+     * @param id the id the uniquely identifies this subscriptin within the node.
+     */
+    public NodeSubscription(Node node, JID owner, JID jid, State state, String id)
+<span class="nc" id="L148">    {</span>
+<span class="nc" id="L149">        this.node = node;</span>
+<span class="nc" id="L150">        this.jid = jid;</span>
+<span class="nc" id="L151">        this.owner = owner;</span>
+<span class="nc" id="L152">        this.state = state;</span>
+<span class="nc" id="L153">        this.id = id;</span>
+<span class="nc" id="L154">    }</span>
+
+    /**
+     * Returns the node that holds this subscription.
+     *
+     * @return the node that holds this subscription.
+     */
+    public Node getNode() {
+<span class="nc" id="L162">        return node;</span>
+    }
+
+    /**
+     * Returns the ID that uniquely identifies the subscription of the user in the node.
+     *
+     * @return the ID that uniquely identifies the subscription of the user in the node.
+     */
+    public String getID() {
+<span class="nc" id="L171">        return id;</span>
+    }
+
+    /**
+     * Returns the JID that is going to receive the event notifications. This JID can be the
+     * owner JID or a full JID if the owner wants to receive the notification at a particular
+     * resource.&lt;p&gt;
+     *
+     * Moreover, since subscriber and owner are separated it should be theorically possible to
+     * have a different owner JID (e.g. gato@server1.com) and a subscriber JID
+     * (e.g. gato@server2.com). Note that letting this case to happen may open the pubsub service
+     * to get spam or security problems. However, the pubsub service should avoid this case to
+     * happen.
+     *
+     * @return the JID that is going to receive the event notifications.
+     */
+    public JID getJID() {
+<span class="nc" id="L188">        return jid;</span>
+    }
+
+    /**
+     * Retuns the JID of the entity that owns this subscription. The owner entity will have
+     * a {@link NodeAffiliate} for the owner JID. The owner may have more than one subscription
+     * with the node based on what this message
+     * {@link org.jivesoftware.openfire.pubsub.Node#isMultipleSubscriptionsEnabled()}.
+     *
+     * @return he JID of the entity that owns this subscription.
+     */
+    public JID getOwner() {
+<span class="nc" id="L200">        return owner;</span>
+    }
+
+    /**
+     * Returns the current subscription state. Subscriptions with status of pending should be
+     * authorized by a node owner.
+     *
+     * @return the current subscription state.
+     */
+    public State getState() {
+<span class="nc" id="L210">        return state;</span>
+    }
+
+    /**
+     * Returns true if configuration is required by the node and is still pending to
+     * be configured by the subscriber. Otherwise return false. Once a subscription is
+     * configured it might need to be approved by a node owner to become active.
+     *
+     * @return true if configuration is required by the node and is still pending to
+     *         be configured by the subscriber.
+     */
+    public boolean isConfigurationPending() {
+<span class="nc bnc" id="L222" title="All 2 branches missed.">        return state == State.unconfigured;</span>
+    }
+
+    /**
+     * Returns true if the subscription needs to be approved by a node owner to become
+     * active. Until the subscription is not activated the subscriber will not receive
+     * event notifications.
+     *
+     * @return true if the subscription needs to be approved by a node owner to become active.
+     */
+    public boolean isAuthorizationPending() {
+<span class="nc bnc" id="L233" title="All 2 branches missed.">        return state == State.pending;</span>
+    }
+
+    /**
+     * Returns whether an entity wants to receive or has disabled notifications.
+     *
+     * @return true when notifications should be sent to the subscriber.
+     */
+    public boolean shouldDeliverNotifications() {
+<span class="nc" id="L242">        return deliverNotifications;</span>
+    }
+
+    /**
+     * Returns whether an entity wants to receive digests (aggregations) of
+     * notifications or all notifications individually.
+     *
+     * @return true when an entity wants to receive digests (aggregations) of notifications.
+     */
+    public boolean isUsingDigest() {
+<span class="nc" id="L252">        return usingDigest;</span>
+    }
+
+    /**
+     * Returns the minimum number of milliseconds between sending any two notification digests.
+     * Default is 24 hours.
+     *
+     * @return the minimum number of milliseconds between sending any two notification digests.
+     */
+    public int getDigestFrequency() {
+<span class="nc" id="L262">        return digestFrequency;</span>
+    }
+
+    /**
+     * Returns the Date at which a leased subscription will end or has ended. A value of
+     * {@code null} means that the subscription will never expire.
+     *
+     * @return the Date at which a leased subscription will end or has ended. A value of
+     *         {@code null} means that the subscription will never expire.
+     */
+    public Date getExpire() {
+<span class="nc" id="L273">        return expire;</span>
+    }
+
+    /**
+     * Returns whether an entity wants to receive an XMPP message body in
+     * addition to the payload format.
+     *
+     * @return true when an entity wants to receive an XMPP message body in
+     *         addition to the payload format
+     */
+    public boolean isIncludingBody() {
+<span class="nc" id="L284">        return includingBody;</span>
+    }
+
+    /**
+     * The presence states for which an entity wants to receive notifications. When the owner
+     * is in any of the returned presence states then he is allowed to receive notifications.
+     *
+     * @return the presence states for which an entity wants to receive notifications.
+     *         (e.g. available, away, etc.)
+     */
+    public Collection&lt;String&gt; getPresenceStates() {
+<span class="nc" id="L295">        return presenceStates;</span>
+    }
+
+    /**
+     * Returns if the owner has subscribed to receive notification of new items only
+     * or of new nodes only. When subscribed to a Leaf Node then only {@code items}
+     * is available.
+     *
+     * @return whether the owner has subscribed to receive notification of new items only
+     *         or of new nodes only.
+     */
+    public Type getType() {
+<span class="nc" id="L307">        return type;</span>
+    }
+
+    /**
+     * Returns 1 when the subscriber wants to receive notifications only from first-level
+     * children of the collection. A value of 0 means that the subscriber wants to receive
+     * notifications from all descendents.
+     *
+     * @return 1 when the subscriber wants to receive notifications only from first-level
+     *         children of the collection or 0 when notififying only from all descendents.
+     */
+    public int getDepth() {
+<span class="nc" id="L319">        return depth;</span>
+    }
+
+    /**
+     * Returns the keyword that the event needs to match. When {@code null} all event
+     * are going to be notified to the subscriber.
+     *
+     * @return the keyword that the event needs to match. When {@code null} all event
+     *         are going to be notified to the subscriber.
+     */
+    public String getKeyword() {
+<span class="nc" id="L330">        return keyword;</span>
+    }
+
+    void setShouldDeliverNotifications(boolean deliverNotifications) {
+<span class="nc" id="L334">        this.deliverNotifications = deliverNotifications;</span>
+<span class="nc" id="L335">    }</span>
+
+    void setUsingDigest(boolean usingDigest) {
+<span class="nc" id="L338">        this.usingDigest = usingDigest;</span>
+<span class="nc" id="L339">    }</span>
+
+    void setDigestFrequency(int digestFrequency) {
+<span class="nc" id="L342">        this.digestFrequency = digestFrequency;</span>
+<span class="nc" id="L343">    }</span>
+
+    void setExpire(Date expire) {
+<span class="nc" id="L346">        this.expire = expire;</span>
+<span class="nc" id="L347">    }</span>
+
+    void setIncludingBody(boolean includingBody) {
+<span class="nc" id="L350">        this.includingBody = includingBody;</span>
+<span class="nc" id="L351">    }</span>
+
+    void setPresenceStates(Collection&lt;String&gt; presenceStates) {
+<span class="nc" id="L354">        this.presenceStates = presenceStates;</span>
+<span class="nc" id="L355">    }</span>
+
+    void setType(Type type) {
+<span class="nc" id="L358">        this.type = type;</span>
+<span class="nc" id="L359">    }</span>
+
+    void setDepth(int depth) {
+<span class="nc" id="L362">        this.depth = depth;</span>
+<span class="nc" id="L363">    }</span>
+
+    void setKeyword(String keyword) {
+<span class="nc" id="L366">        this.keyword = keyword;</span>
+<span class="nc" id="L367">    }</span>
+
+    void setSavedToDB(boolean savedToDB) {
+<span class="nc" id="L370">        this.savedToDB = savedToDB;</span>
+<span class="nc" id="L371">    }</span>
+
+    /**
+     * Configures the subscription based on the sent {@link DataForm} included in the IQ
+     * packet sent by the subscriber. If the subscription was pending of configuration
+     * then the last published item is going to be sent to the subscriber.&lt;p&gt;
+     *
+     * The originalIQ parameter may be {@code null} when using this API internally. When no
+     * IQ packet was sent then no IQ result will be sent to the sender. The rest of the
+     * functionality is the same.
+     *
+     * @param originalIQ the IQ packet sent by the subscriber to configure his subscription or
+     *        null when using this API internally.
+     * @param options the data form containing the new subscription configuration.
+     */
+    public void configure(IQ originalIQ, DataForm options) {
+<span class="nc" id="L387">        boolean wasUnconfigured = isConfigurationPending();</span>
+        // Change the subscription configuration based on the completed form
+<span class="nc" id="L389">        configure(options);</span>
+<span class="nc bnc" id="L390" title="All 2 branches missed.">        if (originalIQ != null) {</span>
+            // Return success response
+<span class="nc" id="L392">            node.getService().send(IQ.createResultIQ(originalIQ));</span>
+        }
+
+<span class="nc bnc" id="L395" title="All 2 branches missed.">        if (wasUnconfigured) {</span>
+            // If subscription is pending then send notification to node owners
+            // asking to approve the now configured subscription
+<span class="nc bnc" id="L398" title="All 2 branches missed.">            if (isAuthorizationPending()) {</span>
+<span class="nc" id="L399">                sendAuthorizationRequest();</span>
+            }
+
+            // Send last published item (if node is leaf node and subscription status is ok)
+<span class="nc bnc" id="L403" title="All 4 branches missed.">            if (node.isSendItemSubscribe() &amp;&amp; isActive()) {</span>
+<span class="nc" id="L404">                PublishedItem lastItem = node.getLastPublishedItem();</span>
+<span class="nc bnc" id="L405" title="All 2 branches missed.">                if (lastItem != null) {</span>
+<span class="nc" id="L406">                    sendLastPublishedItem(lastItem);</span>
+                }
+            }
+        }
+<span class="nc" id="L410">    }</span>
+
+    void configure(DataForm options) {
+        List&lt;String&gt; values;
+
+<span class="nc bnc" id="L415" title="All 2 branches missed.">        boolean wasUsingPresence = !presenceStates.isEmpty();</span>
+
+        // Remove this field from the form
+<span class="nc" id="L418">        options.removeField(&quot;FORM_TYPE&quot;);</span>
+        // Process and remove specific collection node fields
+<span class="nc" id="L420">        FormField collectionField = options.getField(&quot;pubsub#subscription_type&quot;);</span>
+<span class="nc bnc" id="L421" title="All 2 branches missed.">        if (collectionField != null) {</span>
+<span class="nc" id="L422">            values = collectionField.getValues();</span>
+<span class="nc bnc" id="L423" title="All 2 branches missed.">            if (values.size() &gt; 0)  {</span>
+<span class="nc" id="L424">                type = Type.valueOf(values.get(0));</span>
+            }
+<span class="nc" id="L426">            options.removeField(&quot;pubsub#subscription_type&quot;);</span>
+        }
+<span class="nc" id="L428">        collectionField = options.getField(&quot;pubsub#subscription_depth&quot;);</span>
+<span class="nc bnc" id="L429" title="All 2 branches missed.">        if (collectionField != null) {</span>
+<span class="nc" id="L430">            values = collectionField.getValues();</span>
+<span class="nc bnc" id="L431" title="All 2 branches missed.">            depth = &quot;all&quot;.equals(values.get(0)) ? 0 : 1;</span>
+<span class="nc" id="L432">            options.removeField(&quot;pubsub#subscription_depth&quot;);</span>
+        }
+        // If there are more fields in the form then process them and set that
+        // the subscription has been configured
+<span class="nc bnc" id="L436" title="All 2 branches missed.">        for (FormField field : options.getFields()) {</span>
+<span class="nc" id="L437">            boolean fieldExists = true;</span>
+<span class="nc bnc" id="L438" title="All 2 branches missed.">            if (&quot;pubsub#deliver&quot;.equals(field.getVariable())) {</span>
+<span class="nc" id="L439">                deliverNotifications = parseFirstValueAsBoolean( field, true ) ;</span>
+            }
+<span class="nc bnc" id="L441" title="All 2 branches missed.">            else if (&quot;pubsub#digest&quot;.equals(field.getVariable())) {</span>
+<span class="nc" id="L442">                usingDigest = parseFirstValueAsBoolean( field, true ) ;</span>
+            }
+<span class="nc bnc" id="L444" title="All 2 branches missed.">            else if (&quot;pubsub#digest_frequency&quot;.equals(field.getVariable())) {</span>
+<span class="nc" id="L445">                values = field.getValues();</span>
+<span class="nc bnc" id="L446" title="All 2 branches missed.">                digestFrequency = values.size() &gt; 0 ? Integer.parseInt(values.get(0)) : 86400000;</span>
+            }
+<span class="nc bnc" id="L448" title="All 2 branches missed.">            else if (&quot;pubsub#expire&quot;.equals(field.getVariable())) {</span>
+<span class="nc" id="L449">                values = field.getValues();</span>
+                try {
+<span class="nc" id="L451">                    expire = xmppDateTime.parseString(values.get(0));</span>
+<span class="nc" id="L452">                } catch (ParseException e) {</span>
+<span class="nc" id="L453">                    Log.error(&quot;Error parsing date&quot;, e);</span>
+<span class="nc" id="L454">                }</span>
+            }
+<span class="nc bnc" id="L456" title="All 2 branches missed.">            else if (&quot;pubsub#include_body&quot;.equals(field.getVariable())) {</span>
+<span class="nc" id="L457">                includingBody = parseFirstValueAsBoolean( field, true ) ;</span>
+            }
+<span class="nc bnc" id="L459" title="All 2 branches missed.">            else if (&quot;pubsub#show-values&quot;.equals(field.getVariable())) {</span>
+                // Get the new list of presence states for which an entity wants to
+                // receive notifications
+<span class="nc" id="L462">                presenceStates = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L463" title="All 2 branches missed.">                for (String value : field.getValues()) {</span>
+                    try {
+<span class="nc" id="L465">                        presenceStates.add(value);</span>
+                    }
+<span class="nc" id="L467">                    catch (Exception e) {</span>
+                        // Do nothing
+<span class="nc" id="L469">                    }</span>
+<span class="nc" id="L470">                }</span>
+            }
+<span class="nc bnc" id="L472" title="All 2 branches missed.">            else if (&quot;x-pubsub#keywords&quot;.equals(field.getVariable())) {</span>
+<span class="nc" id="L473">                values = field.getValues();</span>
+<span class="nc bnc" id="L474" title="All 2 branches missed.">                keyword = values.isEmpty() ? null : values.get(0);</span>
+            }
+            else {
+<span class="nc" id="L477">                fieldExists = false;</span>
+            }
+<span class="nc bnc" id="L479" title="All 2 branches missed.">            if (fieldExists) {</span>
+                // Subscription has been configured so set the next state
+<span class="nc bnc" id="L481" title="All 4 branches missed.">                if (node.getAccessModel().isAuthorizationRequired() &amp;&amp; !node.isAdmin(owner)) {</span>
+<span class="nc" id="L482">                    state = State.pending;</span>
+                }
+                else {
+<span class="nc" id="L485">                    state = State.subscribed;</span>
+                }
+            }
+<span class="nc" id="L488">        }</span>
+<span class="nc bnc" id="L489" title="All 2 branches missed.">        if (savedToDB) {</span>
+            // Update the subscription in the backend store
+<span class="nc" id="L491">            PubSubPersistenceManager.saveSubscription(node, this, false);</span>
+        }
+        // Check if the service needs to subscribe or unsubscribe from the owner presence
+<span class="nc bnc" id="L494" title="All 6 branches missed.">        if (!node.isPresenceBasedDelivery() &amp;&amp; wasUsingPresence != !presenceStates.isEmpty()) {</span>
+<span class="nc bnc" id="L495" title="All 2 branches missed.">            if (presenceStates.isEmpty()) {</span>
+<span class="nc" id="L496">                node.getService().presenceSubscriptionNotRequired(node, owner);</span>
+            }
+            else {
+<span class="nc" id="L499">                node.getService().presenceSubscriptionRequired(node, owner);</span>
+            }
+        }
+<span class="nc" id="L502">    }</span>
+
+    /**
+     * Returns a data form with the subscription configuration. The data form can be used to
+     * edit the subscription configuration.
+     *
+     * @return data form used by the subscriber to edit the subscription configuration.
+     */
+    public DataForm getConfigurationForm() {
+<span class="nc" id="L511">        DataForm form = new DataForm(DataForm.Type.form);</span>
+<span class="nc" id="L512">        form.setTitle(LocaleUtils.getLocalizedString(&quot;pubsub.form.subscription.title&quot;));</span>
+<span class="nc" id="L513">        List&lt;String&gt; params = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L514">        params.add(node.getNodeID());</span>
+<span class="nc" id="L515">        form.addInstruction(LocaleUtils.getLocalizedString(&quot;pubsub.form.subscription.instruction&quot;, params));</span>
+        // Add the form fields and configure them for edition
+<span class="nc" id="L517">        FormField formField = form.addField();</span>
+<span class="nc" id="L518">        formField.setVariable(&quot;FORM_TYPE&quot;);</span>
+<span class="nc" id="L519">        formField.setType(FormField.Type.hidden);</span>
+<span class="nc" id="L520">        formField.addValue(&quot;http://jabber.org/protocol/pubsub#subscribe_options&quot;);</span>
+
+<span class="nc" id="L522">        formField = form.addField();</span>
+<span class="nc" id="L523">        formField.setVariable(&quot;pubsub#deliver&quot;);</span>
+<span class="nc" id="L524">        formField.setType(FormField.Type.boolean_type);</span>
+<span class="nc" id="L525">        formField.setLabel(LocaleUtils.getLocalizedString(&quot;pubsub.form.subscription.deliver&quot;));</span>
+<span class="nc" id="L526">        formField.addValue(deliverNotifications);</span>
+
+<span class="nc" id="L528">        formField = form.addField();</span>
+<span class="nc" id="L529">        formField.setVariable(&quot;pubsub#digest&quot;);</span>
+<span class="nc" id="L530">        formField.setType(FormField.Type.boolean_type);</span>
+<span class="nc" id="L531">        formField.setLabel(LocaleUtils.getLocalizedString(&quot;pubsub.form.subscription.digest&quot;));</span>
+<span class="nc" id="L532">        formField.addValue(usingDigest);</span>
+
+<span class="nc" id="L534">        formField = form.addField();</span>
+<span class="nc" id="L535">        formField.setVariable(&quot;pubsub#digest_frequency&quot;);</span>
+<span class="nc" id="L536">        formField.setType(FormField.Type.text_single);</span>
+<span class="nc" id="L537">        formField.setLabel(LocaleUtils.getLocalizedString(&quot;pubsub.form.subscription.digest_frequency&quot;));</span>
+<span class="nc" id="L538">        formField.addValue(digestFrequency);</span>
+
+<span class="nc" id="L540">        formField = form.addField();</span>
+<span class="nc" id="L541">        formField.setVariable(&quot;pubsub#expire&quot;);</span>
+<span class="nc" id="L542">        formField.setType(FormField.Type.text_single);</span>
+<span class="nc" id="L543">        formField.setLabel(LocaleUtils.getLocalizedString(&quot;pubsub.form.subscription.expire&quot;));</span>
+<span class="nc bnc" id="L544" title="All 2 branches missed.">        if (expire != null) {</span>
+<span class="nc" id="L545">            formField.addValue(XMPPDateTimeFormat.format(expire));</span>
+        }
+
+<span class="nc" id="L548">        formField = form.addField();</span>
+<span class="nc" id="L549">        formField.setVariable(&quot;pubsub#include_body&quot;);</span>
+<span class="nc" id="L550">        formField.setType(FormField.Type.boolean_type);</span>
+<span class="nc" id="L551">        formField.setLabel(LocaleUtils.getLocalizedString(&quot;pubsub.form.subscription.include_body&quot;));</span>
+<span class="nc" id="L552">        formField.addValue(includingBody);</span>
+
+<span class="nc" id="L554">        formField = form.addField();</span>
+<span class="nc" id="L555">        formField.setVariable(&quot;pubsub#show-values&quot;);</span>
+<span class="nc" id="L556">        formField.setType(FormField.Type.list_multi);</span>
+<span class="nc" id="L557">        formField.setLabel(LocaleUtils.getLocalizedString(&quot;pubsub.form.subscription.show-values&quot;));</span>
+<span class="nc" id="L558">        formField.addOption(null, Presence.Show.away.name());</span>
+<span class="nc" id="L559">        formField.addOption(null, Presence.Show.chat.name());</span>
+<span class="nc" id="L560">        formField.addOption(null, Presence.Show.dnd.name());</span>
+<span class="nc" id="L561">        formField.addOption(null, &quot;online&quot;);</span>
+<span class="nc" id="L562">        formField.addOption(null, Presence.Show.xa.name());</span>
+<span class="nc bnc" id="L563" title="All 2 branches missed.">        for (String value : presenceStates) {</span>
+<span class="nc" id="L564">            formField.addValue(value);</span>
+<span class="nc" id="L565">        }</span>
+
+<span class="nc bnc" id="L567" title="All 2 branches missed.">        if (node.isCollectionNode()) {</span>
+<span class="nc" id="L568">            formField = form.addField();</span>
+<span class="nc" id="L569">            formField.setVariable(&quot;pubsub#subscription_type&quot;);</span>
+<span class="nc" id="L570">            formField.setType(FormField.Type.list_single);</span>
+<span class="nc" id="L571">            formField.setLabel(LocaleUtils.getLocalizedString(&quot;pubsub.form.subscription.subscription_type&quot;));</span>
+<span class="nc" id="L572">            formField.addOption(null, Type.items.name());</span>
+<span class="nc" id="L573">            formField.addOption(null, Type.nodes.name());</span>
+<span class="nc" id="L574">            formField.addValue(type);</span>
+
+<span class="nc" id="L576">            formField = form.addField();</span>
+<span class="nc" id="L577">            formField.setVariable(&quot;pubsub#subscription_depth&quot;);</span>
+<span class="nc" id="L578">            formField.setType(FormField.Type.list_single);</span>
+<span class="nc" id="L579">            formField.setLabel(LocaleUtils.getLocalizedString(&quot;pubsub.form.subscription.subscription_depth&quot;));</span>
+<span class="nc" id="L580">            formField.addOption(null, &quot;1&quot;);</span>
+<span class="nc" id="L581">            formField.addOption(null, &quot;all&quot;);</span>
+<span class="nc bnc" id="L582" title="All 2 branches missed.">            formField.addValue(depth == 1 ? &quot;1&quot; : &quot;all&quot;);</span>
+        }
+
+<span class="nc bnc" id="L585" title="All 4 branches missed.">        if (!node.isCollectionNode() || type == Type.items) {</span>
+<span class="nc" id="L586">            formField = form.addField();</span>
+<span class="nc" id="L587">            formField.setVariable(&quot;x-pubsub#keywords&quot;);</span>
+<span class="nc" id="L588">            formField.setType(FormField.Type.text_single);</span>
+<span class="nc" id="L589">            formField.setLabel(LocaleUtils.getLocalizedString(&quot;pubsub.form.subscription.keywords&quot;));</span>
+<span class="nc bnc" id="L590" title="All 2 branches missed.">            if (keyword != null) {</span>
+<span class="nc" id="L591">                formField.addValue(keyword);</span>
+            }
+        }
+
+<span class="nc" id="L595">        return form;</span>
+    }
+
+    /**
+     * Returns true if an event notification can be sent to the subscriber for the specified
+     * published item based on the subsription configuration and subscriber status.
+     *
+     * @param leafNode the node that received the publication.
+     * @param publishedItem the published item to send or null if the publication didn't
+     *        contain an item.
+     * @return true if an event notification can be sent to the subscriber for the specified
+     *         published item.
+     */
+    public boolean canSendPublicationEvent(LeafNode leafNode, PublishedItem publishedItem) {
+<span class="nc bnc" id="L609" title="All 2 branches missed.">        if (!canSendEvents()) {</span>
+<span class="nc" id="L610">            return false;</span>
+        }
+        // Check that any defined keyword was matched (applies only if an item was published)
+<span class="nc bnc" id="L613" title="All 4 branches missed.">        if (publishedItem != null &amp;&amp; !isKeywordMatched(publishedItem)) {</span>
+<span class="nc" id="L614">            return false;</span>
+        }
+        // Check special conditions when subscribed to collection node
+<span class="nc bnc" id="L617" title="All 2 branches missed.">        if (node.isCollectionNode()) {</span>
+            // Check if not subscribe to items
+<span class="nc bnc" id="L619" title="All 2 branches missed.">            if (Type.items != type) {</span>
+<span class="nc" id="L620">                return false;</span>
+            }
+            // Check if published node is a first-level child of the subscribed node
+<span class="nc bnc" id="L623" title="All 4 branches missed.">            if (getDepth() == 1 &amp;&amp; !node.isChildNode(leafNode)) {</span>
+<span class="nc" id="L624">                return false;</span>
+            }
+            // Check if published node is a descendant child of the subscribed node
+<span class="nc bnc" id="L627" title="All 4 branches missed.">            if (getDepth() == 0 &amp;&amp; !node.isDescendantNode(leafNode)) {</span>
+<span class="nc" id="L628">                return false;</span>
+            }
+        }
+<span class="nc" id="L631">        return true;</span>
+    }
+
+    /**
+     * Returns true if an event notification can be sent to the subscriber of the collection
+     * node for a newly created node that was associated to the collection node or a child
+     * node that was deleted. The subscription has to be of type {@link Type#nodes}.
+     *
+     * @param originatingNode the node that was added or deleted from the collection node.
+     * @return true if an event notification can be sent to the subscriber of the collection
+     *         node.
+     */
+    boolean canSendChildNodeEvent(Node originatingNode) {
+        // Check that this is a subscriber to a collection node
+<span class="nc bnc" id="L645" title="All 2 branches missed.">        if (!node.isCollectionNode()) {</span>
+<span class="nc" id="L646">            return false;</span>
+        }
+
+<span class="nc bnc" id="L649" title="All 2 branches missed.">        if (!canSendEvents()) {</span>
+<span class="nc" id="L650">            return false;</span>
+        }
+        // Check that subscriber is using type &quot;nodes&quot;
+<span class="nc bnc" id="L653" title="All 2 branches missed.">        if (Type.nodes != type) {</span>
+<span class="nc" id="L654">            return false;</span>
+        }
+        // Check if added/deleted node is a first-level child of the subscribed node
+<span class="nc bnc" id="L657" title="All 4 branches missed.">        if (getDepth() == 1 &amp;&amp; !node.isChildNode(originatingNode)) {</span>
+<span class="nc" id="L658">            return false;</span>
+        }
+        // Check if added/deleted node is a descendant child of the subscribed node
+<span class="nc bnc" id="L661" title="All 4 branches missed.">        if (getDepth() == 0 &amp;&amp; !node.isDescendantNode(originatingNode)) {</span>
+<span class="nc" id="L662">            return false;</span>
+        }
+<span class="nc" id="L664">        return true;</span>
+    }
+
+    /**
+     * Returns true if node events such as configuration changed or node purged can be
+     * sent to the subscriber.
+     *
+     * @return true if node events such as configuration changed or node purged can be
+     *         sent to the subscriber.
+     */
+    boolean canSendNodeEvents() {
+<span class="nc" id="L675">        return canSendEvents();</span>
+    }
+
+    /**
+     * Returns true if events in general can be sent. This method checks basic
+     * conditions common to all type of event notifications (e.g. item was published,
+     * node configuration has changed, new child node was added to collection node, etc.).
+     *
+     * @return true if events in general can be sent.
+     */
+    private boolean canSendEvents() {
+        // Check if the subscription is active
+<span class="nc bnc" id="L687" title="All 2 branches missed.">        if (!isActive()) {</span>
+<span class="nc" id="L688">            return false;</span>
+        }
+        // Check if delivery of notifications is disabled
+<span class="nc bnc" id="L691" title="All 2 branches missed.">        if (!shouldDeliverNotifications()) {</span>
+<span class="nc" id="L692">            return false;</span>
+        }
+        // Check if delivery is subject to presence-based policy
+<span class="nc bnc" id="L695" title="All 2 branches missed.">        if (!getPresenceStates().isEmpty()) {</span>
+<span class="nc" id="L696">            Collection&lt;String&gt; shows = node.getService().getShowPresences(jid);</span>
+<span class="nc bnc" id="L697" title="All 4 branches missed.">            if (shows.isEmpty() || Collections.disjoint(getPresenceStates(), shows)) {</span>
+<span class="nc" id="L698">                return false;</span>
+            }
+        }
+        // Check if node is only sending events when user is online
+<span class="nc bnc" id="L702" title="All 2 branches missed.">        if (node.isPresenceBasedDelivery()) {</span>
+            // Check that user is online
+<span class="nc bnc" id="L704" title="All 2 branches missed.">            if (node.getService().getShowPresences(jid).isEmpty())</span>
+            {
+<span class="nc" id="L706">                return false;</span>
+            }
+        }
+<span class="nc" id="L709">        return true;</span>
+    }
+
+    /**
+     * Returns true if the published item matches the keyword filter specified in
+     * the subscription. If no keyword was specified then answer true.
+     *
+     * @param publishedItem the published item to send.
+     * @return true if the published item matches the keyword filter specified in
+     *         the subscription.
+     */
+    boolean isKeywordMatched(PublishedItem publishedItem) {
+        // Check if keyword was defined and it was not matched
+<span class="nc bnc" id="L722" title="All 6 branches missed.">        if (keyword != null &amp;&amp; keyword.length() &gt; 0 &amp;&amp; !publishedItem.containsKeyword(keyword)) {</span>
+<span class="nc" id="L723">            return false;</span>
+        }
+<span class="nc" id="L725">        return true;</span>
+    }
+
+    /**
+     * Returns true if the subscription is active. A subscription is considered active if it
+     * has not expired, it has been approved and configured.
+     *
+     * @return true if the subscription is active.
+     */
+    public boolean isActive() {
+        // Check if subscription is approved and configured (if required)
+<span class="nc bnc" id="L736" title="All 2 branches missed.">        if (state != State.subscribed) {</span>
+<span class="nc" id="L737">            return false;</span>
+        }
+        // Check if the subscription has expired
+<span class="nc bnc" id="L740" title="All 4 branches missed.">        if (expire != null &amp;&amp; new Date().after(expire)) {</span>
+            // TODO This checking does not replace the fact that we need to implement expiration.
+            // TODO A thread that checks expired subscriptions and removes them is needed.
+<span class="nc" id="L743">            return false;</span>
+        }
+<span class="nc" id="L745">        return true;</span>
+    }
+
+    /**
+     * Sends the current subscription status to the user that tried to create a subscription to
+     * the node. The subscription status is sent to the subsciber after the subscription was
+     * created or if the subscriber tries to subscribe many times and the node does not support
+     * multpiple subscriptions.
+     *
+     * @param originalRequest the IQ packet sent by the subscriber to create the subscription.
+     */
+    void sendSubscriptionState(IQ originalRequest) {
+<span class="nc" id="L757">        IQ result = IQ.createResultIQ(originalRequest);</span>
+<span class="nc" id="L758">        Element child = result.setChildElement(&quot;pubsub&quot;, &quot;http://jabber.org/protocol/pubsub&quot;);</span>
+<span class="nc" id="L759">        Element entity = child.addElement(&quot;subscription&quot;);</span>
+<span class="nc bnc" id="L760" title="All 2 branches missed.">        if (!node.isRootCollectionNode()) {</span>
+<span class="nc" id="L761">            entity.addAttribute(&quot;node&quot;, node.getNodeID());</span>
+        }
+<span class="nc" id="L763">        entity.addAttribute(&quot;jid&quot;, getJID().toString());</span>
+<span class="nc bnc" id="L764" title="All 2 branches missed.">        if (node.isMultipleSubscriptionsEnabled()) {</span>
+<span class="nc" id="L765">            entity.addAttribute(&quot;subid&quot;, getID());</span>
+        }
+<span class="nc" id="L767">        entity.addAttribute(&quot;subscription&quot;, getState().name());</span>
+<span class="nc" id="L768">        Element subscribeOptions = entity.addElement(&quot;subscribe-options&quot;);</span>
+<span class="nc bnc" id="L769" title="All 4 branches missed.">        if (node.isSubscriptionConfigurationRequired() &amp;&amp; isConfigurationPending()) {</span>
+<span class="nc" id="L770">            subscribeOptions.addElement(&quot;required&quot;);</span>
+        }
+        // Send the result
+<span class="nc" id="L773">        node.getService().send(result);</span>
+<span class="nc" id="L774">    }</span>
+
+    /**
+     * Sends an event notification for the last published item to the subscriber. If
+     * the subscription has not yet been authorized or is pending to be configured then
+     * no notification is going to be sent.&lt;p&gt;
+     *
+     * Depending on the subscription configuration the event notification may or may not have
+     * a payload, may not be sent if a keyword (i.e. filter) was defined and it was not matched.
+     *
+     * &lt;p&gt;Sending the last published item can also be entirely disabled by setting
+     * {@code xmpp.pubsub.disable-delayed-delivery} to {@code &lt;true}.&lt;/p&gt;
+     *
+     * @param publishedItem the last item that was published to the node.
+     */
+    void sendLastPublishedItem(PublishedItem publishedItem) {
+        // Check to see if we've been disabled
+<span class="nc bnc" id="L791" title="All 2 branches missed.">        if (JiveGlobals.getBooleanProperty(&quot;xmpp.pubsub.disable-delayed-delivery&quot;, false)) {</span>
+<span class="nc" id="L792">            return;</span>
+        }
+
+        // Check if the published item can be sent to the subscriber
+<span class="nc bnc" id="L796" title="All 2 branches missed.">        if (!canSendPublicationEvent(publishedItem.getNode(), publishedItem)) {</span>
+<span class="nc" id="L797">            return;</span>
+        }
+        // Send event notification to the subscriber
+<span class="nc" id="L800">        Message notification = new Message();</span>
+<span class="nc" id="L801">        Element event = notification.getElement()</span>
+<span class="nc" id="L802">                .addElement(&quot;event&quot;, &quot;http://jabber.org/protocol/pubsub#event&quot;);</span>
+<span class="nc" id="L803">        Element items = event.addElement(&quot;items&quot;);</span>
+<span class="nc" id="L804">        items.addAttribute(&quot;node&quot;, node.getNodeID());</span>
+<span class="nc" id="L805">        Element item = items.addElement(&quot;item&quot;);</span>
+<span class="nc bnc" id="L806" title="All 2 branches missed.">        if (((LeafNode) node).isItemRequired()) {</span>
+<span class="nc" id="L807">            item.addAttribute(&quot;id&quot;, publishedItem.getID());</span>
+        }
+<span class="nc bnc" id="L809" title="All 4 branches missed.">        if (node.isPayloadDelivered() &amp;&amp; publishedItem.getPayload() != null) {</span>
+<span class="nc" id="L810">            item.add(publishedItem.getPayload().createCopy());</span>
+        }
+        // Add a message body (if required)
+<span class="nc bnc" id="L813" title="All 2 branches missed.">        if (isIncludingBody()) {</span>
+<span class="nc" id="L814">            notification.setBody(LocaleUtils.getLocalizedString(&quot;pubsub.notification.message.body&quot;));</span>
+        }
+        // Include date when published item was created
+<span class="nc" id="L817">        notification.getElement().addElement(&quot;delay&quot;, &quot;urn:xmpp:delay&quot;)</span>
+<span class="nc" id="L818">                .addAttribute(&quot;stamp&quot;, XMPPDateTimeFormat.format(publishedItem.getCreationDate()));</span>
+        // Send the event notification to the subscriber
+<span class="nc" id="L820">        node.getService().sendNotification(node, notification, jid);</span>
+<span class="nc" id="L821">    }</span>
+
+    /**
+     * Returns true if the specified user is allowed to modify or cancel the subscription. Users
+     * that are allowed to modify/cancel the subscription are: the entity that is recieving the
+     * notifications, the owner of the subscriptions or sysadmins of the pubsub service.
+     *
+     * @param user the user that is trying to cancel the subscription.
+     * @return true if the specified user is allowed to modify or cancel the subscription.
+     */
+    boolean canModify(JID user) {
+<span class="nc bnc" id="L832" title="All 6 branches missed.">        return user.equals(getJID()) || user.equals(getOwner()) || node.getService().isServiceAdmin(user);</span>
+    }
+
+    /**
+     * Returns the {@link NodeAffiliate} that owns this subscription. Users that have a
+     * subscription with the node will ALWAYS have an affiliation even if the
+     * affiliation is of type {@code none}.
+     *
+     * @return the NodeAffiliate that owns this subscription.
+     */
+    public NodeAffiliate getAffiliate() {
+<span class="nc" id="L843">        return node.getAffiliate(getOwner());</span>
+    }
+
+    @Override
+    public String toString() {
+<span class="nc" id="L848">        return super.toString() + &quot; - JID: &quot; + getJID() + &quot; - State: &quot; + getState().name();</span>
+    }
+
+    /**
+     * The subscription has been approved by a node owner. The subscription is now active so
+     * the subscriber is now allowed to get event notifications.
+     */
+    void approved() {
+<span class="nc bnc" id="L856" title="All 2 branches missed.">        if (state == State.subscribed) {</span>
+            // Do nothing
+<span class="nc" id="L858">            return;</span>
+        }
+<span class="nc" id="L860">        state = State.subscribed;</span>
+
+<span class="nc bnc" id="L862" title="All 2 branches missed.">        if (savedToDB) {</span>
+            // Update the subscription in the backend store
+<span class="nc" id="L864">            PubSubPersistenceManager.saveSubscription(node, this, false);</span>
+        }
+
+        // Send last published item (if node is leaf node and subscription status is ok)
+<span class="nc bnc" id="L868" title="All 4 branches missed.">        if (node.isSendItemSubscribe() &amp;&amp; isActive()) {</span>
+<span class="nc" id="L869">            PublishedItem lastItem = node.getLastPublishedItem();</span>
+<span class="nc bnc" id="L870" title="All 2 branches missed.">            if (lastItem != null) {</span>
+<span class="nc" id="L871">                sendLastPublishedItem(lastItem);</span>
+            }
+        }
+<span class="nc" id="L874">    }</span>
+
+    /**
+     * Sends an request to authorize the pending subscription to the specified owner.
+     *
+     * @param owner the JID of the user that will get the authorization request.
+     */
+    public void sendAuthorizationRequest(JID owner) {
+<span class="nc" id="L882">        Message authRequest = new Message();</span>
+<span class="nc" id="L883">        authRequest.addExtension(node.getAuthRequestForm(this));</span>
+<span class="nc" id="L884">        authRequest.setTo(owner);</span>
+<span class="nc" id="L885">        authRequest.setFrom(node.getService().getAddress());</span>
+        // Send authentication request to node owners
+<span class="nc" id="L887">        node.getService().send(authRequest);</span>
+<span class="nc" id="L888">    }</span>
+
+    /**
+     * Sends an request to authorize the pending subscription to all owners. The first
+     * answer sent by a owner will be processed. Rest of the answers will be discarded.
+     */
+    public void sendAuthorizationRequest() {
+<span class="nc" id="L895">        Message authRequest = new Message();</span>
+<span class="nc" id="L896">        authRequest.addExtension(node.getAuthRequestForm(this));</span>
+        // Send authentication request to node owners
+<span class="nc" id="L898">        node.getService().broadcast(node, authRequest, node.getOwners());</span>
+<span class="nc" id="L899">    }</span>
+
+    /**
+     * Subscriptions to a node may exist in several states. Delivery of event notifications
+     * varies according to the subscription state of the user with the node.
+     */
+<span class="nc" id="L905">    public static enum State {</span>
+
+        /**
+         * The node will never send event notifications or payloads to users in this state. Users
+         * with subscription state none and affiliation none are going to be deleted.
+         */
+<span class="nc" id="L911">        none,</span>
+        /**
+         * An entity has requested to subscribe to a node and the request has not yet been
+         * approved by a node owner. The node will not send event notifications or payloads
+         * to the entity while it is in this state.
+         */
+<span class="nc" id="L917">        pending,</span>
+        /**
+         * An entity has subscribed but its subscription options have not yet been configured.
+         * The node will send event notifications or payloads to the entity while it is in this
+         * state. Default subscription configuration is going to be assumed.
+         */
+<span class="nc" id="L923">        unconfigured,</span>
+        /**
+         * An entity is subscribed to a node. The node will send all event notifications
+         * (and, if configured, payloads) to the entity while it is in this state.
+         */
+<span class="nc" id="L928">        subscribed</span>
+    }
+
+<span class="nc" id="L931">    public static enum Type {</span>
+
+        /**
+         * Receive notification of new items only.
+         */
+<span class="nc" id="L936">        items,</span>
+        /**
+         * Receive notification of new nodes only.
+         */
+<span class="nc" id="L940">        nodes</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

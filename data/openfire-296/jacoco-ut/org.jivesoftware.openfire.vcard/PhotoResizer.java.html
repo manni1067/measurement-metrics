@@ -1,0 +1,169 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>PhotoResizer.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.vcard</a> &gt; <span class="el_source">PhotoResizer.java</span></div><h1>PhotoResizer.java</h1><pre class="source lang-java linenums">package org.jivesoftware.openfire.vcard;
+
+import org.dom4j.Element;
+import org.jivesoftware.util.Base64;
+import org.jivesoftware.util.JiveGlobals;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import javax.imageio.ImageIO;
+import javax.imageio.ImageWriter;
+import javax.imageio.stream.ImageOutputStream;
+import javax.imageio.stream.MemoryCacheImageOutputStream;
+import java.awt.*;
+import java.awt.geom.AffineTransform;
+import java.awt.image.BufferedImage;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.util.Iterator;
+
+/**
+ * Image resizing utility methods.
+ */
+<span class="nc" id="L24">public class PhotoResizer</span>
+{
+<span class="nc" id="L26">    private static final Logger Log = LoggerFactory.getLogger( PhotoResizer.class );</span>
+
+    // Property that, when 'true' causes avatars that are being loaded from backend storage to be resized, prior to be
+    // processed and send to entities.
+    public static final String PROPERTY_RESIZE_ON_LOAD = &quot;avatar.resize.enable-on-load&quot;;
+    public static final boolean PROPERTY_RESIZE_ON_LOAD_DEFAULT = true;
+
+    // Property that, when 'true' causes avatars that are being stored in backend storage to be resized.
+    public static final String PROPERTY_RESIZE_ON_CREATE = &quot;avatar.resize.enable-on-create&quot;;
+    public static final boolean PROPERTY_RESIZE_ON_CREATE_DEFAULT = false;
+
+    // Property that controls the target dimension, in pixels.
+    public static final String PROPERTY_TARGETDIMENSION = &quot;avatar.resize.targetdimension&quot;;
+    public static final int PROPERTY_TARGETDIMENSION_DEFAULT = 96;
+
+    public static void resizeAvatar( final Element vCardElement )
+    {
+<span class="nc bnc" id="L43" title="All 2 branches missed.">        if ( vCardElement == null )</span>
+        {
+<span class="nc" id="L45">            return;</span>
+        }
+
+        // XPath didn't work?
+<span class="nc bnc" id="L49" title="All 2 branches missed.">        if ( vCardElement.element( &quot;PHOTO&quot; ) == null )</span>
+        {
+<span class="nc" id="L51">            return;</span>
+        }
+
+<span class="nc bnc" id="L54" title="All 4 branches missed.">        if ( vCardElement.element( &quot;PHOTO&quot; ).element( &quot;BINVAL&quot; ) == null || vCardElement.element( &quot;PHOTO&quot; ).element( &quot;TYPE&quot; ) == null )</span>
+        {
+<span class="nc" id="L56">            return;</span>
+        }
+
+<span class="nc" id="L59">        final Element element = vCardElement.element( &quot;PHOTO&quot; ).element( &quot;BINVAL&quot; );</span>
+<span class="nc bnc" id="L60" title="All 4 branches missed.">        if ( element.getTextTrim() == null || element.getTextTrim().isEmpty() )</span>
+        {
+<span class="nc" id="L62">            return;</span>
+        }
+
+        // Get a writer (check if we can generate a new image for the type of the original).
+<span class="nc" id="L66">        final String type = vCardElement.element( &quot;PHOTO&quot; ).element( &quot;TYPE&quot; ).getTextTrim();</span>
+<span class="nc" id="L67">        final Iterator it = ImageIO.getImageWritersByMIMEType( type );</span>
+<span class="nc bnc" id="L68" title="All 2 branches missed.">        if ( !it.hasNext() )</span>
+        {
+<span class="nc" id="L70">            Log.debug( &quot;Cannot resize avatar. No writers available for MIME type {}.&quot;, type );</span>
+<span class="nc" id="L71">            return;</span>
+        }
+<span class="nc" id="L73">        final ImageWriter iw = (ImageWriter) it.next();</span>
+
+        // Extract the original avatar from the VCard.
+<span class="nc" id="L76">        final byte[] original = Base64.decode( element.getTextTrim() );</span>
+
+        // Crop and shrink, if needed.
+<span class="nc" id="L79">        final int targetDimension = JiveGlobals.getIntProperty( PROPERTY_TARGETDIMENSION, PROPERTY_TARGETDIMENSION_DEFAULT );</span>
+<span class="nc" id="L80">        final byte[] resized = cropAndShrink( original, targetDimension, iw );</span>
+
+        // If a resized image was created, replace to original avatar in the VCard.
+<span class="nc bnc" id="L83" title="All 2 branches missed.">        if ( resized != null )</span>
+        {
+<span class="nc" id="L85">            Log.debug( &quot;Replacing original avatar in vcard with a resized variant.&quot; );</span>
+<span class="nc" id="L86">            vCardElement.element( &quot;PHOTO&quot; ).element( &quot;BINVAL&quot; ).setText( Base64.encodeBytes( resized ) );</span>
+        }
+<span class="nc" id="L88">    }</span>
+
+    public static byte[] cropAndShrink( final byte[] bytes, final int targetDimension, final ImageWriter iw )
+    {
+<span class="nc" id="L92">        Log.debug( &quot;Original image size: {} bytes.&quot;, bytes.length );</span>
+
+        BufferedImage avatar;
+<span class="nc" id="L95">        try ( final ByteArrayInputStream stream = new ByteArrayInputStream( bytes ) )</span>
+        {
+<span class="nc" id="L97">            avatar = ImageIO.read( stream );</span>
+
+<span class="nc bnc" id="L99" title="All 4 branches missed.">            if ( avatar.getWidth() &lt;= targetDimension &amp;&amp; avatar.getHeight() &lt;= targetDimension )</span>
+            {
+<span class="nc" id="L101">                Log.debug( &quot;Original image dimension ({}x{}) is within acceptable bounds ({}x{}). No need to resize.&quot;, new Object[] { avatar.getWidth(), avatar.getHeight(), targetDimension, targetDimension });</span>
+<span class="nc" id="L102">                return null;</span>
+            }
+<span class="nc bnc" id="L104" title="All 12 branches missed.">        }</span>
+<span class="nc" id="L105">        catch ( IOException | RuntimeException ex )</span>
+        {
+<span class="nc" id="L107">            Log.warn( &quot;Failed to resize avatar. An unexpected exception occurred while reading the original image.&quot;, ex );</span>
+<span class="nc" id="L108">            return null;</span>
+<span class="nc" id="L109">        }</span>
+
+        /* We're going to be resizing, let's crop the image so that it's square and figure out the new starting size. */
+<span class="nc" id="L112">        Log.debug( &quot;Original image is &quot; + avatar.getWidth() + &quot;x&quot; + avatar.getHeight() + &quot; pixels&quot; );</span>
+
+        final int targetWidth, targetHeight;
+
+<span class="nc bnc" id="L116" title="All 2 branches missed.">        if ( avatar.getHeight() == avatar.getWidth() )</span>
+        {
+<span class="nc" id="L118">            Log.debug( &quot;Original image is already square ({}x{})&quot;, avatar.getWidth(), avatar.getHeight() );</span>
+<span class="nc" id="L119">            targetWidth = targetHeight = avatar.getWidth();</span>
+        }
+        else
+        {
+            final int x, y;
+<span class="nc bnc" id="L124" title="All 2 branches missed.">            if ( avatar.getHeight() &gt; avatar.getWidth() )</span>
+            {
+<span class="nc" id="L126">                Log.debug( &quot;Original image is taller ({}) than wide ({}).&quot;, avatar.getHeight(), avatar.getWidth() );</span>
+<span class="nc" id="L127">                x = 0;</span>
+<span class="nc" id="L128">                y = ( avatar.getHeight() - avatar.getWidth() ) / 2;</span>
+<span class="nc" id="L129">                targetWidth = targetHeight = avatar.getWidth();</span>
+            }
+            else
+            {
+<span class="nc" id="L133">                Log.debug( &quot;Original image is wider ({}) than tall ({}).&quot;, avatar.getWidth(), avatar.getHeight() );</span>
+<span class="nc" id="L134">                x = ( avatar.getWidth() - avatar.getHeight() ) / 2;</span>
+<span class="nc" id="L135">                y = 0;</span>
+<span class="nc" id="L136">                targetWidth = targetHeight = avatar.getHeight();</span>
+            }
+            // pull out a square image, centered.
+<span class="nc" id="L139">            avatar = avatar.getSubimage( x, y, targetWidth, targetHeight );</span>
+        }
+
+        /* Let's crop/scale the image as necessary out the new dimensions. */
+<span class="nc" id="L143">        final BufferedImage resizedAvatar = new BufferedImage( targetDimension, targetDimension, avatar.getType() );</span>
+
+<span class="nc" id="L145">        final AffineTransform scale = AffineTransform.getScaleInstance( (double) targetDimension / (double) targetWidth, (double) targetDimension / (double) targetHeight );</span>
+<span class="nc" id="L146">        final Graphics2D g = resizedAvatar.createGraphics();</span>
+<span class="nc" id="L147">        g.drawRenderedImage( avatar, scale );</span>
+<span class="nc" id="L148">        Log.debug( &quot;Resized image is {}x{}.&quot;, resizedAvatar.getWidth(), resizedAvatar.getHeight() );</span>
+
+        /* Now we have to dump the new jpeg, png, etc. to a byte array */
+<span class="nc" id="L151">        try ( final ByteArrayOutputStream bostream = new ByteArrayOutputStream();</span>
+<span class="nc" id="L152">              final ImageOutputStream iostream = new MemoryCacheImageOutputStream( bostream ) )</span>
+        {
+<span class="nc" id="L154">            iw.setOutput( iostream );</span>
+<span class="nc" id="L155">            iw.write( resizedAvatar );</span>
+<span class="nc" id="L156">            final byte[] data = bostream.toByteArray();</span>
+
+<span class="nc" id="L158">            Log.debug( &quot;Resized image size: {} bytes.&quot;, data.length );</span>
+
+<span class="nc" id="L160">            return data;</span>
+<span class="nc bnc" id="L161" title="All 16 branches missed.">        }</span>
+<span class="nc" id="L162">        catch ( IOException | RuntimeException ex )</span>
+        {
+<span class="nc" id="L164">            Log.warn( &quot;Failed to resize avatar. An unexpected exception occurred while writing the resized image.&quot;, ex );</span>
+<span class="nc" id="L165">            return null;</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

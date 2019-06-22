@@ -1,0 +1,352 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>FileCleaningTrackerTestCase.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">commons_io$Test.exec</a> &gt; <a href="index.source.html" class="el_package">org.apache.commons.io</a> &gt; <span class="el_source">FileCleaningTrackerTestCase.java</span></div><h1>FileCleaningTrackerTestCase.java</h1><pre class="source lang-java linenums">/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the &quot;License&quot;); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.commons.io;
+
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
+
+import java.io.BufferedOutputStream;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.RandomAccessFile;
+import java.lang.ref.ReferenceQueue;
+import java.util.ArrayList;
+import java.util.List;
+
+import org.apache.commons.io.testtools.TestUtils;
+import org.junit.After;
+import org.junit.Before;
+import org.junit.Rule;
+import org.junit.Test;
+import org.junit.rules.TemporaryFolder;
+
+/**
+ * This is used to test {@link FileCleaningTracker} for correctness.
+ *
+ * @see FileCleaningTracker
+ */
+<span class="fc" id="L45">public class FileCleaningTrackerTestCase {</span>
+
+<span class="fc" id="L47">    @Rule</span>
+    public TemporaryFolder temporaryFolder = new TemporaryFolder();
+
+    private File getTestDirectory() {
+<span class="fc" id="L51">        return temporaryFolder.getRoot();</span>
+    }
+
+    protected FileCleaningTracker newInstance() {
+<span class="fc" id="L55">        return new FileCleaningTracker();</span>
+    }
+
+    private File testFile;
+    private FileCleaningTracker theInstance;
+
+    @Before
+    public void setUp() throws Exception {
+<span class="fc" id="L63">        testFile = new File(getTestDirectory(), &quot;file-test.txt&quot;);</span>
+<span class="fc" id="L64">        theInstance = newInstance();</span>
+<span class="fc" id="L65">    }</span>
+
+    @After
+    public void tearDown() throws Exception {
+
+        // reset file cleaner class, so as not to break other tests
+
+        /**
+         * The following block of code can possibly be removed when the deprecated {@link FileCleaner} is gone. The
+         * question is, whether we want to support reuse of {@link FileCleaningTracker} instances, which we should, IMO,
+         * not.
+         */
+        {
+<span class="pc bpc" id="L78" title="1 of 2 branches missed.">            if (theInstance != null) {</span>
+<span class="fc" id="L79">                theInstance.q = new ReferenceQueue&lt;&gt;();</span>
+<span class="fc" id="L80">                theInstance.trackers.clear();</span>
+<span class="fc" id="L81">                theInstance.deleteFailures.clear();</span>
+<span class="fc" id="L82">                theInstance.exitWhenFinished = false;</span>
+<span class="fc" id="L83">                theInstance.reaper = null;</span>
+            }
+        }
+
+<span class="fc" id="L87">        theInstance = null;</span>
+<span class="fc" id="L88">    }</span>
+
+    //-----------------------------------------------------------------------
+    @Test
+    public void testFileCleanerFile() throws Exception {
+<span class="fc" id="L93">        final String path = testFile.getPath();</span>
+
+<span class="fc" id="L95">        assertFalse(testFile.exists());</span>
+<span class="fc" id="L96">        RandomAccessFile r = new RandomAccessFile(testFile, &quot;rw&quot;);</span>
+<span class="fc" id="L97">        assertTrue(testFile.exists());</span>
+
+<span class="fc" id="L99">        assertEquals(0, theInstance.getTrackCount());</span>
+<span class="fc" id="L100">        theInstance.track(path, r);</span>
+<span class="fc" id="L101">        assertEquals(1, theInstance.getTrackCount());</span>
+
+<span class="fc" id="L103">        r.close();</span>
+<span class="fc" id="L104">        testFile = null;</span>
+<span class="fc" id="L105">        r = null;</span>
+
+<span class="fc" id="L107">        waitUntilTrackCount();</span>
+<span class="fc" id="L108">        pauseForDeleteToComplete(new File(path));</span>
+
+<span class="fc" id="L110">        assertEquals(0, theInstance.getTrackCount());</span>
+<span class="fc" id="L111">        assertEquals(showFailures(), false, new File(path).exists());</span>
+<span class="fc" id="L112">    }</span>
+
+    @Test
+    public void testFileCleanerDirectory() throws Exception {
+<span class="fc" id="L116">        TestUtils.createFile(testFile, 100);</span>
+<span class="fc" id="L117">        assertTrue(testFile.exists());</span>
+<span class="fc" id="L118">        assertTrue(getTestDirectory().exists());</span>
+
+<span class="fc" id="L120">        Object obj = new Object();</span>
+<span class="fc" id="L121">        assertEquals(0, theInstance.getTrackCount());</span>
+<span class="fc" id="L122">        theInstance.track(getTestDirectory(), obj);</span>
+<span class="fc" id="L123">        assertEquals(1, theInstance.getTrackCount());</span>
+
+<span class="fc" id="L125">        obj = null;</span>
+
+<span class="fc" id="L127">        waitUntilTrackCount();</span>
+
+<span class="fc" id="L129">        assertEquals(0, theInstance.getTrackCount());</span>
+<span class="fc" id="L130">        assertTrue(testFile.exists());  // not deleted, as dir not empty</span>
+<span class="fc" id="L131">        assertTrue(testFile.getParentFile().exists());  // not deleted, as dir not empty</span>
+<span class="fc" id="L132">    }</span>
+
+    @Test
+    public void testFileCleanerDirectory_NullStrategy() throws Exception {
+<span class="fc" id="L136">        TestUtils.createFile(testFile, 100);</span>
+<span class="fc" id="L137">        assertTrue(testFile.exists());</span>
+<span class="fc" id="L138">        assertTrue(getTestDirectory().exists());</span>
+
+<span class="fc" id="L140">        Object obj = new Object();</span>
+<span class="fc" id="L141">        assertEquals(0, theInstance.getTrackCount());</span>
+<span class="fc" id="L142">        theInstance.track(getTestDirectory(), obj, null);</span>
+<span class="fc" id="L143">        assertEquals(1, theInstance.getTrackCount());</span>
+
+<span class="fc" id="L145">        obj = null;</span>
+
+<span class="fc" id="L147">        waitUntilTrackCount();</span>
+
+<span class="fc" id="L149">        assertEquals(0, theInstance.getTrackCount());</span>
+<span class="fc" id="L150">        assertTrue(testFile.exists());  // not deleted, as dir not empty</span>
+<span class="fc" id="L151">        assertTrue(testFile.getParentFile().exists());  // not deleted, as dir not empty</span>
+<span class="fc" id="L152">    }</span>
+
+    @Test
+    public void testFileCleanerDirectory_ForceStrategy() throws Exception {
+<span class="pc bpc" id="L156" title="1 of 2 branches missed.">        if (!testFile.getParentFile().exists()) {</span>
+<span class="nc" id="L157">            throw new IOException(&quot;Cannot create file &quot; + testFile</span>
+                    + &quot; as the parent directory does not exist&quot;);
+        }
+<span class="fc" id="L160">        try (final BufferedOutputStream output =</span>
+                new BufferedOutputStream(new FileOutputStream(testFile))) {
+<span class="fc" id="L162">            TestUtils.generateTestData(output, 100);</span>
+        }
+<span class="fc" id="L164">        assertTrue(testFile.exists());</span>
+<span class="fc" id="L165">        assertTrue(getTestDirectory().exists());</span>
+
+<span class="fc" id="L167">        Object obj = new Object();</span>
+<span class="fc" id="L168">        assertEquals(0, theInstance.getTrackCount());</span>
+<span class="fc" id="L169">        theInstance.track(getTestDirectory(), obj, FileDeleteStrategy.FORCE);</span>
+<span class="fc" id="L170">        assertEquals(1, theInstance.getTrackCount());</span>
+
+<span class="fc" id="L172">        obj = null;</span>
+
+<span class="fc" id="L174">        waitUntilTrackCount();</span>
+<span class="fc" id="L175">        pauseForDeleteToComplete(testFile.getParentFile());</span>
+
+<span class="fc" id="L177">        assertEquals(0, theInstance.getTrackCount());</span>
+<span class="fc" id="L178">        assertEquals(showFailures(), false, new File(testFile.getPath()).exists());</span>
+<span class="fc" id="L179">        assertEquals(showFailures(), false, testFile.getParentFile().exists());</span>
+<span class="fc" id="L180">    }</span>
+
+    @Test
+    public void testFileCleanerNull() throws Exception {
+        try {
+<span class="nc" id="L185">            theInstance.track((File) null, new Object());</span>
+<span class="nc" id="L186">            fail();</span>
+<span class="fc" id="L187">        } catch (final NullPointerException ex) {</span>
+            // expected
+<span class="nc" id="L189">        }</span>
+        try {
+<span class="nc" id="L191">            theInstance.track((File) null, new Object(), FileDeleteStrategy.NORMAL);</span>
+<span class="nc" id="L192">            fail();</span>
+<span class="fc" id="L193">        } catch (final NullPointerException ex) {</span>
+            // expected
+<span class="nc" id="L195">        }</span>
+        try {
+<span class="nc" id="L197">            theInstance.track((String) null, new Object());</span>
+<span class="nc" id="L198">            fail();</span>
+<span class="fc" id="L199">        } catch (final NullPointerException ex) {</span>
+            // expected
+<span class="nc" id="L201">        }</span>
+        try {
+<span class="nc" id="L203">            theInstance.track((String) null, new Object(), FileDeleteStrategy.NORMAL);</span>
+<span class="nc" id="L204">            fail();</span>
+<span class="fc" id="L205">        } catch (final NullPointerException ex) {</span>
+            // expected
+<span class="nc" id="L207">        }</span>
+<span class="fc" id="L208">    }</span>
+
+    @Test
+    public void testFileCleanerExitWhenFinishedFirst() throws Exception {
+<span class="fc" id="L212">        assertFalse(theInstance.exitWhenFinished);</span>
+<span class="fc" id="L213">        theInstance.exitWhenFinished();</span>
+<span class="fc" id="L214">        assertTrue(theInstance.exitWhenFinished);</span>
+<span class="fc" id="L215">        assertEquals(null, theInstance.reaper);</span>
+
+<span class="fc" id="L217">        waitUntilTrackCount();</span>
+
+<span class="fc" id="L219">        assertEquals(0, theInstance.getTrackCount());</span>
+<span class="fc" id="L220">        assertTrue(theInstance.exitWhenFinished);</span>
+<span class="fc" id="L221">        assertEquals(null, theInstance.reaper);</span>
+<span class="fc" id="L222">    }</span>
+
+    @Test
+    public void testFileCleanerExitWhenFinished_NoTrackAfter() throws Exception {
+<span class="fc" id="L226">        assertFalse(theInstance.exitWhenFinished);</span>
+<span class="fc" id="L227">        theInstance.exitWhenFinished();</span>
+<span class="fc" id="L228">        assertTrue(theInstance.exitWhenFinished);</span>
+<span class="fc" id="L229">        assertEquals(null, theInstance.reaper);</span>
+
+<span class="fc" id="L231">        final String path = testFile.getPath();</span>
+<span class="fc" id="L232">        final Object marker = new Object();</span>
+        try {
+<span class="nc" id="L234">            theInstance.track(path, marker);</span>
+<span class="nc" id="L235">            fail();</span>
+<span class="fc" id="L236">        } catch (final IllegalStateException ex) {</span>
+            // expected
+<span class="nc" id="L238">        }</span>
+<span class="fc" id="L239">        assertTrue(theInstance.exitWhenFinished);</span>
+<span class="fc" id="L240">        assertEquals(null, theInstance.reaper);</span>
+<span class="fc" id="L241">    }</span>
+
+    @Test
+    public void testFileCleanerExitWhenFinished1() throws Exception {
+<span class="fc" id="L245">        final String path = testFile.getPath();</span>
+
+<span class="fc" id="L247">        assertEquals(&quot;1-testFile exists: &quot; + testFile, false, testFile.exists());</span>
+<span class="fc" id="L248">        RandomAccessFile r = new RandomAccessFile(testFile, &quot;rw&quot;);</span>
+<span class="fc" id="L249">        assertEquals(&quot;2-testFile exists&quot;, true, testFile.exists());</span>
+
+<span class="fc" id="L251">        assertEquals(&quot;3-Track Count&quot;, 0, theInstance.getTrackCount());</span>
+<span class="fc" id="L252">        theInstance.track(path, r);</span>
+<span class="fc" id="L253">        assertEquals(&quot;4-Track Count&quot;, 1, theInstance.getTrackCount());</span>
+<span class="fc" id="L254">        assertEquals(&quot;5-exitWhenFinished&quot;, false, theInstance.exitWhenFinished);</span>
+<span class="fc" id="L255">        assertEquals(&quot;6-reaper.isAlive&quot;, true, theInstance.reaper.isAlive());</span>
+
+<span class="fc" id="L257">        assertEquals(&quot;7-exitWhenFinished&quot;, false, theInstance.exitWhenFinished);</span>
+<span class="fc" id="L258">        theInstance.exitWhenFinished();</span>
+<span class="fc" id="L259">        assertEquals(&quot;8-exitWhenFinished&quot;, true, theInstance.exitWhenFinished);</span>
+<span class="fc" id="L260">        assertEquals(&quot;9-reaper.isAlive&quot;, true, theInstance.reaper.isAlive());</span>
+
+<span class="fc" id="L262">        r.close();</span>
+<span class="fc" id="L263">        testFile = null;</span>
+<span class="fc" id="L264">        r = null;</span>
+
+<span class="fc" id="L266">        waitUntilTrackCount();</span>
+<span class="fc" id="L267">        pauseForDeleteToComplete(new File(path));</span>
+
+<span class="fc" id="L269">        assertEquals(&quot;10-Track Count&quot;, 0, theInstance.getTrackCount());</span>
+<span class="fc" id="L270">        assertEquals(&quot;11-testFile exists &quot; + showFailures(), false, new File(path).exists());</span>
+<span class="fc" id="L271">        assertEquals(&quot;12-exitWhenFinished&quot;, true, theInstance.exitWhenFinished);</span>
+<span class="fc" id="L272">        assertEquals(&quot;13-reaper.isAlive&quot;, false, theInstance.reaper.isAlive());</span>
+<span class="fc" id="L273">    }</span>
+
+    @Test
+    public void testFileCleanerExitWhenFinished2() throws Exception {
+<span class="fc" id="L277">        final String path = testFile.getPath();</span>
+
+<span class="fc" id="L279">        assertFalse(testFile.exists());</span>
+<span class="fc" id="L280">        RandomAccessFile r = new RandomAccessFile(testFile, &quot;rw&quot;);</span>
+<span class="fc" id="L281">        assertTrue(testFile.exists());</span>
+
+<span class="fc" id="L283">        assertEquals(0, theInstance.getTrackCount());</span>
+<span class="fc" id="L284">        theInstance.track(path, r);</span>
+<span class="fc" id="L285">        assertEquals(1, theInstance.getTrackCount());</span>
+<span class="fc" id="L286">        assertFalse(theInstance.exitWhenFinished);</span>
+<span class="fc" id="L287">        assertTrue(theInstance.reaper.isAlive());</span>
+
+<span class="fc" id="L289">        r.close();</span>
+<span class="fc" id="L290">        testFile = null;</span>
+<span class="fc" id="L291">        r = null;</span>
+
+<span class="fc" id="L293">        waitUntilTrackCount();</span>
+<span class="fc" id="L294">        pauseForDeleteToComplete(new File(path));</span>
+
+<span class="fc" id="L296">        assertEquals(0, theInstance.getTrackCount());</span>
+<span class="fc" id="L297">        assertEquals(showFailures(), false, new File(path).exists());</span>
+<span class="fc" id="L298">        assertFalse(theInstance.exitWhenFinished);</span>
+<span class="fc" id="L299">        assertTrue(theInstance.reaper.isAlive());</span>
+
+<span class="fc" id="L301">        assertFalse(theInstance.exitWhenFinished);</span>
+<span class="fc" id="L302">        theInstance.exitWhenFinished();</span>
+<span class="pc bpc" id="L303" title="1 of 4 branches missed.">        for (int i = 0; i &lt; 20 &amp;&amp; theInstance.reaper.isAlive(); i++) {</span>
+<span class="fc" id="L304">            TestUtils.sleep(500L);  // allow reaper thread to die</span>
+        }
+<span class="fc" id="L306">        assertTrue(theInstance.exitWhenFinished);</span>
+<span class="fc" id="L307">        assertFalse(theInstance.reaper.isAlive());</span>
+<span class="fc" id="L308">    }</span>
+
+    //-----------------------------------------------------------------------
+    private void pauseForDeleteToComplete(File file) {
+<span class="fc" id="L312">        int count = 0;</span>
+<span class="pc bpc" id="L313" title="3 of 4 branches missed.">        while(file.exists() &amp;&amp; count++ &lt; 40) {</span>
+            try {
+<span class="nc" id="L315">                TestUtils.sleep(500L);</span>
+<span class="nc" id="L316">            } catch (final InterruptedException ignore) {</span>
+<span class="nc" id="L317">            }</span>
+<span class="nc" id="L318">            file = new File(file.getPath());</span>
+        }
+<span class="fc" id="L320">    }</span>
+    private String showFailures() throws Exception {
+<span class="pc bpc" id="L322" title="1 of 2 branches missed.">        if (theInstance.deleteFailures.size() == 1) {</span>
+<span class="nc" id="L323">            return &quot;[Delete Failed: &quot; + theInstance.deleteFailures.get(0) + &quot;]&quot;;</span>
+        } else {
+<span class="fc" id="L325">            return &quot;[Delete Failures: &quot; + theInstance.deleteFailures.size() + &quot;]&quot;;</span>
+        }
+    }
+
+    private void waitUntilTrackCount() throws Exception {
+<span class="fc" id="L330">        System.gc();</span>
+<span class="fc" id="L331">        TestUtils.sleep(500);</span>
+<span class="fc" id="L332">        int count = 0;</span>
+<span class="pc bpc" id="L333" title="3 of 4 branches missed.">        while(theInstance.getTrackCount() != 0 &amp;&amp; count++ &lt; 5) {</span>
+<span class="nc" id="L334">            List&lt;String&gt; list = new ArrayList&lt;&gt;();</span>
+            try {
+<span class="nc" id="L336">                long i = 0;</span>
+<span class="nc bnc" id="L337" title="All 2 branches missed.">                while (theInstance.getTrackCount() != 0) {</span>
+<span class="nc" id="L338">                    list.add(&quot;A Big String A Big String A Big String A Big String A Big String A Big String A Big String A Big String A Big String A Big String &quot; + (i++));</span>
+                }
+<span class="nc" id="L340">            } catch (final Throwable ignored) {</span>
+<span class="nc" id="L341">            }</span>
+<span class="nc" id="L342">            list = null;</span>
+<span class="nc" id="L343">            System.gc();</span>
+<span class="nc" id="L344">            TestUtils.sleep(1000);</span>
+<span class="nc" id="L345">        }</span>
+<span class="pc bpc" id="L346" title="1 of 2 branches missed.">        if (theInstance.getTrackCount() != 0) {</span>
+<span class="nc" id="L347">            throw new IllegalStateException(&quot;Your JVM is not releasing References, try running the testcase with less memory (-Xmx)&quot;);</span>
+        }
+
+<span class="fc" id="L350">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.2.201808211720</span></div></body></html>

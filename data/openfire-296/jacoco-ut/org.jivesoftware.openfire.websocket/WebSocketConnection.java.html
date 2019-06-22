@@ -1,0 +1,143 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>WebSocketConnection.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.websocket</a> &gt; <span class="el_source">WebSocketConnection.java</span></div><h1>WebSocketConnection.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2015 Tom Evans. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.jivesoftware.openfire.websocket;
+
+import java.net.InetSocketAddress;
+
+import org.dom4j.Namespace;
+import org.jivesoftware.openfire.*;
+import org.jivesoftware.openfire.PacketDeliverer;
+import org.jivesoftware.openfire.auth.UnauthorizedException;
+import org.jivesoftware.openfire.net.VirtualConnection;
+import org.jivesoftware.openfire.nio.OfflinePacketDeliverer;
+import org.jivesoftware.openfire.session.LocalClientSession;
+import org.jivesoftware.openfire.session.LocalSession;
+import org.jivesoftware.openfire.spi.ConnectionConfiguration;
+import org.jivesoftware.openfire.spi.ConnectionManagerImpl;
+import org.jivesoftware.openfire.spi.ConnectionType;
+import org.xmpp.packet.Packet;
+import org.xmpp.packet.StreamError;
+
+/**
+ * Following the conventions of the BOSH implementation, this class extends {@link VirtualConnection}
+ * and delegates the expected XMPP connection behaviors to the corresponding {@link XmppWebSocket}.
+ */
+public class WebSocketConnection extends VirtualConnection
+{
+    private InetSocketAddress remotePeer;
+    private XmppWebSocket socket;
+    private PacketDeliverer backupDeliverer;
+    private ConnectionConfiguration configuration;
+    private ConnectionType connectionType;
+
+<span class="nc" id="L46">    public WebSocketConnection(XmppWebSocket socket, InetSocketAddress remotePeer) {</span>
+<span class="nc" id="L47">        this.socket = socket;</span>
+<span class="nc" id="L48">        this.remotePeer = remotePeer;</span>
+<span class="nc" id="L49">        this.connectionType = ConnectionType.SOCKET_C2S;</span>
+<span class="nc" id="L50">    }</span>
+
+    @Override
+    public void closeVirtualConnection()
+    {
+<span class="nc" id="L55">        socket.closeSession();</span>
+<span class="nc" id="L56">    }</span>
+
+    @Override
+    public byte[] getAddress() {
+<span class="nc" id="L60">        return remotePeer.getAddress().getAddress();</span>
+    }
+
+    @Override
+    public String getHostAddress() {
+<span class="nc" id="L65">        return remotePeer.getAddress().getHostAddress();</span>
+    }
+
+    @Override
+    public String getHostName()  {
+<span class="nc" id="L70">        return remotePeer.getHostName();</span>
+    }
+
+    @Override
+    public void systemShutdown() {
+<span class="nc" id="L75">        deliverRawText(new StreamError(StreamError.Condition.system_shutdown).toXML());</span>
+<span class="nc" id="L76">        close();</span>
+<span class="nc" id="L77">    }</span>
+
+    @Override
+    public void deliver(Packet packet) throws UnauthorizedException
+    {
+        final String xml;
+<span class="nc bnc" id="L83" title="All 2 branches missed.">        if (Namespace.NO_NAMESPACE.equals(packet.getElement().getNamespace())) {</span>
+            // use string-based operation here to avoid cascading xmlns wonkery
+<span class="nc" id="L85">            StringBuilder packetXml = new StringBuilder(packet.toXML());</span>
+<span class="nc" id="L86">            packetXml.insert(packetXml.indexOf(&quot; &quot;), &quot; xmlns=\&quot;jabber:client\&quot;&quot;);</span>
+<span class="nc" id="L87">            xml = packetXml.toString();</span>
+<span class="nc" id="L88">        } else {</span>
+<span class="nc" id="L89">            xml = packet.toXML();</span>
+        }
+<span class="nc bnc" id="L91" title="All 2 branches missed.">        if (validate()) {</span>
+<span class="nc" id="L92">            deliverRawText(xml);</span>
+        } else {
+            // use fallback delivery mechanism (offline)
+<span class="nc" id="L95">            getPacketDeliverer().deliver(packet);</span>
+        }
+<span class="nc" id="L97">    }</span>
+
+    @Override
+    public void deliverRawText(String text)
+    {
+<span class="nc" id="L102">        socket.deliver(text);</span>
+<span class="nc" id="L103">    }</span>
+
+    @Override
+    public boolean validate() {
+<span class="nc" id="L107">        return socket.isWebSocketOpen();</span>
+    }
+
+    @Override
+    public boolean isSecure() {
+<span class="nc" id="L112">        return socket.isWebSocketSecure();</span>
+    }
+
+    @Override
+    public PacketDeliverer getPacketDeliverer() {
+<span class="nc bnc" id="L117" title="All 2 branches missed.">        if (backupDeliverer == null) {</span>
+<span class="nc" id="L118">            backupDeliverer = new OfflinePacketDeliverer();</span>
+        }
+<span class="nc" id="L120">        return backupDeliverer;</span>
+    }
+
+    @Override
+    public ConnectionConfiguration getConfiguration() {
+<span class="nc bnc" id="L125" title="All 2 branches missed.">        if (configuration == null) {</span>
+<span class="nc" id="L126">            final ConnectionManagerImpl connectionManager = ((ConnectionManagerImpl) XMPPServer.getInstance().getConnectionManager());</span>
+<span class="nc" id="L127">            configuration = connectionManager.getListener( connectionType, true ).generateConnectionConfiguration();</span>
+        }
+<span class="nc" id="L129">        return configuration;</span>
+    }
+
+    @Override
+    public boolean isCompressed() {
+<span class="nc" id="L134">        return XmppWebSocket.isCompressionEnabled();</span>
+    }
+
+    @Override
+    public void reinit(LocalSession session) {
+<span class="nc" id="L139">        this.socket.setXmppSession((LocalClientSession)session);</span>
+<span class="nc" id="L140">        super.reinit(session);</span>
+<span class="nc" id="L141">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

@@ -1,0 +1,264 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>MultiplexerPacketHandler.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.multiplex</a> &gt; <span class="el_source">MultiplexerPacketHandler.java</span></div><h1>MultiplexerPacketHandler.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.multiplex;
+
+import java.util.List;
+
+import org.dom4j.DocumentHelper;
+import org.dom4j.Element;
+import org.dom4j.QName;
+import org.jivesoftware.openfire.SessionPacketRouter;
+import org.jivesoftware.openfire.StreamID;
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.session.ClientSession;
+import org.jivesoftware.openfire.session.ConnectionMultiplexerSession;
+import org.jivesoftware.openfire.session.LocalClientSession;
+import org.jivesoftware.openfire.spi.BasicStreamIDFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmpp.packet.IQ;
+import org.xmpp.packet.Message;
+import org.xmpp.packet.Packet;
+import org.xmpp.packet.PacketError;
+
+/**
+ * IQ packets sent from Connection Managers themselves to the server will be handled by
+ * instances of this class.
+ * &lt;p&gt;
+ * This class will interact with {@link ConnectionMultiplexerManager} to create, close or
+ * get client sessions.&lt;/p&gt;
+ *
+ * @author Gaston Dombiak
+ */
+public class MultiplexerPacketHandler {
+
+<span class="nc" id="L49">    private static final Logger Log = LoggerFactory.getLogger(MultiplexerPacketHandler.class);</span>
+
+    private String connectionManagerDomain;
+    private final ConnectionMultiplexerManager multiplexerManager;
+
+<span class="nc" id="L54">    public MultiplexerPacketHandler(String connectionManagerDomain) {</span>
+<span class="nc" id="L55">        this.connectionManagerDomain = connectionManagerDomain;</span>
+<span class="nc" id="L56">        multiplexerManager = ConnectionMultiplexerManager.getInstance();</span>
+<span class="nc" id="L57">    }</span>
+
+    /**
+     * Process IQ packet sent by a connection manager indicating that a new session has
+     * been created, should be closed or that a packet was failed to be delivered.
+     *
+     * @param packet the IQ packet.
+     */
+    public void handle(Packet packet) {
+<span class="nc bnc" id="L66" title="All 2 branches missed.">        if (packet instanceof IQ) {</span>
+<span class="nc" id="L67">            IQ iq = (IQ) packet;</span>
+<span class="nc bnc" id="L68" title="All 2 branches missed.">            if (iq.getType() == IQ.Type.result) {</span>
+                // Do nothing with result packets
+            }
+<span class="nc bnc" id="L71" title="All 2 branches missed.">            else if (iq.getType() == IQ.Type.error) {</span>
+                // Log the IQ error packet that the connection manager failed to process
+<span class="nc" id="L73">                Log.warn(&quot;Connection Manager failed to process IQ packet: &quot; + packet.toXML());</span>
+            }
+<span class="nc bnc" id="L75" title="All 2 branches missed.">            else if (iq.getType() == IQ.Type.set) {</span>
+<span class="nc" id="L76">                Element child = iq.getChildElement();</span>
+<span class="nc" id="L77">                String streamIDValue = child.attributeValue(&quot;id&quot;);</span>
+<span class="nc bnc" id="L78" title="All 2 branches missed.">                if (streamIDValue == null) {</span>
+                    // No stream ID was included so return a bad_request error
+<span class="nc" id="L80">                    Element extraError = DocumentHelper.createElement(QName.get(</span>
+                            &quot;id-required&quot;, &quot;http://jabber.org/protocol/connectionmanager#errors&quot;));
+<span class="nc" id="L82">                    sendErrorPacket(iq, PacketError.Condition.bad_request, extraError);</span>
+<span class="nc" id="L83">                }</span>
+<span class="nc bnc" id="L84" title="All 2 branches missed.">                else if (&quot;session&quot;.equals(child.getName())) {</span>
+<span class="nc" id="L85">                    StreamID streamID = BasicStreamIDFactory.createStreamID( streamIDValue );</span>
+<span class="nc" id="L86">                    Element create = child.element( &quot;create&quot; );</span>
+<span class="nc bnc" id="L87" title="All 2 branches missed.">                    if (create != null) {</span>
+                        // Get the InetAddress of the client
+<span class="nc" id="L89">                        Element hostElement = create.element(&quot;host&quot;);</span>
+<span class="nc bnc" id="L90" title="All 2 branches missed.">                        String hostName = hostElement != null ? hostElement.attributeValue(&quot;name&quot;) : null;</span>
+<span class="nc bnc" id="L91" title="All 2 branches missed.">                        String hostAddress = hostElement != null ? hostElement.attributeValue(&quot;address&quot;) : null;</span>
+                        // Connection Manager wants to create a Client Session
+<span class="nc" id="L93">                        boolean created = multiplexerManager</span>
+<span class="nc" id="L94">                                .createClientSession(connectionManagerDomain, streamID, hostName, hostAddress);</span>
+<span class="nc bnc" id="L95" title="All 2 branches missed.">                        if (created) {</span>
+<span class="nc" id="L96">                            sendResultPacket(iq);</span>
+                        }
+                        else {
+                            // Send error to CM. The CM should close the new-born connection
+<span class="nc" id="L100">                            sendErrorPacket(iq, PacketError.Condition.not_allowed, null);</span>
+                        }
+<span class="nc" id="L102">                    }</span>
+                    else {
+<span class="nc" id="L104">                        ClientSession session = multiplexerManager</span>
+<span class="nc" id="L105">                                .getClientSession(connectionManagerDomain, streamID);</span>
+<span class="nc bnc" id="L106" title="All 2 branches missed.">                        if (session == null) {</span>
+                            // Specified Client Session does not exist
+<span class="nc" id="L108">                            sendErrorPacket(iq, PacketError.Condition.item_not_found, null);</span>
+                        }
+<span class="nc bnc" id="L110" title="All 2 branches missed.">                        else if (child.element(&quot;close&quot;) != null) {</span>
+                            // Connection Manager wants to close a Client Session
+<span class="nc" id="L112">                            multiplexerManager</span>
+<span class="nc" id="L113">                                    .closeClientSession(connectionManagerDomain, streamID);</span>
+<span class="nc" id="L114">                            sendResultPacket(iq);</span>
+                        }
+<span class="nc bnc" id="L116" title="All 2 branches missed.">                        else if (child.element(&quot;failed&quot;) != null) {</span>
+                            // Connection Manager failed to deliver a message
+                            // Connection Manager wrapped a packet from a Client Session.
+<span class="nc" id="L119">                            List wrappedElements = child.element(&quot;failed&quot;).elements();</span>
+<span class="nc bnc" id="L120" title="All 2 branches missed.">                            if (wrappedElements.size() != 1) {</span>
+                                // Wrapper element is wrapping 0 or many items
+<span class="nc" id="L122">                                Element extraError = DocumentHelper.createElement(QName.get(</span>
+                                        &quot;invalid-payload&quot;,
+                                        &quot;http://jabber.org/protocol/connectionmanager#errors&quot;));
+<span class="nc" id="L125">                                sendErrorPacket(iq, PacketError.Condition.bad_request, extraError);</span>
+<span class="nc" id="L126">                            }</span>
+                            else {
+<span class="nc" id="L128">                                Element wrappedElement = (Element) wrappedElements.get(0);</span>
+<span class="nc" id="L129">                                String tag = wrappedElement.getName();</span>
+<span class="nc bnc" id="L130" title="All 2 branches missed.">                                if (&quot;message&quot;.equals(tag)) {</span>
+<span class="nc" id="L131">                                    XMPPServer.getInstance().getOfflineMessageStrategy()</span>
+<span class="nc" id="L132">                                            .storeOffline(new Message(wrappedElement));</span>
+<span class="nc" id="L133">                                    sendResultPacket(iq);</span>
+                                }
+                                else {
+<span class="nc" id="L136">                                    Element extraError = DocumentHelper.createElement(QName.get(</span>
+                                            &quot;unknown-stanza&quot;,
+                                            &quot;http://jabber.org/protocol/connectionmanager#errors&quot;));
+<span class="nc" id="L139">                                    sendErrorPacket(iq, PacketError.Condition.bad_request,</span>
+                                            extraError);
+                                }
+                            }
+<span class="nc" id="L143">                        }</span>
+                        else {
+                            // Unknown IQ packet received so return error to sender
+<span class="nc" id="L146">                            sendErrorPacket(iq, PacketError.Condition.bad_request, null);</span>
+                        }
+                    }
+<span class="nc" id="L149">                }</span>
+                else {
+                    // Unknown IQ packet received so return error to sender
+<span class="nc" id="L152">                    sendErrorPacket(iq, PacketError.Condition.bad_request, null);</span>
+                }
+<span class="nc" id="L154">            }</span>
+            else {
+                // Unknown IQ packet received so return error to sender
+<span class="nc" id="L157">                sendErrorPacket(iq, PacketError.Condition.bad_request, null);</span>
+            }
+        }
+<span class="nc" id="L160">    }</span>
+
+    /**
+     * Processes a route packet that is wrapping a stanza sent by a client that is connected
+     * to the connection manager.
+     *
+     * @param route the route packet.
+     */
+    public void route(Route route) {
+<span class="nc" id="L169">        StreamID streamID = route.getStreamID();</span>
+<span class="nc bnc" id="L170" title="All 2 branches missed.">        if (streamID == null) {</span>
+            // No stream ID was included so return a bad_request error
+<span class="nc" id="L172">            Element extraError = DocumentHelper.createElement(QName.get(</span>
+                    &quot;id-required&quot;, &quot;http://jabber.org/protocol/connectionmanager#errors&quot;));
+<span class="nc" id="L174">            sendErrorPacket(route, PacketError.Condition.bad_request, extraError);</span>
+        }
+<span class="nc" id="L176">        LocalClientSession session = multiplexerManager.getClientSession(connectionManagerDomain, streamID);</span>
+<span class="nc bnc" id="L177" title="All 2 branches missed.">        if (session == null) {</span>
+            // Specified Client Session does not exist
+<span class="nc" id="L179">            sendErrorPacket(route, PacketError.Condition.item_not_found, null);</span>
+<span class="nc" id="L180">            return;</span>
+        }
+
+<span class="nc" id="L183">        SessionPacketRouter router = new SessionPacketRouter(session);</span>
+        // Connection Manager already validate JIDs so just skip this expensive operation
+<span class="nc" id="L185">        router.setSkipJIDValidation(true);</span>
+        try {
+<span class="nc" id="L187">            router.route(route.getChildElement());</span>
+        }
+<span class="nc" id="L189">        catch (UnknownStanzaException use) {</span>
+<span class="nc" id="L190">            Element extraError = DocumentHelper.createElement(QName.get(</span>
+                    &quot;unknown-stanza&quot;,
+                    &quot;http://jabber.org/protocol/connectionmanager#errors&quot;));
+<span class="nc" id="L193">            sendErrorPacket(route, PacketError.Condition.bad_request, extraError);</span>
+        }
+<span class="nc" id="L195">        catch (Exception e) {</span>
+<span class="nc" id="L196">            Log.error(&quot;Error processing wrapped packet: &quot; + route.getChildElement().asXML(), e);</span>
+<span class="nc" id="L197">            sendErrorPacket(route, PacketError.Condition.internal_server_error, null);</span>
+<span class="nc" id="L198">        }</span>
+<span class="nc" id="L199">    }</span>
+
+    /**
+     * Sends an IQ error with the specified condition to the sender of the original
+     * IQ packet.
+     *
+     * @param packet     the packet to be bounced.
+     * @param extraError application specific error or null if none.
+     * @param error the error.
+     */
+    private void sendErrorPacket(IQ packet, PacketError.Condition error, Element extraError) {
+<span class="nc" id="L210">        IQ reply = IQ.createResultIQ(packet);</span>
+<span class="nc" id="L211">        reply.setChildElement(packet.getChildElement().createCopy());</span>
+<span class="nc" id="L212">        reply.setError(error);</span>
+<span class="nc bnc" id="L213" title="All 2 branches missed.">        if (extraError != null) {</span>
+            // Add specific application error if available
+<span class="nc" id="L215">            reply.getError().getElement().add(extraError);</span>
+        }
+<span class="nc" id="L217">        deliver(reply);</span>
+<span class="nc" id="L218">    }</span>
+
+    /**
+     * Sends an IQ error with the specified condition to the sender of the original
+     * IQ packet.
+     *
+     * @param packet     the packet to be bounced.
+     * @param extraError application specific error or null if none.
+     * @param error the error.
+     */
+    private void sendErrorPacket(Route packet, PacketError.Condition error, Element extraError) {
+<span class="nc" id="L229">        Route reply = new Route(packet.getStreamID());</span>
+<span class="nc" id="L230">        reply.setID(packet.getID());</span>
+<span class="nc" id="L231">        reply.setFrom(packet.getTo());</span>
+<span class="nc" id="L232">        reply.setTo(packet.getFrom());</span>
+<span class="nc" id="L233">        reply.setError(error);</span>
+<span class="nc bnc" id="L234" title="All 2 branches missed.">        if (extraError != null) {</span>
+            // Add specific application error if available
+<span class="nc" id="L236">            reply.getError().getElement().add(extraError);</span>
+        }
+<span class="nc" id="L238">        deliver(reply);</span>
+<span class="nc" id="L239">    }</span>
+
+    /**
+     * Sends an IQ result packet confirming that the operation was successful.
+     *
+     * @param packet the original IQ packet.
+     */
+    private void sendResultPacket(IQ packet) {
+<span class="nc" id="L247">        IQ reply = IQ.createResultIQ(packet);</span>
+<span class="nc" id="L248">        reply.setChildElement(packet.getChildElement().createCopy());</span>
+<span class="nc" id="L249">        deliver(reply);</span>
+<span class="nc" id="L250">    }</span>
+
+    private void deliver(Packet reply) {
+        // Get any session of the connection manager to deliver the packet
+<span class="nc" id="L254">        ConnectionMultiplexerSession session =</span>
+<span class="nc" id="L255">                multiplexerManager.getMultiplexerSession(connectionManagerDomain);</span>
+<span class="nc bnc" id="L256" title="All 2 branches missed.">        if (session != null) {</span>
+<span class="nc" id="L257">            session.process(reply);</span>
+        }
+        else {
+<span class="nc" id="L260">            Log.warn(&quot;No multiplexer session found. Packet not delivered: &quot; + reply.toXML());</span>
+        }
+<span class="nc" id="L262">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

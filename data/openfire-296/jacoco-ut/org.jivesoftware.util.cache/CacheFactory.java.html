@@ -1,0 +1,858 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>CacheFactory.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.util.cache</a> &gt; <span class="el_source">CacheFactory.java</span></div><h1>CacheFactory.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2004-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.jivesoftware.util.cache;
+
+import java.net.URL;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.Lock;
+
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.XMPPServerListener;
+import org.jivesoftware.openfire.cluster.ClusterEventListener;
+import org.jivesoftware.openfire.cluster.ClusterManager;
+import org.jivesoftware.openfire.cluster.ClusterNodeInfo;
+import org.jivesoftware.openfire.container.Plugin;
+import org.jivesoftware.openfire.container.PluginClassLoader;
+import org.jivesoftware.openfire.container.PluginManager;
+import org.jivesoftware.util.*;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Creates Cache objects. The returned caches will either be local or clustered
+ * depending on the clustering enabled setting and a user's license.
+ *
+ * &lt;p&gt;When clustered caching is turned on, cache usage statistics for all caches
+ * that have been created are periodically published to the clustered cache
+ * named &quot;opt-$cacheStats&quot;.&lt;/p&gt;
+ *
+ */
+@SuppressWarnings(&quot;rawtypes&quot;)
+public class CacheFactory {
+
+<span class="fc" id="L52">    private static final Logger log = LoggerFactory.getLogger(CacheFactory.class);</span>
+
+<span class="fc" id="L54">    public static String LOCAL_CACHE_PROPERTY_NAME = &quot;cache.clustering.local.class&quot;;</span>
+<span class="fc" id="L55">    public static String CLUSTERED_CACHE_PROPERTY_NAME = &quot;cache.clustering.clustered.class&quot;;</span>
+
+<span class="fc" id="L57">    private static boolean clusteringStarted = false;</span>
+<span class="fc" id="L58">    private static boolean clusteringStarting = false;</span>
+
+    /**
+     * Storage for all caches that get created.
+     */
+<span class="fc" id="L63">    private static Map&lt;String, Cache&gt; caches = new ConcurrentHashMap&lt;&gt;();</span>
+<span class="fc" id="L64">    private static List&lt;String&gt; localOnly = Collections.synchronizedList(new ArrayList&lt;String&gt;());</span>
+
+    private static String localCacheFactoryClass;
+    private static String clusteredCacheFactoryClass;
+<span class="fc" id="L68">    private static CacheFactoryStrategy cacheFactoryStrategy = new DefaultLocalCacheStrategy();</span>
+    private static CacheFactoryStrategy localCacheFactoryStrategy;
+    private static CacheFactoryStrategy clusteredCacheFactoryStrategy;
+    private static Thread statsThread;
+
+    public static final int DEFAULT_MAX_CACHE_SIZE = 1024 * 256;
+    public static final long DEFAULT_MAX_CACHE_LIFETIME = 6 * JiveConstants.HOUR;
+
+    /**
+     * This map contains property names which were used to store cache configuration data
+     * in local xml properties in previous versions.
+     */
+<span class="fc" id="L80">    private static final Map&lt;String, String&gt; cacheNames = new HashMap&lt;&gt;();</span>
+    /**
+     * Default properties to use for local caches. Default properties can be overridden
+     * by setting the corresponding system properties.
+     */
+<span class="fc" id="L85">    private static final Map&lt;String, Long&gt; cacheProps = new HashMap&lt;&gt;();</span>
+
+    static {
+<span class="fc" id="L88">        localCacheFactoryClass = JiveGlobals.getProperty(LOCAL_CACHE_PROPERTY_NAME,</span>
+                &quot;org.jivesoftware.util.cache.DefaultLocalCacheStrategy&quot;);
+<span class="fc" id="L90">        clusteredCacheFactoryClass = JiveGlobals.getProperty(CLUSTERED_CACHE_PROPERTY_NAME,</span>
+                &quot;org.jivesoftware.openfire.plugin.util.cache.ClusteredCacheFactory&quot;);
+
+<span class="fc" id="L93">        cacheNames.put(&quot;Favicon Hits&quot;, &quot;faviconHits&quot;);</span>
+<span class="fc" id="L94">        cacheNames.put(&quot;Favicon Misses&quot;, &quot;faviconMisses&quot;);</span>
+<span class="fc" id="L95">        cacheNames.put(&quot;Group&quot;, &quot;group&quot;);</span>
+<span class="fc" id="L96">        cacheNames.put(&quot;Group Metadata Cache&quot;, &quot;groupMeta&quot;);</span>
+<span class="fc" id="L97">        cacheNames.put(&quot;Javascript Cache&quot;, &quot;javascript&quot;);</span>
+<span class="fc" id="L98">        cacheNames.put(&quot;Last Activity Cache&quot;, &quot;lastActivity&quot;);</span>
+<span class="fc" id="L99">        cacheNames.put(&quot;Multicast Service&quot;, &quot;multicast&quot;);</span>
+<span class="fc" id="L100">        cacheNames.put(&quot;Offline Message Size&quot;, &quot;offlinemessage&quot;);</span>
+<span class="fc" id="L101">        cacheNames.put(&quot;Offline Presence Cache&quot;, &quot;offlinePresence&quot;);</span>
+<span class="fc" id="L102">        cacheNames.put(&quot;Privacy Lists&quot;, &quot;listsCache&quot;);</span>
+<span class="fc" id="L103">        cacheNames.put(&quot;Remote Users Existence&quot;, &quot;remoteUsersCache&quot;);</span>
+<span class="fc" id="L104">        cacheNames.put(&quot;Roster&quot;, &quot;username2roster&quot;);</span>
+<span class="fc" id="L105">        cacheNames.put(&quot;User&quot;, &quot;userCache&quot;);</span>
+<span class="fc" id="L106">        cacheNames.put(&quot;Locked Out Accounts&quot;, &quot;lockOutCache&quot;);</span>
+<span class="fc" id="L107">        cacheNames.put(&quot;VCard&quot;, &quot;vcardCache&quot;);</span>
+<span class="fc" id="L108">        cacheNames.put(&quot;File Transfer Cache&quot;, &quot;fileTransfer&quot;);</span>
+<span class="fc" id="L109">        cacheNames.put(&quot;File Transfer&quot;, &quot;transferProxy&quot;);</span>
+<span class="fc" id="L110">        cacheNames.put(&quot;POP3 Authentication&quot;, &quot;pop3&quot;);</span>
+<span class="fc" id="L111">        cacheNames.put(&quot;LDAP Authentication&quot;, &quot;ldap&quot;);</span>
+<span class="fc" id="L112">        cacheNames.put(&quot;Routing Servers Cache&quot;, &quot;routeServer&quot;);</span>
+<span class="fc" id="L113">        cacheNames.put(&quot;Routing Components Cache&quot;, &quot;routeComponent&quot;);</span>
+<span class="fc" id="L114">        cacheNames.put(&quot;Routing Users Cache&quot;, &quot;routeUser&quot;);</span>
+<span class="fc" id="L115">        cacheNames.put(&quot;Routing AnonymousUsers Cache&quot;, &quot;routeAnonymousUser&quot;);</span>
+<span class="fc" id="L116">        cacheNames.put(&quot;Routing User Sessions&quot;, &quot;routeUserSessions&quot;);</span>
+<span class="fc" id="L117">        cacheNames.put(&quot;Components Sessions&quot;, &quot;componentsSessions&quot;);</span>
+<span class="fc" id="L118">        cacheNames.put(&quot;Connection Managers Sessions&quot;, &quot;connManagerSessions&quot;);</span>
+<span class="fc" id="L119">        cacheNames.put(&quot;Incoming Server Sessions&quot;, &quot;incServerSessions&quot;);</span>
+<span class="fc" id="L120">        cacheNames.put(&quot;Sessions by Hostname&quot;, &quot;sessionsHostname&quot;);</span>
+<span class="fc" id="L121">        cacheNames.put(&quot;Secret Keys Cache&quot;, &quot;secretKeys&quot;);</span>
+<span class="fc" id="L122">        cacheNames.put(&quot;Validated Domains&quot;, &quot;validatedDomains&quot;);</span>
+<span class="fc" id="L123">        cacheNames.put(&quot;Directed Presences&quot;, &quot;directedPresences&quot;);</span>
+<span class="fc" id="L124">        cacheNames.put(&quot;Disco Server Features&quot;, &quot;serverFeatures&quot;);</span>
+<span class="fc" id="L125">        cacheNames.put(&quot;Disco Server Items&quot;, &quot;serverItems&quot;);</span>
+<span class="fc" id="L126">        cacheNames.put(&quot;Remote Server Configurations&quot;, &quot;serversConfigurations&quot;);</span>
+<span class="fc" id="L127">        cacheNames.put(&quot;Entity Capabilities&quot;, &quot;entityCapabilities&quot;);</span>
+<span class="fc" id="L128">        cacheNames.put(&quot;Entity Capabilities Users&quot;, &quot;entityCapabilitiesUsers&quot;);</span>
+<span class="fc" id="L129">        cacheNames.put(&quot;PEPServiceManager&quot;, &quot;pepServiceManager&quot;);</span>
+<span class="fc" id="L130">        cacheNames.put(&quot;Published Items&quot;, &quot;publishedItems&quot;);</span>
+
+<span class="fc" id="L132">        cacheProps.put(&quot;cache.fileTransfer.size&quot;, 128 * 1024l);</span>
+<span class="fc" id="L133">        cacheProps.put(&quot;cache.fileTransfer.maxLifetime&quot;, 1000 * 60 * 10l);</span>
+<span class="fc" id="L134">        cacheProps.put(&quot;cache.multicast.size&quot;, 128 * 1024l);</span>
+<span class="fc" id="L135">        cacheProps.put(&quot;cache.multicast.maxLifetime&quot;, JiveConstants.DAY);</span>
+<span class="fc" id="L136">        cacheProps.put(&quot;cache.offlinemessage.size&quot;, 100 * 1024l);</span>
+<span class="fc" id="L137">        cacheProps.put(&quot;cache.offlinemessage.maxLifetime&quot;, JiveConstants.HOUR * 12);</span>
+<span class="fc" id="L138">        cacheProps.put(&quot;cache.pop3.size&quot;, 512 * 1024l);</span>
+<span class="fc" id="L139">        cacheProps.put(&quot;cache.pop3.maxLifetime&quot;, JiveConstants.HOUR);</span>
+<span class="fc" id="L140">        cacheProps.put(&quot;cache.transferProxy.size&quot;, -1l);</span>
+<span class="fc" id="L141">        cacheProps.put(&quot;cache.transferProxy.maxLifetime&quot;, 1000 * 60 * 10l);</span>
+<span class="fc" id="L142">        cacheProps.put(&quot;cache.group.size&quot;, 1024 * 1024l);</span>
+<span class="fc" id="L143">        cacheProps.put(&quot;cache.group.maxLifetime&quot;, JiveConstants.MINUTE * 15);</span>
+<span class="fc" id="L144">        cacheProps.put(&quot;cache.lockOutCache.size&quot;, 1024 * 1024l);</span>
+<span class="fc" id="L145">        cacheProps.put(&quot;cache.lockOutCache.maxLifetime&quot;, JiveConstants.MINUTE * 15);</span>
+<span class="fc" id="L146">        cacheProps.put(&quot;cache.groupMeta.size&quot;, 512 * 1024l);</span>
+<span class="fc" id="L147">        cacheProps.put(&quot;cache.groupMeta.maxLifetime&quot;, JiveConstants.MINUTE * 15);</span>
+<span class="fc" id="L148">        cacheProps.put(&quot;cache.username2roster.size&quot;, 1024 * 1024l);</span>
+<span class="fc" id="L149">        cacheProps.put(&quot;cache.username2roster.maxLifetime&quot;, JiveConstants.MINUTE * 30);</span>
+<span class="fc" id="L150">        cacheProps.put(&quot;cache.javascript.size&quot;, 128 * 1024l);</span>
+<span class="fc" id="L151">        cacheProps.put(&quot;cache.javascript.maxLifetime&quot;, 3600 * 24 * 10l);</span>
+<span class="fc" id="L152">        cacheProps.put(&quot;cache.ldap.size&quot;, 512 * 1024l);</span>
+<span class="fc" id="L153">        cacheProps.put(&quot;cache.ldap.maxLifetime&quot;, JiveConstants.HOUR * 2);</span>
+<span class="fc" id="L154">        cacheProps.put(&quot;cache.listsCache.size&quot;, 512 * 1024l);</span>
+<span class="fc" id="L155">        cacheProps.put(&quot;cache.offlinePresence.size&quot;, 512 * 1024l);</span>
+<span class="fc" id="L156">        cacheProps.put(&quot;cache.lastActivity.size&quot;, 128 * 1024l);</span>
+<span class="fc" id="L157">        cacheProps.put(&quot;cache.userCache.size&quot;, 512 * 1024l);</span>
+<span class="fc" id="L158">        cacheProps.put(&quot;cache.userCache.maxLifetime&quot;, JiveConstants.MINUTE * 30);</span>
+<span class="fc" id="L159">        cacheProps.put(&quot;cache.remoteUsersCache.size&quot;, 512 * 1024l);</span>
+<span class="fc" id="L160">        cacheProps.put(&quot;cache.remoteUsersCache.maxLifetime&quot;, JiveConstants.MINUTE * 30);</span>
+<span class="fc" id="L161">        cacheProps.put(&quot;cache.vcardCache.size&quot;, 512 * 1024l);</span>
+<span class="fc" id="L162">        cacheProps.put(&quot;cache.faviconHits.size&quot;, 128 * 1024l);</span>
+<span class="fc" id="L163">        cacheProps.put(&quot;cache.faviconMisses.size&quot;, 128 * 1024l);</span>
+<span class="fc" id="L164">        cacheProps.put(&quot;cache.routeServer.size&quot;, -1l);</span>
+<span class="fc" id="L165">        cacheProps.put(&quot;cache.routeServer.maxLifetime&quot;, -1l);</span>
+<span class="fc" id="L166">        cacheProps.put(&quot;cache.routeComponent.size&quot;, -1l);</span>
+<span class="fc" id="L167">        cacheProps.put(&quot;cache.routeComponent.maxLifetime&quot;, -1l);</span>
+<span class="fc" id="L168">        cacheProps.put(&quot;cache.routeUser.size&quot;, -1l);</span>
+<span class="fc" id="L169">        cacheProps.put(&quot;cache.routeUser.maxLifetime&quot;, -1l);</span>
+<span class="fc" id="L170">        cacheProps.put(&quot;cache.routeAnonymousUser.size&quot;, -1l);</span>
+<span class="fc" id="L171">        cacheProps.put(&quot;cache.routeAnonymousUser.maxLifetime&quot;, -1l);</span>
+<span class="fc" id="L172">        cacheProps.put(&quot;cache.routeUserSessions.size&quot;, -1l);</span>
+<span class="fc" id="L173">        cacheProps.put(&quot;cache.routeUserSessions.maxLifetime&quot;, -1l);</span>
+<span class="fc" id="L174">        cacheProps.put(&quot;cache.componentsSessions.size&quot;, -1l);</span>
+<span class="fc" id="L175">        cacheProps.put(&quot;cache.componentsSessions.maxLifetime&quot;, -1l);</span>
+<span class="fc" id="L176">        cacheProps.put(&quot;cache.connManagerSessions.size&quot;, -1l);</span>
+<span class="fc" id="L177">        cacheProps.put(&quot;cache.connManagerSessions.maxLifetime&quot;, -1l);</span>
+<span class="fc" id="L178">        cacheProps.put(&quot;cache.incServerSessions.size&quot;, -1l);</span>
+<span class="fc" id="L179">        cacheProps.put(&quot;cache.incServerSessions.maxLifetime&quot;, -1l);</span>
+<span class="fc" id="L180">        cacheProps.put(&quot;cache.sessionsHostname.size&quot;, -1l);</span>
+<span class="fc" id="L181">        cacheProps.put(&quot;cache.sessionsHostname.maxLifetime&quot;, -1l);</span>
+<span class="fc" id="L182">        cacheProps.put(&quot;cache.secretKeys.size&quot;, -1l);</span>
+<span class="fc" id="L183">        cacheProps.put(&quot;cache.secretKeys.maxLifetime&quot;, -1l);</span>
+<span class="fc" id="L184">        cacheProps.put(&quot;cache.validatedDomains.size&quot;, -1l);</span>
+<span class="fc" id="L185">        cacheProps.put(&quot;cache.validatedDomains.maxLifetime&quot;, -1l);</span>
+<span class="fc" id="L186">        cacheProps.put(&quot;cache.directedPresences.size&quot;, -1l);</span>
+<span class="fc" id="L187">        cacheProps.put(&quot;cache.directedPresences.maxLifetime&quot;, -1l);</span>
+<span class="fc" id="L188">        cacheProps.put(&quot;cache.serverFeatures.size&quot;, -1l);</span>
+<span class="fc" id="L189">        cacheProps.put(&quot;cache.serverFeatures.maxLifetime&quot;, -1l);</span>
+<span class="fc" id="L190">        cacheProps.put(&quot;cache.serverItems.size&quot;, -1l);</span>
+<span class="fc" id="L191">        cacheProps.put(&quot;cache.serverItems.maxLifetime&quot;, -1l);</span>
+<span class="fc" id="L192">        cacheProps.put(&quot;cache.serversConfigurations.size&quot;, 128 * 1024l);</span>
+<span class="fc" id="L193">        cacheProps.put(&quot;cache.serversConfigurations.maxLifetime&quot;, JiveConstants.MINUTE * 30);</span>
+<span class="fc" id="L194">        cacheProps.put(&quot;cache.entityCapabilities.size&quot;, -1l);</span>
+<span class="fc" id="L195">        cacheProps.put(&quot;cache.entityCapabilities.maxLifetime&quot;, JiveConstants.DAY * 2);</span>
+<span class="fc" id="L196">        cacheProps.put(&quot;cache.entityCapabilitiesUsers.size&quot;, -1l);</span>
+<span class="fc" id="L197">        cacheProps.put(&quot;cache.entityCapabilitiesUsers.maxLifetime&quot;, JiveConstants.DAY * 2);</span>
+<span class="fc" id="L198">        cacheProps.put(&quot;cache.pluginCacheInfo.size&quot;, -1l);</span>
+<span class="fc" id="L199">        cacheProps.put(&quot;cache.pluginCacheInfo.maxLifetime&quot;, -1l);</span>
+<span class="fc" id="L200">        cacheProps.put(&quot;cache.pepServiceManager.size&quot;, 1024l * 1024 * 10);</span>
+<span class="fc" id="L201">        cacheProps.put(&quot;cache.pepServiceManager.maxLifetime&quot;, JiveConstants.MINUTE * 30);</span>
+<span class="fc" id="L202">        cacheProps.put(&quot;cache.publishedItems.size&quot;, 1024l * 1024 * 10);</span>
+<span class="fc" id="L203">        cacheProps.put(&quot;cache.publishedItems.maxLifetime&quot;, JiveConstants.MINUTE * 15);</span>
+
+<span class="fc" id="L205">        PropertyEventDispatcher.addListener( new PropertyEventListener()</span>
+<span class="fc" id="L206">        {</span>
+
+            @Override
+            public void propertySet( String property, Map&lt;String, Object&gt; params )
+            {
+<span class="fc" id="L211">                final Cache cache = getCacheByProperty( property );</span>
+<span class="pc bpc" id="L212" title="1 of 2 branches missed.">                if ( cache == null )</span>
+                {
+<span class="fc" id="L214">                    return;</span>
+                }
+
+<span class="nc bnc" id="L217" title="All 2 branches missed.">                if ( property.endsWith( &quot;.size&quot; ) )</span>
+                {
+<span class="nc" id="L219">                    final Long size = getMaxCacheSize( cache.getName() );</span>
+<span class="nc bnc" id="L220" title="All 2 branches missed.">                    cache.setMaxCacheSize( size &lt; Integer.MAX_VALUE ? size.intValue() : Integer.MAX_VALUE );</span>
+                }
+
+<span class="nc bnc" id="L223" title="All 2 branches missed.">                if ( property.endsWith( &quot;.maxLifeTime&quot; ) )</span>
+                {
+<span class="nc" id="L225">                    final Long lifetime = getMaxCacheLifetime( cache.getName() );</span>
+<span class="nc" id="L226">                    cache.setMaxLifetime( lifetime );</span>
+                }
+
+                // Note that changes to 'min' and 'type' cannot be applied runtime - a restart is required for those.
+<span class="nc" id="L230">            }</span>
+
+            @Override
+            public void propertyDeleted( String property, Map&lt;String, Object&gt; params )
+            {
+<span class="fc" id="L235">                propertySet( property, params );</span>
+<span class="fc" id="L236">            }</span>
+
+            @Override
+            public void xmlPropertySet( String property, Map&lt;String, Object&gt; params )
+            {
+<span class="fc" id="L241">                propertySet( property, params );</span>
+<span class="fc" id="L242">            }</span>
+
+            @Override
+            public void xmlPropertyDeleted( String property, Map&lt;String, Object&gt; params )
+            {
+<span class="fc" id="L247">                propertySet( property, params );</span>
+<span class="fc" id="L248">            }</span>
+        } );
+<span class="fc" id="L250">    }</span>
+
+<span class="nc" id="L252">    private CacheFactory() {</span>
+<span class="nc" id="L253">    }</span>
+
+    /**
+     * If a local property is found for the supplied name which specifies a value for cache size, it is returned.
+     * Otherwise, the defaultSize argument is returned.
+     *
+     * @param cacheName the name of the cache to look up a corresponding property for.
+     * @return either the property value or the default value.
+     */
+    public static long getMaxCacheSize(String cacheName) {
+<span class="fc" id="L263">        return getCacheProperty(cacheName, &quot;.size&quot;, DEFAULT_MAX_CACHE_SIZE);</span>
+    }
+
+    /**
+     * Sets a local property which overrides the maximum cache size for the
+     * supplied cache name.
+     * @param cacheName the name of the cache to store a value for.
+     * @param size the maximum cache size.
+     */
+    public static void setMaxSizeProperty(String cacheName, long size) {
+<span class="nc" id="L273">        cacheName = cacheName.replaceAll(&quot; &quot;, &quot;&quot;);</span>
+<span class="nc bnc" id="L274" title="All 2 branches missed.">        if ( !Long.toString(size).equals( JiveGlobals.getProperty( &quot;cache.&quot; + cacheName + &quot;.size&quot; ) ) )</span>
+        {
+<span class="nc" id="L276">            JiveGlobals.setProperty( &quot;cache.&quot; + cacheName + &quot;.size&quot;, Long.toString( size ) );</span>
+        }
+<span class="nc" id="L278">    }</span>
+
+    public static boolean hasMaxSizeFromProperty(String cacheName) {
+<span class="nc" id="L281">        return hasCacheProperty(cacheName, &quot;.size&quot;);</span>
+    }
+
+    /**
+    * If a local property is found for the supplied name which specifies a value for cache entry lifetime, it
+     * is returned. Otherwise, the defaultLifetime argument is returned.
+     *
+    * @param cacheName the name of the cache to look up a corresponding property for.
+    * @return either the property value or the default value.
+    */
+    public static long getMaxCacheLifetime(String cacheName) {
+<span class="fc" id="L292">        return getCacheProperty(cacheName, &quot;.maxLifetime&quot;, DEFAULT_MAX_CACHE_LIFETIME);</span>
+    }
+
+    /**
+     * Sets a local property which overrides the maximum cache entry lifetime
+     * for the supplied cache name.
+     * @param cacheName the name of the cache to store a value for.
+     * @param lifetime the maximum cache entry lifetime.
+     */
+    public static void setMaxLifetimeProperty(String cacheName, long lifetime) {
+<span class="nc" id="L302">        cacheName = cacheName.replaceAll(&quot; &quot;, &quot;&quot;);</span>
+<span class="nc bnc" id="L303" title="All 2 branches missed.">        if ( !Long.toString( lifetime ).equals( JiveGlobals.getProperty( &quot;cache.&quot; + cacheName + &quot;.maxLifetime&quot; ) ))</span>
+        {
+<span class="nc" id="L305">            JiveGlobals.setProperty( ( &quot;cache.&quot; + cacheName + &quot;.maxLifetime&quot; ), Long.toString( lifetime ) );</span>
+        }
+<span class="nc" id="L307">    }</span>
+
+    public static boolean hasMaxLifetimeFromProperty(String cacheName) {
+<span class="nc" id="L310">        return hasCacheProperty(cacheName, &quot;.maxLifetime&quot;);</span>
+    }
+
+    public static void setCacheTypeProperty(String cacheName, String type) {
+<span class="nc" id="L314">        cacheName = cacheName.replaceAll(&quot; &quot;, &quot;&quot;);</span>
+<span class="nc bnc" id="L315" title="All 2 branches missed.">        if ( !type.equals( JiveGlobals.getProperty( &quot;cache.&quot; + cacheName + &quot;.type&quot; ) ))</span>
+        {
+<span class="nc" id="L317">            JiveGlobals.setProperty( &quot;cache.&quot; + cacheName + &quot;.type&quot;, type );</span>
+        }
+<span class="nc" id="L319">    }</span>
+
+    public static String getCacheTypeProperty(String cacheName) {
+<span class="nc" id="L322">        cacheName = cacheName.replaceAll(&quot; &quot;, &quot;&quot;);</span>
+<span class="nc" id="L323">        return JiveGlobals.getProperty(&quot;cache.&quot; + cacheName + &quot;.type&quot;);</span>
+    }
+
+    public static void setMinCacheSize(String cacheName, long size) {
+<span class="nc" id="L327">        cacheName = cacheName.replaceAll(&quot; &quot;, &quot;&quot;);</span>
+<span class="nc bnc" id="L328" title="All 2 branches missed.">        if ( !Long.toString( size ).equals( JiveGlobals.getProperty( &quot;cache.&quot; + cacheName + &quot;.min&quot; ) ))</span>
+        {
+<span class="nc" id="L330">            JiveGlobals.setProperty( &quot;cache.&quot; + cacheName + &quot;.min&quot;, Long.toString( size ) );</span>
+        }
+<span class="nc" id="L332">    }</span>
+
+    public static long getMinCacheSize(String cacheName) {
+<span class="nc" id="L335">        return getCacheProperty(cacheName, &quot;.min&quot;, 0);</span>
+    }
+
+    private static Cache getCacheByProperty( String property )
+    {
+<span class="pc bpc" id="L340" title="1 of 2 branches missed.">        if ( !property.startsWith( &quot;cache.&quot; ) )</span>
+        {
+<span class="fc" id="L342">            return null;</span>
+        }
+
+        // Extract the cache name identifier from the property name.
+<span class="nc" id="L346">        final String name = property.substring( &quot;cache.&quot;.length(), property.lastIndexOf( &quot;.&quot; ) );</span>
+
+        // See if property is using the short name variant.
+<span class="nc bnc" id="L349" title="All 2 branches missed.">        for ( final Map.Entry&lt;String, String&gt; entry : cacheNames.entrySet() )</span>
+        {
+<span class="nc bnc" id="L351" title="All 2 branches missed.">            if ( name.equals( entry.getValue() ) )</span>
+            {
+<span class="nc" id="L353">                return caches.get( entry.getKey() );</span>
+            }
+<span class="nc" id="L355">        }</span>
+
+        // If not a short name, then try for a normalized name.
+<span class="nc bnc" id="L358" title="All 2 branches missed.">        for ( final Map.Entry&lt;String, Cache&gt; entry : caches.entrySet() )</span>
+        {
+<span class="nc bnc" id="L360" title="All 2 branches missed.">            if ( entry.getKey().replaceAll(&quot; &quot;, &quot;&quot;).equals( name ) )</span>
+            {
+<span class="nc" id="L362">                return entry.getValue();</span>
+            }
+<span class="nc" id="L364">        }</span>
+
+<span class="nc" id="L366">        return null;</span>
+    }
+
+    private static long getCacheProperty(String cacheName, String suffix, long defaultValue) {
+        // First check if user is overwriting default value using a system property for the cache name
+<span class="fc" id="L371">        String propName = &quot;cache.&quot; + cacheName.replaceAll(&quot; &quot;, &quot;&quot;) + suffix;</span>
+<span class="fc" id="L372">        String sizeProp = JiveGlobals.getProperty(propName);</span>
+<span class="pc bpc" id="L373" title="1 of 4 branches missed.">        if (sizeProp == null &amp;&amp; cacheNames.containsKey(cacheName)) {</span>
+            // No system property was found for the cache name so try now with short name
+<span class="fc" id="L375">            propName = &quot;cache.&quot; + cacheNames.get(cacheName) + suffix;</span>
+<span class="fc" id="L376">            sizeProp = JiveGlobals.getProperty(propName);</span>
+        }
+<span class="pc bpc" id="L378" title="1 of 2 branches missed.">        if (sizeProp != null) {</span>
+            try {
+<span class="nc" id="L380">                return Long.parseLong(sizeProp);</span>
+            }
+<span class="nc" id="L382">            catch (NumberFormatException nfe) {</span>
+<span class="nc" id="L383">                log.warn(&quot;Unable to parse &quot; + propName + &quot; using default value.&quot;);</span>
+            }
+        }
+        // Check if there is a default size value for this cache
+<span class="fc" id="L387">        Long defaultSize = cacheProps.get(propName);</span>
+<span class="fc bfc" id="L388" title="All 2 branches covered.">        return defaultSize == null ? defaultValue : defaultSize;</span>
+    }
+
+    private static boolean hasCacheProperty(String cacheName, String suffix) {
+        // First check if user is overwriting default value using a system property for the cache name
+<span class="nc" id="L393">        String propName = &quot;cache.&quot; + cacheName.replaceAll(&quot; &quot;, &quot;&quot;) + suffix;</span>
+<span class="nc" id="L394">        String sizeProp = JiveGlobals.getProperty(propName);</span>
+<span class="nc bnc" id="L395" title="All 4 branches missed.">        if (sizeProp == null &amp;&amp; cacheNames.containsKey(cacheName)) {</span>
+            // No system property was found for the cache name so try now with short name
+<span class="nc" id="L397">            propName = &quot;cache.&quot; + cacheNames.get(cacheName) + suffix;</span>
+<span class="nc" id="L398">            sizeProp = JiveGlobals.getProperty(propName);</span>
+        }
+<span class="nc bnc" id="L400" title="All 2 branches missed.">        if (sizeProp != null) {</span>
+            try {
+<span class="nc" id="L402">                Long.parseLong(sizeProp);</span>
+<span class="nc" id="L403">                return true;</span>
+            }
+<span class="nc" id="L405">            catch (NumberFormatException nfe) {</span>
+<span class="nc" id="L406">                log.warn(&quot;Unable to parse &quot; + propName + &quot; using default value.&quot;);</span>
+            }
+        }
+<span class="nc" id="L409">        return false;</span>
+    }
+
+    /**
+     * Returns an array of all caches in the system.
+     * @return an array of all caches in the system.
+     */
+    public static Cache[] getAllCaches() {
+<span class="nc" id="L417">        List&lt;Cache&gt; values = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L418" title="All 2 branches missed.">        for (Cache cache : caches.values()) {</span>
+<span class="nc" id="L419">            values.add(cache);</span>
+<span class="nc" id="L420">        }</span>
+<span class="nc" id="L421">        return values.toArray(new Cache[values.size()]);</span>
+    }
+
+    /**
+     * Returns the named cache, creating it as necessary.
+     *
+     * @param name         the name of the cache to create.
+     * @param &lt;T&gt; the type cache being created
+     * @return the named cache, creating it as necessary.
+     */
+    @SuppressWarnings(&quot;unchecked&quot;)
+    public static synchronized &lt;T extends Cache&gt; T createCache(String name) {
+<span class="fc" id="L433">        T cache = (T) caches.get(name);</span>
+<span class="fc bfc" id="L434" title="All 2 branches covered.">        if (cache != null) {</span>
+<span class="fc" id="L435">            return cache;</span>
+        }
+<span class="fc" id="L437">        cache = (T) cacheFactoryStrategy.createCache(name);</span>
+
+<span class="fc" id="L439">        log.info(&quot;Created cache [&quot; + cacheFactoryStrategy.getClass().getName() + &quot;] for &quot; + name);</span>
+
+<span class="fc" id="L441">        return wrapCache(cache, name);</span>
+    }
+
+    /**
+     * Returns the named local cache, creating it as necessary.
+     *
+     * @param name         the name of the cache to create.
+     * @param &lt;T&gt; the type cache being created
+     * @return the named cache, creating it as necessary.
+     */
+    @SuppressWarnings(&quot;unchecked&quot;)
+    public static synchronized &lt;T extends Cache&gt; T createLocalCache(String name) {
+<span class="nc" id="L453">        T cache = (T) caches.get(name);</span>
+<span class="nc bnc" id="L454" title="All 2 branches missed.">        if (cache != null) {</span>
+<span class="nc" id="L455">            return cache;</span>
+        }
+<span class="nc" id="L457">        cache = (T) localCacheFactoryStrategy.createCache(name);</span>
+<span class="nc" id="L458">        localOnly.add(name);</span>
+
+<span class="nc" id="L460">        log.info(&quot;Created local-only cache [&quot; + localCacheFactoryClass + &quot;] for &quot; + name);</span>
+
+<span class="nc" id="L462">        return wrapCache(cache, name);</span>
+    }
+
+    /**
+     * Destroys the cache for the cache name specified.
+     *
+     * @param name the name of the cache to destroy.
+     */
+    public static synchronized void destroyCache(String name) {
+<span class="nc" id="L471">        Cache cache = caches.remove(name);</span>
+<span class="nc bnc" id="L472" title="All 2 branches missed.">        if (cache != null) {</span>
+<span class="nc bnc" id="L473" title="All 2 branches missed.">            if (localOnly.contains(name)) {</span>
+<span class="nc" id="L474">                localOnly.remove(name);</span>
+<span class="nc" id="L475">                localCacheFactoryStrategy.destroyCache(cache);</span>
+            } else {
+<span class="nc" id="L477">                cacheFactoryStrategy.destroyCache(cache);</span>
+            }
+        }
+<span class="nc" id="L480">    }</span>
+
+    /**
+     * @deprecated in favour of {@link Cache#getLock}. Will be removed in Openfire 5.0.0.
+     *
+     * &lt;p&gt;Returns an existing {@link java.util.concurrent.locks.Lock} on the specified key or creates a new one
+     * if none was found. This operation is thread safe. Successive calls with the same key may or may not
+     * return the same {@link java.util.concurrent.locks.Lock}. However, different threads asking for the
+     * same Lock at the same time will get the same Lock object.&lt;p&gt;
+     *
+     * The supplied cache may or may not be used depending whether the server is running on cluster mode
+     * or not. When not running as part of a cluster then the lock will be unrelated to the cache and will
+     * only be visible in this JVM.
+     *
+     * @param key the object that defines the visibility or scope of the lock.
+     * @param cache the cache used for holding the lock.
+     * @return an existing lock on the specified key or creates a new one if none was found.
+     */
+    @Deprecated
+    public static synchronized Lock getLock(Object key, Cache cache) {
+<span class="nc bnc" id="L500" title="All 2 branches missed.">        if (localOnly.contains(cache.getName())) {</span>
+<span class="nc" id="L501">            return localCacheFactoryStrategy.getLock(key, cache);</span>
+        } else {
+<span class="nc" id="L503">            return cacheFactoryStrategy.getLock(key, cache);</span>
+        }
+    }
+
+    @SuppressWarnings(&quot;unchecked&quot;)
+    private static &lt;T extends Cache&gt; T wrapCache(T cache, String name) {
+<span class="pc bpc" id="L509" title="1 of 2 branches missed.">        if (&quot;Routing Components Cache&quot;.equals(name)) {</span>
+<span class="nc" id="L510">            cache = (T) new ComponentCacheWrapper(cache);</span>
+        } else {
+<span class="fc" id="L512">            cache = (T) new CacheWrapper(cache);</span>
+        }
+<span class="fc" id="L514">        cache.setName(name);</span>
+
+<span class="fc" id="L516">        caches.put(name, cache);</span>
+<span class="fc" id="L517">        return cache;</span>
+    }
+
+    /**
+     * Returns true if clustering is installed and can be used by this JVM
+     * to join a cluster. A false value could mean that either clustering
+     * support is not available or the license does not allow to have more
+     * than 1 cluster node.
+     *
+     * @return true if clustering is installed and can be used by
+     * this JVM to join a cluster.
+     */
+    public static boolean isClusteringAvailable() {
+<span class="nc bnc" id="L530" title="All 2 branches missed.">        if (clusteredCacheFactoryStrategy == null) {</span>
+            try {
+<span class="nc" id="L532">                clusteredCacheFactoryStrategy = (CacheFactoryStrategy) Class.forName(</span>
+                        clusteredCacheFactoryClass, true,
+<span class="nc" id="L534">                        getClusteredCacheStrategyClassLoader()).newInstance();</span>
+<span class="nc" id="L535">            } catch (NoClassDefFoundError | Exception e) {</span>
+<span class="nc" id="L536">                log.warn(&quot;Clustered cache factory strategy &quot; + clusteredCacheFactoryClass + &quot; not found&quot;);</span>
+<span class="nc" id="L537">            }</span>
+        }
+<span class="nc bnc" id="L539" title="All 2 branches missed.">        return (clusteredCacheFactoryStrategy != null);</span>
+    }
+
+    /**
+     * Returns true is clustering is currently being started. Once the cluster
+     * is started or failed to be started this value will be false.
+     *
+     * @return true is clustering is currently being started.
+     */
+    public static boolean isClusteringStarting() {
+<span class="nc" id="L549">        return clusteringStarting;</span>
+    }
+
+    /**
+     * Returns true if this node is currently a member of a cluster. The last step of application
+     * initialization is to join a cluster, so this method returns false during most of application startup.
+     *
+     * @return true if this node is currently a member of a cluster.
+     */
+    public static boolean isClusteringStarted() {
+<span class="nc" id="L559">        return clusteringStarted;</span>
+    }
+
+    /**
+     * Returns a byte[] that uniquely identifies this member within the cluster or {@code null}
+     * when not in a cluster.
+     *
+     * @return a byte[] that uniquely identifies this member within the cluster or null when not in a cluster.
+     */
+    public static byte[] getClusterMemberID() {
+<span class="nc" id="L569">        return cacheFactoryStrategy.getClusterMemberID();</span>
+    }
+
+    public synchronized static void clearCaches() {
+<span class="nc bnc" id="L573" title="All 2 branches missed.">        for (String cacheName : caches.keySet()) {</span>
+<span class="nc" id="L574">            Cache cache = caches.get(cacheName);</span>
+<span class="nc" id="L575">            cache.clear();</span>
+<span class="nc" id="L576">        }</span>
+<span class="nc" id="L577">    }</span>
+
+    /**
+     * Returns a byte[] that uniquely identifies this senior cluster member or {@code null}
+     * when not in a cluster.
+     *
+     * @return a byte[] that uniquely identifies this senior cluster member or null when not in a cluster.
+     */
+    public static byte[] getSeniorClusterMemberID() {
+<span class="fc" id="L586">        return cacheFactoryStrategy.getSeniorClusterMemberID();</span>
+    }
+
+    /**
+     * Returns true if this member is the senior member in the cluster. If clustering
+     * is not enabled, this method will also return true. This test is useful for
+     * tasks that should only be run on a single member in a cluster.
+     *
+     * @return true if this cluster member is the senior or if clustering is not enabled.
+     */
+    public static boolean isSeniorClusterMember() {
+<span class="fc" id="L597">        return cacheFactoryStrategy.isSeniorClusterMember();</span>
+    }
+
+    /**
+     * Returns basic information about the current members of the cluster or an empty
+     * collection if not running in a cluster.
+     *
+     * @return information about the current members of the cluster or an empty
+     *         collection if not running in a cluster.
+     */
+    public static Collection&lt;ClusterNodeInfo&gt; getClusterNodesInfo() {
+<span class="fc" id="L608">        return cacheFactoryStrategy.getClusterNodesInfo();</span>
+    }
+
+    /**
+     * Returns the maximum number of cluster members allowed. A value of 0 will
+     * be returned when clustering is not allowed.
+     *
+     * @return the maximum number of cluster members allowed or 0 if clustering is not allowed.
+     */
+    public static int getMaxClusterNodes() {
+<span class="nc" id="L618">        return cacheFactoryStrategy.getMaxClusterNodes();</span>
+    }
+
+    /**
+     * Gets the pseudo-synchronized time from the cluster. While the cluster members may
+     * have varying system times, this method is expected to return a timestamp that is
+     * synchronized (or nearly so; best effort) across the cluster.
+     *
+     * @return Synchronized time for all cluster members
+     */
+    public static long getClusterTime() {
+        // use try/catch here for backward compatibility with older plugin(s)
+<span class="nc" id="L630">        try { return cacheFactoryStrategy.getClusterTime(); }</span>
+<span class="nc" id="L631">        catch (AbstractMethodError ame) {</span>
+<span class="nc" id="L632">            log.warn(&quot;Cluster time not available; check for update to hazelcast/clustering plugin&quot;);</span>
+<span class="nc" id="L633">            return localCacheFactoryStrategy.getClusterTime();</span>
+        }
+    }
+
+    /**
+     * Invokes a task on other cluster members in an asynchronous fashion. The task will not be
+     * executed on the local cluster member. If clustering is not enabled, this method
+     * will do nothing.
+     *
+     * @param task the task to be invoked on all other cluster members.
+     */
+    public static void doClusterTask(final ClusterTask&lt;?&gt; task) {
+<span class="fc" id="L645">        cacheFactoryStrategy.doClusterTask(task);</span>
+<span class="fc" id="L646">    }</span>
+
+    /**
+     * Invokes a task on a given cluster member in an asynchronous fashion. If clustering is not enabled,
+     * this method will do nothing.
+     *
+     * @param task the task to be invoked on the specified cluster member.
+     * @param nodeID the byte array that identifies the target cluster member.
+     * @throws IllegalStateException if requested node was not found or not running in a cluster. 
+     */
+    public static void doClusterTask(final ClusterTask&lt;?&gt; task, byte[] nodeID) {
+<span class="nc" id="L657">        cacheFactoryStrategy.doClusterTask(task, nodeID);</span>
+<span class="nc" id="L658">    }</span>
+
+    /**
+     * Invokes a task on other cluster members synchronously and returns the result as a Collection
+     * (method will not return until the task has been executed on each cluster member).
+     * The task will not be executed on the local cluster member. If clustering is not enabled,
+     * this method will return an empty collection.
+     *
+     * @param task               the ClusterTask object to be invoked on all other cluster members.
+     * @param includeLocalMember true to run the task on the local member, false otherwise
+     * @param &lt;T&gt; the return type of the cluster task
+     * @return collection with the result of the execution.
+     */
+    public static &lt;T&gt; Collection&lt;T&gt; doSynchronousClusterTask(ClusterTask&lt;T&gt; task, boolean includeLocalMember) {
+<span class="nc" id="L672">        return cacheFactoryStrategy.doSynchronousClusterTask(task, includeLocalMember);</span>
+    }
+
+    /**
+     * Invokes a task on a given cluster member synchronously and returns the result of
+     * the remote operation. If clustering is not enabled, this method will return null.
+     *
+     * @param task        the ClusterTask object to be invoked on a given cluster member.
+     * @param nodeID      the byte array that identifies the target cluster member.
+     * @param &lt;T&gt; the return type of the cluster task
+     * @return result of remote operation or null if operation failed or operation returned null.
+     * @throws IllegalStateException if requested node was not found or not running in a cluster.
+     */
+    public static &lt;T&gt; T doSynchronousClusterTask(ClusterTask&lt;T&gt; task, byte[] nodeID) {
+<span class="nc" id="L686">        return cacheFactoryStrategy.doSynchronousClusterTask(task, nodeID);</span>
+    }
+
+    /**
+     * Returns the node info for the given cluster node
+     * @param nodeID The target cluster node 
+     * @return The info for the cluster node or null if not found
+     */
+    public static ClusterNodeInfo getClusterNodeInfo(byte[] nodeID) {
+<span class="nc" id="L695">        return cacheFactoryStrategy.getClusterNodeInfo(nodeID);</span>
+    }
+
+    public static String getPluginName() {
+<span class="nc" id="L699">        return cacheFactoryStrategy.getPluginName();</span>
+    }
+
+    public static synchronized void initialize() throws InitializationException {
+        try {
+<span class="fc" id="L704">            localCacheFactoryStrategy = (CacheFactoryStrategy) Class.forName(localCacheFactoryClass).newInstance();</span>
+<span class="fc" id="L705">            cacheFactoryStrategy = localCacheFactoryStrategy;</span>
+<span class="nc" id="L706">        } catch (Exception e) {</span>
+<span class="nc" id="L707">            log.error(&quot;Failed to instantiate local cache factory strategy: &quot; + localCacheFactoryClass, e);</span>
+<span class="nc" id="L708">             throw new InitializationException(e);</span>
+<span class="fc" id="L709">        }</span>
+<span class="fc" id="L710">    }</span>
+
+    private static ClassLoader getClusteredCacheStrategyClassLoader() {
+<span class="nc" id="L713">        PluginManager pluginManager = XMPPServer.getInstance().getPluginManager();</span>
+<span class="nc" id="L714">        Plugin plugin = pluginManager.getPlugin(&quot;hazelcast&quot;);</span>
+<span class="nc bnc" id="L715" title="All 2 branches missed.">        if (plugin == null) {</span>
+<span class="nc" id="L716">            plugin = pluginManager.getPlugin(&quot;clustering&quot;);</span>
+<span class="nc bnc" id="L717" title="All 2 branches missed.">            if (plugin == null) {</span>
+<span class="nc" id="L718">                plugin = pluginManager.getPlugin(&quot;enterprise&quot;);</span>
+            }
+        }
+<span class="nc" id="L721">        PluginClassLoader pluginLoader = pluginManager.getPluginClassloader(plugin);</span>
+<span class="nc bnc" id="L722" title="All 2 branches missed.">        if (pluginLoader != null) {</span>
+<span class="nc bnc" id="L723" title="All 2 branches missed.">            if (log.isDebugEnabled()) {</span>
+<span class="nc" id="L724">                StringBuffer pluginLoaderDetails = new StringBuffer(&quot;Clustering plugin class loader: &quot;);</span>
+<span class="nc" id="L725">                pluginLoaderDetails.append(pluginLoader.getClass().getName());</span>
+<span class="nc bnc" id="L726" title="All 2 branches missed.">                for (URL url : pluginLoader.getURLs()) {</span>
+<span class="nc" id="L727">                    pluginLoaderDetails.append(&quot;\n\t&quot;).append(url.toExternalForm());</span>
+                }
+<span class="nc" id="L729">                log.debug(pluginLoaderDetails.toString());</span>
+            }
+<span class="nc" id="L731">            return pluginLoader;</span>
+        }
+        else {
+<span class="nc" id="L734">            log.warn(&quot;CacheFactory - Unable to find a Plugin that provides clustering support.&quot;);</span>
+<span class="nc" id="L735">            return Thread.currentThread().getContextClassLoader();</span>
+        }
+    }
+
+    public static void startClustering() {
+<span class="nc bnc" id="L740" title="All 2 branches missed.">        if (isClusteringAvailable()) {</span>
+<span class="nc" id="L741">            clusteringStarting = true;</span>
+<span class="nc" id="L742">            clusteringStarted = clusteredCacheFactoryStrategy.startCluster();</span>
+<span class="nc" id="L743">            clusteringStarting = false;</span>
+        }
+<span class="nc bnc" id="L745" title="All 2 branches missed.">        if (clusteringStarted) {</span>
+<span class="nc bnc" id="L746" title="All 2 branches missed.">            if (statsThread == null) {</span>
+                // Start a timing thread with 1 second of accuracy.
+<span class="nc" id="L748">                statsThread = new Thread(&quot;Cache Stats&quot;) {</span>
+<span class="nc" id="L749">                    private volatile boolean destroyed = false;</span>
+
+                    @Override
+                    public void run() {
+<span class="nc" id="L753">                        XMPPServer.getInstance().addServerListener(new XMPPServerListener() {</span>
+                            @Override
+<span class="nc" id="L755">                            public void serverStarted() {}</span>
+
+                            @Override
+                            public void serverStopping() {
+<span class="nc" id="L759">                                destroyed = true;</span>
+<span class="nc" id="L760">                            }</span>
+                        });
+<span class="nc" id="L762">                        ClusterManager.addListener(new ClusterEventListener() {</span>
+                            @Override
+<span class="nc" id="L764">                            public void joinedCluster() {}</span>
+
+                            @Override
+<span class="nc" id="L767">                            public void joinedCluster(byte[] nodeID) {}</span>
+
+                            @Override
+                            public void leftCluster() {
+<span class="nc" id="L771">                                destroyed = true;</span>
+<span class="nc" id="L772">                                ClusterManager.removeListener(this);</span>
+<span class="nc" id="L773">                            }</span>
+
+                            @Override
+<span class="nc" id="L776">                            public void leftCluster(byte[] nodeID) {}</span>
+
+                            @Override
+<span class="nc" id="L779">                            public void markedAsSeniorClusterMember() {}</span>
+                        });
+
+                        // Run the timer indefinitely.
+<span class="nc bnc" id="L783" title="All 4 branches missed.">                        while (!destroyed &amp;&amp; ClusterManager.isClusteringEnabled()) {</span>
+                            // Publish cache stats for this cluster node (assuming clustering is
+                            // enabled and there are stats to publish).
+                            try {
+<span class="nc" id="L787">                                cacheFactoryStrategy.updateCacheStats(caches);</span>
+                            }
+<span class="nc" id="L789">                            catch (Exception e) {</span>
+<span class="nc" id="L790">                                log.error(e.getMessage(), e);</span>
+<span class="nc" id="L791">                            }</span>
+                            try {
+                                // Sleep 10 seconds.
+<span class="nc" id="L794">                                sleep(10000);</span>
+                            }
+<span class="nc" id="L796">                            catch (InterruptedException ie) {</span>
+                                // Ignore.
+<span class="nc" id="L798">                            }</span>
+                        }
+<span class="nc" id="L800">                        statsThread = null;</span>
+<span class="nc" id="L801">                        log.debug(&quot;Cache stats thread terminated.&quot;);</span>
+<span class="nc" id="L802">                    }</span>
+                };
+<span class="nc" id="L804">                statsThread.setDaemon(true);</span>
+<span class="nc" id="L805">                statsThread.start();</span>
+            }
+        }
+<span class="nc" id="L808">    }</span>
+
+    public static void stopClustering() {
+        // Stop the cluster
+<span class="nc" id="L812">        clusteredCacheFactoryStrategy.stopCluster();</span>
+<span class="nc" id="L813">        clusteredCacheFactoryStrategy = null;</span>
+        // Set the strategy to local
+<span class="nc" id="L815">        cacheFactoryStrategy = localCacheFactoryStrategy;</span>
+<span class="nc" id="L816">    }</span>
+
+    /**
+     * Notification message indicating that this JVM has joined a cluster.
+     */
+    @SuppressWarnings(&quot;unchecked&quot;)
+    public static synchronized void joinedCluster() {
+<span class="nc" id="L823">        cacheFactoryStrategy = clusteredCacheFactoryStrategy;</span>
+        // Loop through local caches and switch them to clustered cache (copy content)
+<span class="nc bnc" id="L825" title="All 2 branches missed.">        for (Cache cache : getAllCaches()) {</span>
+            // skip local-only caches
+<span class="nc bnc" id="L827" title="All 2 branches missed.">            if (localOnly.contains(cache.getName())) continue;</span>
+<span class="nc" id="L828">            CacheWrapper cacheWrapper = ((CacheWrapper) cache);</span>
+<span class="nc" id="L829">            Cache clusteredCache = cacheFactoryStrategy.createCache(cacheWrapper.getName());</span>
+<span class="nc" id="L830">            clusteredCache.putAll(cache);</span>
+<span class="nc" id="L831">            cacheWrapper.setWrappedCache(clusteredCache);</span>
+        }
+<span class="nc" id="L833">        clusteringStarting = false;</span>
+<span class="nc" id="L834">        clusteringStarted = true;</span>
+<span class="nc" id="L835">        log.info(&quot;Clustering started; cache migration complete&quot;);</span>
+<span class="nc" id="L836">    }</span>
+
+    /**
+     * Notification message indicating that this JVM has left the cluster.
+     */
+    @SuppressWarnings(&quot;unchecked&quot;)
+    public static synchronized void leftCluster() {
+<span class="nc" id="L843">        clusteringStarted = false;</span>
+<span class="nc" id="L844">        cacheFactoryStrategy = localCacheFactoryStrategy;</span>
+
+        // Loop through clustered caches and change them to local caches (copy content)
+<span class="nc bnc" id="L847" title="All 2 branches missed.">        for (Cache cache : getAllCaches()) {</span>
+            // skip local-only caches
+<span class="nc bnc" id="L849" title="All 2 branches missed.">            if (localOnly.contains(cache.getName())) continue;</span>
+<span class="nc" id="L850">            CacheWrapper cacheWrapper = ((CacheWrapper) cache);</span>
+<span class="nc" id="L851">            Cache standaloneCache = cacheFactoryStrategy.createCache(cacheWrapper.getName());</span>
+<span class="nc" id="L852">            standaloneCache.putAll(cache);</span>
+<span class="nc" id="L853">            cacheWrapper.setWrappedCache(standaloneCache);</span>
+        }
+<span class="nc" id="L855">        log.info(&quot;Clustering stopped; cache migration complete&quot;);</span>
+<span class="nc" id="L856">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

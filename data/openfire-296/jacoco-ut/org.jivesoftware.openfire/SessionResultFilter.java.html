@@ -1,0 +1,374 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>SessionResultFilter.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire</a> &gt; <span class="el_source">SessionResultFilter.java</span></div><h1>SessionResultFilter.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2004-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire;
+
+import org.jivesoftware.openfire.session.ClientSession;
+
+import java.util.Comparator;
+import java.util.Date;
+
+/**
+ * Filters and sorts lists of sessions. This allows for a very rich set of possible
+ * queries that can be run on session data. Some examples are: &quot;Show all sessions
+ * started during the last hour by a certain user&quot;.
+ * &lt;p&gt;
+ * The class also supports pagination of results with the setStartIndex(int)
+ * and setNumResults(int) methods. If the start index is not set, it will
+ * begin at index 0 (the start of results). If the number of results is not set,
+ * it will be unbounded and return as many results as available.&lt;/p&gt;
+ * &lt;p&gt;
+ * Factory methods to create common queries are provided for convenience.&lt;/p&gt;
+ *
+ * @author Matt Tucker
+ */
+<span class="nc" id="L38">public class SessionResultFilter {</span>
+
+    // ############################################################
+    // Search order criteria
+    // ############################################################
+    /**
+     * Descending sort (ie 3, 2, 1...).
+     */
+    public static final int DESCENDING = 0;
+
+    /**
+     * Ascending sort (ie 3, 4, 5...).
+     */
+    public static final int ASCENDING = 1;
+
+    // ############################################################
+    // Result limit search criteria
+    // ############################################################
+    /**
+     * Represents no result limit (infinite results).
+     */
+    public static final int NO_RESULT_LIMIT = -1;
+
+    // ############################################################
+    // Sort fields
+    // ############################################################
+    public static final int SORT_USER = 0;
+    public static final int SORT_CREATION_DATE = 1;
+    public static final int SORT_LAST_ACTIVITY_DATE = 2;
+    public static final int SORT_NUM_CLIENT_PACKETS = 3;
+    public static final int SORT_NUM_SERVER_PACKETS = 4;
+
+    /**
+     * Creates a default SessionResultFilter: no filtering with results sorted
+     * by user (ascending).
+     *
+     * @return default SessionResultFilter.
+     */
+    public static SessionResultFilter createDefaultSessionFilter() {
+<span class="nc" id="L77">        SessionResultFilter resultFilter = new SessionResultFilter();</span>
+<span class="nc" id="L78">        resultFilter.setSortField(SORT_USER);</span>
+<span class="nc" id="L79">        resultFilter.setSortOrder(ASCENDING);</span>
+<span class="nc" id="L80">        return resultFilter;</span>
+    }
+
+<span class="nc" id="L83">    private int sortField = SORT_LAST_ACTIVITY_DATE;</span>
+<span class="nc" id="L84">    private int sortOrder = DESCENDING;</span>
+
+<span class="nc" id="L86">    private String username = null;</span>
+
+    /**
+     * The starting index for results. Default is 0.
+     */
+<span class="nc" id="L91">    private int startIndex = 0;</span>
+
+    /**
+     * Number of results to return. Default is NO_RESULT_LIMIT
+     * which means an unlimited number of results.
+     */
+<span class="nc" id="L97">    private int numResults = NO_RESULT_LIMIT;</span>
+
+<span class="nc" id="L99">    private Date creationDateRangeMin = null;</span>
+<span class="nc" id="L100">    private Date creationDateRangeMax = null;</span>
+<span class="nc" id="L101">    private Date lastActivityDateRangeMin = null;</span>
+<span class="nc" id="L102">    private Date lastActivityDateRangeMax = null;</span>
+
+    /**
+     * Returns the currently selected sort field. The default value is
+     * SessionResultFilter.SORT_LAST_ACTIVITY_DATE.
+     *
+     * @return current sort field.
+     */
+    public int getSortField() {
+<span class="nc" id="L111">        return sortField;</span>
+    }
+
+    /**
+     * Sets the sort field to use. The default value is
+     * SessionResultFilter.SORT_LAST_ACTIVITY_DATE.
+     *
+     * @param sortField the field that will be used for sorting.
+     */
+    public void setSortField(int sortField) {
+<span class="nc" id="L121">        this.sortField = sortField;</span>
+<span class="nc" id="L122">    }</span>
+
+    /**
+     * Returns the sort order, which will be SessionResultFilter.ASCENDING for
+     * ascending sorting, or SessionResultFilter.DESCENDING for descending sorting.
+     * Descending sorting is: 3, 2, 1, etc. Ascending sorting is 1, 2, 3, etc.
+     *
+     * @return the sort order.
+     */
+    public int getSortOrder() {
+<span class="nc" id="L132">        return this.sortOrder;</span>
+    }
+
+    /**
+     * Sets the sort type. Valid arguments are SessionResultFilter.ASCENDING for
+     * ascending sorting or SessionResultFilter.DESCENDING for descending sorting.
+     * Descending sorting is: 3, 2, 1, etc. Ascending sorting is 1, 2, 3, etc.
+     *
+     * @param sortOrder the order that results will be sorted in.
+     */
+    public void setSortOrder(int sortOrder) {
+<span class="nc bnc" id="L143" title="All 4 branches missed.">        if (!(sortOrder == SessionResultFilter.ASCENDING || sortOrder == SessionResultFilter.DESCENDING)) {</span>
+<span class="nc" id="L144">            throw new IllegalArgumentException();</span>
+        }
+<span class="nc" id="L146">        this.sortOrder = sortOrder;</span>
+<span class="nc" id="L147">    }</span>
+
+    /**
+     * &lt;p&gt;Returns the max number of results that should be returned.&lt;/p&gt;
+     * &lt;p&gt;The default value for is NO_RESULT_LIMIT, which means there will be no limit
+     * on the number of results. This method can be used in combination with
+     * setStartIndex(int) to perform pagination of results.&lt;/p&gt;
+     *
+     * @return the max number of results to return or NO_RESULT_LIMIT for no limit
+     * @see #setStartIndex(int)
+     */
+    public int getNumResults() {
+<span class="nc" id="L159">        return numResults;</span>
+    }
+
+    /**
+     * &lt;p&gt;Sets the limit on the number of results to be returned.&lt;/p&gt;
+     * &lt;p&gt;User NO_RESULT_LIMIT if you don't want to limit the results returned.&lt;/p&gt;
+     *
+     * @param numResults the number of results to return or NO_RESULT_LIMIT for no limit
+     */
+    public void setNumResults(int numResults) {
+<span class="nc bnc" id="L169" title="All 4 branches missed.">        if (numResults != NO_RESULT_LIMIT &amp;&amp; numResults &lt; 0) {</span>
+<span class="nc" id="L170">            throw new IllegalArgumentException(&quot;numResults cannot be less than 0.&quot;);</span>
+        }
+<span class="nc" id="L172">        this.numResults = numResults;</span>
+<span class="nc" id="L173">    }</span>
+
+    /**
+     * Returns the index of the first result to return.
+     *
+     * @return the index of the first result which should be returned.
+     */
+    public int getStartIndex() {
+<span class="nc" id="L181">        return startIndex;</span>
+    }
+
+    /**
+     * Sets the index of the first result to return. For example, if the start
+     * index is set to 20, the Iterator returned will start at the 20th result
+     * in the query. This method can be used in combination with
+     * setNumResults(int) to perform pagination of results.
+     *
+     * @param startIndex the index of the first result to return.
+     */
+    public void setStartIndex(int startIndex) {
+<span class="nc bnc" id="L193" title="All 2 branches missed.">        if (startIndex &lt; 0) {</span>
+<span class="nc" id="L194">            throw new IllegalArgumentException(&quot;A start index less than 0 is not valid.&quot;);</span>
+        }
+<span class="nc" id="L196">        this.startIndex = startIndex;</span>
+<span class="nc" id="L197">    }</span>
+
+    /**
+     * Returns a comparator that will sort a standard sorted set according
+     * to this filter's sort order.
+     *
+     * @return a comparator that sorts Sessions matching the sort order for this filter.
+     */
+    public Comparator&lt;ClientSession&gt; getSortComparator() {
+<span class="nc" id="L206">        return new SessionComparator();</span>
+    }
+
+    /**
+     * Compares sessions according to sort fields.
+     *
+     * @author Iain Shigeoka
+     */
+<span class="nc" id="L214">    private class SessionComparator implements Comparator&lt;ClientSession&gt; {</span>
+
+        @Override
+        public int compare(ClientSession lhs, ClientSession rhs) {
+            int comparison;
+<span class="nc bnc" id="L219" title="All 6 branches missed.">            switch (sortField) {</span>
+                case SessionResultFilter.SORT_CREATION_DATE:
+<span class="nc" id="L221">                    comparison = lhs.getCreationDate().compareTo(rhs.getCreationDate());</span>
+<span class="nc" id="L222">                    break;</span>
+                case SessionResultFilter.SORT_LAST_ACTIVITY_DATE:
+<span class="nc" id="L224">                    comparison = lhs.getLastActiveDate().compareTo(rhs.getCreationDate());</span>
+<span class="nc" id="L225">                    break;</span>
+                case SessionResultFilter.SORT_NUM_CLIENT_PACKETS:
+<span class="nc" id="L227">                    comparison = (int)(lhs.getNumClientPackets() - rhs.getNumClientPackets());</span>
+<span class="nc" id="L228">                    break;</span>
+                case SessionResultFilter.SORT_NUM_SERVER_PACKETS:
+<span class="nc" id="L230">                    comparison = (int)(lhs.getNumServerPackets() - rhs.getNumServerPackets());</span>
+<span class="nc" id="L231">                    break;</span>
+                case SessionResultFilter.SORT_USER:
+                    // sort first by name, then by resource
+<span class="nc bnc" id="L234" title="All 2 branches missed.">                    String lUsername = lhs.isAnonymousUser() ? &quot;&quot; : lhs.getAddress().getNode();</span>
+<span class="nc bnc" id="L235" title="All 2 branches missed.">                    String rUsername = rhs.isAnonymousUser() ? &quot;&quot; : rhs.getAddress().getNode();</span>
+<span class="nc" id="L236">                    comparison = compareString(lUsername, rUsername);</span>
+<span class="nc bnc" id="L237" title="All 2 branches missed.">                    if (comparison == 0) {</span>
+<span class="nc" id="L238">                        comparison = compareString(lhs.getAddress().getResource(),</span>
+<span class="nc" id="L239">                                rhs.getAddress().getResource());</span>
+                    }
+                    break;
+                default:
+<span class="nc" id="L243">                    comparison = 0;</span>
+            }
+<span class="nc bnc" id="L245" title="All 2 branches missed.">            if (sortOrder == SessionResultFilter.DESCENDING) {</span>
+<span class="nc" id="L246">                comparison *= -1; // Naturally ascending, flip sign if descending</span>
+            }
+<span class="nc" id="L248">            return comparison;</span>
+        }
+
+        private int compareString(String lhs, String rhs) {
+<span class="nc bnc" id="L252" title="All 2 branches missed.">            if (lhs == null) {</span>
+<span class="nc" id="L253">                lhs = &quot;&quot;;</span>
+            }
+<span class="nc bnc" id="L255" title="All 2 branches missed.">            if (rhs == null) {</span>
+<span class="nc" id="L256">                rhs = &quot;&quot;;</span>
+            }
+<span class="nc" id="L258">            return lhs.compareTo(rhs);</span>
+        }
+    }
+
+    /**
+     * Rounds the given date down to the nearest specified second. The following
+     * table shows sample input and expected output values: (Note, only
+     * the time portion of the date is shown for brevity)
+     *
+     * &lt;table border=&quot;1&quot;&gt;
+     * &lt;caption&gt;Rounding examples&lt;/caption&gt;
+     * &lt;tr&gt;&lt;th&gt;Date&lt;/th&gt;&lt;th&gt;Seconds&lt;/th&gt;&lt;th&gt;Result&lt;/th&gt;&lt;/tr&gt;
+     * &lt;tr&gt;&lt;td&gt;1:37.48&lt;/td&gt;&lt;td&gt;5&lt;/td&gt;&lt;td&gt;1:37.45&lt;/td&gt;&lt;/tr&gt;
+     * &lt;tr&gt;&lt;td&gt;1:37.48&lt;/td&gt;&lt;td&gt;10&lt;/td&gt;&lt;td&gt;1:37.40&lt;/td&gt;&lt;/tr&gt;
+     * &lt;tr&gt;&lt;td&gt;1:37.48&lt;/td&gt;&lt;td&gt;30&lt;/td&gt;&lt;td&gt;1:37.30&lt;/td&gt;&lt;/tr&gt;
+     * &lt;tr&gt;&lt;td&gt;1:37.48&lt;/td&gt;&lt;td&gt;60&lt;/td&gt;&lt;td&gt;1:37.00&lt;/td&gt;&lt;/tr&gt;
+     * &lt;tr&gt;&lt;td&gt;1:37.48&lt;/td&gt;&lt;td&gt;120&lt;/td&gt;&lt;td&gt;1:36.00&lt;/td&gt;&lt;/tr&gt;
+     * &lt;/table&gt;
+     *
+     * &lt;p&gt;This method is useful when calculating the last post in
+     * a forum or the number of new messages from a given date. Using a rounded
+     * date allows Jive to internally cache the results of the date query.
+     * Here's an example that shows the last posted message in a forum accurate
+     * to the last 60 seconds:&lt;/p&gt;
+     *
+     * &lt;pre&gt;
+     * SessionResultFilter filter = new SessionResultFilter();
+     * filter.setSortOrder(SessionResultFilter.DESCENDING);
+     * filter.setSortField(JiveGlobals.SORT_CREATION_DATE);
+     * &lt;b&gt;filter.setCreationDateRangeMin(SessionResultFilter.roundDate(forum.getModificationDate(), 60));&lt;/b&gt;
+     * filter.setNumResults(1);
+     * Iterator messages = forum.messages(filter);
+     * ForumMessage lastPost = (ForumMessage)messages.next();
+     * &lt;/pre&gt;
+     *
+     * @param date the {@code Date} we want to round.
+     * @param seconds the number of seconds we want to round the date to.
+     * @return the given date, rounded down to the nearest specified number of seconds.
+     */
+    public static Date roundDate(Date date, int seconds) {
+<span class="nc" id="L298">        return new Date(roundDate(date.getTime(), seconds));</span>
+    }
+
+    /**
+     * Rounds the given date down to the nearest specfied second.
+     *
+     * @param date the date (as a long) that we want to round.
+     * @param seconds the number of seconds we want to round the date to.
+     * @return the given date (as a long), rounded down to the nearest
+     *         specified number of seconds.
+     */
+    public static long roundDate(long date, int seconds) {
+<span class="nc" id="L310">        return date - (date % (1000 * seconds));</span>
+    }
+
+    @Override
+    public boolean equals(Object object) {
+<span class="nc bnc" id="L315" title="All 2 branches missed.">        if (this == object) {</span>
+<span class="nc" id="L316">            return true;</span>
+        }
+<span class="nc bnc" id="L318" title="All 4 branches missed.">        if (object != null &amp;&amp; object instanceof SessionResultFilter) {</span>
+<span class="nc" id="L319">            SessionResultFilter o = (SessionResultFilter)object;</span>
+<span class="nc bnc" id="L320" title="All 2 branches missed.">            if (sortField != o.sortField) {</span>
+<span class="nc" id="L321">                return false;</span>
+            }
+<span class="nc bnc" id="L323" title="All 2 branches missed.">            if (sortOrder != o.sortOrder) {</span>
+<span class="nc" id="L324">                return false;</span>
+            }
+<span class="nc bnc" id="L326" title="All 2 branches missed.">            if (numResults != o.numResults) {</span>
+<span class="nc" id="L327">                return false;</span>
+            }
+<span class="nc bnc" id="L329" title="All 2 branches missed.">            if (!compare(username, o.username)) {</span>
+<span class="nc" id="L330">                return false;</span>
+            }
+
+<span class="nc bnc" id="L333" title="All 2 branches missed.">            if (!compare(creationDateRangeMin, o.creationDateRangeMin)) {</span>
+<span class="nc" id="L334">                return false;</span>
+            }
+<span class="nc bnc" id="L336" title="All 2 branches missed.">            if (!compare(creationDateRangeMax, o.creationDateRangeMax)) {</span>
+<span class="nc" id="L337">                return false;</span>
+            }
+<span class="nc bnc" id="L339" title="All 2 branches missed.">            if (!compare(lastActivityDateRangeMin, o.lastActivityDateRangeMin)) {</span>
+<span class="nc" id="L340">                return false;</span>
+            }
+<span class="nc bnc" id="L342" title="All 2 branches missed.">            if (!compare(lastActivityDateRangeMax, o.lastActivityDateRangeMax)) {</span>
+<span class="nc" id="L343">                return false;</span>
+            }
+            // All checks passed, so equal.
+<span class="nc" id="L346">            return true;</span>
+        }
+        else {
+<span class="nc" id="L349">            return false;</span>
+        }
+    }
+
+    /**
+     * Returns true if two objects are equal. This is a helper method
+     * to assist with the case that one or both objects are {@code null};
+     * if both objects are {@code null} then they're considered equal.
+     *
+     * @param one the first object.
+     * @param two the second object.
+     * @return true if the objects are equal.
+     */
+    private static boolean compare (Object one, Object two) {
+<span class="nc bnc" id="L363" title="All 4 branches missed.">        if (one == null &amp;&amp; two != null) {</span>
+<span class="nc" id="L364">            return false;</span>
+        }
+<span class="nc bnc" id="L366" title="All 2 branches missed.">        else if (one != null) {</span>
+<span class="nc bnc" id="L367" title="All 2 branches missed.">            if (!one.equals(two)) {</span>
+<span class="nc" id="L368">                return false;</span>
+            }
+        }
+<span class="nc" id="L371">        return true;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

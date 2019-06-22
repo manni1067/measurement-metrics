@@ -1,0 +1,275 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>SANCertificateIdentityMapping.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.util.cert</a> &gt; <span class="el_source">SANCertificateIdentityMapping.java</span></div><h1>SANCertificateIdentityMapping.java</h1><pre class="source lang-java linenums">package org.jivesoftware.util.cert;
+
+import org.bouncycastle.asn1.*;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.security.cert.CertificateParsingException;
+import java.security.cert.X509Certificate;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.List;
+
+/**
+ * Certificate identity mapping that uses SubjectAlternativeName as the identity credentials.
+ * This implementation returns all subjectAltName entries that are a:
+ * &lt;ul&gt;
+ * &lt;li&gt;GeneralName of type otherName with the &quot;id-on-xmppAddr&quot; Object Identifier&lt;/li&gt;
+ * &lt;li&gt;GeneralName of type otherName with the &quot;id-on-dnsSRV&quot; Object Identifier&lt;/li&gt;
+ * &lt;li&gt;GeneralName of type DNSName&lt;/li&gt;
+ * &lt;li&gt;GeneralName of type UniformResourceIdentifier&lt;/li&gt;
+ * &lt;/ul&gt;
+ *
+ * @author Victor Hong
+ * @author Guus der Kinderen, guus@goodbytes.nl
+ */
+<span class="fc" id="L27">public class SANCertificateIdentityMapping implements CertificateIdentityMapping</span>
+{
+
+<span class="fc" id="L30">    private static final Logger Log = LoggerFactory.getLogger( SANCertificateIdentityMapping.class );</span>
+
+    /**
+     * id-on-xmppAddr Object Identifier.
+     *
+     * @see &lt;a href=&quot;http://tools.ietf.org/html/rfc6120&quot;&gt;RFC 6120&lt;/a&gt;
+     */
+    public static final String OTHERNAME_XMPP_OID = &quot;1.3.6.1.5.5.7.8.5&quot;;
+
+    /**
+     * id-on-dnsSRV Object Identifier.
+     *
+     * @see &lt;a href=&quot;https://tools.ietf.org/html/rfc4985&quot;&gt;RFC 4985&lt;/a&gt;
+     */
+    public static final String OTHERNAME_SRV_OID = &quot;1.3.6.1.5.5.7.8.7&quot;;
+    
+    /**
+     * User Principal Name (UPN) Object Identifier.
+     *
+     * @see &lt;a href=&quot;http://www.oid-info.com/get/1.3.6.1.4.1.311.20.2.3&quot;&gt;User Principal Name (UPN)&lt;/a&gt;
+     */
+    public static final String OTHERNAME_UPN_OID = &quot;1.3.6.1.4.1.311.20.2.3&quot;;
+
+    
+    /**
+     * Returns the JID representation of an XMPP entity contained as a SubjectAltName extension
+     * in the certificate. If none was found then return an empty list.
+     *
+     * @param certificate the certificate presented by the remote entity.
+     * @return the JID representation of an XMPP entity contained as a SubjectAltName extension
+     * in the certificate. If none was found then return an empty list.
+     */
+    @Override
+    public List&lt;String&gt; mapIdentity( X509Certificate certificate )
+    {
+<span class="fc" id="L65">        List&lt;String&gt; identities = new ArrayList&lt;&gt;();</span>
+        try
+        {
+<span class="fc" id="L68">            Collection&lt;List&lt;?&gt;&gt; altNames = certificate.getSubjectAlternativeNames();</span>
+            // Check that the certificate includes the SubjectAltName extension
+<span class="fc bfc" id="L70" title="All 2 branches covered.">            if ( altNames == null )</span>
+            {
+<span class="fc" id="L72">                return Collections.emptyList();</span>
+            }
+<span class="fc bfc" id="L74" title="All 2 branches covered.">            for ( List&lt;?&gt; item : altNames )</span>
+            {
+<span class="fc" id="L76">                final Integer type = (Integer) item.get( 0 );</span>
+<span class="fc" id="L77">                final Object value = item.get( 1 ); // this is either a string, or a byte-array that represents the ASN.1 DER encoded form.</span>
+                final String result;
+<span class="pc bpc" id="L79" title="2 of 4 branches missed.">                switch ( type )</span>
+                {
+                    case 0:
+                        // OtherName: search for &quot;id-on-xmppAddr&quot; or 'sRVName' or 'userPrincipalName'
+<span class="fc" id="L83">                        result = parseOtherName( (byte[]) value );</span>
+<span class="fc" id="L84">                        break;</span>
+                    case 2:
+                        // DNS
+<span class="fc" id="L87">                        result = (String) value;</span>
+<span class="fc" id="L88">                        break;</span>
+                    case 6:
+                        // URI
+<span class="nc" id="L91">                        result = (String) value;</span>
+<span class="nc" id="L92">                        break;</span>
+                    default:
+                        // Not applicable to XMPP, so silently ignore them
+<span class="nc" id="L95">                        result = null;</span>
+                        break;
+                }
+
+<span class="pc bpc" id="L99" title="1 of 2 branches missed.">                if ( result != null )</span>
+                {
+<span class="fc" id="L101">                    identities.add( result );</span>
+                }
+<span class="fc" id="L103">            }</span>
+        }
+<span class="nc" id="L105">        catch ( CertificateParsingException e )</span>
+        {
+<span class="nc" id="L107">            Log.error( &quot;Error parsing SubjectAltName in certificate: &quot; + certificate.getSubjectDN(), e );</span>
+<span class="fc" id="L108">        }</span>
+<span class="fc" id="L109">        return identities;</span>
+    }
+
+    /**
+     * Returns the short name of mapping.
+     *
+     * @return The short name of the mapping (never null).
+     */
+    @Override
+    public String name()
+    {
+<span class="fc" id="L120">        return &quot;Subject Alternative Name Mapping&quot;;</span>
+    }
+
+    /**
+     * Parses the byte-array representation of a subjectAltName 'otherName' entry.
+     * &lt;p&gt;
+     * The provided 'OtherName' is expected to have this format:
+     * &lt;pre&gt;{@code
+     * OtherName ::= SEQUENCE {
+     * type-id    OBJECT IDENTIFIER,
+     * value      [0] EXPLICIT ANY DEFINED BY type-id }
+     * }&lt;/pre&gt;
+     *
+     * @param item A byte array representation of a subjectAltName 'otherName' entry (cannot be null).
+     * @return an xmpp address, or null when the otherName entry does not relate to XMPP (or fails to parse).
+     */
+    public String parseOtherName( byte[] item )
+    {
+<span class="pc bpc" id="L138" title="2 of 4 branches missed.">        if ( item == null || item.length == 0 )</span>
+        {
+<span class="nc" id="L140">            return null;</span>
+        }
+
+<span class="pc" id="L143">        try ( final ASN1InputStream decoder = new ASN1InputStream( item ) )</span>
+        {
+            // By specification, OtherName instances must always be an ASN.1 Sequence.
+<span class="fc" id="L146">            final ASN1Primitive object = decoder.readObject();</span>
+<span class="fc" id="L147">            final ASN1Sequence otherNameSeq = (ASN1Sequence) object;</span>
+
+            // By specification, an OtherName instance consists of:
+            // - the type-id (which is an Object Identifier), followed by:
+            // - a tagged value, of which the tag number is 0 (zero) and the value is defined by the type-id.
+<span class="fc" id="L152">            final ASN1ObjectIdentifier typeId = (ASN1ObjectIdentifier) otherNameSeq.getObjectAt( 0 );</span>
+<span class="fc" id="L153">            final ASN1TaggedObject taggedValue = (ASN1TaggedObject) otherNameSeq.getObjectAt( 1 );</span>
+
+<span class="fc" id="L155">            final int tagNo = taggedValue.getTagNo();</span>
+<span class="pc bpc" id="L156" title="1 of 2 branches missed.">            if ( tagNo != 0 )</span>
+            {
+<span class="nc" id="L158">                throw new IllegalArgumentException( &quot;subjectAltName 'otherName' sequence's second object is expected to be a tagged value of which the tag number is 0. The tag number that was detected: &quot; + tagNo );</span>
+            }
+<span class="fc" id="L160">            final ASN1Primitive value = taggedValue.getObject();</span>
+
+<span class="pc bpc" id="L162" title="8 of 14 branches missed.">            switch ( typeId.getId() )</span>
+            {
+                case OTHERNAME_SRV_OID:
+<span class="fc" id="L165">                    return parseOtherNameDnsSrv( value );</span>
+
+                case OTHERNAME_XMPP_OID:
+<span class="fc" id="L168">                    return parseOtherNameXmppAddr( value );</span>
+                    
+                case OTHERNAME_UPN_OID:
+<span class="nc" id="L171">                    return parseOtherNameUpn( value );</span>
+
+                default:
+<span class="nc" id="L174">                    String otherName = parseOtherName(typeId, value);</span>
+<span class="nc bnc" id="L175" title="All 2 branches missed.">                    if (otherName != null) {</span>
+<span class="nc" id="L176">                        return otherName;</span>
+                    }
+<span class="nc" id="L178">                    Log.debug( &quot;Ignoring subjectAltName 'otherName' type-id '{}' that's neither id-on-xmppAddr nor id-on-dnsSRV.&quot;, typeId.getId() );</span>
+<span class="nc" id="L179">                    return null;</span>
+            }
+<span class="pc bpc" id="L181" title="20 of 24 branches missed.">        }</span>
+<span class="nc" id="L182">        catch ( Exception e )</span>
+        {
+<span class="nc" id="L184">            Log.warn( &quot;Unable to parse a byte array (of length {}) as a subjectAltName 'otherName'. It is ignored.&quot;, item.length, e );</span>
+<span class="nc" id="L185">            return null;</span>
+        }
+    }
+
+    /**
+     * Allow sub-class to support additional OID values, possibly taking typeId into account
+     *
+     * @param typeId The ASN.1 object identifier (cannot be null).
+     * @param value The ASN.1 representation of the value (cannot be null).
+     * @return The parsed otherName String value.
+     */
+    protected String parseOtherName(ASN1ObjectIdentifier typeId, ASN1Primitive value) {
+<span class="nc" id="L197">        return null;</span>
+    }
+    
+    /**
+     * Parses a SRVName value as specified by RFC 4985.
+     *
+     * This method parses the argument value as a DNS SRV Resource Record. Only when the parsed value refers to an XMPP
+     * related service, the corresponding DNS domain name is returned (minus the service name).
+     *
+     * @param srvName The ASN.1 representation of the srvName value (cannot be null).
+     * @return an XMPP address value, or null when the record does not relate to XMPP.
+     */
+    protected String parseOtherNameDnsSrv( ASN1Primitive srvName )
+    {
+        // RFC 4985 says that this should be a IA5 String. Lets be tolerant and allow all text-based values.
+<span class="fc" id="L212">        final String value = ( (ASN1String) srvName ).getString();</span>
+
+<span class="pc bpc" id="L214" title="1 of 2 branches missed.">        if ( value.toLowerCase().startsWith( &quot;_xmpp-server.&quot; ) )</span>
+        {
+<span class="fc" id="L216">            return value.substring( &quot;_xmpp-server.&quot;.length() );</span>
+        }
+<span class="nc bnc" id="L218" title="All 2 branches missed.">        else if ( value.toLowerCase().startsWith( &quot;_xmpp-client.&quot; ) )</span>
+        {
+<span class="nc" id="L220">            return value.substring( &quot;_xmpp-client.&quot;.length() );</span>
+        }
+        else
+        {
+            // Not applicable to XMPP. Ignore.
+<span class="nc" id="L225">            Log.debug( &quot;srvName value '{}' of id-on-dnsSRV record is neither _xmpp-server nor _xmpp-client. It is being ignored.&quot;, value );</span>
+<span class="nc" id="L226">            return null;</span>
+        }
+    }
+
+    /**
+     * Parse a XmppAddr value as specified in RFC 6120.
+     *
+     * @param xmppAddr The ASN.1 representation of the xmppAddr value (cannot be null).
+     * @return The parsed xmppAddr value.
+     */
+    protected String parseOtherNameXmppAddr( ASN1Primitive xmppAddr )
+    {
+        // Get the nested object if the value is an ASN1TaggedObject or a sub-type of it
+<span class="pc bpc" id="L239" title="1 of 2 branches missed.">        if (ASN1TaggedObject.class.isAssignableFrom(xmppAddr.getClass())) {</span>
+<span class="nc" id="L240">            ASN1TaggedObject taggedObject = (ASN1TaggedObject) xmppAddr;</span>
+<span class="nc" id="L241">            ASN1Primitive objectPrimitive = taggedObject.getObject();</span>
+<span class="nc bnc" id="L242" title="All 2 branches missed.">            if (ASN1String.class.isAssignableFrom(objectPrimitive.getClass())) {</span>
+<span class="nc" id="L243">                return ((ASN1String) objectPrimitive).getString();</span>
+            }
+        }
+
+        // RFC 6120 says that this should be a UTF8String. Lets be tolerant and allow all text-based values.
+<span class="fc" id="L248">        return ( (ASN1String) xmppAddr ).getString();</span>
+    }
+    
+    /**
+     * Parse a UPN value 
+     *
+     * @param value The ASN.1 representation of the UPN (cannot be null).
+     * @return The parsed UPN value.
+     */
+    protected String parseOtherNameUpn( ASN1Primitive value )
+    {
+<span class="nc" id="L259">        String otherName = null;</span>
+<span class="nc bnc" id="L260" title="All 2 branches missed.">        if (value instanceof ASN1TaggedObject) {</span>
+<span class="nc" id="L261">            ASN1TaggedObject taggedObject = (ASN1TaggedObject) value;</span>
+<span class="nc" id="L262">            ASN1Primitive objectPrimitive = taggedObject.getObject();</span>
+<span class="nc bnc" id="L263" title="All 2 branches missed.">            if (objectPrimitive instanceof ASN1String) {</span>
+<span class="nc" id="L264">                otherName = ((ASN1String)objectPrimitive).getString();</span>
+            }
+        }
+<span class="nc bnc" id="L267" title="All 2 branches missed.">        if (otherName == null) {</span>
+<span class="nc" id="L268">            Log.warn(&quot;UPN type unexpected, UPN extraction failed: &quot; + value.getClass().getName() + &quot;:&quot; + value.toString());</span>
+        } else {
+<span class="nc" id="L270">            Log.debug(&quot;UPN from certificate has value of: &quot; + otherName );</span>
+        }
+<span class="nc" id="L272">        return otherName;</span>
+    }    
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

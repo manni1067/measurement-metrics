@@ -1,0 +1,320 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>LdapUserTester.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.admin</a> &gt; <span class="el_source">LdapUserTester.java</span></div><h1>LdapUserTester.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.admin;
+
+import org.jivesoftware.util.Base64;
+import org.jivesoftware.openfire.ldap.LdapManager;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmpp.packet.JID;
+
+import javax.naming.NamingEnumeration;
+import javax.naming.NamingException;
+import javax.naming.directory.*;
+import javax.naming.ldap.Control;
+import javax.naming.ldap.LdapContext;
+import javax.naming.ldap.SortControl;
+import java.io.IOException;
+import java.text.MessageFormat;
+import java.util.*;
+
+/**
+ * Class that assists during the testing of the user-ldap mapping.
+ *
+ * @author Gaston Dombiak
+ */
+public class LdapUserTester {
+
+<span class="nc" id="L42">    private static final Logger Log = LoggerFactory.getLogger(LdapUserTester.class);</span>
+
+    /**
+     * Constants to access user properties
+     */
+    public static final String NAME = &quot;Name&quot;;
+    public static final String EMAIL = &quot;Email&quot;;
+    public static final String FULL_NAME = &quot;FullName&quot;;
+    public static final String NICKNAME = &quot;Nickname&quot;;
+    public static final String BIRTHDAY = &quot;Birthday&quot;;
+    public static final String PHOTO = &quot;Photo&quot;;
+    public static final String HOME_STREET = &quot;HomeStreet&quot;;
+    public static final String HOME_CITY = &quot;HomeCity&quot;;
+    public static final String HOME_STATE = &quot;HomeState&quot;;
+    public static final String HOME_ZIP = &quot;HomeZip&quot;;
+    public static final String HOME_COUNTRY = &quot;HomeCountry&quot;;
+    public static final String HOME_PHONE = &quot;HomePhone&quot;;
+    public static final String HOME_MOBILE = &quot;HomeMobile&quot;;
+    public static final String HOME_FAX = &quot;HomeFax&quot;;
+    public static final String HOME_PAGER = &quot;HomePager&quot;;
+    public static final String BUSINESS_STREET = &quot;BusinessStreet&quot;;
+    public static final String BUSINESS_CITY = &quot;BusinessCity&quot;;
+    public static final String BUSINESS_STATE = &quot;BusinessState&quot;;
+    public static final String BUSINESS_ZIP = &quot;BusinessZip&quot;;
+    public static final String BUSINESS_COUNTRY = &quot;BusinessCountry&quot;;
+    public static final String BUSINESS_JOB_TITLE = &quot;BusinessJobTitle&quot;;
+    public static final String BUSINESS_DEPARTMENT = &quot;BusinessDepartment&quot;;
+    public static final String BUSINESS_PHONE = &quot;BusinessPhone&quot;;
+    public static final String BUSINESS_MOBILE = &quot;BusinessMobile&quot;;
+    public static final String BUSINESS_FAX = &quot;BusinessFax&quot;;
+    public static final String BUSINESS_PAGER = &quot;BusinessPager&quot;;
+
+    private LdapManager manager;
+    private LdapUserProfile profile;
+
+<span class="nc" id="L77">    public LdapUserTester(LdapManager manager, LdapUserProfile profile) {</span>
+<span class="nc" id="L78">        this.manager = manager;</span>
+<span class="nc" id="L79">        this.profile = profile;</span>
+<span class="nc" id="L80">    }</span>
+
+    /**
+     * Returns a list of usernames with a sample of the users found in LDAP.
+     *
+     * @param maxSample the max size of the sample to return.
+     * @return a list of usernames with a sample of the users found in LDAP.
+     * @throws NamingException if something goes wrong....
+     */
+    public List&lt;String&gt; getSample(int maxSample) throws NamingException {
+<span class="nc" id="L90">        List&lt;String&gt; usernames = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L91">        LdapContext ctx = null;</span>
+
+        try {
+<span class="nc" id="L94">            ctx = manager.getContext();</span>
+
+            // Sort on username field.
+            Control[] searchControl;
+            try {
+<span class="nc" id="L99">                searchControl = new Control[]{</span>
+<span class="nc" id="L100">                        new SortControl(new String[]{manager.getUsernameField()}, Control.NONCRITICAL)</span>
+                };
+<span class="nc" id="L102">            } catch (IOException e) {</span>
+<span class="nc" id="L103">                Log.error(e.getMessage(), e);</span>
+<span class="nc" id="L104">                return Collections.emptyList();</span>
+<span class="nc" id="L105">            }</span>
+<span class="nc" id="L106">            ctx.setRequestControls(searchControl);</span>
+
+            // Search for the dn based on the username.
+<span class="nc" id="L109">            SearchControls searchControls = new SearchControls();</span>
+            // See if recursive searching is enabled. Otherwise, only search one level.
+<span class="nc bnc" id="L111" title="All 2 branches missed.">            if (manager.isSubTreeSearch()) {</span>
+<span class="nc" id="L112">                searchControls.setSearchScope(SearchControls.SUBTREE_SCOPE);</span>
+            } else {
+<span class="nc" id="L114">                searchControls.setSearchScope(SearchControls.ONELEVEL_SCOPE);</span>
+            }
+<span class="nc" id="L116">            searchControls.setReturningAttributes(new String[]{manager.getUsernameField()});</span>
+            // Limit results to those we'll need to process
+<span class="nc" id="L118">            searchControls.setCountLimit(maxSample);</span>
+<span class="nc" id="L119">            String filter = MessageFormat.format(manager.getSearchFilter(), &quot;*&quot;);</span>
+<span class="nc" id="L120">            NamingEnumeration answer = ctx.search(&quot;&quot;, filter, searchControls);</span>
+
+<span class="nc bnc" id="L122" title="All 2 branches missed.">            while (answer.hasMoreElements()) {</span>
+                // Get the next userID.
+<span class="nc" id="L124">                String username = (String) ((SearchResult) answer.next()).getAttributes().get(</span>
+<span class="nc" id="L125">                        manager.getUsernameField()).get();</span>
+                // Escape username and add to results.
+<span class="nc" id="L127">                usernames.add(JID.escapeNode(username));</span>
+<span class="nc" id="L128">            }</span>
+            // Close the enumeration.
+<span class="nc" id="L130">            answer.close();</span>
+        } finally {
+<span class="nc" id="L132">            try {</span>
+<span class="nc bnc" id="L133" title="All 6 branches missed.">                if (ctx != null) {</span>
+<span class="nc" id="L134">                    ctx.setRequestControls(null);</span>
+<span class="nc" id="L135">                    ctx.close();</span>
+                }
+            }
+<span class="nc" id="L138">            catch (Exception ignored) {</span>
+                // Ignore.
+<span class="nc" id="L140">            }</span>
+<span class="nc" id="L141">        }</span>
+<span class="nc" id="L142">        return usernames;</span>
+    }
+
+    /**
+     * Returns a list of attributes and their LDAP values found in LDAP for the specified username.
+     *
+     * @param username the username of the user to get his attributes from LDAP.
+     * @return a list of attributes and their LDAP values found in LDAP for the specified username.
+     */
+    public Map&lt;String, String&gt; getAttributes(String username) {
+<span class="nc" id="L152">        Map&lt;String, String&gt; userAttributes = new HashMap&lt;&gt;();</span>
+        // Un-escape username.
+<span class="nc" id="L154">        username = JID.unescapeNode(username);</span>
+<span class="nc" id="L155">        DirContext ctx = null;</span>
+        try {
+<span class="nc" id="L157">            String userDN = manager.findUserDN(username);</span>
+            // Build list of attributes to load from LDAP
+<span class="nc" id="L159">            Map&lt;String, PropertyMapping&gt; ldapMappings = getLdapAttributes();</span>
+<span class="nc" id="L160">            Set&lt;String&gt; fields = new HashSet&lt;&gt;();</span>
+<span class="nc bnc" id="L161" title="All 2 branches missed.">            for (PropertyMapping mapping : ldapMappings.values()) {</span>
+<span class="nc" id="L162">                fields.addAll(mapping.getFields());</span>
+<span class="nc" id="L163">            }</span>
+<span class="nc" id="L164">            fields.add(manager.getUsernameField());</span>
+            // Load records
+<span class="nc" id="L166">            ctx = manager.getContext(manager.getUsersBaseDN(username));</span>
+<span class="nc" id="L167">            Attributes attrs = ctx.getAttributes(userDN, fields.toArray(new String[]{}));</span>
+            // Build answer
+<span class="nc bnc" id="L169" title="All 2 branches missed.">            for (Map.Entry&lt;String, PropertyMapping&gt; entry : ldapMappings.entrySet()) {</span>
+<span class="nc" id="L170">                String attribute = entry.getKey();</span>
+<span class="nc" id="L171">                PropertyMapping mapping = entry.getValue();</span>
+<span class="nc" id="L172">                String value = mapping.getDisplayFormat();</span>
+<span class="nc bnc" id="L173" title="All 2 branches missed.">                for (String field : mapping.getFields()) {</span>
+<span class="nc" id="L174">                    Attribute ldapField = attrs.get(field);</span>
+<span class="nc bnc" id="L175" title="All 2 branches missed.">                    if (ldapField != null) {</span>
+                        String answer;
+<span class="nc" id="L177">                        Object ob = ldapField.get();</span>
+<span class="nc bnc" id="L178" title="All 2 branches missed.">                        if (ob instanceof String) {</span>
+<span class="nc" id="L179">                            answer = (String) ob;</span>
+                        } else {
+<span class="nc" id="L181">                            answer = Base64.encodeBytes((byte[]) ob);</span>
+                        }
+<span class="nc" id="L183">                        value = value.replace(&quot;{&quot; + field + &quot;}&quot;, answer);</span>
+                    }
+<span class="nc" id="L185">                }</span>
+<span class="nc" id="L186">                userAttributes.put(attribute, value);</span>
+<span class="nc" id="L187">            }</span>
+        }
+<span class="nc" id="L189">        catch (Exception e) {</span>
+<span class="nc" id="L190">            Log.error(e.getMessage(), e);</span>
+            // TODO something else?
+        }
+        finally {
+<span class="nc" id="L194">            try {</span>
+<span class="nc bnc" id="L195" title="All 6 branches missed.">                if (ctx != null) {</span>
+<span class="nc" id="L196">                    ctx.close();</span>
+                }
+            }
+<span class="nc" id="L199">            catch (Exception ignored) {</span>
+                // Ignore.
+<span class="nc" id="L201">            }</span>
+<span class="nc" id="L202">        }</span>
+<span class="nc" id="L203">        return userAttributes;</span>
+    }
+
+    private Map&lt;String, PropertyMapping&gt; getLdapAttributes() {
+<span class="nc" id="L207">        Map&lt;String, PropertyMapping&gt; map = new HashMap&lt;&gt;();</span>
+
+<span class="nc bnc" id="L209" title="All 4 branches missed.">        if (profile.getName() != null &amp;&amp; profile.getName().trim().length() &gt; 0) {</span>
+<span class="nc" id="L210">            map.put(NAME, new PropertyMapping(profile.getName()));</span>
+        }
+<span class="nc bnc" id="L212" title="All 4 branches missed.">        if (profile.getEmail() != null &amp;&amp; profile.getEmail().trim().length() &gt; 0) {</span>
+<span class="nc" id="L213">            map.put(EMAIL, new PropertyMapping(profile.getEmail()));</span>
+        }
+<span class="nc bnc" id="L215" title="All 4 branches missed.">        if (profile.getFullName() != null &amp;&amp; profile.getFullName().trim().length() &gt; 0) {</span>
+<span class="nc" id="L216">            map.put(FULL_NAME, new PropertyMapping(profile.getFullName()));</span>
+        }
+<span class="nc bnc" id="L218" title="All 4 branches missed.">        if (profile.getNickname() != null &amp;&amp; profile.getNickname().trim().length() &gt; 0) {</span>
+<span class="nc" id="L219">            map.put(NICKNAME, new PropertyMapping(profile.getNickname()));</span>
+        }
+<span class="nc bnc" id="L221" title="All 4 branches missed.">        if (profile.getBirthday() != null &amp;&amp; profile.getBirthday().trim().length() &gt; 0) {</span>
+<span class="nc" id="L222">            map.put(BIRTHDAY, new PropertyMapping(profile.getBirthday()));</span>
+        }
+<span class="nc bnc" id="L224" title="All 4 branches missed.">        if (profile.getPhoto() != null &amp;&amp; profile.getPhoto().trim().length() &gt; 0) {</span>
+<span class="nc" id="L225">            map.put(PHOTO, new PropertyMapping(profile.getPhoto()));</span>
+        }
+<span class="nc bnc" id="L227" title="All 4 branches missed.">        if (profile.getHomeStreet() != null &amp;&amp; profile.getHomeStreet().trim().length() &gt; 0) {</span>
+<span class="nc" id="L228">            map.put(HOME_STREET, new PropertyMapping(profile.getHomeStreet()));</span>
+        }
+<span class="nc bnc" id="L230" title="All 4 branches missed.">        if (profile.getHomeCity() != null &amp;&amp; profile.getHomeCity().trim().length() &gt; 0) {</span>
+<span class="nc" id="L231">            map.put(HOME_CITY, new PropertyMapping(profile.getHomeCity()));</span>
+        }
+<span class="nc bnc" id="L233" title="All 4 branches missed.">        if (profile.getHomeState() != null &amp;&amp; profile.getHomeState().trim().length() &gt; 0) {</span>
+<span class="nc" id="L234">            map.put(HOME_STATE, new PropertyMapping(profile.getHomeState()));</span>
+        }
+<span class="nc bnc" id="L236" title="All 4 branches missed.">        if (profile.getHomeZip() != null &amp;&amp; profile.getHomeZip().trim().length() &gt; 0) {</span>
+<span class="nc" id="L237">            map.put(HOME_ZIP, new PropertyMapping(profile.getHomeZip()));</span>
+        }
+<span class="nc bnc" id="L239" title="All 4 branches missed.">        if (profile.getHomeCountry() != null &amp;&amp; profile.getHomeCountry().trim().length() &gt; 0) {</span>
+<span class="nc" id="L240">            map.put(HOME_COUNTRY, new PropertyMapping(profile.getHomeCountry()));</span>
+        }
+<span class="nc bnc" id="L242" title="All 4 branches missed.">        if (profile.getHomePhone() != null &amp;&amp; profile.getHomePhone().trim().length() &gt; 0) {</span>
+<span class="nc" id="L243">            map.put(HOME_PHONE, new PropertyMapping(profile.getHomePhone()));</span>
+        }
+<span class="nc bnc" id="L245" title="All 4 branches missed.">        if (profile.getHomeMobile() != null &amp;&amp; profile.getHomeMobile().trim().length() &gt; 0) {</span>
+<span class="nc" id="L246">            map.put(HOME_MOBILE, new PropertyMapping(profile.getHomeMobile()));</span>
+        }
+<span class="nc bnc" id="L248" title="All 4 branches missed.">        if (profile.getHomeFax() != null &amp;&amp; profile.getHomeFax().trim().length() &gt; 0) {</span>
+<span class="nc" id="L249">            map.put(HOME_FAX, new PropertyMapping(profile.getHomeFax()));</span>
+        }
+<span class="nc bnc" id="L251" title="All 4 branches missed.">        if (profile.getHomePager() != null &amp;&amp; profile.getHomePager().trim().length() &gt; 0) {</span>
+<span class="nc" id="L252">            map.put(HOME_PAGER, new PropertyMapping(profile.getHomePager()));</span>
+        }
+<span class="nc bnc" id="L254" title="All 4 branches missed.">        if (profile.getBusinessStreet() != null &amp;&amp; profile.getBusinessStreet().trim().length() &gt; 0) {</span>
+<span class="nc" id="L255">            map.put(BUSINESS_STREET, new PropertyMapping(profile.getBusinessStreet()));</span>
+        }
+<span class="nc bnc" id="L257" title="All 4 branches missed.">        if (profile.getBusinessCity() != null &amp;&amp; profile.getBusinessCity().trim().length() &gt; 0) {</span>
+<span class="nc" id="L258">            map.put(BUSINESS_CITY, new PropertyMapping(profile.getBusinessCity()));</span>
+        }
+<span class="nc bnc" id="L260" title="All 4 branches missed.">        if (profile.getBusinessState() != null &amp;&amp; profile.getBusinessState().trim().length() &gt; 0) {</span>
+<span class="nc" id="L261">            map.put(BUSINESS_STATE, new PropertyMapping(profile.getBusinessState()));</span>
+        }
+<span class="nc bnc" id="L263" title="All 4 branches missed.">        if (profile.getBusinessZip() != null &amp;&amp; profile.getBusinessZip().trim().length() &gt; 0) {</span>
+<span class="nc" id="L264">            map.put(BUSINESS_ZIP, new PropertyMapping(profile.getBusinessZip()));</span>
+        }
+<span class="nc bnc" id="L266" title="All 4 branches missed.">        if (profile.getBusinessCountry() != null &amp;&amp; profile.getBusinessCountry().trim().length() &gt; 0) {</span>
+<span class="nc" id="L267">            map.put(BUSINESS_COUNTRY, new PropertyMapping(profile.getBusinessCountry()));</span>
+        }
+<span class="nc bnc" id="L269" title="All 4 branches missed.">        if (profile.getBusinessJobTitle() != null &amp;&amp; profile.getBusinessJobTitle().trim().length() &gt; 0) {</span>
+<span class="nc" id="L270">            map.put(BUSINESS_JOB_TITLE, new PropertyMapping(profile.getBusinessJobTitle()));</span>
+        }
+<span class="nc bnc" id="L272" title="All 4 branches missed.">        if (profile.getBusinessDepartment() != null &amp;&amp; profile.getBusinessDepartment().trim().length() &gt; 0) {</span>
+<span class="nc" id="L273">            map.put(BUSINESS_DEPARTMENT, new PropertyMapping(profile.getBusinessDepartment()));</span>
+        }
+<span class="nc bnc" id="L275" title="All 4 branches missed.">        if (profile.getBusinessPhone() != null &amp;&amp; profile.getBusinessPhone().trim().length() &gt; 0) {</span>
+<span class="nc" id="L276">            map.put(BUSINESS_PHONE, new PropertyMapping(profile.getBusinessPhone()));</span>
+        }
+<span class="nc bnc" id="L278" title="All 4 branches missed.">        if (profile.getBusinessMobile() != null &amp;&amp; profile.getBusinessMobile().trim().length() &gt; 0) {</span>
+<span class="nc" id="L279">            map.put(BUSINESS_MOBILE, new PropertyMapping(profile.getBusinessMobile()));</span>
+        }
+<span class="nc bnc" id="L281" title="All 4 branches missed.">        if (profile.getBusinessFax() != null &amp;&amp; profile.getBusinessFax().trim().length() &gt; 0) {</span>
+<span class="nc" id="L282">            map.put(BUSINESS_FAX, new PropertyMapping(profile.getBusinessFax()));</span>
+        }
+<span class="nc bnc" id="L284" title="All 4 branches missed.">        if (profile.getBusinessPager() != null &amp;&amp; profile.getBusinessPager().trim().length() &gt; 0) {</span>
+<span class="nc" id="L285">            map.put(BUSINESS_PAGER, new PropertyMapping(profile.getBusinessPager()));</span>
+        }
+
+<span class="nc" id="L288">        return map;</span>
+    }
+
+    private static class PropertyMapping {
+        /**
+         * Format how user property is going to appear (e.g. {firstname}, {lastname}
+         */
+        private String displayFormat;
+        /**
+         * LDAP fields that compose the user property
+         */
+<span class="nc" id="L299">        private Collection&lt;String&gt; fields = new ArrayList&lt;&gt;();</span>
+
+
+<span class="nc" id="L302">        public PropertyMapping(String displayFormat) {</span>
+<span class="nc" id="L303">            this.displayFormat = displayFormat;</span>
+
+<span class="nc" id="L305">            StringTokenizer st = new StringTokenizer(displayFormat.trim(), &quot;, //{}&quot;);</span>
+<span class="nc bnc" id="L306" title="All 2 branches missed.">            while (st.hasMoreTokens()) {</span>
+<span class="nc" id="L307">                fields.add(st.nextToken().replaceFirst(&quot;(\\{)([\\d\\D&amp;&amp;[^}]]+)(})&quot;, &quot;$2&quot;));</span>
+            }
+<span class="nc" id="L309">        }</span>
+
+        public String getDisplayFormat() {
+<span class="nc" id="L312">            return displayFormat;</span>
+        }
+
+        public Collection&lt;String&gt; getFields() {
+<span class="nc" id="L316">            return fields;</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

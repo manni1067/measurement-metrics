@@ -1,0 +1,435 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>EncryptionArtifactFactory.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.spi</a> &gt; <span class="el_source">EncryptionArtifactFactory.java</span></div><h1>EncryptionArtifactFactory.java</h1><pre class="source lang-java linenums">package org.jivesoftware.openfire.spi;
+
+import org.apache.mina.filter.ssl.SslFilter;
+import org.eclipse.jetty.util.ssl.SslContextFactory;
+import org.jivesoftware.openfire.keystore.OpenfireX509TrustManager;
+import org.jivesoftware.util.SystemProperty;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import javax.net.ssl.*;
+import java.lang.reflect.Constructor;
+import java.security.*;
+import java.util.*;
+
+/**
+ * Instances of this class will be able to generate various encryption-related artifacts based on a specific connection
+ * configuration.
+ *
+ * This implementation intends to centralize the implementation for generating the artifacts produced, which in earlier
+ * versions of the code-base was scattered (and duplicated) over various connection-type-specific implementations.
+ *
+ * @author Guus der Kinderen, guus.der.kinderen@gmail.com
+ */
+public class EncryptionArtifactFactory
+{
+<span class="nc" id="L26">    private final Logger Log = LoggerFactory.getLogger( EncryptionArtifactFactory.class );</span>
+
+<span class="fc" id="L28">    public static final SystemProperty&lt;Class&gt; TRUST_MANAGER_CLASS = SystemProperty.Builder.ofType( Class.class )</span>
+<span class="fc" id="L29">        .setKey( &quot;xmpp.auth.ssl.default-trustmanager-impl&quot; )</span>
+<span class="fc" id="L30">        .setBaseClass( TrustManager.class )</span>
+<span class="fc" id="L31">        .setDefaultValue( OpenfireX509TrustManager.class )</span>
+<span class="fc" id="L32">        .setDynamic( false )</span>
+<span class="fc" id="L33">        .build();</span>
+
+    private final ConnectionConfiguration configuration;
+
+    // lazy loaded factory objects. These re-usable objects should be lazy loaded, preventing initialization in situations where they're never going to be used.
+    private transient KeyManagerFactory keyManagerFactory;
+    private transient SslContextFactory sslContextFactory;
+
+    /**
+     * Creates a new instance of the factory.
+     *
+     * @param configuration the configuration for which this factory generates artifacts (cannot be null).
+     */
+    public EncryptionArtifactFactory( ConnectionConfiguration configuration )
+<span class="nc" id="L47">    {</span>
+<span class="nc bnc" id="L48" title="All 2 branches missed.">        if ( configuration == null ) {</span>
+<span class="nc" id="L49">            throw new IllegalArgumentException( &quot;Argument 'configuration' cannot be null&quot; );</span>
+        }
+<span class="nc" id="L51">        this.configuration = configuration;</span>
+<span class="nc" id="L52">    }</span>
+
+    /**
+     * Generates KeyManager instances suitable for connections that are created based on a particular configuration.
+     *
+     * @return KeyManagers applicable to a connection that is established using the provided configuration.
+     * @throws UnrecoverableKeyException if the key could not be recovered
+     * @throws NoSuchAlgorithmException if the algorithm was unrecognised
+     * @throws KeyStoreException if there was a problem loading the keystore
+     */
+    public synchronized KeyManager[] getKeyManagers() throws UnrecoverableKeyException, NoSuchAlgorithmException, KeyStoreException
+    {
+        try
+        {
+<span class="nc bnc" id="L66" title="All 2 branches missed.">            if ( keyManagerFactory == null )</span>
+            {
+                try
+                {
+                    // OF-1501: If multiple certificates are available, the 'NewSunX509' implementation in the SunJSSE
+                    // provider makes the effort to pick a certificate with the appropriate key usage and prefers valid
+                    // to expired certificates.
+<span class="nc" id="L73">                    keyManagerFactory = KeyManagerFactory.getInstance( &quot;NewSunX509&quot; );</span>
+                }
+<span class="nc" id="L75">                catch ( NoSuchAlgorithmException e )</span>
+                {
+<span class="nc" id="L77">                    Log.info( &quot;Unable to load the 'NewSunX509' KeyManager implementation. Will fall back to the default.&quot; );</span>
+<span class="nc" id="L78">                    keyManagerFactory = KeyManagerFactory.getInstance( KeyManagerFactory.getDefaultAlgorithm() );</span>
+<span class="nc" id="L79">                }</span>
+
+<span class="nc" id="L81">                keyManagerFactory.init( configuration.getIdentityStore().getStore(), configuration.getIdentityStoreConfiguration().getPassword() );</span>
+            }
+
+<span class="nc" id="L84">            return keyManagerFactory.getKeyManagers();</span>
+        }
+<span class="nc" id="L86">        catch ( UnrecoverableKeyException | NoSuchAlgorithmException | KeyStoreException | RuntimeException ex )</span>
+        {
+            // Allow initialization to restart upon next iteration.
+<span class="nc" id="L89">            keyManagerFactory = null;</span>
+<span class="nc" id="L90">            throw ex;</span>
+        }
+    }
+
+    /**
+     * Generates KeyManager instances suitable for connections that are created based on a particular configuration.
+     *
+     * @return TrustManagers applicable to a connection that is established using the provided configuration.
+     * @throws KeyStoreException if there was a problem accessing the keystore
+     * @throws NoSuchAlgorithmException if the algorithm is not supported
+     */
+    public synchronized TrustManager[] getTrustManagers() throws KeyStoreException, NoSuchAlgorithmException
+    {
+<span class="nc" id="L103">        final Class&lt;TrustManager&gt; trustManagerClass = (Class&lt;TrustManager&gt;) TRUST_MANAGER_CLASS.getValue();</span>
+<span class="nc" id="L104">        Log.debug( &quot;Configured TrustManager class: {}&quot;, trustManagerClass.getCanonicalName() );</span>
+
+        try
+        {
+<span class="nc" id="L108">            Log.debug( &quot;Attempting to instantiate '{}' using the three-argument constructor that is properietary to Openfire.&quot;, trustManagerClass );</span>
+<span class="nc" id="L109">            final Constructor&lt;TrustManager&gt; constructor = trustManagerClass.getConstructor( KeyStore.class, Boolean.TYPE, Boolean.TYPE);</span>
+<span class="nc" id="L110">            final TrustManager trustManager = constructor.newInstance( configuration.getTrustStore().getStore(), configuration.isAcceptSelfSignedCertificates(), configuration.isVerifyCertificateValidity() );</span>
+<span class="nc" id="L111">            Log.debug( &quot;Successfully instantiated '{}'.&quot;, trustManagerClass );</span>
+<span class="nc" id="L112">            return new TrustManager[] { trustManager };</span>
+        }
+<span class="nc" id="L114">        catch ( Exception e )</span>
+        {
+<span class="nc" id="L116">            Log.debug( &quot;Unable to instantiate '{}' using the three-argument constructor that is properietary to Openfire. Trying to use a no-arg constructor instead...&quot;, trustManagerClass );</span>
+            try
+            {
+<span class="nc" id="L119">                final TrustManager trustManager = trustManagerClass.newInstance();</span>
+<span class="nc" id="L120">                Log.debug( &quot;Successfully instantiated '{}'.&quot;, trustManagerClass );</span>
+
+<span class="nc" id="L122">                return new TrustManager[] { trustManager };</span>
+            }
+<span class="nc" id="L124">            catch ( InstantiationException | IllegalAccessException ex )</span>
+            {
+<span class="nc" id="L126">                Log.warn( &quot;Unable to instantiate an instance of the configured Trust Manager implementation '{}'. Using {} instead.&quot;, trustManagerClass, OpenfireX509TrustManager.class, ex );</span>
+<span class="nc" id="L127">                return new TrustManager[] { new OpenfireX509TrustManager( configuration.getTrustStore().getStore(), configuration.isAcceptSelfSignedCertificates(), configuration.isVerifyCertificateValidity() )};</span>
+            }
+        }
+    }
+
+    /**
+     * Generates a new, initialized SSLContext instance that is suitable for connections that are created based on a
+     * particular configuration.
+     *
+     * @return TrustManagers applicable to a connection that is established using the provided configuration.
+     * @throws NoSuchAlgorithmException if the algorithm is not supported
+     * @throws KeyManagementException if there was problem manging the ket
+     * @throws KeyStoreException if there was a problem accessing the keystore
+     * @throws UnrecoverableKeyException if the key could not be recovered
+     */
+    public synchronized SSLContext getSSLContext() throws NoSuchAlgorithmException, KeyManagementException, KeyStoreException, UnrecoverableKeyException
+    {
+<span class="nc" id="L144">        final SSLContext sslContext = SSLContext.getInstance(&quot;TLSv1&quot;);</span>
+<span class="nc" id="L145">        sslContext.init( getKeyManagers(), getTrustManagers(), new SecureRandom() );</span>
+<span class="nc" id="L146">        return sslContext;</span>
+    }
+
+    /**
+     * A utility method that implements the shared functionality of getClientModeSSLEngine and getServerModeSSLEngine.
+     *
+     * This method is used to initialize and pre-configure an instance of SSLEngine for a particular connection type.
+     * The returned value lacks further configuration. In most cases, developers will want to use getClientModeSSLEngine
+     * or getServerModeSSLEngine instead of this method.
+     *
+     * @return A new pre-configured SSLEngine instance (never null).
+     */
+    private SSLEngine createSSLEngine() throws UnrecoverableKeyException, NoSuchAlgorithmException, KeyStoreException, KeyManagementException
+    {
+<span class="nc" id="L160">        final SSLContext sslContext = getSSLContext();</span>
+
+<span class="nc" id="L162">        final SSLEngine sslEngine = sslContext.createSSLEngine();</span>
+
+        // Configure protocol support.
+<span class="nc" id="L165">        final Set&lt;String&gt; protocols = configuration.getEncryptionProtocols();</span>
+<span class="nc bnc" id="L166" title="All 2 branches missed.">        if ( !protocols.isEmpty() )</span>
+        {
+            // When an explicit list of enabled protocols is defined, use only those (otherwise, an implementation-specific default will be used).
+<span class="nc" id="L169">            sslEngine.setEnabledProtocols( protocols.toArray( new String[ protocols.size() ] ) );</span>
+        }
+
+        // Configure cipher suite support.
+<span class="nc" id="L173">        final Set&lt;String&gt; cipherSuites = configuration.getEncryptionCipherSuites();</span>
+<span class="nc bnc" id="L174" title="All 2 branches missed.">        if ( !cipherSuites.isEmpty() )</span>
+        {
+            // When an explicit list of enabled protocols is defined, use only those (otherwise, an implementation-specific default will be used)..
+<span class="nc" id="L177">            sslEngine.setEnabledCipherSuites( cipherSuites.toArray( new String[ cipherSuites.size() ] ) );</span>
+        }
+
+<span class="nc" id="L180">        return sslEngine;</span>
+    }
+
+    /**
+     * Creates a new SSL Engine that is configured to use server mode when handshaking.
+     *
+     * For Openfire, an engine is of this mode used for most purposes (as Openfire is a server by nature).
+     *
+     * @return A new, initialized SSLEngine instance (never null).
+     * @throws UnrecoverableKeyException if the key could not be recovered
+     * @throws NoSuchAlgorithmException if the algorithm is not supported
+     * @throws KeyStoreException if there was a problem accessing the keystore
+     * @throws KeyManagementException if there was problem manging the ket
+     */
+    public SSLEngine createServerModeSSLEngine() throws UnrecoverableKeyException, NoSuchAlgorithmException, KeyStoreException, KeyManagementException
+    {
+<span class="nc" id="L196">        final SSLEngine sslEngine = createSSLEngine( );</span>
+<span class="nc" id="L197">        sslEngine.setUseClientMode( false );</span>
+
+<span class="nc bnc" id="L199" title="All 4 branches missed.">        switch ( configuration.getClientAuth() )</span>
+        {
+            case needed:
+<span class="nc" id="L202">                sslEngine.setNeedClientAuth( true );</span>
+<span class="nc" id="L203">                break;</span>
+
+            case wanted:
+<span class="nc" id="L206">                sslEngine.setWantClientAuth( true );</span>
+<span class="nc" id="L207">                break;</span>
+
+            case disabled:
+<span class="nc" id="L210">                sslEngine.setWantClientAuth( false );</span>
+                break;
+        }
+
+<span class="nc" id="L214">        return sslEngine;</span>
+    }
+
+    /**
+     * Creates an SSL Engine that is configured to use client mode when handshaking.
+     *
+     * For Openfire, an engine of this mode is typically used when the server tries to connect to another server.
+     *
+     * These SSLEngines never send SSLV2 ClientHello messages.
+     *
+     * @return An initialized SSLEngine instance (never null).
+     * @throws UnrecoverableKeyException if the key could not be recovered
+     * @throws NoSuchAlgorithmException if the algorithm is not supported
+     * @throws KeyStoreException if there was a problem accessing the keystore
+     * @throws KeyManagementException if there was problem manging the ket
+     */
+    public SSLEngine createClientModeSSLEngine() throws UnrecoverableKeyException, NoSuchAlgorithmException, KeyStoreException, KeyManagementException
+    {
+<span class="nc" id="L232">        final SSLEngine sslEngine = createSSLEngine();</span>
+<span class="nc" id="L233">        sslEngine.setUseClientMode( true );</span>
+<span class="nc" id="L234">        final Set&lt;String&gt; protocols = new LinkedHashSet&lt;&gt;( Arrays.asList( sslEngine.getEnabledProtocols() ) );</span>
+<span class="nc" id="L235">        protocols.remove( &quot;SSLv2Hello&quot; );</span>
+<span class="nc" id="L236">        sslEngine.setEnabledProtocols( protocols.toArray( new String[ protocols.size() ] ) );</span>
+
+<span class="nc" id="L238">        return sslEngine;</span>
+    }
+
+    public synchronized SslContextFactory getSslContextFactory()
+    {
+<span class="nc bnc" id="L243" title="All 2 branches missed.">        if ( sslContextFactory != null )</span>
+        {
+<span class="nc" id="L245">            return sslContextFactory;</span>
+        }
+
+<span class="nc" id="L248">        Log.info( &quot;Creating new SslContextFactory instance&quot; );</span>
+        try
+        {
+<span class="nc" id="L251">            sslContextFactory = new SslContextFactory();</span>
+
+<span class="nc" id="L253">            sslContextFactory.setTrustStore( configuration.getTrustStore().getStore() );</span>
+<span class="nc" id="L254">            sslContextFactory.setTrustStorePassword( new String( configuration.getTrustStore().getConfiguration().getPassword() ) );</span>
+
+<span class="nc" id="L256">            sslContextFactory.setKeyStore( configuration.getIdentityStore().getStore() );</span>
+<span class="nc" id="L257">            sslContextFactory.setKeyStorePassword( new String( configuration.getIdentityStore().getConfiguration().getPassword() ) );</span>
+
+            // Configure protocol support
+<span class="nc" id="L260">            final Set&lt;String&gt; protocols = configuration.getEncryptionProtocols();</span>
+<span class="nc bnc" id="L261" title="All 2 branches missed.">            if ( !protocols.isEmpty() )</span>
+            {
+                // Note that this is always server-mode, so may support SSLv2Hello.
+<span class="nc" id="L264">                sslContextFactory.setIncludeProtocols(protocols.toArray(new String[protocols.size()]));</span>
+            }
+
+            // Configure cipher suite support.
+<span class="nc" id="L268">            final Set&lt;String&gt; cipherSuites = configuration.getEncryptionCipherSuites();</span>
+<span class="nc bnc" id="L269" title="All 2 branches missed.">            if ( !cipherSuites.isEmpty() )</span>
+            {
+<span class="nc" id="L271">                sslContextFactory.setIncludeCipherSuites( cipherSuites.toArray( new String[ cipherSuites.size() ] ) );</span>
+            }
+
+            // Set policy for checking client certificates.
+<span class="nc bnc" id="L275" title="All 4 branches missed.">            switch ( configuration.getClientAuth() )</span>
+            {
+                case disabled:
+<span class="nc" id="L278">                    sslContextFactory.setNeedClientAuth( false );</span>
+<span class="nc" id="L279">                    sslContextFactory.setWantClientAuth( false );</span>
+<span class="nc" id="L280">                    break;</span>
+                case wanted:
+<span class="nc" id="L282">                    sslContextFactory.setNeedClientAuth( false );</span>
+<span class="nc" id="L283">                    sslContextFactory.setWantClientAuth( true );</span>
+<span class="nc" id="L284">                    break;</span>
+                case needed:
+<span class="nc" id="L286">                    sslContextFactory.setNeedClientAuth( true );</span>
+                    break;
+            }
+<span class="nc" id="L289">            return sslContextFactory;</span>
+        }
+<span class="nc" id="L291">        catch ( RuntimeException ex )</span>
+        {
+            // Allow initialization to restart upon next iteration.
+<span class="nc" id="L294">            sslContextFactory = null;</span>
+<span class="nc" id="L295">            throw ex;</span>
+        }
+    }
+
+    /**
+     * Creates an Apache MINA SslFilter that is configured to use server mode when handshaking.
+     *
+     * For Openfire, an engine is of this mode used for most purposes (as Openfire is a server by nature).
+     *
+     * Instead of an SSLContext or SSLEngine, Apache MINA uses an SslFilter instance. It is generally not needed to
+     * create both SSLContext/SSLEngine as well as SslFilter instances.
+     *
+     * @return An initialized SslFilter instance (never null)
+     * @throws KeyManagementException if there was problem manging the ket
+     * @throws NoSuchAlgorithmException if the algorithm is not supported
+     * @throws KeyStoreException if there was a problem accessing the keystore
+     * @throws UnrecoverableKeyException if the key could not be recovered
+     */
+    public SslFilter createServerModeSslFilter() throws KeyManagementException, NoSuchAlgorithmException, KeyStoreException, UnrecoverableKeyException
+    {
+<span class="nc" id="L315">        final SSLContext sslContext = getSSLContext();</span>
+<span class="nc" id="L316">        final SSLEngine sslEngine = createServerModeSSLEngine();</span>
+
+<span class="nc" id="L318">        return createSslFilter( sslContext, sslEngine );</span>
+    }
+
+    /**
+     * Creates an Apache MINA SslFilter that is configured to use client mode when handshaking.
+     *
+     * For Openfire, a filter of this mode is typically used when the server tries to connect to another server.
+     *
+     * Instead of an SSLContext or SSLEngine, Apache MINA uses an SslFilter instance. It is generally not needed to
+     * create both SSLContext/SSLEngine as well as SslFilter instances.
+     *
+     * @return An initialized SslFilter instance (never null)
+     * @throws KeyManagementException if there was problem manging the ket
+     * @throws NoSuchAlgorithmException if the algorithm is not supported
+     * @throws KeyStoreException if there was a problem accessing the keystore
+     * @throws UnrecoverableKeyException if the key could not be recovered
+     */
+    public SslFilter createClientModeSslFilter() throws KeyManagementException, NoSuchAlgorithmException, KeyStoreException, UnrecoverableKeyException
+    {
+<span class="nc" id="L337">        final SSLContext sslContext = getSSLContext();</span>
+<span class="nc" id="L338">        final SSLEngine sslEngine = createClientModeSSLEngine();</span>
+
+<span class="nc" id="L340">        return createSslFilter( sslContext, sslEngine );</span>
+    }
+
+    /**
+     * A utility method that implements the shared functionality of getServerModeSslFilter and getClientModeSslFilter.
+     *
+     * This method is used to initialize and configure an instance of SslFilter for a particular pre-configured
+     * SSLContext and SSLEngine. In most cases, developers will want to use getServerModeSslFilter or
+     * getClientModeSslFilter instead of this method.
+     *
+     * @param sslContext a pre-configured SSL Context instance (cannot be null).
+     * @param sslEngine a pre-configured SSL Engine instance (cannot be null).
+     * @return A SslFilter instance (never null).
+     */
+    private static SslFilter createSslFilter( SSLContext sslContext, SSLEngine sslEngine ) {
+<span class="nc" id="L355">        final SslFilter filter = new SslFilter( sslContext );</span>
+
+        // Copy configuration from the SSL Engine into the filter.
+<span class="nc" id="L358">        filter.setUseClientMode( sslEngine.getUseClientMode() );</span>
+<span class="nc" id="L359">        filter.setEnabledProtocols( sslEngine.getEnabledProtocols() );</span>
+<span class="nc" id="L360">        filter.setEnabledCipherSuites( sslEngine.getEnabledCipherSuites() );</span>
+
+        // Note that the setters for 'need' and 'want' influence each-other. Invoke only one of them!
+<span class="nc bnc" id="L363" title="All 2 branches missed.">        if ( sslEngine.getNeedClientAuth() )</span>
+        {
+<span class="nc" id="L365">            filter.setNeedClientAuth( true );</span>
+        }
+<span class="nc bnc" id="L367" title="All 2 branches missed.">        else if ( sslEngine.getWantClientAuth() )</span>
+        {
+<span class="nc" id="L369">            filter.setWantClientAuth( true );</span>
+        }
+<span class="nc" id="L371">        return filter;</span>
+    }
+
+    /**
+     * Returns the names of all encryption protocols that are supported (but not necessarily enabled).
+     *
+     * @return An array of protocol names. Not expected to be empty.
+     * @throws NoSuchAlgorithmException if the algorithm is not supported
+     * @throws KeyManagementException if there was problem manging the ket
+     */
+    public static List&lt;String&gt; getSupportedProtocols() throws NoSuchAlgorithmException, KeyManagementException
+    {
+        // TODO Might want to cache the result. It's unlikely to change at runtime.
+<span class="fc" id="L384">        final SSLContext context = SSLContext.getInstance( &quot;TLSv1&quot; );</span>
+<span class="fc" id="L385">        context.init( null, null, null );</span>
+<span class="fc" id="L386">        return Arrays.asList( context.createSSLEngine().getSupportedProtocols() );</span>
+    }
+
+    /**
+     * Returns the names of all encryption protocols that are enabled by default.
+     *
+     * @return An array of protocol names. Not expected to be empty.
+     * @throws NoSuchAlgorithmException if the algorithm is not supported
+     * @throws KeyManagementException if there was problem manging the ket
+     */
+    public static List&lt;String&gt; getDefaultProtocols() throws NoSuchAlgorithmException, KeyManagementException
+    {
+        // TODO Might want to cache the result. It's unlikely to change at runtime.
+<span class="fc" id="L399">        final SSLContext context = SSLContext.getInstance( &quot;TLSv1&quot; );</span>
+<span class="fc" id="L400">        context.init( null, null, null );</span>
+<span class="fc" id="L401">        return Arrays.asList( context.createSSLEngine().getEnabledProtocols() );</span>
+    }
+
+    /**
+     * Returns the names of all encryption cipher suites that are supported (but not necessarily enabled).
+     *
+     * @return An array of cipher suite names. Not expected to be empty.
+     * @throws NoSuchAlgorithmException if the algorithm is not supported
+     * @throws KeyManagementException if there was problem manging the ket
+     */
+    public static List&lt;String&gt; getSupportedCipherSuites() throws NoSuchAlgorithmException, KeyManagementException
+    {
+        // TODO Might want to cache the result. It's unlikely to change at runtime.
+<span class="fc" id="L414">        final SSLContext context = SSLContext.getInstance( &quot;TLSv1&quot; );</span>
+<span class="fc" id="L415">        context.init( null, null, null );</span>
+<span class="fc" id="L416">        return Arrays.asList( context.createSSLEngine().getSupportedCipherSuites() );</span>
+    }
+
+    /**
+     * Returns the names of all encryption cipher suites that are enabled by default.
+     *
+     * @return An array of cipher suite names. Not expected to be empty.
+     * @throws NoSuchAlgorithmException if the algorithm is not supported
+     * @throws KeyManagementException if there was problem manging the ket
+     */
+    public static List&lt;String&gt; getDefaultCipherSuites() throws NoSuchAlgorithmException, KeyManagementException
+    {
+        // TODO Might want to cache the result. It's unlikely to change at runtime.
+<span class="fc" id="L429">        final SSLContext context = SSLContext.getInstance( &quot;TLSv1&quot; );</span>
+<span class="fc" id="L430">        context.init( null, null, null );</span>
+<span class="fc" id="L431">        return Arrays.asList( context.createSSLEngine().getEnabledCipherSuites() );</span>
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

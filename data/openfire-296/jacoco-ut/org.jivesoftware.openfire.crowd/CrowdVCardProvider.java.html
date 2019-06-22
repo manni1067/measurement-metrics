@@ -1,0 +1,162 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>CrowdVCardProvider.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.crowd</a> &gt; <span class="el_source">CrowdVCardProvider.java</span></div><h1>CrowdVCardProvider.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2012 Issa Gorissen &lt;issa-gorissen@usa.net&gt;. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.jivesoftware.openfire.crowd;
+
+import java.io.StringReader;
+import java.util.concurrent.ConcurrentHashMap;
+
+import org.dom4j.DocumentException;
+import org.dom4j.Element;
+import org.dom4j.io.SAXReader;
+import org.jivesoftware.openfire.crowd.jaxb.User;
+import org.jivesoftware.openfire.user.UserManager;
+import org.jivesoftware.openfire.user.UserNotFoundException;
+import org.jivesoftware.openfire.vcard.DefaultVCardProvider;
+import org.jivesoftware.util.AlreadyExistsException;
+import org.jivesoftware.util.NotFoundException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * VCard provider for Crowd.
+ * 
+ * &lt;p&gt;The name, email will be provided by crowd. All other information
+ * can be managed by the XMPP client
+ */
+<span class="nc" id="L39">public class CrowdVCardProvider extends DefaultVCardProvider {</span>
+<span class="nc" id="L40">    private static final Logger LOG = LoggerFactory.getLogger(CrowdVCardProvider.class);</span>
+    
+    private static final String VCARD_TEMPLATE
+        = &quot;&lt;vCard xmlns=\&quot;vcard-temp\&quot;&gt;&lt;FN&gt;@displayname@&lt;/FN&gt;&lt;N&gt;&lt;FAMILY&gt;@lastname@&lt;/FAMILY&gt;&lt;GIVEN&gt;@firstname@&lt;/GIVEN&gt;&lt;/N&gt;&lt;NICKNAME&gt;@nickname@&lt;/NICKNAME&gt;&lt;EMAIL&gt;&lt;USERID&gt;@email@&lt;/USERID&gt;&lt;/EMAIL&gt;&lt;/vCard&gt;&quot;;
+<span class="nc" id="L44">    private static final ConcurrentHashMap&lt;String, Object&gt; MUTEX = new ConcurrentHashMap&lt;&gt;();</span>
+
+    /**
+     * @see org.jivesoftware.openfire.vcard.DefaultVCardProvider#loadVCard(java.lang.String)
+     */
+    @Override
+    public Element loadVCard(String username) {
+<span class="nc bnc" id="L51" title="All 2 branches missed.">        if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L52">            LOG.debug(&quot;loadvcard:&quot; + username);</span>
+        }
+        
+<span class="nc bnc" id="L55" title="All 2 branches missed.">        if (MUTEX.containsKey(username)) {</span>
+            // preventing looping
+<span class="nc" id="L57">            return null;</span>
+        }
+
+        try {
+<span class="nc" id="L61">            MUTEX.put(username, username);</span>
+            
+<span class="nc" id="L63">            Element vcard = super.loadVCard(username);</span>
+            
+<span class="nc bnc" id="L65" title="All 2 branches missed.">            if (vcard == null) {</span>
+<span class="nc" id="L66">                CrowdUserProvider userProvider = (CrowdUserProvider) UserManager.getUserProvider();</span>
+                try {
+<span class="nc" id="L68">                    User user = userProvider.getCrowdUser(username);</span>
+<span class="nc" id="L69">                    String str = VCARD_TEMPLATE.replace(&quot;@displayname@&quot;, user.displayName)</span>
+<span class="nc" id="L70">                            .replace(&quot;@lastname@&quot;, user.lastName)</span>
+<span class="nc" id="L71">                            .replace(&quot;@firstname@&quot;, user.firstName)</span>
+<span class="nc" id="L72">                            .replace(&quot;@email@&quot;, user.email)</span>
+<span class="nc" id="L73">                            .replace(&quot;@nickname@&quot;, username);</span>
+                    
+<span class="nc" id="L75">                    SAXReader xmlReader = new SAXReader();</span>
+<span class="nc" id="L76">                    xmlReader.setEncoding(&quot;UTF-8&quot;);</span>
+                    
+<span class="nc" id="L78">                    vcard = xmlReader.read(new StringReader(str)).getRootElement();</span>
+                    
+<span class="nc" id="L80">                } catch (UserNotFoundException unfe) {</span>
+<span class="nc" id="L81">                    LOG.error(&quot;Unable to find user:&quot; + String.valueOf(username) + &quot; for loading its vcard&quot;, unfe);</span>
+<span class="nc" id="L82">                    return null;</span>
+<span class="nc" id="L83">                } catch (DocumentException de) {</span>
+<span class="nc" id="L84">                    LOG.error(&quot;vcard parsing error&quot;, de);</span>
+<span class="nc" id="L85">                    return null;</span>
+<span class="nc" id="L86">                }</span>
+
+                
+<span class="nc bnc" id="L89" title="All 2 branches missed.">                if (LOG.isDebugEnabled()) {</span>
+<span class="nc bnc" id="L90" title="All 2 branches missed.">                    LOG.debug(vcard != null ? vcard.asXML() : &quot;vcard is null&quot;);</span>
+                }
+                
+                
+                // store this new vcard
+<span class="nc bnc" id="L95" title="All 2 branches missed.">                if (vcard != null) {</span>
+                    try {
+<span class="nc" id="L97">                        createVCard(username, vcard);</span>
+<span class="nc" id="L98">                    } catch (AlreadyExistsException aee) {</span>
+<span class="nc" id="L99">                        LOG.error(&quot;Unable to create and store a new vcard for user:&quot; + username + &quot;; one already exists&quot;, aee);</span>
+<span class="nc" id="L100">                    }</span>
+                }
+            }
+            
+<span class="nc" id="L104">            return vcard;</span>
+
+<span class="nc" id="L106">        } catch (RuntimeException re) {</span>
+<span class="nc" id="L107">            LOG.error(&quot;Failure occured when loading a vcard for user:&quot; + username, re);</span>
+<span class="nc" id="L108">            throw re;</span>
+        } finally {
+<span class="nc" id="L110">            MUTEX.remove(username);</span>
+<span class="nc" id="L111">        }</span>
+    }
+
+    /**
+     * @see org.jivesoftware.openfire.vcard.DefaultVCardProvider#createVCard(java.lang.String, org.dom4j.Element)
+     */
+    @Override
+    public Element createVCard(String username, Element vCardElement) throws AlreadyExistsException {
+<span class="nc bnc" id="L119" title="All 2 branches missed.">        if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L120">            LOG.debug(&quot;createvcard:&quot; + vCardElement.asXML());</span>
+        }
+<span class="nc" id="L122">        return super.createVCard(username, vCardElement);</span>
+    }
+
+    /**
+     * @see org.jivesoftware.openfire.vcard.DefaultVCardProvider#updateVCard(java.lang.String, org.dom4j.Element)
+     */
+    @Override
+    public Element updateVCard(String username, Element vCard) throws NotFoundException {
+        // make sure some properties have not been overridden
+<span class="nc" id="L131">        Element nickNameNode = vCard.element(&quot;NICKNAME&quot;);</span>
+<span class="nc" id="L132">        Element displayNameNode = vCard.element(&quot;FN&quot;);</span>
+        
+<span class="nc" id="L134">        Element nameNode = vCard.element(&quot;N&quot;);</span>
+<span class="nc" id="L135">        Element lastNameNode = nameNode.element(&quot;FAMILY&quot;);</span>
+<span class="nc" id="L136">        Element firstnameNode = nameNode.element(&quot;GIVEN&quot;);</span>
+        
+<span class="nc" id="L138">        Element emailNode = vCard.element(&quot;EMAIL&quot;).element(&quot;USERID&quot;);</span>
+        
+<span class="nc" id="L140">        CrowdUserProvider userProvider = (CrowdUserProvider) UserManager.getUserProvider();</span>
+        try {
+<span class="nc" id="L142">            User user = userProvider.getCrowdUser(username);</span>
+            
+<span class="nc" id="L144">            nickNameNode.setText(username);</span>
+<span class="nc" id="L145">            displayNameNode.setText(user.displayName);</span>
+<span class="nc" id="L146">            lastNameNode.setText(user.lastName);</span>
+<span class="nc" id="L147">            firstnameNode.setText(user.firstName);</span>
+<span class="nc" id="L148">            emailNode.setText(user.email);</span>
+            
+<span class="nc" id="L150">        } catch (UserNotFoundException unfe) {</span>
+<span class="nc" id="L151">            LOG.error(&quot;Unable to find user:&quot; + String.valueOf(username) + &quot; for updating its vcard&quot;, unfe);</span>
+<span class="nc" id="L152">        }</span>
+
+<span class="nc bnc" id="L154" title="All 2 branches missed.">        if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L155">            LOG.debug(&quot;updatevcard:&quot; + vCard.asXML());</span>
+        }
+
+<span class="nc" id="L158">        return super.updateVCard(username, vCard);</span>
+    }
+    
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

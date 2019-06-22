@@ -1,0 +1,461 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>FileTransferProxy.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.filetransfer.proxy</a> &gt; <span class="el_source">FileTransferProxy.java</span></div><h1>FileTransferProxy.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 1999-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.filetransfer.proxy;
+
+import java.net.InetAddress;
+import java.net.NetworkInterface;
+import java.net.SocketException;
+import java.net.UnknownHostException;
+import java.util.*;
+
+import org.dom4j.DocumentHelper;
+import org.dom4j.Element;
+import org.jivesoftware.openfire.IQHandlerInfo;
+import org.jivesoftware.openfire.PacketException;
+import org.jivesoftware.openfire.PacketRouter;
+import org.jivesoftware.openfire.RoutableChannelHandler;
+import org.jivesoftware.openfire.RoutingTable;
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.auth.UnauthorizedException;
+import org.jivesoftware.openfire.container.BasicModule;
+import org.jivesoftware.openfire.disco.DiscoInfoProvider;
+import org.jivesoftware.openfire.disco.DiscoItem;
+import org.jivesoftware.openfire.disco.DiscoItemsProvider;
+import org.jivesoftware.openfire.disco.DiscoServerItem;
+import org.jivesoftware.openfire.disco.ServerItemsProvider;
+import org.jivesoftware.openfire.filetransfer.FileTransferManager;
+import org.jivesoftware.util.JiveGlobals;
+import org.jivesoftware.util.PropertyEventDispatcher;
+import org.jivesoftware.util.PropertyEventListener;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmpp.forms.DataForm;
+import org.xmpp.packet.IQ;
+import org.xmpp.packet.JID;
+import org.xmpp.packet.Packet;
+import org.xmpp.packet.PacketError;
+
+/**
+ * Manages the transfering of files between two remote entities on the jabber network.
+ * This class acts independtly as a Jabber component from the rest of the server, according to
+ * the Jabber &lt;a href=&quot;http://www.jabber.org/jeps/jep-0065.html&quot;&gt;SOCKS5 bytestreams protocol&lt;/a&gt;.
+ *
+ * @author Alexander Wenckus
+ */
+public class FileTransferProxy extends BasicModule
+        implements ServerItemsProvider, DiscoInfoProvider, DiscoItemsProvider,
+        RoutableChannelHandler {
+
+<span class="nc" id="L63">    private static final Logger Log = LoggerFactory.getLogger( FileTransferProxy.class);</span>
+
+    /**
+     * The JiveProperty relating to whether or not the file treansfer proxy is enabled.
+     */
+    public static final String JIVEPROPERTY_PROXY_ENABLED = &quot;xmpp.proxy.enabled&quot;;
+
+    /**
+     * The JiveProperty relating to the port the proxy is operating on. Changing this value requires a restart of the
+     * proxy.
+     */
+    public static final String JIVEPROPERTY_PORT = &quot;xmpp.proxy.port&quot;;
+
+    /**
+     * Name of the property that hardcodes the external IP that is being listened on.
+     */
+    public static final String PROPERTY_EXTERNALIP = &quot;xmpp.proxy.externalip&quot;;
+
+    /**
+     * Whether or not the file transfer proxy is enabled by default.
+     */
+    public static final boolean DEFAULT_IS_PROXY_ENABLED = true;
+
+    /**
+     * The default port of the file transfer proxy
+     */
+    public static final int DEFAULT_PORT = 7777;
+
+    private String proxyServiceName;
+
+    private IQHandlerInfo info;
+    private RoutingTable routingTable;
+    private PacketRouter router;
+    private ProxyConnectionManager connectionManager;
+
+    // The address to operate on. Null for any address.
+    private InetAddress bindInterface;
+
+
+    public FileTransferProxy() {
+<span class="nc" id="L103">        super(&quot;SOCKS5 file transfer proxy&quot;);</span>
+
+<span class="nc" id="L105">        info = new IQHandlerInfo(&quot;query&quot;, FileTransferManager.NAMESPACE_BYTESTREAMS);</span>
+
+<span class="nc" id="L107">        PropertyEventDispatcher.addListener(new FileTransferPropertyListener());</span>
+<span class="nc" id="L108">    }</span>
+
+    public boolean handleIQ(IQ packet) throws UnauthorizedException {
+<span class="nc" id="L111">        Element childElement = packet.getChildElement();</span>
+<span class="nc" id="L112">        String namespace = null;</span>
+
+        // ignore errors
+<span class="nc bnc" id="L115" title="All 2 branches missed.">        if (packet.getType() == IQ.Type.error) {</span>
+<span class="nc" id="L116">            return true;</span>
+        }
+<span class="nc bnc" id="L118" title="All 2 branches missed.">        if (childElement != null) {</span>
+<span class="nc" id="L119">            namespace = childElement.getNamespaceURI();</span>
+        }
+
+<span class="nc bnc" id="L122" title="All 2 branches missed.">        if (&quot;http://jabber.org/protocol/disco#info&quot;.equals(namespace)) {</span>
+<span class="nc" id="L123">            IQ reply = XMPPServer.getInstance().getIQDiscoInfoHandler().handleIQ(packet);</span>
+<span class="nc" id="L124">            router.route(reply);</span>
+<span class="nc" id="L125">            return true;</span>
+        }
+<span class="nc bnc" id="L127" title="All 2 branches missed.">        else if (&quot;http://jabber.org/protocol/disco#items&quot;.equals(namespace)) {</span>
+            // a component
+<span class="nc" id="L129">            IQ reply = XMPPServer.getInstance().getIQDiscoItemsHandler().handleIQ(packet);</span>
+<span class="nc" id="L130">            router.route(reply);</span>
+<span class="nc" id="L131">            return true;</span>
+        }
+<span class="nc bnc" id="L133" title="All 2 branches missed.">        else if (FileTransferManager.NAMESPACE_BYTESTREAMS.equals(namespace)) {</span>
+<span class="nc bnc" id="L134" title="All 2 branches missed.">            if (packet.getType() == IQ.Type.get) {</span>
+<span class="nc" id="L135">                IQ reply = IQ.createResultIQ(packet);</span>
+<span class="nc" id="L136">                Element newChild = reply.setChildElement(&quot;query&quot;, FileTransferManager.NAMESPACE_BYTESTREAMS);</span>
+
+<span class="nc" id="L138">                final String externalIP = JiveGlobals.getProperty( PROPERTY_EXTERNALIP );</span>
+<span class="nc bnc" id="L139" title="All 4 branches missed.">                if ( externalIP != null &amp;&amp; !externalIP.isEmpty() )</span>
+                {
+                    // OF-512: Override the automatic detection with a specific address (useful for NATs, proxies, etc)
+<span class="nc" id="L142">                    final Element response = newChild.addElement( &quot;streamhost&quot; );</span>
+<span class="nc" id="L143">                    response.addAttribute( &quot;jid&quot;, getServiceDomain() );</span>
+<span class="nc" id="L144">                    response.addAttribute( &quot;host&quot;, externalIP );</span>
+<span class="nc" id="L145">                    response.addAttribute( &quot;port&quot;, String.valueOf( connectionManager.getProxyPort() ) );</span>
+<span class="nc" id="L146">                }</span>
+                else
+                {
+                    // Report all network addresses that we know that we're servicing.
+<span class="nc bnc" id="L150" title="All 2 branches missed.">                    for ( final InetAddress address : getAddresses() )</span>
+                    {
+<span class="nc" id="L152">                        final Element response = newChild.addElement( &quot;streamhost&quot; );</span>
+<span class="nc" id="L153">                        response.addAttribute( &quot;jid&quot;, getServiceDomain() );</span>
+<span class="nc" id="L154">                        response.addAttribute( &quot;host&quot;, address.getHostAddress() );</span>
+<span class="nc" id="L155">                        response.addAttribute( &quot;port&quot;, String.valueOf( connectionManager.getProxyPort() ) );</span>
+<span class="nc" id="L156">                    }</span>
+                }
+<span class="nc" id="L158">                router.route(reply);</span>
+<span class="nc" id="L159">                return true;</span>
+            }
+<span class="nc bnc" id="L161" title="All 2 branches missed.">            else if (packet.getType() == IQ.Type.set) {</span>
+<span class="nc" id="L162">                String sid = childElement.attributeValue(&quot;sid&quot;);</span>
+<span class="nc" id="L163">                JID from = packet.getFrom();</span>
+<span class="nc" id="L164">                JID to = new JID(childElement.elementTextTrim(&quot;activate&quot;));</span>
+
+<span class="nc" id="L166">                IQ reply = IQ.createResultIQ(packet);</span>
+                try {
+<span class="nc" id="L168">                    connectionManager.activate(from, to, sid);</span>
+                }
+<span class="nc" id="L170">                catch (IllegalArgumentException ie) {</span>
+<span class="nc" id="L171">                    Log.error(&quot;Error activating connection&quot;, ie);</span>
+<span class="nc" id="L172">                    reply.setType(IQ.Type.error);</span>
+<span class="nc" id="L173">                    reply.setError(new PacketError(PacketError.Condition.not_allowed));</span>
+<span class="nc" id="L174">                }</span>
+
+<span class="nc" id="L176">                router.route(reply);</span>
+<span class="nc" id="L177">                return true;</span>
+            }
+        }
+<span class="nc" id="L180">        return false;</span>
+    }
+
+    public IQHandlerInfo getInfo() {
+<span class="nc" id="L184">        return info;</span>
+    }
+
+    @Override
+    public void initialize( XMPPServer server )
+    {
+<span class="nc" id="L190">        super.initialize(server);</span>
+
+<span class="nc" id="L192">        proxyServiceName = JiveGlobals.getProperty(&quot;xmpp.proxy.service&quot;, &quot;proxy&quot;);</span>
+<span class="nc" id="L193">        routingTable = server.getRoutingTable();</span>
+<span class="nc" id="L194">        router = server.getPacketRouter();</span>
+
+<span class="nc" id="L196">        connectionManager = new ProxyConnectionManager(getFileTransferManager(server));</span>
+<span class="nc" id="L197">    }</span>
+
+    /**
+     * Returns the IP address(es) that the proxy connection manager is servicing.
+     */
+    private Set&lt;InetAddress&gt; getAddresses()
+    {
+<span class="nc" id="L204">        final String interfaceName = JiveGlobals.getXMLProperty( &quot;network.interface&quot; );</span>
+
+<span class="nc" id="L206">        final Set&lt;InetAddress&gt; result = new HashSet&lt;&gt;();</span>
+
+        // Let's see if we hardcoded a specific interface, then use its address.
+<span class="nc bnc" id="L209" title="All 4 branches missed.">        if ( interfaceName != null &amp;&amp; !interfaceName.trim().isEmpty() )</span>
+        {
+            try
+            {
+<span class="nc" id="L213">                bindInterface = InetAddress.getByName( interfaceName.trim() );</span>
+<span class="nc" id="L214">                result.add( bindInterface );</span>
+<span class="nc" id="L215">                return result;</span>
+            }
+<span class="nc" id="L217">            catch ( UnknownHostException e )</span>
+            {
+<span class="nc" id="L219">                Log.error( &quot;Error binding to network.interface '{}'&quot;, interfaceName, e );</span>
+            }
+        }
+
+        // When there's no specific address configured, return all available (non-loopback) addresses.
+        try
+        {
+<span class="nc" id="L226">            final Enumeration&lt;NetworkInterface&gt; networkInterfaces = NetworkInterface.getNetworkInterfaces();</span>
+<span class="nc bnc" id="L227" title="All 2 branches missed.">            while ( networkInterfaces.hasMoreElements() )</span>
+            {
+<span class="nc" id="L229">                final NetworkInterface networkInterface = networkInterfaces.nextElement();</span>
+<span class="nc bnc" id="L230" title="All 2 branches missed.">                if ( networkInterface.isLoopback() )</span>
+                {
+<span class="nc" id="L232">                    continue;</span>
+                }
+<span class="nc" id="L234">                final Enumeration&lt;InetAddress&gt; inetAddresses = networkInterface.getInetAddresses();</span>
+<span class="nc bnc" id="L235" title="All 2 branches missed.">                while ( inetAddresses.hasMoreElements() )</span>
+                {
+<span class="nc" id="L237">                    result.add( inetAddresses.nextElement() );</span>
+                }
+<span class="nc" id="L239">            }</span>
+        }
+<span class="nc" id="L241">        catch ( SocketException e )</span>
+        {
+<span class="nc" id="L243">            Log.error( &quot;Error determining all addresses for this server&quot;, e );</span>
+<span class="nc" id="L244">        }</span>
+<span class="nc" id="L245">        return result;</span>
+    }
+
+    private FileTransferManager getFileTransferManager(XMPPServer server) {
+<span class="nc" id="L249">        return server.getFileTransferManager();</span>
+    }
+
+    @Override
+    public void start() {
+<span class="nc" id="L254">        super.start();</span>
+
+<span class="nc bnc" id="L256" title="All 2 branches missed.">        if (isEnabled()) {</span>
+<span class="nc" id="L257">            startProxy();</span>
+        }
+        else {
+<span class="nc" id="L260">            XMPPServer.getInstance().getIQDiscoItemsHandler().removeServerItemsProvider(this);</span>
+        }
+<span class="nc" id="L262">    }</span>
+
+    private void startProxy() {
+<span class="nc" id="L265">        connectionManager.processConnections(bindInterface, getProxyPort());</span>
+<span class="nc" id="L266">        routingTable.addComponentRoute(getAddress(), this);</span>
+<span class="nc" id="L267">        XMPPServer server = XMPPServer.getInstance();</span>
+
+<span class="nc" id="L269">        server.getIQDiscoItemsHandler().addServerItemsProvider(this);</span>
+<span class="nc" id="L270">    }</span>
+
+    @Override
+    public void stop() {
+<span class="nc" id="L274">        super.stop();</span>
+
+<span class="nc" id="L276">        XMPPServer.getInstance().getIQDiscoItemsHandler()</span>
+<span class="nc" id="L277">                .removeComponentItem(getAddress().toString());</span>
+<span class="nc" id="L278">        routingTable.removeComponentRoute(getAddress());</span>
+<span class="nc" id="L279">        connectionManager.disable();</span>
+<span class="nc" id="L280">    }</span>
+
+    @Override
+    public void destroy() {
+<span class="nc" id="L284">        super.destroy();</span>
+
+<span class="nc" id="L286">        connectionManager.shutdown();</span>
+<span class="nc" id="L287">    }</span>
+
+    public void enableFileTransferProxy(boolean isEnabled) {
+<span class="nc" id="L290">        JiveGlobals.setProperty(FileTransferProxy.JIVEPROPERTY_PROXY_ENABLED,</span>
+<span class="nc" id="L291">                                Boolean.toString(isEnabled));</span>
+<span class="nc" id="L292">        setEnabled( isEnabled );</span>
+<span class="nc" id="L293">    }</span>
+
+    private void setEnabled(boolean isEnabled) {
+<span class="nc bnc" id="L296" title="All 2 branches missed.">        if (isEnabled) {</span>
+<span class="nc" id="L297">            startProxy();</span>
+        }
+        else {
+<span class="nc" id="L300">            stop();</span>
+        }
+<span class="nc" id="L302">    }</span>
+
+    /**
+     * Returns true if the file transfer proxy is currently enabled and false if it is not.
+     *
+     * @return Returns true if the file transfer proxy is currently enabled and false if it is not.
+     */
+    public boolean isProxyEnabled() {
+<span class="nc bnc" id="L310" title="All 2 branches missed.">        return connectionManager.isRunning() &amp;&amp;</span>
+<span class="nc bnc" id="L311" title="All 2 branches missed.">                JiveGlobals.getBooleanProperty(JIVEPROPERTY_PROXY_ENABLED, DEFAULT_IS_PROXY_ENABLED);</span>
+    }
+
+    private boolean isEnabled() {
+<span class="nc" id="L315">        return JiveGlobals.getBooleanProperty(JIVEPROPERTY_PROXY_ENABLED, DEFAULT_IS_PROXY_ENABLED);</span>
+    }
+
+    /**
+     * Sets the port that the proxy operates on. This requires a restart of the file transfer proxy.
+     *
+     * @param port The port.
+     */
+    public void setProxyPort(int port) {
+<span class="nc" id="L324">        JiveGlobals.setProperty(JIVEPROPERTY_PORT, Integer.toString(port));</span>
+<span class="nc" id="L325">    }</span>
+
+    /**
+     * Returns the port that the file transfer proxy is opertating on.
+     *
+     * @return Returns the port that the file transfer proxy is opertating on.
+     */
+    public int getProxyPort() {
+<span class="nc" id="L333">        return JiveGlobals.getIntProperty(JIVEPROPERTY_PORT, DEFAULT_PORT);</span>
+    }
+
+    /**
+     * Returns the fully-qualifed domain name of this chat service.
+     * The domain is composed by the service name and the
+     * name of the XMPP server where the service is running.
+     *
+     * @return the file transfer server domain (service name + host name).
+     */
+    public String getServiceDomain() {
+<span class="nc" id="L344">        return proxyServiceName + &quot;.&quot; + XMPPServer.getInstance().getServerInfo().getXMPPDomain();</span>
+    }
+
+    @Override
+    public JID getAddress() {
+<span class="nc" id="L349">        return new JID(null, getServiceDomain(), null);</span>
+    }
+
+    @Override
+    public Iterator&lt;DiscoServerItem&gt; getItems() {
+<span class="nc bnc" id="L354" title="All 2 branches missed.">        if(!isEnabled()) {</span>
+<span class="nc" id="L355">            return Collections.emptyIterator();</span>
+        }
+
+<span class="nc" id="L358">        final DiscoServerItem item = new DiscoServerItem(new JID(</span>
+<span class="nc" id="L359">                getServiceDomain()), &quot;Socks 5 Bytestreams Proxy&quot;, null, null, this,</span>
+                                                         this);
+
+<span class="nc" id="L362">        return Collections.singleton(item).iterator();</span>
+    }
+
+    @Override
+    public Iterator&lt;Element&gt; getIdentities(String name, String node, JID senderJID) {
+        // Answer the identity of the proxy
+<span class="nc" id="L368">        Element identity = DocumentHelper.createElement(&quot;identity&quot;);</span>
+<span class="nc" id="L369">        identity.addAttribute(&quot;category&quot;, &quot;proxy&quot;);</span>
+<span class="nc" id="L370">        identity.addAttribute(&quot;name&quot;, &quot;SOCKS5 Bytestreams Service&quot;);</span>
+<span class="nc" id="L371">        identity.addAttribute(&quot;type&quot;, &quot;bytestreams&quot;);</span>
+
+<span class="nc" id="L373">        return Collections.singleton(identity).iterator();</span>
+    }
+
+    @Override
+    public Iterator&lt;String&gt; getFeatures(String name, String node, JID senderJID) {
+<span class="nc" id="L378">        return Arrays.asList(FileTransferManager.NAMESPACE_BYTESTREAMS,</span>
+<span class="nc" id="L379">                             &quot;http://jabber.org/protocol/disco#info&quot;).iterator();</span>
+    }
+
+    @Override
+    public DataForm getExtendedInfo(String name, String node, JID senderJID) {
+<span class="nc" id="L384">        return null;</span>
+    }
+
+    @Override
+    public boolean hasInfo(String name, String node, JID senderJID) {
+<span class="nc" id="L389">        return true;</span>
+    }
+
+    @Override
+    public Iterator&lt;DiscoItem&gt; getItems(String name, String node, JID senderJID) {
+        // A proxy server has no items
+<span class="nc" id="L395">        return new ArrayList&lt;DiscoItem&gt;().iterator();</span>
+    }
+
+    @Override
+    public void process(Packet packet) throws UnauthorizedException, PacketException {
+        // Check if the packet is a disco request or a packet with namespace iq:register
+<span class="nc bnc" id="L401" title="All 2 branches missed.">        if (packet instanceof IQ) {</span>
+<span class="nc bnc" id="L402" title="All 2 branches missed.">            if (handleIQ((IQ) packet)) {</span>
+                // Do nothing
+            }
+            else {
+<span class="nc" id="L406">                IQ reply = IQ.createResultIQ((IQ) packet);</span>
+<span class="nc" id="L407">                reply.setChildElement(((IQ) packet).getChildElement().createCopy());</span>
+<span class="nc" id="L408">                reply.setError(PacketError.Condition.feature_not_implemented);</span>
+<span class="nc" id="L409">                router.route(reply);</span>
+            }
+        }
+<span class="nc" id="L412">    }</span>
+
+<span class="nc" id="L414">    private class FileTransferPropertyListener implements PropertyEventListener {</span>
+        @Override
+        public void propertySet(String property, Map params)
+        {
+<span class="nc bnc" id="L418" title="All 2 branches missed.">            if ( isEnabled() )</span>
+            {
+                // Restart when configuration changed.
+<span class="nc bnc" id="L421" title="All 2 branches missed.">                if (JIVEPROPERTY_PORT.equalsIgnoreCase( property ))</span>
+                {
+<span class="nc" id="L423">                    setEnabled( false );</span>
+<span class="nc" id="L424">                    setEnabled( true );</span>
+                }
+            }
+
+<span class="nc bnc" id="L428" title="All 2 branches missed.">            if(JIVEPROPERTY_PROXY_ENABLED.equalsIgnoreCase(property)) {</span>
+<span class="nc" id="L429">                Object value = params.get(&quot;value&quot;);</span>
+<span class="nc bnc" id="L430" title="All 2 branches missed.">                boolean isEnabled = (value != null ? Boolean.parseBoolean(value.toString()) : DEFAULT_IS_PROXY_ENABLED);</span>
+<span class="nc" id="L431">                setEnabled(isEnabled);</span>
+            }
+<span class="nc" id="L433">        }</span>
+
+        @Override
+        public void propertyDeleted(String property, Map params) {
+<span class="nc bnc" id="L437" title="All 2 branches missed.">            if(JIVEPROPERTY_PROXY_ENABLED.equalsIgnoreCase(property)) {</span>
+<span class="nc" id="L438">                setEnabled(DEFAULT_IS_PROXY_ENABLED);</span>
+            }
+
+<span class="nc bnc" id="L441" title="All 2 branches missed.">            if ( isEnabled() )</span>
+            {
+                // Restart when configuration changed.
+<span class="nc bnc" id="L444" title="All 2 branches missed.">                if (JIVEPROPERTY_PORT.equalsIgnoreCase( property ) )</span>
+                {
+<span class="nc" id="L446">                    setEnabled( false );</span>
+<span class="nc" id="L447">                    setEnabled( true );</span>
+                }
+            }
+<span class="nc" id="L450">        }</span>
+
+        @Override
+        public void xmlPropertySet(String property, Map params) {
+<span class="nc" id="L454">        }</span>
+
+        @Override
+        public void xmlPropertyDeleted(String property, Map params) {
+<span class="nc" id="L458">        }</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

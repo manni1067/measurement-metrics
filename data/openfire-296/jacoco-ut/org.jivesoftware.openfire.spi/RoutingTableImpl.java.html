@@ -1,0 +1,1188 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>RoutingTableImpl.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.spi</a> &gt; <span class="el_source">RoutingTableImpl.java</span></div><h1>RoutingTableImpl.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.spi;
+
+import org.dom4j.Element;
+import org.dom4j.QName;
+import org.jivesoftware.openfire.*;
+import org.jivesoftware.openfire.auth.UnauthorizedException;
+import org.jivesoftware.openfire.carbons.Received;
+import org.jivesoftware.openfire.cluster.ClusterEventListener;
+import org.jivesoftware.openfire.cluster.ClusterManager;
+import org.jivesoftware.openfire.cluster.NodeID;
+import org.jivesoftware.openfire.component.ExternalComponentManager;
+import org.jivesoftware.openfire.container.BasicModule;
+import org.jivesoftware.openfire.forward.Forwarded;
+import org.jivesoftware.openfire.handler.PresenceUpdateHandler;
+import org.jivesoftware.openfire.server.OutgoingSessionPromise;
+import org.jivesoftware.openfire.server.RemoteServerManager;
+import org.jivesoftware.openfire.session.*;
+import org.jivesoftware.util.JiveGlobals;
+import org.jivesoftware.util.cache.Cache;
+import org.jivesoftware.util.cache.CacheFactory;
+import org.jivesoftware.util.cache.CacheUtil;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmpp.packet.*;
+
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.Lock;
+import java.util.function.Function;
+import java.util.function.Predicate;
+
+/**
+ * Routing table that stores routes to client sessions, outgoing server sessions
+ * and components. As soon as a user authenticates with the server its client session
+ * will be added to the routing table. Whenever the client session becomes available
+ * or unavailable the routing table will be updated too.&lt;p&gt;
+ *
+ * When running inside of a cluster the routing table will also keep references to routes
+ * hosted in other cluster nodes. A {@link RemotePacketRouter} will be use to route packets
+ * to routes hosted in other cluster nodes.&lt;p&gt;
+ *
+ * Failure to route a packet will end up sending {@link IQRouter#routingFailed(JID, Packet)},
+ * {@link MessageRouter#routingFailed(JID, Packet)} or {@link PresenceRouter#routingFailed(JID, Packet)}
+ * depending on the packet type that tried to be sent.
+ *
+ * @author Gaston Dombiak
+ */
+public class RoutingTableImpl extends BasicModule implements RoutingTable, ClusterEventListener {
+
+<span class="nc" id="L66">    private static final Logger Log = LoggerFactory.getLogger(RoutingTableImpl.class);</span>
+    
+    public static final String C2S_CACHE_NAME = &quot;Routing Users Cache&quot;;
+    public static final String ANONYMOUS_C2S_CACHE_NAME = &quot;Routing AnonymousUsers Cache&quot;;
+    public static final String S2S_CACHE_NAME = &quot;Routing Servers Cache&quot;;
+    public static final String COMPONENT_CACHE_NAME = &quot;Routing Components Cache&quot;;
+    public static final String C2S_SESSION_NAME = &quot;Routing User Sessions&quot;;
+
+    /**
+     * Cache (unlimited, never expire) that holds outgoing sessions to remote servers from this server.
+     * Key: server domain pair, Value: nodeID
+     */
+    private Cache&lt;DomainPair, NodeID&gt; serversCache;
+    /**
+     * Cache (unlimited, never expire) that holds components connected to the server.
+     * Key: component domain, Value: list of nodeIDs hosting the component
+     */
+    private Cache&lt;String, HashSet&lt;NodeID&gt;&gt; componentsCache;
+    /**
+     * Cache (unlimited, never expire) that holds sessions of user that have authenticated with the server.
+     * Key: full JID, Value: {nodeID, available/unavailable}
+     */
+    private Cache&lt;String, ClientRoute&gt; usersCache;
+    /**
+     * Cache (unlimited, never expire) that holds sessions of anonymous user that have authenticated with the server.
+     * Key: full JID, Value: {nodeID, available/unavailable}
+     */
+    private Cache&lt;String, ClientRoute&gt; anonymousUsersCache;
+    /**
+     * Cache (unlimited, never expire) that holds set of connected resources of authenticated users
+     * (includes anonymous).
+     * Key: bare JID, Value: set of full JIDs of the user
+     */
+    private Cache&lt;String, HashSet&lt;String&gt;&gt; usersSessions;
+
+    private String serverName;
+    private XMPPServer server;
+    private LocalRoutingTable localRoutingTable;
+    private RemotePacketRouter remotePacketRouter;
+    private IQRouter iqRouter;
+    private MessageRouter messageRouter;
+    private PresenceRouter presenceRouter;
+    private PresenceUpdateHandler presenceUpdateHandler;
+
+    public RoutingTableImpl() {
+<span class="nc" id="L111">        super(&quot;Routing table&quot;);</span>
+<span class="nc" id="L112">        serversCache = CacheFactory.createCache(S2S_CACHE_NAME);</span>
+<span class="nc" id="L113">        componentsCache = CacheFactory.createCache(COMPONENT_CACHE_NAME);</span>
+<span class="nc" id="L114">        usersCache = CacheFactory.createCache(C2S_CACHE_NAME);</span>
+<span class="nc" id="L115">        anonymousUsersCache = CacheFactory.createCache(ANONYMOUS_C2S_CACHE_NAME);</span>
+<span class="nc" id="L116">        usersSessions = CacheFactory.createCache(C2S_SESSION_NAME);</span>
+<span class="nc" id="L117">        localRoutingTable = new LocalRoutingTable();</span>
+<span class="nc" id="L118">    }</span>
+
+    @Override
+    public void addServerRoute(DomainPair address, LocalOutgoingServerSession destination) {
+<span class="nc" id="L122">        localRoutingTable.addRoute(address, destination);</span>
+<span class="nc" id="L123">        Lock lock = CacheFactory.getLock(address, serversCache);</span>
+        try {
+<span class="nc" id="L125">            lock.lock();</span>
+<span class="nc" id="L126">            serversCache.put(address, server.getNodeID());</span>
+        }
+        finally {
+<span class="nc" id="L129">            lock.unlock();</span>
+<span class="nc" id="L130">        }</span>
+<span class="nc" id="L131">    }</span>
+
+    @Override
+    public void addComponentRoute(JID route, RoutableChannelHandler destination) {
+<span class="nc" id="L135">        DomainPair pair = new DomainPair(&quot;&quot;, route.getDomain());</span>
+<span class="nc" id="L136">        String address = route.getDomain();</span>
+<span class="nc" id="L137">        localRoutingTable.addRoute(pair, destination);</span>
+<span class="nc" id="L138">        Lock lock = CacheFactory.getLock(address, componentsCache);</span>
+        try {
+<span class="nc" id="L140">            lock.lock();</span>
+<span class="nc" id="L141">            HashSet&lt;NodeID&gt; nodes = componentsCache.get(address);</span>
+<span class="nc bnc" id="L142" title="All 2 branches missed.">            if (nodes == null) {</span>
+<span class="nc" id="L143">                nodes = new HashSet&lt;&gt;();</span>
+            }
+<span class="nc" id="L145">            nodes.add(server.getNodeID());</span>
+<span class="nc" id="L146">            componentsCache.put(address, nodes);</span>
+        } finally {
+<span class="nc" id="L148">            lock.unlock();</span>
+<span class="nc" id="L149">        }</span>
+<span class="nc" id="L150">    }</span>
+
+    @Override
+    public boolean addClientRoute(JID route, LocalClientSession destination) {
+        boolean added;
+<span class="nc" id="L155">        boolean available = destination.getPresence().isAvailable();</span>
+<span class="nc" id="L156">        Log.debug(&quot;Adding client route {}&quot;, route);</span>
+<span class="nc" id="L157">        localRoutingTable.addRoute(new DomainPair(&quot;&quot;, route.toString()), destination);</span>
+<span class="nc bnc" id="L158" title="All 2 branches missed.">        if (destination.getAuthToken().isAnonymous()) {</span>
+<span class="nc" id="L159">            Lock lockAn = CacheFactory.getLock(route.toString(), anonymousUsersCache);</span>
+            try {
+<span class="nc" id="L161">                lockAn.lock();</span>
+<span class="nc bnc" id="L162" title="All 2 branches missed.">                added = anonymousUsersCache.put(route.toString(), new ClientRoute(server.getNodeID(), available)) ==</span>
+                        null;
+            }
+            finally {
+<span class="nc" id="L166">                lockAn.unlock();</span>
+<span class="nc" id="L167">            }</span>
+            // Add the session to the list of user sessions
+<span class="nc bnc" id="L169" title="All 6 branches missed.">            if (route.getResource() != null &amp;&amp; (!available || added)) {</span>
+<span class="nc" id="L170">                Lock lock = CacheFactory.getLock(route.toBareJID(), usersSessions);</span>
+                try {
+<span class="nc" id="L172">                    lock.lock();</span>
+<span class="nc" id="L173">                    usersSessions.put(route.toBareJID(), new HashSet&lt;&gt;(Collections.singletonList(route.toString())));</span>
+                }
+                finally {
+<span class="nc" id="L176">                    lock.unlock();</span>
+<span class="nc" id="L177">                }</span>
+            }
+<span class="nc" id="L179">        }</span>
+        else {
+<span class="nc" id="L181">            Lock lockU = CacheFactory.getLock(route.toString(), usersCache);</span>
+            try {
+<span class="nc" id="L183">                lockU.lock();</span>
+<span class="nc bnc" id="L184" title="All 2 branches missed.">                added = usersCache.put(route.toString(), new ClientRoute(server.getNodeID(), available)) == null;</span>
+            }
+            finally {
+<span class="nc" id="L187">                lockU.unlock();</span>
+<span class="nc" id="L188">            }</span>
+            // Add the session to the list of user sessions
+<span class="nc bnc" id="L190" title="All 6 branches missed.">            if (route.getResource() != null &amp;&amp; (!available || added)) {</span>
+<span class="nc" id="L191">                Lock lock = CacheFactory.getLock(route.toBareJID(), usersSessions);</span>
+                try {
+<span class="nc" id="L193">                    lock.lock();</span>
+<span class="nc" id="L194">                    HashSet&lt;String&gt; jids = usersSessions.get(route.toBareJID());</span>
+<span class="nc bnc" id="L195" title="All 2 branches missed.">                    if (jids == null) {</span>
+<span class="nc" id="L196">                        jids = new HashSet&lt;&gt;();</span>
+                    }
+<span class="nc" id="L198">                    jids.add(route.toString());</span>
+<span class="nc" id="L199">                    usersSessions.put(route.toBareJID(), jids);</span>
+                }
+                finally {
+<span class="nc" id="L202">                    lock.unlock();</span>
+<span class="nc" id="L203">                }</span>
+            }
+        }
+<span class="nc" id="L206">        return added;</span>
+    }
+
+    @Override
+    public void broadcastPacket(Message packet, boolean onlyLocal) {
+        // Send the message to client sessions connected to this JVM
+<span class="nc bnc" id="L212" title="All 2 branches missed.">        for(ClientSession session : localRoutingTable.getClientRoutes()) {</span>
+<span class="nc" id="L213">            session.process(packet);</span>
+<span class="nc" id="L214">        }</span>
+
+        // Check if we need to broadcast the message to client sessions connected to remote cluter nodes
+<span class="nc bnc" id="L217" title="All 4 branches missed.">        if (!onlyLocal &amp;&amp; remotePacketRouter != null) {</span>
+<span class="nc" id="L218">            remotePacketRouter.broadcastPacket(packet);</span>
+        }
+<span class="nc" id="L220">    }</span>
+
+    /*
+     * (non-Javadoc)
+     * @see org.jivesoftware.openfire.RoutingTable#routePacket(org.xmpp.packet.JID, org.xmpp.packet.Packet, boolean)
+     * 
+     * @param jid the recipient of the packet to route.
+     * @param packet the packet to route.
+     * @param fromServer true if the packet was created by the server. This packets should
+     *        always be delivered
+     * @throws PacketException thrown if the packet is malformed (results in the sender's
+     *      session being shutdown).
+     */
+    @Override
+    public void routePacket(JID jid, Packet packet, boolean fromServer) throws PacketException {
+<span class="nc" id="L235">        boolean routed = false;</span>
+        try {
+<span class="nc bnc" id="L237" title="All 2 branches missed.">            if (serverName.equals(jid.getDomain())) {</span>
+                // Packet sent to our domain.
+<span class="nc" id="L239">                routed = routeToLocalDomain(jid, packet, fromServer);</span>
+            }
+<span class="nc bnc" id="L241" title="All 4 branches missed.">            else if (jid.getDomain().endsWith(serverName) &amp;&amp; hasComponentRoute(jid)) {</span>
+                // Packet sent to component hosted in this server
+<span class="nc" id="L243">                routed = routeToComponent(jid, packet, routed);</span>
+            }
+            else {
+                // Packet sent to remote server
+<span class="nc" id="L247">                routed = routeToRemoteDomain(jid, packet, routed);</span>
+            }
+<span class="nc" id="L249">        } catch (Exception ex) {</span>
+            // Catch here to ensure that all packets get handled, despite various processing
+            // exceptions, rather than letting any fall through the cracks. For example,
+            // an IAE could be thrown when running in a cluster if a remote member becomes 
+            // unavailable before the routing caches are updated to remove the defunct node.
+            // We have also occasionally seen various flavors of NPE and other oddities, 
+            // typically due to unexpected environment or logic breakdowns. 
+<span class="nc" id="L256">            Log.error(&quot;Primary packet routing failed&quot;, ex); </span>
+<span class="nc" id="L257">        }</span>
+
+<span class="nc bnc" id="L259" title="All 2 branches missed.">        if (!routed) {</span>
+<span class="nc bnc" id="L260" title="All 2 branches missed.">            if (Log.isDebugEnabled()) {</span>
+<span class="nc" id="L261">                Log.debug(&quot;Failed to route packet to JID: {} packet: {}&quot;, jid, packet.toXML());</span>
+            }
+<span class="nc bnc" id="L263" title="All 2 branches missed.">            if (packet instanceof IQ) {</span>
+<span class="nc" id="L264">                iqRouter.routingFailed(jid, packet);</span>
+            }
+<span class="nc bnc" id="L266" title="All 2 branches missed.">            else if (packet instanceof Message) {</span>
+<span class="nc" id="L267">                messageRouter.routingFailed(jid, packet);</span>
+            }
+<span class="nc bnc" id="L269" title="All 2 branches missed.">            else if (packet instanceof Presence) {</span>
+<span class="nc" id="L270">                presenceRouter.routingFailed(jid, packet);</span>
+            }
+        }
+<span class="nc" id="L273">    }</span>
+
+    /**
+     * Routes packets that are sent to the XMPP domain itself (excluding subdomains).
+     * 
+     * @param jid
+     *            the recipient of the packet to route.
+     * @param packet
+     *            the packet to route.
+     * @param fromServer
+     *            true if the packet was created by the server. This packets
+     *            should always be delivered
+     * @throws PacketException
+     *             thrown if the packet is malformed (results in the sender's
+     *             session being shutdown).
+     * @return {@code true} if the packet was routed successfully,
+     *         {@code false} otherwise.
+     */
+    private boolean routeToLocalDomain(JID jid, Packet packet,
+            boolean fromServer) {
+<span class="nc" id="L293">        boolean routed = false;</span>
+<span class="nc" id="L294">        Element privateElement = packet.getElement().element(QName.get(&quot;private&quot;, &quot;urn:xmpp:carbons:2&quot;));</span>
+<span class="nc bnc" id="L295" title="All 2 branches missed.">        boolean isPrivate = privateElement != null;</span>
+        // The receiving server and SHOULD remove the &lt;private/&gt; element before delivering to the recipient.
+<span class="nc" id="L297">        packet.getElement().remove(privateElement);</span>
+
+<span class="nc bnc" id="L299" title="All 2 branches missed.">        if (jid.getResource() == null) {</span>
+            // Packet sent to a bare JID of a user
+<span class="nc bnc" id="L301" title="All 2 branches missed.">            if (packet instanceof Message) {</span>
+                // Find best route of local user
+<span class="nc" id="L303">                routed = routeToBareJID(jid, (Message) packet, isPrivate);</span>
+            }
+            else {
+<span class="nc" id="L306">                throw new PacketException(&quot;Cannot route packet of type IQ or Presence to bare JID: &quot; + packet.toXML());</span>
+            }
+        }
+        else {
+            // Packet sent to local user (full JID)
+<span class="nc" id="L311">            ClientRoute clientRoute = usersCache.get(jid.toString());</span>
+<span class="nc bnc" id="L312" title="All 2 branches missed.">            if (clientRoute == null) {</span>
+<span class="nc" id="L313">                clientRoute = anonymousUsersCache.get(jid.toString());</span>
+            }
+<span class="nc bnc" id="L315" title="All 2 branches missed.">            if (clientRoute != null) {</span>
+<span class="nc bnc" id="L316" title="All 4 branches missed.">                if (!clientRoute.isAvailable() &amp;&amp; routeOnlyAvailable(packet, fromServer) &amp;&amp;</span>
+<span class="nc bnc" id="L317" title="All 2 branches missed.">                        !presenceUpdateHandler.hasDirectPresence(packet.getTo(), packet.getFrom())) {</span>
+<span class="nc" id="L318">                    Log.debug(&quot;Unable to route packet. Packet should only be sent to available sessions and the route is not available. {} &quot;, packet.toXML());</span>
+<span class="nc" id="L319">                    routed = false;</span>
+                } else {
+<span class="nc bnc" id="L321" title="All 2 branches missed.">                    if (localRoutingTable.isLocalRoute(jid)) {</span>
+<span class="nc bnc" id="L322" title="All 2 branches missed.">                        if (packet instanceof Message) {</span>
+<span class="nc" id="L323">                            Message message = (Message) packet;</span>
+<span class="nc bnc" id="L324" title="All 4 branches missed.">                            if (message.getType() == Message.Type.chat &amp;&amp; !isPrivate) {</span>
+<span class="nc" id="L325">                                List&lt;JID&gt; routes = getRoutes(jid.asBareJID(), null);</span>
+<span class="nc bnc" id="L326" title="All 2 branches missed.">                                for (JID route : routes) {</span>
+                                    // The receiving server MUST NOT send a forwarded copy to the full JID the original &lt;message/&gt; stanza was addressed to, as that recipient receives the original &lt;message/&gt; stanza.
+<span class="nc bnc" id="L328" title="All 2 branches missed.">                                    if (!route.equals(jid)) {</span>
+<span class="nc" id="L329">                                        ClientSession clientSession = getClientRoute(route);</span>
+<span class="nc bnc" id="L330" title="All 2 branches missed.">                                        if (clientSession.isMessageCarbonsEnabled()) {</span>
+<span class="nc" id="L331">                                            Message carbon = new Message();</span>
+                                            // The wrapping message SHOULD maintain the same 'type' attribute value;
+<span class="nc" id="L333">                                            carbon.setType(message.getType());</span>
+                                            // the 'from' attribute MUST be the Carbons-enabled user's bare JID
+<span class="nc" id="L335">                                            carbon.setFrom(route.asBareJID());</span>
+                                            // and the 'to' attribute MUST be the full JID of the resource receiving the copy
+<span class="nc" id="L337">                                            carbon.setTo(route);</span>
+                                            // The content of the wrapping message MUST contain a &lt;received/&gt; element qualified by the namespace &quot;urn:xmpp:carbons:2&quot;, which itself contains a &lt;forwarded/&gt; element qualified by the namespace &quot;urn:xmpp:forward:0&quot; that contains the original &lt;message/&gt;.
+<span class="nc" id="L339">                                            carbon.addExtension(new Received(new Forwarded(message)));</span>
+
+                                            try {
+<span class="nc" id="L342">                                                localRoutingTable.getRoute(route).process(carbon);</span>
+<span class="nc" id="L343">                                            } catch (UnauthorizedException e) {</span>
+<span class="nc" id="L344">                                                Log.error(&quot;Unable to route packet &quot; + packet.toXML(), e);</span>
+<span class="nc" id="L345">                                            }</span>
+                                        }
+                                    }
+<span class="nc" id="L348">                                }</span>
+                            }
+                        }
+
+                        // This is a route to a local user hosted in this node
+                        try {
+<span class="nc" id="L354">                            localRoutingTable.getRoute(jid).process(packet);</span>
+<span class="nc" id="L355">                            routed = true;</span>
+<span class="nc" id="L356">                        } catch (UnauthorizedException e) {</span>
+<span class="nc" id="L357">                            Log.error(&quot;Unable to route packet &quot; + packet.toXML(), e);</span>
+<span class="nc" id="L358">                        }</span>
+                    }
+                    else {
+                        // This is a route to a local user hosted in other node
+<span class="nc bnc" id="L362" title="All 2 branches missed.">                        if (remotePacketRouter != null) {</span>
+<span class="nc" id="L363">                            routed = remotePacketRouter</span>
+<span class="nc" id="L364">                                    .routePacket(clientRoute.getNodeID().toByteArray(), jid, packet);</span>
+<span class="nc bnc" id="L365" title="All 2 branches missed.">                            if (!routed) {</span>
+<span class="nc" id="L366">                                removeClientRoute(jid); // drop invalid client route</span>
+                            }
+                        }
+                    }
+                }
+            }
+        }
+<span class="nc" id="L373">        return routed;</span>
+    }
+
+    /**
+     * Routes packets that are sent to components of the XMPP domain (which are
+     * subdomains of the XMPP domain)
+     * 
+     * @param jid
+     *            the recipient of the packet to route.
+     * @param packet
+     *            the packet to route.
+     * @throws PacketException
+     *             thrown if the packet is malformed (results in the sender's
+     *             session being shutdown).
+     * @return {@code true} if the packet was routed successfully,
+     *         {@code false} otherwise.
+     */
+    private boolean routeToComponent(JID jid, Packet packet,
+            boolean routed) {
+<span class="nc bnc" id="L392" title="All 2 branches missed.">        if (!hasComponentRoute(jid) </span>
+<span class="nc bnc" id="L393" title="All 2 branches missed.">                &amp;&amp; !ExternalComponentManager.hasConfiguration(jid.getDomain())) {</span>
+<span class="nc" id="L394">            return false;</span>
+        }
+        
+        // First check if the component is being hosted in this JVM
+<span class="nc" id="L398">        RoutableChannelHandler route = localRoutingTable.getRoute(new JID(null, jid.getDomain(), null, true));</span>
+<span class="nc bnc" id="L399" title="All 2 branches missed.">        if (route != null) {</span>
+            try {
+<span class="nc" id="L401">                route.process(packet);</span>
+<span class="nc" id="L402">                routed = true;</span>
+<span class="nc" id="L403">            } catch (UnauthorizedException e) {</span>
+<span class="nc" id="L404">                Log.error(&quot;Unable to route packet &quot; + packet.toXML(), e);</span>
+<span class="nc" id="L405">            }</span>
+        }
+        else {
+            // Check if other cluster nodes are hosting this component
+<span class="nc" id="L409">            Set&lt;NodeID&gt; nodes = componentsCache.get(jid.getDomain());</span>
+<span class="nc bnc" id="L410" title="All 2 branches missed.">            if (nodes != null) {</span>
+<span class="nc bnc" id="L411" title="All 2 branches missed.">                for (NodeID nodeID : nodes) {</span>
+<span class="nc bnc" id="L412" title="All 2 branches missed.">                    if (server.getNodeID().equals(nodeID)) {</span>
+                        // This is a route to a local component hosted in this node (route
+                        // could have been added after our previous check)
+                        try {
+<span class="nc" id="L416">                            RoutableChannelHandler localRoute = localRoutingTable.getRoute(new JID(null, jid.getDomain(), null, true));</span>
+<span class="nc bnc" id="L417" title="All 2 branches missed.">                            if (localRoute != null) {</span>
+<span class="nc" id="L418">                                localRoute.process(packet);</span>
+<span class="nc" id="L419">                                routed = true;</span>
+<span class="nc" id="L420">                                break;</span>
+                            }
+<span class="nc" id="L422">                        } catch (UnauthorizedException e) {</span>
+<span class="nc" id="L423">                            Log.error(&quot;Unable to route packet &quot; + packet.toXML(), e);</span>
+<span class="nc" id="L424">                        }</span>
+                    }
+                    else {
+                        // This is a route to a local component hosted in other node
+<span class="nc bnc" id="L428" title="All 2 branches missed.">                        if (remotePacketRouter != null) {</span>
+<span class="nc" id="L429">                            routed = remotePacketRouter.routePacket(nodeID.toByteArray(), jid, packet);</span>
+<span class="nc bnc" id="L430" title="All 2 branches missed.">                            if (routed) {</span>
+<span class="nc" id="L431">                                break;</span>
+                            }
+                        }
+                    }
+<span class="nc" id="L435">                }</span>
+            }
+        }
+<span class="nc" id="L438">        return routed;</span>
+    }
+
+    /**
+     * Routes packets that are sent to other XMPP domains than the local XMPP
+     * domain.
+     * 
+     * @param jid
+     *            the recipient of the packet to route.
+     * @param packet
+     *            the packet to route.
+     * @throws PacketException
+     *             thrown if the packet is malformed (results in the sender's
+     *             session being shutdown).
+     * @return {@code true} if the packet was routed successfully,
+     *         {@code false} otherwise.
+     */
+    private boolean routeToRemoteDomain(JID jid, Packet packet, boolean routed)
+    {
+<span class="nc bnc" id="L457" title="All 2 branches missed.">        if ( !JiveGlobals.getBooleanProperty( ConnectionSettings.Server.ALLOW_ANONYMOUS_OUTBOUND_DATA, false ) )</span>
+        {
+            // Disallow anonymous local users to send data to other domains than the local domain.
+<span class="nc bnc" id="L460" title="All 2 branches missed.">            if ( isAnonymousRoute( packet.getFrom() ) )</span>
+            {
+<span class="nc" id="L462">                Log.info( &quot;The anonymous user '{}' attempted to send data to '{}', which is on a remote domain. Openfire is configured to not allow anonymous users to send data to remote domains.&quot;, packet.getFrom(), jid );</span>
+<span class="nc" id="L463">                routed = false;</span>
+<span class="nc" id="L464">                return routed;</span>
+            }
+        }
+
+<span class="nc" id="L468">        DomainPair pair = new DomainPair(packet.getFrom().getDomain(), jid.getDomain());</span>
+<span class="nc" id="L469">        NodeID nodeID = serversCache.get(pair);</span>
+<span class="nc bnc" id="L470" title="All 2 branches missed.">        if (nodeID != null) {</span>
+<span class="nc bnc" id="L471" title="All 2 branches missed.">            if (server.getNodeID().equals(nodeID)) {</span>
+                // This is a route to a remote server connected from this node
+                try {
+<span class="nc" id="L474">                    localRoutingTable.getRoute(pair).process(packet);</span>
+<span class="nc" id="L475">                    routed = true;</span>
+<span class="nc" id="L476">                } catch (UnauthorizedException e) {</span>
+<span class="nc" id="L477">                    Log.error(&quot;Unable to route packet &quot; + packet.toXML(), e);</span>
+<span class="nc" id="L478">                }</span>
+            }
+            else {
+                // This is a route to a remote server connected from other node
+<span class="nc bnc" id="L482" title="All 2 branches missed.">                if (remotePacketRouter != null) {</span>
+<span class="nc" id="L483">                    routed = remotePacketRouter.routePacket(nodeID.toByteArray(), jid, packet);</span>
+                }
+            }
+        }
+<span class="nc bnc" id="L487" title="All 2 branches missed.">        else if (!RemoteServerManager.canAccess(jid.getDomain())) { // Check if the remote domain is in the blacklist</span>
+<span class="nc" id="L488">            Log.info( &quot;Will not route: Remote domain {} is not accessible according to our configuration (typical causes: server federation is disabled, or domain is blacklisted).&quot;, jid.getDomain() );</span>
+<span class="nc" id="L489">            routed = false;</span>
+        }
+        else {
+            // Return a promise of a remote session. This object will queue packets pending
+            // to be sent to remote servers
+<span class="nc" id="L494">            OutgoingSessionPromise.getInstance().process(packet);</span>
+<span class="nc" id="L495">            routed = true;</span>
+        }
+<span class="nc" id="L497">        return routed;</span>
+    }
+    
+    /**
+     * Returns true if the specified packet must only be route to available client sessions.
+     *
+     * @param packet the packet to route.
+     * @param fromServer true if the packet was created by the server.
+     * @return true if the specified packet must only be route to available client sessions.
+     */
+    private boolean routeOnlyAvailable(Packet packet, boolean fromServer) {
+<span class="nc bnc" id="L508" title="All 2 branches missed.">        if (fromServer) {</span>
+            // Packets created by the server (no matter their FROM value) must always be delivered no
+            // matter the available presence of the user
+<span class="nc" id="L511">            return false;</span>
+        }
+<span class="nc" id="L513">        boolean onlyAvailable = true;</span>
+<span class="nc" id="L514">        JID from = packet.getFrom();</span>
+<span class="nc bnc" id="L515" title="All 2 branches missed.">        boolean hasSender = from != null;</span>
+<span class="nc bnc" id="L516" title="All 2 branches missed.">        if (packet instanceof IQ) {</span>
+<span class="nc bnc" id="L517" title="All 6 branches missed.">            onlyAvailable = hasSender &amp;&amp; !(serverName.equals(from.getDomain()) &amp;&amp; from.getResource() == null) &amp;&amp;</span>
+<span class="nc bnc" id="L518" title="All 2 branches missed.">                    !componentsCache.containsKey(from.getDomain());</span>
+        }
+<span class="nc bnc" id="L520" title="All 4 branches missed.">        else if (packet instanceof Message || packet instanceof Presence) {</span>
+<span class="nc bnc" id="L521" title="All 2 branches missed.">            onlyAvailable = !hasSender ||</span>
+<span class="nc bnc" id="L522" title="All 4 branches missed.">                    (!serverName.equals(from.toString()) &amp;&amp; !componentsCache.containsKey(from.getDomain()));</span>
+        }
+<span class="nc" id="L524">        return onlyAvailable;</span>
+    }
+
+    /**
+     * Deliver the message sent to the bare JID of a local user to the best connected resource. If the
+     * target user is not online then messages will be stored offline according to the offline strategy.
+     * However, if the user is connected from only one resource then the message will be delivered to
+     * that resource. In the case that the user is connected from many resources the logic will be the
+     * following:
+     * &lt;ol&gt;
+     *  &lt;li&gt;Select resources with highest priority&lt;/li&gt;
+     *  &lt;li&gt;Select resources with highest show value (chat, available, away, xa, dnd)&lt;/li&gt;
+     *  &lt;li&gt;Select resource with most recent activity&lt;/li&gt;
+     * &lt;/ol&gt;
+     *
+     * Admins can override the above logic and just send the message to all connected resources
+     * with highest priority by setting the system property {@code route.all-resources} to
+     * {@code true}.
+     *
+     * @param recipientJID the bare JID of the target local user.
+     * @param packet the message to send.
+     * @return true if at least one target session was found
+     */
+    private boolean routeToBareJID(JID recipientJID, Message packet, boolean isPrivate) {
+<span class="nc" id="L548">        List&lt;ClientSession&gt; sessions = new ArrayList&lt;&gt;();</span>
+        // Get existing AVAILABLE sessions of this user or AVAILABLE to the sender of the packet
+<span class="nc bnc" id="L550" title="All 2 branches missed.">        for (JID address : getRoutes(recipientJID, packet.getFrom())) {</span>
+<span class="nc" id="L551">            ClientSession session = getClientRoute(address);</span>
+<span class="nc bnc" id="L552" title="All 4 branches missed.">            if (session != null &amp;&amp; session.isInitialized()) {</span>
+<span class="nc" id="L553">                sessions.add(session);</span>
+            }
+<span class="nc" id="L555">        }</span>
+
+        // Get the sessions with non-negative priority for message carbons processing.
+<span class="nc" id="L558">        List&lt;ClientSession&gt; nonNegativePrioritySessions = getNonNegativeSessions(sessions, 0);</span>
+
+<span class="nc bnc" id="L560" title="All 2 branches missed.">        if (packet.getType() == Message.Type.error) {</span>
+            // Errors should be dropped at this point.
+<span class="nc" id="L562">            Log.debug(&quot;Error stanza to bare JID discarded: {}&quot;, packet.toXML());</span>
+<span class="nc" id="L563">            return true; // Not offline.</span>
+        }
+
+<span class="nc bnc" id="L566" title="All 2 branches missed.">        if (packet.getType() == Message.Type.groupchat) {</span>
+            // Surreal message type; cannot occur.
+<span class="nc" id="L568">            Log.debug(&quot;Groupchat stanza to bare JID discarded: {}&quot;, packet.toXML());</span>
+<span class="nc" id="L569">            return false; // Maybe offline has an idea?</span>
+        }
+
+<span class="nc bnc" id="L572" title="All 2 branches missed.">        if (nonNegativePrioritySessions.isEmpty()) {</span>
+            // No session is available so store offline
+<span class="nc" id="L574">            Log.debug(&quot;Unable to route packet. No session is available so store offline. {} &quot;, packet.toXML());</span>
+<span class="nc" id="L575">            return false;</span>
+        }
+
+        // Check for message carbons enabled sessions and send the message to them.
+<span class="nc bnc" id="L579" title="All 2 branches missed.">        for (ClientSession session : nonNegativePrioritySessions) {</span>
+<span class="nc bnc" id="L580" title="All 2 branches missed.">            if (packet.getType() == Message.Type.headline) {</span>
+                // Headline messages are broadcast.
+<span class="nc" id="L582">                session.process(packet);</span>
+            // Deliver to each session, if is message carbons enabled.
+<span class="nc bnc" id="L584" title="All 2 branches missed.">            } else if (shouldCarbonCopyToResource(session, packet, isPrivate)) {</span>
+<span class="nc" id="L585">                session.process(packet);</span>
+            // Deliver to each session if property route.really-all-resources is true
+            // (in case client does not support carbons)
+<span class="nc bnc" id="L588" title="All 2 branches missed.">            } else if (JiveGlobals.getBooleanProperty(&quot;route.really-all-resources&quot;, false)) {</span>
+<span class="nc" id="L589">                session.process(packet);</span>
+            }
+<span class="nc" id="L591">        }</span>
+
+<span class="nc bnc" id="L593" title="All 2 branches missed.">        if (packet.getType() == Message.Type.headline) {</span>
+<span class="nc" id="L594">            return true;</span>
+        }
+
+<span class="nc bnc" id="L597" title="All 2 branches missed.">        if (JiveGlobals.getBooleanProperty(&quot;route.really-all-resources&quot;, false)) {</span>
+<span class="nc" id="L598">            return true;</span>
+        }
+
+        // Get the highest priority sessions for normal processing.
+<span class="nc" id="L602">        List&lt;ClientSession&gt; highestPrioritySessions = getHighestPrioritySessions(nonNegativePrioritySessions);</span>
+
+<span class="nc bnc" id="L604" title="All 2 branches missed.">        if (highestPrioritySessions.size() == 1) {</span>
+            // Found only one session so deliver message (if it hasn't already been processed because it has message carbons enabled)
+<span class="nc bnc" id="L606" title="All 2 branches missed.">            if (!shouldCarbonCopyToResource(highestPrioritySessions.get(0), packet, isPrivate)) {</span>
+<span class="nc" id="L607">                highestPrioritySessions.get(0).process(packet);</span>
+            }
+        }
+        else {
+            // Many sessions have the highest priority (be smart now) :)
+<span class="nc bnc" id="L612" title="All 2 branches missed.">            if (!JiveGlobals.getBooleanProperty(&quot;route.all-resources&quot;, false)) {</span>
+                // Sort sessions by show value (e.g. away, xa)
+<span class="nc" id="L614">                Collections.sort(highestPrioritySessions, new Comparator&lt;ClientSession&gt;() {</span>
+
+                    @Override
+                    public int compare(ClientSession o1, ClientSession o2) {
+<span class="nc" id="L618">                        int thisVal = getShowValue(o1);</span>
+<span class="nc" id="L619">                        int anotherVal = getShowValue(o2);</span>
+<span class="nc bnc" id="L620" title="All 4 branches missed.">                        return (thisVal&lt;anotherVal ? -1 : (thisVal==anotherVal ? 0 : 1));</span>
+                    }
+
+                    /**
+                     * Priorities are: chat, available, away, xa, dnd.
+                     */
+                    private int getShowValue(ClientSession session) {
+<span class="nc" id="L627">                        Presence.Show show = session.getPresence().getShow();</span>
+<span class="nc bnc" id="L628" title="All 2 branches missed.">                        if (show == Presence.Show.chat) {</span>
+<span class="nc" id="L629">                            return 1;</span>
+                        }
+<span class="nc bnc" id="L631" title="All 2 branches missed.">                        else if (show == null) {</span>
+<span class="nc" id="L632">                            return 2;</span>
+                        }
+<span class="nc bnc" id="L634" title="All 2 branches missed.">                        else if (show == Presence.Show.away) {</span>
+<span class="nc" id="L635">                            return 3;</span>
+                        }
+<span class="nc bnc" id="L637" title="All 2 branches missed.">                        else if (show == Presence.Show.xa) {</span>
+<span class="nc" id="L638">                            return 4;</span>
+                        }
+                        else {
+<span class="nc" id="L641">                            return 5;</span>
+                        }
+                    }
+                });
+
+                // Get same sessions with same max show value
+<span class="nc" id="L647">                List&lt;ClientSession&gt; targets = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L648">                Presence.Show showFilter = highestPrioritySessions.get(0).getPresence().getShow();</span>
+<span class="nc bnc" id="L649" title="All 2 branches missed.">                for (ClientSession session : highestPrioritySessions) {</span>
+<span class="nc bnc" id="L650" title="All 2 branches missed.">                    if (session.getPresence().getShow() == showFilter) {</span>
+<span class="nc" id="L651">                        targets.add(session);</span>
+                    }
+                    else {
+                        break;
+                    }
+<span class="nc" id="L656">                }</span>
+
+                // Get session with most recent activity (and highest show value)
+<span class="nc" id="L659">                Collections.sort(targets, new Comparator&lt;ClientSession&gt;() {</span>
+                    @Override
+                    public int compare(ClientSession o1, ClientSession o2) {
+<span class="nc" id="L662">                        return o2.getLastActiveDate().compareTo(o1.getLastActiveDate());</span>
+                    }
+                });
+
+                // Make sure, we don't send the packet again, if it has already been sent by message carbons.
+<span class="nc" id="L667">                ClientSession session = targets.get(0);</span>
+<span class="nc bnc" id="L668" title="All 2 branches missed.">                if (!shouldCarbonCopyToResource(session, packet, isPrivate)) {</span>
+                    // Deliver stanza to session with highest priority, highest show value and most recent activity
+<span class="nc" id="L670">                    session.process(packet);</span>
+                }
+<span class="nc" id="L672">            }</span>
+            else {
+<span class="nc bnc" id="L674" title="All 2 branches missed.">                for (ClientSession session : highestPrioritySessions) {</span>
+                    // Make sure, we don't send the packet again, if it has already been sent by message carbons.
+<span class="nc bnc" id="L676" title="All 2 branches missed.">                    if (!shouldCarbonCopyToResource(session, packet, isPrivate)) {</span>
+<span class="nc" id="L677">                        session.process(packet);</span>
+                    }
+<span class="nc" id="L679">                }</span>
+            }
+        }
+<span class="nc" id="L682">        return true;</span>
+    }
+
+    private boolean shouldCarbonCopyToResource(ClientSession session, Message message, boolean isPrivate) {
+<span class="nc bnc" id="L686" title="All 6 branches missed.">        return !isPrivate &amp;&amp; session.isMessageCarbonsEnabled() &amp;&amp; message.getType() == Message.Type.chat;</span>
+    }
+
+    /**
+     * Returns the sessions that had the highest presence priority that is non-negative.
+     *
+     * @param sessions the list of user sessions that filter and get the ones with highest priority.
+     * @return the sessions that had the highest presence non-negative priority or empty collection
+     *         if all were negative.
+     */
+    private List&lt;ClientSession&gt; getHighestPrioritySessions(List&lt;ClientSession&gt; sessions) {
+<span class="nc" id="L697">        int highest = Integer.MIN_VALUE;</span>
+        // Get the highest priority amongst the sessions
+<span class="nc bnc" id="L699" title="All 2 branches missed.">        for (ClientSession session : sessions) {</span>
+<span class="nc" id="L700">            int priority = session.getPresence().getPriority();</span>
+<span class="nc bnc" id="L701" title="All 4 branches missed.">            if (priority &gt;= 0 &amp;&amp; priority &gt; highest) {</span>
+<span class="nc" id="L702">                highest = priority;</span>
+            }
+<span class="nc" id="L704">        }</span>
+        // Get sessions that have the highest priority
+<span class="nc" id="L706">        return getNonNegativeSessions(sessions, highest);</span>
+    }
+
+    /**
+     * Gets the non-negative session from a minimal priority.
+     *
+     * @param sessions The sessions.
+     * @param min      The minimal priority.
+     * @return The filtered sessions.
+     */
+    private List&lt;ClientSession&gt; getNonNegativeSessions(List&lt;ClientSession&gt; sessions, int min) {
+<span class="nc bnc" id="L717" title="All 2 branches missed.">        if (min &lt; 0) {</span>
+<span class="nc" id="L718">            return Collections.emptyList();</span>
+        }
+        // Get sessions with priority &gt;= min
+<span class="nc" id="L721">        List&lt;ClientSession&gt; answer = new ArrayList&lt;&gt;(sessions.size());</span>
+<span class="nc bnc" id="L722" title="All 2 branches missed.">        for (ClientSession session : sessions) {</span>
+<span class="nc bnc" id="L723" title="All 2 branches missed.">            if (session.getPresence().getPriority() &gt;= min) {</span>
+<span class="nc" id="L724">                answer.add(session);</span>
+            }
+<span class="nc" id="L726">        }</span>
+<span class="nc" id="L727">        return answer;</span>
+    }
+
+    @Override
+    public ClientSession getClientRoute(JID jid) {
+        // Check if this session is hosted by this cluster node
+<span class="nc" id="L733">        ClientSession session = (ClientSession) localRoutingTable.getRoute(jid);</span>
+<span class="nc bnc" id="L734" title="All 2 branches missed.">        if (session == null) {</span>
+            // The session is not in this JVM so assume remote
+<span class="nc" id="L736">            RemoteSessionLocator locator = server.getRemoteSessionLocator();</span>
+<span class="nc bnc" id="L737" title="All 2 branches missed.">            if (locator != null) {</span>
+                // Check if the session is hosted by other cluster node
+<span class="nc" id="L739">                ClientRoute route = usersCache.get(jid.toString());</span>
+<span class="nc bnc" id="L740" title="All 2 branches missed.">                if (route == null) {</span>
+<span class="nc" id="L741">                    route = anonymousUsersCache.get(jid.toString());</span>
+                }
+<span class="nc bnc" id="L743" title="All 2 branches missed.">                if (route != null) {</span>
+<span class="nc" id="L744">                    session = locator.getClientSession(route.getNodeID().toByteArray(), jid);</span>
+                }
+            }
+        }
+<span class="nc" id="L748">        return session;</span>
+    }
+
+    @Override
+    public Collection&lt;ClientSession&gt; getClientsRoutes(boolean onlyLocal) {
+        // Add sessions hosted by this cluster node
+<span class="nc" id="L754">        Collection&lt;ClientSession&gt; sessions = new ArrayList&lt;ClientSession&gt;(localRoutingTable.getClientRoutes());</span>
+<span class="nc bnc" id="L755" title="All 2 branches missed.">        if (!onlyLocal) {</span>
+            // Add sessions not hosted by this JVM
+<span class="nc" id="L757">            RemoteSessionLocator locator = server.getRemoteSessionLocator();</span>
+<span class="nc bnc" id="L758" title="All 2 branches missed.">            if (locator != null) {</span>
+                // Add sessions of non-anonymous users hosted by other cluster nodes
+<span class="nc bnc" id="L760" title="All 2 branches missed.">                for (Map.Entry&lt;String, ClientRoute&gt; entry : usersCache.entrySet()) {</span>
+<span class="nc" id="L761">                    ClientRoute route = entry.getValue();</span>
+<span class="nc bnc" id="L762" title="All 2 branches missed.">                    if (!server.getNodeID().equals(route.getNodeID())) {</span>
+<span class="nc" id="L763">                        sessions.add(locator.getClientSession(route.getNodeID().toByteArray(), new JID(entry.getKey())));</span>
+                    }
+<span class="nc" id="L765">                }</span>
+                // Add sessions of anonymous users hosted by other cluster nodes
+<span class="nc bnc" id="L767" title="All 2 branches missed.">                for (Map.Entry&lt;String, ClientRoute&gt; entry : anonymousUsersCache.entrySet()) {</span>
+<span class="nc" id="L768">                    ClientRoute route = entry.getValue();</span>
+<span class="nc bnc" id="L769" title="All 2 branches missed.">                    if (!server.getNodeID().equals(route.getNodeID())) {</span>
+<span class="nc" id="L770">                        sessions.add(locator.getClientSession(route.getNodeID().toByteArray(), new JID(entry.getKey())));</span>
+                    }
+<span class="nc" id="L772">                }</span>
+            }
+        }
+<span class="nc" id="L775">        return sessions;</span>
+    }
+
+    @Override
+    public OutgoingServerSession getServerRoute(DomainPair jids) {
+        // Check if this session is hosted by this cluster node
+<span class="nc" id="L781">        OutgoingServerSession session = (OutgoingServerSession) localRoutingTable.getRoute(jids);</span>
+<span class="nc bnc" id="L782" title="All 2 branches missed.">        if (session == null) {</span>
+            // The session is not in this JVM so assume remote
+<span class="nc" id="L784">            RemoteSessionLocator locator = server.getRemoteSessionLocator();</span>
+<span class="nc bnc" id="L785" title="All 2 branches missed.">            if (locator != null) {</span>
+                // Check if the session is hosted by other cluster node
+<span class="nc" id="L787">                NodeID nodeID = serversCache.get(jids);</span>
+<span class="nc bnc" id="L788" title="All 2 branches missed.">                if (nodeID != null) {</span>
+<span class="nc" id="L789">                    session = locator.getOutgoingServerSession(nodeID.toByteArray(), jids);</span>
+                }
+            }
+        }
+<span class="nc" id="L793">        return session;</span>
+    }
+
+    @Override
+    public Collection&lt;String&gt; getServerHostnames() {
+<span class="nc" id="L798">        Set&lt;String&gt; domains = new HashSet&lt;&gt;();</span>
+<span class="nc bnc" id="L799" title="All 2 branches missed.">        for (DomainPair pair : serversCache.keySet()) {</span>
+<span class="nc" id="L800">            domains.add(pair.getRemote());</span>
+<span class="nc" id="L801">        }</span>
+<span class="nc" id="L802">        return domains;</span>
+    }
+
+    @Override
+    public Collection&lt;DomainPair&gt; getServerRoutes() {
+<span class="nc" id="L807">        return serversCache.keySet();</span>
+    }
+
+    @Override
+    public int getServerSessionsCount() {
+<span class="nc" id="L812">        return localRoutingTable.getServerRoutes().size();</span>
+    }
+
+    @Override
+    public Collection&lt;String&gt; getComponentsDomains() {
+<span class="nc" id="L817">        return componentsCache.keySet();</span>
+    }
+
+    @Override
+    public boolean hasClientRoute(JID jid) {
+<span class="nc bnc" id="L822" title="All 4 branches missed.">        return usersCache.containsKey(jid.toString()) || isAnonymousRoute(jid);</span>
+    }
+
+    @Override
+    public boolean isAnonymousRoute(JID jid) {
+<span class="nc" id="L827">        return anonymousUsersCache.containsKey(jid.toString());</span>
+    }
+
+    @Override
+    public boolean isLocalRoute(JID jid) {
+<span class="nc" id="L832">        return localRoutingTable.isLocalRoute(jid);</span>
+    }
+
+    @Override
+    public boolean hasServerRoute(DomainPair pair) {
+<span class="nc" id="L837">        return serversCache.containsKey(pair);</span>
+    }
+
+    @Override
+    public boolean hasComponentRoute(JID jid) {
+<span class="nc" id="L842">        return componentsCache.containsKey(jid.getDomain());</span>
+    }
+
+    @Override
+    public List&lt;JID&gt; getRoutes(JID route, JID requester) {
+<span class="nc" id="L847">        List&lt;JID&gt; jids = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L848" title="All 2 branches missed.">        if (serverName.equals(route.getDomain())) {</span>
+            // Address belongs to local user
+<span class="nc bnc" id="L850" title="All 2 branches missed.">            if (route.getResource() != null) {</span>
+                // Address is a full JID of a user
+<span class="nc" id="L852">                ClientRoute clientRoute = usersCache.get(route.toString());</span>
+<span class="nc bnc" id="L853" title="All 2 branches missed.">                if (clientRoute == null) {</span>
+<span class="nc" id="L854">                    clientRoute = anonymousUsersCache.get(route.toString());</span>
+                }
+<span class="nc bnc" id="L856" title="All 2 branches missed.">                if (clientRoute != null &amp;&amp;</span>
+<span class="nc bnc" id="L857" title="All 4 branches missed.">                        (clientRoute.isAvailable() || presenceUpdateHandler.hasDirectPresence(route, requester))) {</span>
+<span class="nc" id="L858">                    jids.add(route);</span>
+                }
+<span class="nc" id="L860">            }</span>
+            else {
+                // Address is a bare JID so return all AVAILABLE resources of user
+<span class="nc" id="L863">                Lock lock = CacheFactory.getLock(route.toBareJID(), usersSessions);</span>
+                try {
+<span class="nc" id="L865">                    lock.lock(); // temporarily block new sessions for this JID</span>
+<span class="nc" id="L866">                    Collection&lt;String&gt; sessions = usersSessions.get(route.toBareJID());</span>
+<span class="nc bnc" id="L867" title="All 2 branches missed.">                    if (sessions != null) {</span>
+                        // Select only available sessions
+<span class="nc bnc" id="L869" title="All 2 branches missed.">                        for (String jid : sessions) {</span>
+<span class="nc" id="L870">                            ClientRoute clientRoute = usersCache.get(jid);</span>
+<span class="nc bnc" id="L871" title="All 2 branches missed.">                            if (clientRoute == null) {</span>
+<span class="nc" id="L872">                                clientRoute = anonymousUsersCache.get(jid);</span>
+                            }
+<span class="nc bnc" id="L874" title="All 4 branches missed.">                            if (clientRoute != null &amp;&amp; (clientRoute.isAvailable() ||</span>
+<span class="nc bnc" id="L875" title="All 2 branches missed.">                                    presenceUpdateHandler.hasDirectPresence(new JID(jid), requester))) {</span>
+<span class="nc" id="L876">                                jids.add(new JID(jid));</span>
+                            }
+<span class="nc" id="L878">                        }</span>
+                    }
+                }
+                finally {
+<span class="nc" id="L882">                    lock.unlock();</span>
+<span class="nc" id="L883">                }</span>
+<span class="nc" id="L884">            }</span>
+        }
+<span class="nc bnc" id="L886" title="All 2 branches missed.">        else if (route.getDomain().contains(serverName)) {</span>
+            // Packet sent to component hosted in this server
+<span class="nc bnc" id="L888" title="All 2 branches missed.">            if (componentsCache.containsKey(route.getDomain())) {</span>
+<span class="nc" id="L889">                jids.add(new JID(route.getDomain()));</span>
+            }
+        }
+        else {
+            // Packet sent to remote server
+<span class="nc" id="L894">            jids.add(route);</span>
+        }
+<span class="nc" id="L896">        return jids;</span>
+    }
+
+    @Override
+    public boolean removeClientRoute(JID route) {
+<span class="nc" id="L901">        boolean anonymous = false;</span>
+<span class="nc" id="L902">        String address = route.toString();</span>
+<span class="nc" id="L903">        ClientRoute clientRoute = null;</span>
+<span class="nc" id="L904">        Lock lockU = CacheFactory.getLock(address, usersCache);</span>
+        try {
+<span class="nc" id="L906">            lockU.lock();</span>
+<span class="nc" id="L907">            clientRoute = usersCache.remove(address);</span>
+        }
+        finally {
+<span class="nc" id="L910">            lockU.unlock();</span>
+<span class="nc" id="L911">        }</span>
+<span class="nc bnc" id="L912" title="All 2 branches missed.">        if (clientRoute == null) {</span>
+<span class="nc" id="L913">            Lock lockA = CacheFactory.getLock(address, anonymousUsersCache);</span>
+            try {
+<span class="nc" id="L915">                lockA.lock();</span>
+<span class="nc" id="L916">                clientRoute = anonymousUsersCache.remove(address);</span>
+<span class="nc" id="L917">                anonymous = true;</span>
+            }
+            finally {
+<span class="nc" id="L920">                lockA.unlock();</span>
+<span class="nc" id="L921">            }</span>
+        }
+<span class="nc bnc" id="L923" title="All 4 branches missed.">        if (clientRoute != null &amp;&amp; route.getResource() != null) {</span>
+<span class="nc" id="L924">            Lock lock = CacheFactory.getLock(route.toBareJID(), usersSessions);</span>
+            try {
+<span class="nc" id="L926">                lock.lock();</span>
+<span class="nc bnc" id="L927" title="All 2 branches missed.">                if (anonymous) {</span>
+<span class="nc" id="L928">                    usersSessions.remove(route.toBareJID());</span>
+                }
+                else {
+<span class="nc" id="L931">                    HashSet&lt;String&gt; jids = usersSessions.get(route.toBareJID());</span>
+<span class="nc bnc" id="L932" title="All 2 branches missed.">                    if (jids != null) {</span>
+<span class="nc" id="L933">                        jids.remove(route.toString());</span>
+<span class="nc bnc" id="L934" title="All 2 branches missed.">                        if (!jids.isEmpty()) {</span>
+<span class="nc" id="L935">                            usersSessions.put(route.toBareJID(), jids);</span>
+                        }
+                        else {
+<span class="nc" id="L938">                            usersSessions.remove(route.toBareJID());</span>
+                        }
+                    }
+                }
+            }
+            finally {
+<span class="nc" id="L944">                lock.unlock();</span>
+<span class="nc" id="L945">            }</span>
+        }
+<span class="nc" id="L947">        Log.debug(&quot;Removing client route {}&quot;, route);</span>
+<span class="nc" id="L948">        localRoutingTable.removeRoute(new DomainPair(&quot;&quot;, route.toString()));</span>
+<span class="nc bnc" id="L949" title="All 2 branches missed.">        return clientRoute != null;</span>
+    }
+
+    @Override
+    public boolean removeServerRoute(DomainPair route) {
+        boolean removed;
+<span class="nc" id="L955">        Lock lock = CacheFactory.getLock(route, serversCache);</span>
+        try {
+<span class="nc" id="L957">            lock.lock();</span>
+<span class="nc bnc" id="L958" title="All 2 branches missed.">            removed = serversCache.remove(route) != null;</span>
+        }
+        finally {
+<span class="nc" id="L961">            lock.unlock();</span>
+<span class="nc" id="L962">        }</span>
+<span class="nc" id="L963">        localRoutingTable.removeRoute(route);</span>
+<span class="nc" id="L964">        return removed;</span>
+    }
+
+    @Override
+    public boolean removeComponentRoute(JID route) {
+<span class="nc" id="L969">        return removeComponentRoute(route, server.getNodeID());</span>
+    }
+
+    /**
+     * Remove local or remote component route.
+     *
+     * @param route the route of the component to be removed.
+     * @param nodeID The node to which the to-be-removed component was connected to.
+     */
+    private boolean removeComponentRoute(JID route, NodeID nodeID) {
+<span class="nc" id="L979">        String address = route.getDomain();</span>
+<span class="nc" id="L980">        boolean removed = false;</span>
+<span class="nc" id="L981">        Lock lock = CacheFactory.getLock(address, componentsCache);</span>
+        try {
+<span class="nc" id="L983">            lock.lock();</span>
+<span class="nc" id="L984">            HashSet&lt;NodeID&gt; nodes = componentsCache.get(address);</span>
+<span class="nc bnc" id="L985" title="All 2 branches missed.">            if (nodes != null) {</span>
+<span class="nc" id="L986">                removed = nodes.remove(nodeID);</span>
+<span class="nc bnc" id="L987" title="All 2 branches missed.">                if (nodes.isEmpty()) {</span>
+<span class="nc" id="L988">                    componentsCache.remove(address);</span>
+                }
+                else {
+<span class="nc" id="L991">                    componentsCache.put(address, nodes);</span>
+                }
+            }
+        } finally {
+<span class="nc" id="L995">            lock.unlock();</span>
+<span class="nc" id="L996">        }</span>
+<span class="nc" id="L997">        localRoutingTable.removeRoute(new DomainPair(&quot;&quot;, address));</span>
+<span class="nc" id="L998">        return removed;</span>
+    }
+
+    @Override
+    public void setRemotePacketRouter(RemotePacketRouter remotePacketRouter) {
+<span class="nc" id="L1003">        this.remotePacketRouter = remotePacketRouter;</span>
+<span class="nc" id="L1004">    }</span>
+
+    @Override
+    public RemotePacketRouter getRemotePacketRouter() {
+<span class="nc" id="L1008">        return remotePacketRouter;</span>
+    }
+
+    @Override
+    public void initialize(XMPPServer server) {
+<span class="nc" id="L1013">        super.initialize(server);</span>
+<span class="nc" id="L1014">        this.server = server;</span>
+<span class="nc" id="L1015">        serverName = server.getServerInfo().getXMPPDomain();</span>
+<span class="nc" id="L1016">        iqRouter = server.getIQRouter();</span>
+<span class="nc" id="L1017">        messageRouter = server.getMessageRouter();</span>
+<span class="nc" id="L1018">        presenceRouter = server.getPresenceRouter();</span>
+<span class="nc" id="L1019">        presenceUpdateHandler = server.getPresenceUpdateHandler();</span>
+        // Listen to cluster events
+<span class="nc" id="L1021">        ClusterManager.addListener(this);</span>
+<span class="nc" id="L1022">    }</span>
+
+    @Override
+    public void start() throws IllegalStateException {
+<span class="nc" id="L1026">        super.start();</span>
+<span class="nc" id="L1027">        localRoutingTable.start();</span>
+<span class="nc" id="L1028">    }</span>
+
+    @Override
+    public void stop() {
+<span class="nc" id="L1032">        super.stop();</span>
+<span class="nc" id="L1033">        localRoutingTable.stop();</span>
+
+        try
+        {
+            // Purge our own components from the cache for the benefit of other cluster nodes.
+<span class="nc" id="L1038">            CacheUtil.removeValueFromMultiValuedCache( componentsCache, XMPPServer.getInstance().getNodeID() );</span>
+        }
+<span class="nc" id="L1040">        catch ( Exception e )</span>
+        {
+<span class="nc" id="L1042">            Log.warn( &quot;An exception occurred while trying to remove locally connected external components from the clustered cache. Other cluster nodes might continue to see our external components, even though we this instance is stopping.&quot;, e );</span>
+<span class="nc" id="L1043">        }</span>
+<span class="nc" id="L1044">    }</span>
+
+    @Override
+    public void joinedCluster()
+    {
+        // Upon joining a cluster, the server can get a new ID. Here, all old IDs are replaced with the new identity.
+<span class="nc" id="L1050">        final NodeID defaultNodeID = server.getDefaultNodeID();</span>
+<span class="nc" id="L1051">        final NodeID nodeID = server.getNodeID();</span>
+<span class="nc bnc" id="L1052" title="All 2 branches missed.">        if ( !defaultNodeID.equals( nodeID ) ) // In more recent versions of Openfire, the ID does not change.</span>
+        {
+<span class="nc" id="L1054">            CacheUtil.replaceValueInCache( serversCache, defaultNodeID, nodeID );</span>
+<span class="nc" id="L1055">            CacheUtil.replaceValueInMultivaluedCache( componentsCache, defaultNodeID, nodeID );</span>
+<span class="nc" id="L1056">            CacheUtil.replaceValueInCacheByMapping( usersCache,</span>
+<span class="nc bnc" id="L1057" title="All 2 branches missed.">                                                    clientRoute -&gt; { if ( clientRoute.getNodeID().equals( defaultNodeID ) ) { clientRoute.setNodeID( nodeID ); } return clientRoute; } );</span>
+<span class="nc" id="L1058">            CacheUtil.replaceValueInCacheByMapping( anonymousUsersCache,</span>
+<span class="nc bnc" id="L1059" title="All 2 branches missed.">                                                    clientRoute -&gt; { if ( clientRoute.getNodeID().equals( defaultNodeID ) ) { clientRoute.setNodeID( nodeID ); } return clientRoute; } );</span>
+        }
+        // Broadcast presence of local sessions to remote sessions when subscribed to presence
+        // Probe presences of remote sessions when subscribed to presence of local session
+        // Send pending subscription requests to local sessions from remote sessions
+        // Deliver offline messages sent to local sessions that were unavailable in other nodes
+        // Send available presences of local sessions to other resources of the same user
+<span class="nc" id="L1066">        PresenceUpdateHandler presenceUpdateHandler = XMPPServer.getInstance().getPresenceUpdateHandler();</span>
+<span class="nc bnc" id="L1067" title="All 2 branches missed.">        for (LocalClientSession session : localRoutingTable.getClientRoutes()) {</span>
+            // Simulate that the local session has just became available
+<span class="nc" id="L1069">            session.setInitialized(false);</span>
+            // Simulate that current session presence has just been received
+<span class="nc" id="L1071">            presenceUpdateHandler.process(session.getPresence());</span>
+<span class="nc" id="L1072">        }</span>
+<span class="nc" id="L1073">    }</span>
+
+    @Override
+    public void joinedCluster(byte[] nodeID) {
+        // Do nothing
+<span class="nc" id="L1078">    }</span>
+
+    @Override
+    public void leftCluster() {
+<span class="nc bnc" id="L1082" title="All 2 branches missed.">        if (!XMPPServer.getInstance().isShuttingDown()) {</span>
+            // Upon leaving a cluster, the server uses its non-clustered/default ID again. Here, all clustered IDs are replaced with the new identity.
+<span class="nc" id="L1084">            final NodeID defaultNodeID = server.getDefaultNodeID();</span>
+<span class="nc" id="L1085">            final NodeID nodeID = server.getNodeID();</span>
+<span class="nc bnc" id="L1086" title="All 2 branches missed.">            if ( !defaultNodeID.equals( nodeID ) ) // In more recent versions of Openfire, the ID does not change.</span>
+            {
+<span class="nc" id="L1088">                CacheUtil.replaceValueInCache( serversCache, nodeID, defaultNodeID );</span>
+<span class="nc" id="L1089">                CacheUtil.replaceValueInMultivaluedCache( componentsCache, nodeID, defaultNodeID );</span>
+<span class="nc" id="L1090">                CacheUtil.replaceValueInCacheByMapping( usersCache,</span>
+<span class="nc bnc" id="L1091" title="All 2 branches missed.">                                                        clientRoute -&gt; { if ( clientRoute.getNodeID().equals( nodeID ) ) { clientRoute.setNodeID( defaultNodeID ); } return clientRoute; } );</span>
+<span class="nc" id="L1092">                CacheUtil.replaceValueInCacheByMapping( anonymousUsersCache,</span>
+<span class="nc bnc" id="L1093" title="All 2 branches missed.">                                                        clientRoute -&gt; { if ( clientRoute.getNodeID().equals( nodeID ) ) { clientRoute.setNodeID( defaultNodeID ); } return clientRoute; } );</span>
+            }
+            // The local cluster node left the cluster.
+            //
+            // Determine what routes were available only on other cluster nodes than the local one.
+            // These need to be cleaned up, as they're no longer available to the local cluster node.
+
+            // Drop outgoing server routes from all other nodes.
+<span class="nc" id="L1101">            final Set&lt;DomainPair&gt; removedOutgoingServerSessions = CacheUtil.retainValueInCache( serversCache, defaultNodeID );</span>
+<span class="nc" id="L1102">            removedOutgoingServerSessions.forEach( removedOutgoingServerSession -&gt; {</span>
+<span class="nc" id="L1103">                Log.debug( &quot;The local cluster node left the cluster. The outoing server session for '{}' was living on another cluster nodes, and is no longer available.&quot;, removedOutgoingServerSession.getRemote() );</span>
+<span class="nc" id="L1104">                localRoutingTable.removeRoute( removedOutgoingServerSession );</span>
+<span class="nc" id="L1105">            } );</span>
+
+            // Drop component routes from all other nodes.
+<span class="nc" id="L1108">            final Map&lt;Boolean, Map&lt;String, HashSet&lt;NodeID&gt;&gt;&gt; modified = CacheUtil.retainValueInMultiValuedCache( componentsCache, defaultNodeID );</span>
+<span class="nc" id="L1109">            modified.get( false ).keySet().forEach( removedComponentDomain -&gt; {</span>
+<span class="nc" id="L1110">                Log.debug( &quot;The local cluster node left the cluster. The component session for '{}' was living on one (or more) other cluster nodes, and is no longer available.&quot;, removedComponentDomain );</span>
+<span class="nc" id="L1111">                localRoutingTable.removeRoute(new DomainPair(&quot;&quot;, removedComponentDomain ));</span>
+<span class="nc" id="L1112">            } );</span>
+
+            // Drop routes for all client sessions connected via other cluster nodes.
+<span class="nc" id="L1115">            final List&lt;String&gt; remoteClientRoutes = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L1116" title="All 2 branches missed.">            for (Map.Entry&lt;String, ClientRoute&gt; entry : usersCache.entrySet()) {</span>
+<span class="nc bnc" id="L1117" title="All 2 branches missed.">                if (!entry.getValue().getNodeID().equals(defaultNodeID)) {</span>
+<span class="nc" id="L1118">                    remoteClientRoutes.add(entry.getKey());</span>
+                }
+<span class="nc" id="L1120">            }</span>
+<span class="nc bnc" id="L1121" title="All 2 branches missed.">            for (Map.Entry&lt;String, ClientRoute&gt; entry : anonymousUsersCache.entrySet()) {</span>
+<span class="nc bnc" id="L1122" title="All 2 branches missed.">                if (!entry.getValue().getNodeID().equals(defaultNodeID)) {</span>
+<span class="nc" id="L1123">                    remoteClientRoutes.add(entry.getKey());</span>
+                }
+<span class="nc" id="L1125">            }</span>
+<span class="nc" id="L1126">            Log.debug( &quot;The local cluster node left the cluster. A total of {} client sessions were living on one (or more) other cluster nodes, and are no longer available.&quot;, remoteClientRoutes.size() );</span>
+<span class="nc bnc" id="L1127" title="All 2 branches missed.">            for (String route : remoteClientRoutes) {</span>
+                // This call takes responsibility for cleaning up the state in RoutingTableImpl as well as SessionManager.
+                // The detour is needed, as SessionManager does not keep track what client is associated to what cluster node.
+<span class="nc" id="L1130">                SessionManager.getInstance().removeRemoteClientSession( new JID(route) );</span>
+<span class="nc" id="L1131">            }</span>
+        }
+<span class="nc" id="L1133">    }</span>
+
+    @Override
+    public void leftCluster(byte[] nodeID) {
+        
+        // When a peer server leaves the cluster, any remote routes that were
+        // associated with the defunct node must be dropped from the routing 
+        // caches that are shared by the remaining cluster member(s).
+        
+        // drop routes for all client sessions connected via the defunct cluster node
+<span class="nc" id="L1143">        Lock clientLock = CacheFactory.getLock(nodeID, usersCache);</span>
+        try {
+<span class="nc" id="L1145">            clientLock.lock();</span>
+<span class="nc" id="L1146">            List&lt;String&gt; remoteClientRoutes = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L1147" title="All 2 branches missed.">            for (Map.Entry&lt;String, ClientRoute&gt; entry : usersCache.entrySet()) {</span>
+<span class="nc bnc" id="L1148" title="All 2 branches missed.">                if (entry.getValue().getNodeID().equals(nodeID)) {</span>
+<span class="nc" id="L1149">                    remoteClientRoutes.add(entry.getKey());</span>
+                }
+<span class="nc" id="L1151">            }</span>
+<span class="nc bnc" id="L1152" title="All 2 branches missed.">            for (Map.Entry&lt;String, ClientRoute&gt; entry : anonymousUsersCache.entrySet()) {</span>
+<span class="nc bnc" id="L1153" title="All 2 branches missed.">                if (entry.getValue().getNodeID().equals(nodeID)) {</span>
+<span class="nc" id="L1154">                    remoteClientRoutes.add(entry.getKey());</span>
+                }
+<span class="nc" id="L1156">            }</span>
+<span class="nc" id="L1157">            Log.debug( &quot;Cluster node {} just left the cluster. A total of {} client sessions was living there, and are no longer available.&quot;, NodeID.getInstance( nodeID ), remoteClientRoutes.size() );</span>
+<span class="nc bnc" id="L1158" title="All 2 branches missed.">            for (String route : remoteClientRoutes) {</span>
+                // This call takes responsibility for cleaning up the state in RoutingTableImpl as well as SessionManager.
+                // The detour is needed, as SessionManager does not keep track what client is associated to what cluster node.
+<span class="nc" id="L1161">                SessionManager.getInstance().removeRemoteClientSession( new JID(route) );</span>
+<span class="nc" id="L1162">            }</span>
+        }
+        finally {
+<span class="nc" id="L1165">            clientLock.unlock();</span>
+<span class="nc" id="L1166">        }</span>
+        
+        // remove routes for server domains that were accessed through the defunct node
+<span class="nc" id="L1169">        final Set&lt;DomainPair&gt; removedServers = CacheUtil.removeValueFromCache( serversCache, NodeID.getInstance( nodeID ) );</span>
+<span class="nc" id="L1170">        removedServers.forEach( removedServer -&gt; {</span>
+<span class="nc" id="L1171">            Log.debug( &quot;Cluster node {} just left the cluster, and was the only node on which the outgoing server route to '{}' was living. This route will be removed.&quot;, NodeID.getInstance( nodeID ), removedServer.getRemote() );</span>
+<span class="nc" id="L1172">            localRoutingTable.removeRoute( removedServer );</span>
+<span class="nc" id="L1173">        } );</span>
+
+        // remove component routes for the defunct node
+<span class="nc" id="L1176">        final Map&lt;Boolean, Map&lt;String, HashSet&lt;NodeID&gt;&gt;&gt; modifiedComponents = CacheUtil.removeValueFromMultiValuedCache( componentsCache, NodeID.getInstance( nodeID ) );</span>
+<span class="nc" id="L1177">        modifiedComponents.get( false ).keySet().forEach( removedComponentDomain -&gt; {</span>
+<span class="nc" id="L1178">            Log.debug( &quot;Cluster node {} just left the cluster, and was the only node on which the external component session for '{}' was living. This route will be removed&quot;, NodeID.getInstance( nodeID ), removedComponentDomain );</span>
+<span class="nc" id="L1179">            localRoutingTable.removeRoute(new DomainPair(&quot;&quot;, removedComponentDomain ));</span>
+<span class="nc" id="L1180">        } );</span>
+<span class="nc" id="L1181">    }</span>
+
+    @Override
+    public void markedAsSeniorClusterMember() {
+        // Do nothing
+<span class="nc" id="L1186">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

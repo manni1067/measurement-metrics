@@ -1,0 +1,1816 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>MultiUserChatServiceImpl.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.muc.spi</a> &gt; <span class="el_source">MultiUserChatServiceImpl.java</span></div><h1>MultiUserChatServiceImpl.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2004-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.muc.spi;
+
+import org.dom4j.DocumentHelper;
+import org.dom4j.Element;
+import org.jivesoftware.openfire.PacketRouter;
+import org.jivesoftware.openfire.RoutingTable;
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.XMPPServerListener;
+import org.jivesoftware.openfire.auth.UnauthorizedException;
+import org.jivesoftware.openfire.cluster.ClusterManager;
+import org.jivesoftware.openfire.disco.*;
+import org.jivesoftware.openfire.group.ConcurrentGroupList;
+import org.jivesoftware.openfire.group.GroupAwareList;
+import org.jivesoftware.openfire.group.GroupJID;
+import org.jivesoftware.openfire.handler.IQHandler;
+import org.jivesoftware.openfire.muc.*;
+import org.jivesoftware.openfire.muc.cluster.GetNumberConnectedUsers;
+import org.jivesoftware.openfire.muc.cluster.OccupantAddedEvent;
+import org.jivesoftware.openfire.muc.cluster.RoomAvailableEvent;
+import org.jivesoftware.openfire.muc.cluster.RoomRemovedEvent;
+import org.jivesoftware.openfire.user.UserManager;
+import org.jivesoftware.util.*;
+import org.jivesoftware.openfire.archive.Archiver;
+import org.jivesoftware.util.cache.CacheFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmpp.component.Component;
+import org.xmpp.component.ComponentManager;
+import org.xmpp.forms.DataForm;
+import org.xmpp.forms.DataForm.Type;
+import org.xmpp.forms.FormField;
+import org.xmpp.packet.*;
+import org.xmpp.resultsetmanagement.ResultSet;
+
+import java.time.Duration;
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+
+/**
+ * Implements the chat server as a cached memory resident chat server. The server is also
+ * responsible for responding Multi-User Chat disco requests as well as removing inactive users from
+ * the rooms after a period of time and to maintain a log of the conversation in the rooms that
+ * require to log their conversations. The conversations log is saved to the database using a
+ * separate process.
+ * &lt;p&gt;
+ * Temporary rooms are held in memory as long as they have occupants. They will be destroyed after
+ * the last occupant left the room. On the other hand, persistent rooms are always present in memory
+ * even after the last occupant left the room. In order to keep memory clean of persistent rooms that
+ * have been forgotten or abandoned this class includes a clean up process. The clean up process
+ * will remove from memory rooms that haven't had occupants for a while. Moreover, forgotten or
+ * abandoned rooms won't be loaded into memory when the Multi-User Chat service starts up.&lt;/p&gt;
+ *
+ * @author Gaston Dombiak
+ */
+public class MultiUserChatServiceImpl implements Component, MultiUserChatService,
+        ServerItemsProvider, DiscoInfoProvider, DiscoItemsProvider, XMPPServerListener
+{
+
+<span class="nc" id="L80">    private static final Logger Log = LoggerFactory.getLogger(MultiUserChatServiceImpl.class);</span>
+
+    /**
+     * The time to elapse between clearing of idle chat users.
+     */
+<span class="nc" id="L85">    private int user_timeout = 300000;</span>
+    /**
+     * The number of milliseconds a user must be idle before he/she gets kicked from all the rooms.
+     */
+<span class="nc" id="L89">    private int user_idle = -1;</span>
+    /**
+     * Task that kicks idle users from the rooms.
+     */
+    private UserTimeoutTask userTimeoutTask;
+
+    /**
+     * The maximum amount of logs to be written to the database in one iteration.
+     */
+    private int logMaxConversationBatchSize;
+
+    /**
+     * The maximum time between database writes of log batches.
+     */
+    private Duration logMaxBatchInterval;
+
+    /**
+     * Logs are written to the database almost instantly, but are batched together
+     * when a new log entry becomes available within the amount of time defined
+     * in this field - unless the total amount of time since the last write
+     * is larger then #maxbatchinterval.
+     */
+    private Duration logBatchGracePeriod;
+
+    /**
+     * the chat service's hostname (subdomain)
+     */
+    private final String chatServiceName;
+    /**
+     * the chat service's description
+     */
+    private String chatDescription;
+
+    /**
+     * LocalMUCRoom chat manager which supports simple chatroom management
+     */
+<span class="nc" id="L125">    private final LocalMUCRoomManager localMUCRoomManager = new LocalMUCRoomManager();</span>
+
+    /**
+     * Chat users managed by this manager. This includes only users connected to this JVM.
+     * That means that when running inside of a cluster each node will have its own manager
+     * that in turn will keep its own list of locally connected.
+     *
+     * table: key user jid (XMPPAddress); value ChatUser
+     */
+<span class="nc" id="L134">    private final Map&lt;JID, LocalMUCUser&gt; users = new ConcurrentHashMap&lt;&gt;();</span>
+    private final HistoryStrategy historyStrategy;
+
+<span class="nc" id="L137">    private RoutingTable routingTable = null;</span>
+    /**
+     * The packet router for the server.
+     */
+<span class="nc" id="L141">    private PacketRouter router = null;</span>
+    /**
+     * The handler of packets with namespace jabber:iq:register for the server.
+     */
+<span class="nc" id="L145">    private IQMUCRegisterHandler registerHandler = null;</span>
+
+    /**
+     * The handler of search requests ('jabber:iq:search' namespace).
+     */
+<span class="nc" id="L150">    private IQMUCSearchHandler searchHandler = null;</span>
+
+    /**
+     * Plugin (etc) provided IQ Handlers for MUC:
+     */
+<span class="nc" id="L155">    private Map&lt;String,IQHandler&gt; iqHandlers = null;</span>
+
+    /**
+     * The total time all agents took to chat *
+     */
+    private long totalChatTime;
+
+    /**
+     * Flag that indicates if the service should provide information about locked rooms when
+     * handling service discovery requests.
+     * Note: Setting this flag in false is not compliant with the spec. A user may try to join a
+     * locked room thinking that the room doesn't exist because the user didn't discover it before.
+     */
+<span class="nc" id="L168">    private boolean allowToDiscoverLockedRooms = true;</span>
+
+    /**
+     * Flag that indicates if the service should provide information about non-public members-only
+     * rooms when handling service discovery requests.
+     */
+<span class="nc" id="L174">    private boolean allowToDiscoverMembersOnlyRooms = false;</span>
+
+    /**
+     * Returns the permission policy for creating rooms. A true value means that not anyone can
+     * create a room. Users are allowed to create rooms only when
+     * &lt;code&gt;isAllRegisteredUsersAllowedToCreate&lt;/code&gt; or &lt;code&gt;getUsersAllowedToCreate&lt;/code&gt;
+     * (or both) allow them to.
+     */
+<span class="nc" id="L182">    private boolean roomCreationRestricted = false;</span>
+
+    /**
+     * Determines if all registered users (as opposed to anonymous users, and users from other
+     * XMPP domains) are allowed to create rooms.
+     */
+<span class="nc" id="L188">    private boolean allRegisteredUsersAllowedToCreate = false;</span>
+
+    /**
+     * Bare jids of users that are allowed to create MUC rooms. Might also include group jids.
+     */
+<span class="nc" id="L193">    private GroupAwareList&lt;JID&gt; allowedToCreate = new ConcurrentGroupList&lt;&gt;();</span>
+
+    /**
+     * Bare jids of users that are system administrators of the MUC service. A sysadmin has the same
+     * permissions as a room owner. Might also contain group jids.
+     */
+<span class="nc" id="L199">    private GroupAwareList&lt;JID&gt; sysadmins = new ConcurrentGroupList&lt;&gt;();</span>
+
+    /**
+     * Queue that holds the messages to log for the rooms that need to log their conversations.
+     */
+    private Archiver&lt;ConversationLogEntry&gt; archiver;
+
+    /**
+     * Max number of hours that a persistent room may be empty before the service removes the
+     * room from memory. Unloaded rooms will exist in the database and may be loaded by a user
+     * request. Default time limit is: 30 days.
+     */
+<span class="nc" id="L211">    private long emptyLimit = 30 * 24;</span>
+
+    /**
+     * The time to elapse between each rooms cleanup. Default frequency is 60 minutes.
+     */
+    private static final long CLEANUP_FREQUENCY = 60;
+
+    /**
+     * Total number of received messages in all rooms since the last reset. The counter
+     * is reset each time the Statistic makes a sampling.
+     */
+<span class="nc" id="L222">    private final AtomicInteger inMessages = new AtomicInteger(0);</span>
+    /**
+     * Total number of broadcasted messages in all rooms since the last reset. The counter
+     * is reset each time the Statistic makes a sampling.
+     */
+<span class="nc" id="L227">    private final AtomicLong outMessages = new AtomicLong(0);</span>
+
+    /**
+     * Flag that indicates if MUC service is enabled.
+     */
+<span class="nc" id="L232">    private boolean serviceEnabled = true;</span>
+
+    /**
+     * Flag that indicates if MUC service is hidden from services views.
+     */
+    private final boolean isHidden;
+
+    /**
+     * Delegate responds to events for the MUC service.
+     */
+    private MUCEventDelegate mucEventDelegate;
+
+    /**
+     * Additional features to be added to the disco response for the service.
+     */
+<span class="nc" id="L247">    private final List&lt;String&gt; extraDiscoFeatures = new ArrayList&lt;&gt;();</span>
+
+    /**
+     * Additional identities to be added to the disco response for the service.
+     */
+<span class="nc" id="L252">    private final List&lt;Element&gt; extraDiscoIdentities = new ArrayList&lt;&gt;();</span>
+
+    /**
+     * Create a new group chat server.
+     *
+     * @param subdomain
+     *            Subdomain portion of the conference services (for example,
+     *            conference for conference.example.org)
+     * @param description
+     *            Short description of service for disco and such. If
+     *            {@code null} or empty, a default value will be used.
+     * @param isHidden
+     *            True if this service should be hidden from services views.
+     * @throws IllegalArgumentException
+     *             if the provided subdomain is an invalid, according to the JID
+     *             domain definition.
+     */
+<span class="nc" id="L269">    public MultiUserChatServiceImpl(final String subdomain, final String description, final Boolean isHidden) {</span>
+        // Check subdomain and throw an IllegalArgumentException if its invalid
+<span class="nc" id="L271">        new JID(null,subdomain + &quot;.&quot; + XMPPServer.getInstance().getServerInfo().getXMPPDomain(), null);</span>
+
+<span class="nc" id="L273">        this.chatServiceName = subdomain;</span>
+<span class="nc bnc" id="L274" title="All 4 branches missed.">        if (description != null &amp;&amp; description.trim().length() &gt; 0) {</span>
+<span class="nc" id="L275">            this.chatDescription = description;</span>
+        }
+        else {
+<span class="nc" id="L278">            this.chatDescription = LocaleUtils.getLocalizedString(&quot;muc.service-name&quot;);</span>
+        }
+<span class="nc" id="L280">        this.isHidden = isHidden;</span>
+<span class="nc" id="L281">        historyStrategy = new HistoryStrategy(null);</span>
+<span class="nc" id="L282">    }</span>
+
+    @Override
+    public void addIQHandler(final IQHandler iqHandler) {
+<span class="nc bnc" id="L286" title="All 2 branches missed.">        if (this.iqHandlers == null) {</span>
+<span class="nc" id="L287">            this.iqHandlers = new HashMap&lt;&gt;();</span>
+        }
+<span class="nc" id="L289">        this.iqHandlers.put(iqHandler.getInfo().getNamespace(), iqHandler);</span>
+<span class="nc" id="L290">    }</span>
+
+    @Override
+    public void removeIQHandler(final IQHandler iqHandler) {
+<span class="nc bnc" id="L294" title="All 2 branches missed.">        if (this.iqHandlers != null) {</span>
+<span class="nc bnc" id="L295" title="All 2 branches missed.">            if (iqHandler == this.iqHandlers.get(iqHandler.getInfo().getNamespace())) {</span>
+<span class="nc" id="L296">                this.iqHandlers.remove(iqHandler.getInfo().getNamespace());</span>
+            }
+        }
+<span class="nc" id="L299">    }</span>
+
+    @Override
+    public String getDescription() {
+<span class="nc" id="L303">        return chatDescription;</span>
+    }
+
+    public void setDescription(final String desc) {
+<span class="nc" id="L307">        this.chatDescription = desc;</span>
+<span class="nc" id="L308">    }</span>
+
+    @Override
+    public void processPacket(final Packet packet) {
+<span class="nc bnc" id="L312" title="All 2 branches missed.">        if (!isServiceEnabled()) {</span>
+<span class="nc" id="L313">            return;</span>
+        }
+        // The MUC service will receive all the packets whose domain matches the domain of the MUC
+        // service. This means that, for instance, a disco request should be responded by the
+        // service itself instead of relying on the server to handle the request.
+        try {
+            // Check if the packet is a disco request or a packet with namespace iq:register
+<span class="nc bnc" id="L320" title="All 2 branches missed.">            if (packet instanceof IQ) {</span>
+<span class="nc bnc" id="L321" title="All 2 branches missed.">                if (process((IQ)packet)) {</span>
+<span class="nc" id="L322">                    return;</span>
+                }
+<span class="nc bnc" id="L324" title="All 2 branches missed.">            } else if (packet instanceof Message) {</span>
+<span class="nc" id="L325">                final Message msg = (Message) packet;</span>
+<span class="nc bnc" id="L326" title="All 2 branches missed.">                if (msg.getType() == Message.Type.error) {</span>
+                    // Bounced message, drop user.
+<span class="nc" id="L328">                    removeUser(packet.getFrom());</span>
+<span class="nc" id="L329">                    return;</span>
+                }
+<span class="nc bnc" id="L331" title="All 2 branches missed.">            } else if (packet instanceof Presence) {</span>
+<span class="nc" id="L332">                final Presence pres = (Presence) packet;</span>
+<span class="nc bnc" id="L333" title="All 2 branches missed.">                if (pres.getType() == Presence.Type.error) {</span>
+                    // Bounced presence, drop user.
+<span class="nc" id="L335">                    removeUser(packet.getFrom());</span>
+<span class="nc" id="L336">                    return;</span>
+                }
+            }
+
+<span class="nc bnc" id="L340" title="All 2 branches missed.">            if ( packet.getTo().getNode() == null )</span>
+            {
+                // This was addressed at the service itself, which by now should have been handled.
+<span class="nc bnc" id="L343" title="All 4 branches missed.">                if ( packet instanceof IQ &amp;&amp; ((IQ) packet).isRequest() )</span>
+                {
+<span class="nc" id="L345">                    final IQ reply = IQ.createResultIQ( (IQ) packet );</span>
+<span class="nc" id="L346">                    reply.setChildElement( ((IQ) packet).getChildElement().createCopy() );</span>
+<span class="nc" id="L347">                    reply.setError( PacketError.Condition.feature_not_implemented );</span>
+<span class="nc" id="L348">                    router.route( reply );</span>
+                }
+<span class="nc" id="L350">                Log.debug( &quot;Ignoring stanza addressed at conference service: {}&quot;, packet.toXML() );</span>
+            }
+            else
+            {
+                // The packet is a normal packet that should possibly be sent to the room
+<span class="nc" id="L355">                final JID recipient = packet.getTo();</span>
+<span class="nc bnc" id="L356" title="All 2 branches missed.">                final String roomName = recipient != null ? recipient.getNode() : null;</span>
+<span class="nc" id="L357">                final JID userJid = packet.getFrom();</span>
+<span class="nc" id="L358">                try (final AutoCloseableReentrantLock.AutoCloseableLock ignored = new AutoCloseableReentrantLock(MultiUserChatServiceImpl.class, userJid.toString()).lock()) {</span>
+<span class="nc" id="L359">                    getChatUser(userJid, roomName).process(packet);</span>
+<span class="nc bnc" id="L360" title="All 8 branches missed.">                }</span>
+            }
+        }
+<span class="nc" id="L363">        catch (final Exception e) {</span>
+<span class="nc" id="L364">            Log.error(LocaleUtils.getLocalizedString(&quot;admin.error&quot;), e);</span>
+<span class="nc" id="L365">        }</span>
+<span class="nc" id="L366">    }</span>
+
+    /**
+     * Returns true if the IQ packet was processed. This method should only process disco packets
+     * as well as jabber:iq:register packets sent to the MUC service.
+     *
+     * @param iq the IQ packet to process.
+     * @return true if the IQ packet was processed.
+     */
+    private boolean process(final IQ iq) {
+<span class="nc" id="L376">        final Element childElement = iq.getChildElement();</span>
+<span class="nc" id="L377">        String namespace = null;</span>
+        // Ignore IQs of type ERROR
+<span class="nc bnc" id="L379" title="All 2 branches missed.">        if (IQ.Type.error == iq.getType()) {</span>
+<span class="nc" id="L380">            return false;</span>
+        }
+<span class="nc bnc" id="L382" title="All 2 branches missed.">        if (iq.getTo().getResource() != null) {</span>
+            // Ignore IQ packets sent to room occupants
+<span class="nc" id="L384">            return false;</span>
+        }
+<span class="nc bnc" id="L386" title="All 2 branches missed.">        if (childElement != null) {</span>
+<span class="nc" id="L387">            namespace = childElement.getNamespaceURI();</span>
+        }
+<span class="nc bnc" id="L389" title="All 2 branches missed.">        if (&quot;jabber:iq:register&quot;.equals(namespace)) {</span>
+<span class="nc" id="L390">            final IQ reply = registerHandler.handleIQ(iq);</span>
+<span class="nc" id="L391">            router.route(reply);</span>
+<span class="nc" id="L392">        }</span>
+<span class="nc bnc" id="L393" title="All 2 branches missed.">        else if (&quot;jabber:iq:search&quot;.equals(namespace)) {</span>
+<span class="nc" id="L394">            final IQ reply = searchHandler.handleIQ(iq);</span>
+<span class="nc" id="L395">            router.route(reply);</span>
+<span class="nc" id="L396">        }</span>
+<span class="nc bnc" id="L397" title="All 2 branches missed.">        else if (&quot;http://jabber.org/protocol/disco#info&quot;.equals(namespace)) {</span>
+            // TODO MUC should have an IQDiscoInfoHandler of its own when MUC becomes
+            // a component
+<span class="nc" id="L400">            final IQ reply = XMPPServer.getInstance().getIQDiscoInfoHandler().handleIQ(iq);</span>
+<span class="nc" id="L401">            router.route(reply);</span>
+<span class="nc" id="L402">        }</span>
+<span class="nc bnc" id="L403" title="All 2 branches missed.">        else if (&quot;http://jabber.org/protocol/disco#items&quot;.equals(namespace)) {</span>
+            // TODO MUC should have an IQDiscoItemsHandler of its own when MUC becomes
+            // a component
+<span class="nc" id="L406">            final IQ reply = XMPPServer.getInstance().getIQDiscoItemsHandler().handleIQ(iq);</span>
+<span class="nc" id="L407">            router.route(reply);</span>
+<span class="nc" id="L408">        }</span>
+<span class="nc bnc" id="L409" title="All 2 branches missed.">        else if (&quot;urn:xmpp:ping&quot;.equals(namespace)) {</span>
+<span class="nc" id="L410">            router.route( IQ.createResultIQ(iq) );</span>
+        }
+<span class="nc bnc" id="L412" title="All 2 branches missed.">        else if (this.iqHandlers != null) {</span>
+<span class="nc" id="L413">            final IQHandler h = this.iqHandlers.get(namespace);</span>
+<span class="nc bnc" id="L414" title="All 2 branches missed.">            if (h != null) {</span>
+                try {
+<span class="nc" id="L416">                    final IQ reply = h.handleIQ(iq);</span>
+<span class="nc bnc" id="L417" title="All 2 branches missed.">                    if (reply != null) {</span>
+<span class="nc" id="L418">                        router.route(reply);</span>
+                    }
+<span class="nc" id="L420">                } catch (final UnauthorizedException e) {</span>
+<span class="nc" id="L421">                    final IQ reply = IQ.createResultIQ(iq);</span>
+<span class="nc" id="L422">                    reply.setType(IQ.Type.error);</span>
+<span class="nc" id="L423">                    reply.setError(PacketError.Condition.service_unavailable);</span>
+<span class="nc" id="L424">                    router.route(reply);</span>
+<span class="nc" id="L425">                }</span>
+<span class="nc" id="L426">                return true;</span>
+            }
+<span class="nc" id="L428">            return false;</span>
+        } else {
+<span class="nc" id="L430">            return false;</span>
+        }
+<span class="nc" id="L432">        return true;</span>
+    }
+
+    @Override
+    public void initialize(final JID jid, final ComponentManager componentManager) {
+<span class="nc" id="L437">        initialize(XMPPServer.getInstance());</span>
+
+<span class="nc" id="L439">    }</span>
+
+    @Override
+    public void shutdown() {
+<span class="nc" id="L443">        enableService( false, false );</span>
+<span class="nc" id="L444">    }</span>
+
+    @Override
+    public String getServiceDomain() {
+<span class="nc" id="L448">        return chatServiceName + &quot;.&quot; + XMPPServer.getInstance().getServerInfo().getXMPPDomain();</span>
+    }
+
+    public JID getAddress() {
+<span class="nc" id="L452">        return new JID(null, getServiceDomain(), null, true);</span>
+    }
+
+    @Override
+    public void serverStarted()
+<span class="nc" id="L457">    {}</span>
+
+    @Override
+    public void serverStopping()
+    {
+        // When this is executed, we can be certain that all server modules have not yet shut down. This allows us to
+        // inform all users.
+<span class="nc" id="L464">        shutdown();</span>
+<span class="nc" id="L465">    }</span>
+
+    /**
+     * Probes the presence of any user who's last packet was sent more than 5 minute ago.
+     */
+<span class="nc" id="L470">    private class UserTimeoutTask extends TimerTask {</span>
+        /**
+         * Remove any user that has been idle for longer than the user timeout time.
+         */
+        @Override
+        public void run() {
+<span class="nc" id="L476">            checkForTimedOutUsers();</span>
+<span class="nc" id="L477">        }</span>
+    }
+
+    /**
+     * Informs all users local to this cluster node that he or she is being removed from the room because the MUC
+     * service is being shut down.
+     *
+     * The implementation is optimized to run as fast as possible (to prevent prolonging the shutdown).
+     */
+    private void broadcastShutdown()
+    {
+<span class="nc" id="L488">        Log.debug( &quot;Notifying all local users about the imminent destruction of chat service '{}'&quot;, chatServiceName );</span>
+
+<span class="nc bnc" id="L490" title="All 2 branches missed.">        if (users.isEmpty()) {</span>
+<span class="nc" id="L491">            return;</span>
+        }
+
+        // A thread pool is used to broadcast concurrently, as well as to limit the execution time of this service.
+<span class="nc" id="L495">        final ExecutorService service = Executors.newFixedThreadPool( Math.min( users.size(), 10 ) );</span>
+
+        // Queue all tasks in the executor service.
+<span class="nc bnc" id="L498" title="All 2 branches missed.">        for ( final LocalMUCUser user : users.values() )</span>
+        {
+            // Submit a concurrent task for each local user (that could be in more than one (local) room).
+<span class="nc" id="L501">            service.submit(() -&gt; {</span>
+                try
+                {
+<span class="nc bnc" id="L504" title="All 2 branches missed.">                    for ( final LocalMUCRole role : user.getRoles() )</span>
+                    {
+<span class="nc" id="L506">                        final MUCRoom room = role.getChatRoom();</span>
+
+                        // Send a presence stanza of type &quot;unavailable&quot; to the occupant
+<span class="nc" id="L509">                        final Presence presence = room.createPresence( Presence.Type.unavailable );</span>
+<span class="nc" id="L510">                        presence.setFrom( role.getRoleAddress() );</span>
+
+                        // A fragment containing the x-extension.
+<span class="nc" id="L513">                        final Element fragment = presence.addChildElement( &quot;x&quot;, &quot;http://jabber.org/protocol/muc#user&quot; );</span>
+<span class="nc" id="L514">                        final Element item = fragment.addElement( &quot;item&quot; );</span>
+<span class="nc" id="L515">                        item.addAttribute( &quot;affiliation&quot;, &quot;none&quot; );</span>
+<span class="nc" id="L516">                        item.addAttribute( &quot;role&quot;, &quot;none&quot; );</span>
+<span class="nc" id="L517">                        fragment.addElement( &quot;status&quot; ).addAttribute( &quot;code&quot;, &quot;332&quot; );</span>
+
+                        // Make sure that the presence change for each user is only sent to that user (and not broadcasted in the room)!
+<span class="nc" id="L520">                        role.send( presence );</span>
+<span class="nc" id="L521">                    }</span>
+                }
+<span class="nc" id="L523">                catch ( final Exception e )</span>
+                {
+<span class="nc" id="L525">                    Log.debug( &quot;Unable to inform {} about the imminent destruction of chat service '{}'&quot;, user.getAddress(), chatServiceName, e );</span>
+<span class="nc" id="L526">                }</span>
+<span class="nc" id="L527">            });</span>
+<span class="nc" id="L528">        }</span>
+
+        // Try to shutdown - wait - force shutdown.
+<span class="nc" id="L531">        service.shutdown();</span>
+        try
+        {
+<span class="nc" id="L534">            service.awaitTermination( JiveGlobals.getIntProperty( &quot;xmpp.muc.await-termination-millis&quot;, 500 ), TimeUnit.MILLISECONDS );</span>
+<span class="nc" id="L535">            Log.debug( &quot;Successfully notified all {} local users about the imminent destruction of chat service '{}'&quot;, users.size(), chatServiceName );</span>
+        }
+<span class="nc" id="L537">        catch ( final InterruptedException e )</span>
+        {
+<span class="nc" id="L539">            Log.debug( &quot;Interrupted while waiting for all users to be notified of shutdown of chat service '{}'. Shutting down immediately.&quot;, chatServiceName );</span>
+<span class="nc" id="L540">        }</span>
+<span class="nc" id="L541">        service.shutdownNow();</span>
+<span class="nc" id="L542">    }</span>
+
+    private void checkForTimedOutUsers() {
+<span class="nc" id="L545">        final long deadline = System.currentTimeMillis() - user_idle;</span>
+<span class="nc bnc" id="L546" title="All 2 branches missed.">        for (final LocalMUCUser user : users.values()) {</span>
+<span class="nc" id="L547">            try (final AutoCloseableReentrantLock.AutoCloseableLock ignored = new AutoCloseableReentrantLock(MultiUserChatServiceImpl.class, user.getAddress().toString()).lock()) {</span>
+                // If user is not present in any room then remove the user from
+                // the list of users
+<span class="nc bnc" id="L550" title="All 2 branches missed.">                if (!user.isJoined()) {</span>
+<span class="nc" id="L551">                    removeUser(user.getAddress());</span>
+                    continue;
+                }
+                // Do nothing if this feature is disabled (i.e USER_IDLE equals -1)
+<span class="nc bnc" id="L555" title="All 2 branches missed.">                if (user_idle == -1) {</span>
+                    continue;
+                }
+<span class="nc bnc" id="L558" title="All 2 branches missed.">                if (user.getLastPacketTime() &lt; deadline) {</span>
+<span class="nc" id="L559">                    String timeoutKickReason = JiveGlobals.getProperty(&quot;admin.mucRoom.timeoutKickReason&quot;,</span>
+                            &quot;User exceeded idle time limit.&quot;);
+                    // Kick the user from all the rooms that he/she had previuosly joined
+                    MUCRoom room;
+                    Presence kickedPresence;
+<span class="nc bnc" id="L564" title="All 2 branches missed.">                    for (final LocalMUCRole role : user.getRoles()) {</span>
+<span class="nc" id="L565">                        room = role.getChatRoom();</span>
+                        try {
+<span class="nc" id="L567">                            kickedPresence =</span>
+<span class="nc" id="L568">                                    room.kickOccupant(user.getAddress(), null, null, timeoutKickReason);</span>
+                            // Send the updated presence to the room occupants
+<span class="nc" id="L570">                            room.send(kickedPresence);</span>
+                        }
+<span class="nc" id="L572">                        catch (final NotAllowedException e) {</span>
+                            // Do nothing since we cannot kick owners or admins
+<span class="nc" id="L574">                        }</span>
+<span class="nc" id="L575">                    }</span>
+                }
+<span class="nc bnc" id="L577" title="All 16 branches missed.">            }</span>
+<span class="nc" id="L578">            catch (final Throwable e) {</span>
+<span class="nc" id="L579">                Log.error(LocaleUtils.getLocalizedString(&quot;admin.error&quot;), e);</span>
+<span class="nc" id="L580">            }</span>
+<span class="nc" id="L581">        }</span>
+<span class="nc" id="L582">    }</span>
+
+    @Override
+    public Archiver&lt;ConversationLogEntry&gt; getArchiver()
+    {
+<span class="nc" id="L587">        return archiver;</span>
+    }
+
+    /**
+     * Stores Conversations in the database.
+     */
+    private static class ConversationLogEntryArchiver extends Archiver&lt;ConversationLogEntry&gt;
+    {
+        ConversationLogEntryArchiver( String id, int maxWorkQueueSize, Duration maxPurgeInterval, Duration gracePeriod )
+        {
+<span class="nc" id="L597">            super( id, maxWorkQueueSize, maxPurgeInterval, gracePeriod );</span>
+<span class="nc" id="L598">        }</span>
+
+        @Override
+        protected void store( List&lt;ConversationLogEntry&gt; batch )
+        {
+<span class="nc bnc" id="L603" title="All 2 branches missed.">            if ( batch.isEmpty() )</span>
+            {
+<span class="nc" id="L605">                return;</span>
+            }
+
+<span class="nc" id="L608">            MUCPersistenceManager.saveConversationLogBatch( batch );</span>
+<span class="nc" id="L609">        }</span>
+    }
+
+    /**
+     * Removes from memory rooms that have been without activity for a period of time. A room is
+     * considered without activity when no occupants are present in the room for a while.
+     */
+<span class="nc" id="L616">    private class CleanupTask extends TimerTask {</span>
+        @Override
+        public void run() {
+<span class="nc bnc" id="L619" title="All 4 branches missed.">            if (ClusterManager.isClusteringStarted() &amp;&amp; !ClusterManager.isSeniorClusterMember()) {</span>
+                // Do nothing if we are in a cluster and this JVM is not the senior cluster member
+<span class="nc" id="L621">                return;</span>
+            }
+            try {
+<span class="nc" id="L624">                Date cleanUpDate = getCleanupDate();</span>
+<span class="nc" id="L625">                Iterator&lt;LocalMUCRoom&gt; it = localMUCRoomManager.getRooms().iterator();</span>
+<span class="nc bnc" id="L626" title="All 2 branches missed.">                while (it.hasNext()) {</span>
+<span class="nc" id="L627">                    LocalMUCRoom room = it.next();</span>
+<span class="nc" id="L628">                    Date emptyDate = room.getEmptyDate();</span>
+<span class="nc bnc" id="L629" title="All 4 branches missed.">                    if (emptyDate != null &amp;&amp; emptyDate.before(cleanUpDate)) {</span>
+<span class="nc" id="L630">                        removeChatRoom(room.getName());</span>
+                    }
+<span class="nc" id="L632">                }</span>
+            }
+<span class="nc" id="L634">            catch (final Throwable e) {</span>
+<span class="nc" id="L635">                Log.error(LocaleUtils.getLocalizedString(&quot;admin.error&quot;), e);</span>
+<span class="nc" id="L636">            }</span>
+<span class="nc" id="L637">        }</span>
+    }
+
+    /**
+     * Checks if a particular JID is allowed to create rooms.
+     *
+     * @param jid The jid for which to check (cannot be null).
+     * @return true if the JID is allowed to create a room, otherwise false.
+     */
+    private boolean isAllowedToCreate(final JID jid) {
+        // If room creation is not restricted, everyone is allowed to create a room.
+<span class="nc bnc" id="L648" title="All 2 branches missed.">        if (!isRoomCreationRestricted()) {</span>
+<span class="nc" id="L649">            return true;</span>
+        }
+
+<span class="nc" id="L652">        final JID bareJID = jid.asBareJID();</span>
+
+        // System administrators are always allowed to create rooms.
+<span class="nc bnc" id="L655" title="All 2 branches missed.">        if (sysadmins.includes(bareJID)) {</span>
+<span class="nc" id="L656">            return true;</span>
+        }
+
+        // If the JID of the user has explicitly been given permission, room creation is allowed.
+<span class="nc bnc" id="L660" title="All 2 branches missed.">        if (allowedToCreate.includes(bareJID)) {</span>
+<span class="nc" id="L661">            return true;</span>
+        }
+
+        // Verify the policy that allows all local, registered users to create rooms.
+<span class="nc bnc" id="L665" title="All 4 branches missed.">        return allRegisteredUsersAllowedToCreate &amp;&amp; UserManager.getInstance().isRegisteredUser(bareJID);</span>
+
+    }
+
+    @Override
+    public MUCRoom getChatRoom(final String roomName, final JID userjid) throws NotAllowedException {
+        LocalMUCRoom room;
+<span class="nc" id="L672">        boolean loaded = false;</span>
+<span class="nc" id="L673">        boolean created = false;</span>
+<span class="nc" id="L674">        synchronized (roomName.intern()) {</span>
+<span class="nc" id="L675">            room = localMUCRoomManager.getRoom(roomName);</span>
+<span class="nc bnc" id="L676" title="All 2 branches missed.">            if (room == null) {</span>
+<span class="nc" id="L677">                room = new LocalMUCRoom(this, roomName, router);</span>
+                // If the room is persistent load the configuration values from the DB
+                try {
+                    // Try to load the room's configuration from the database (if the room is
+                    // persistent but was added to the DB after the server was started up or the
+                    // room may be an old room that was not present in memory)
+<span class="nc" id="L683">                    MUCPersistenceManager.loadFromDB(room);</span>
+<span class="nc" id="L684">                    loaded = true;</span>
+                }
+<span class="nc" id="L686">                catch (final IllegalArgumentException e) {</span>
+                    // Check if room needs to be recreated in case it failed to be created previously
+                    // (or was deleted somehow and is expected to exist by a delegate).
+<span class="nc bnc" id="L689" title="All 4 branches missed.">                    if (mucEventDelegate != null &amp;&amp; mucEventDelegate.shouldRecreate(roomName, userjid)) {</span>
+<span class="nc bnc" id="L690" title="All 2 branches missed.">                        if (mucEventDelegate.loadConfig(room)) {</span>
+<span class="nc" id="L691">                            loaded = true;</span>
+<span class="nc bnc" id="L692" title="All 2 branches missed.">                            if (room.isPersistent()) {</span>
+<span class="nc" id="L693">                                MUCPersistenceManager.saveToDB(room);</span>
+                            }
+                        }
+                        else {
+                            // Room does not exist and delegate does not recognize it and does
+                            // not allow room creation
+<span class="nc" id="L699">                            throw new NotAllowedException();</span>
+
+                        }
+                    }
+                    else {
+                        // The room does not exist so check for creation permissions
+<span class="nc bnc" id="L705" title="All 2 branches missed.">                        if (!isAllowedToCreate(userjid)) {</span>
+<span class="nc" id="L706">                            throw new NotAllowedException();</span>
+                        }
+<span class="nc" id="L708">                        room.addFirstOwner(userjid);</span>
+<span class="nc" id="L709">                        created = true;</span>
+                    }
+<span class="nc" id="L711">                }</span>
+<span class="nc" id="L712">                localMUCRoomManager.addRoom(roomName, room);</span>
+            }
+<span class="nc" id="L714">        }</span>
+<span class="nc bnc" id="L715" title="All 2 branches missed.">        if (created) {</span>
+            // Fire event that a new room has been created
+<span class="nc" id="L717">            MUCEventDispatcher.roomCreated(room.getRole().getRoleAddress());</span>
+        }
+<span class="nc bnc" id="L719" title="All 4 branches missed.">        if (loaded || created) {</span>
+            // Notify other cluster nodes that a new room is available
+<span class="nc" id="L721">            CacheFactory.doClusterTask(new RoomAvailableEvent(room));</span>
+<span class="nc bnc" id="L722" title="All 2 branches missed.">            for (final MUCRole role : room.getOccupants()) {</span>
+<span class="nc bnc" id="L723" title="All 2 branches missed.">                if (role instanceof LocalMUCRole) {</span>
+<span class="nc" id="L724">                    CacheFactory.doClusterTask(new OccupantAddedEvent(room, role));</span>
+                }
+<span class="nc" id="L726">            }</span>
+        }
+<span class="nc" id="L728">        return room;</span>
+    }
+
+    @Override
+    public MUCRoom getChatRoom(final String roomName) {
+<span class="nc" id="L733">        boolean loaded = false;</span>
+<span class="nc" id="L734">        LocalMUCRoom room = localMUCRoomManager.getRoom(roomName);</span>
+<span class="nc bnc" id="L735" title="All 2 branches missed.">        if (room == null) {</span>
+            // Check if the room exists in the databclase and was not present in memory
+<span class="nc" id="L737">            synchronized (roomName.intern()) {</span>
+<span class="nc" id="L738">                room = localMUCRoomManager.getRoom(roomName);</span>
+<span class="nc bnc" id="L739" title="All 2 branches missed.">                if (room == null) {</span>
+<span class="nc" id="L740">                    room = new LocalMUCRoom(this, roomName, router);</span>
+                    // If the room is persistent load the configuration values from the DB
+                    try {
+                        // Try to load the room's configuration from the database (if the room is
+                        // persistent but was added to the DB after the server was started up or the
+                        // room may be an old room that was not present in memory)
+<span class="nc" id="L746">                        MUCPersistenceManager.loadFromDB(room);</span>
+<span class="nc" id="L747">                        loaded = true;</span>
+<span class="nc" id="L748">                        localMUCRoomManager.addRoom(roomName,room);</span>
+                    }
+<span class="nc" id="L750">                    catch (final IllegalArgumentException e) {</span>
+                        // The room does not exist so do nothing
+<span class="nc" id="L752">                        room = null;</span>
+<span class="nc" id="L753">                    }</span>
+                }
+<span class="nc" id="L755">            }</span>
+        }
+<span class="nc bnc" id="L757" title="All 2 branches missed.">        if (loaded) {</span>
+            // Notify other cluster nodes that a new room is available
+<span class="nc" id="L759">            CacheFactory.doClusterTask(new RoomAvailableEvent(room));</span>
+        }
+<span class="nc" id="L761">        return room;</span>
+    }
+
+    @Override
+    public void refreshChatRoom(final String roomName) {
+<span class="nc" id="L766">        localMUCRoomManager.removeRoom(roomName);</span>
+<span class="nc" id="L767">        getChatRoom(roomName);</span>
+<span class="nc" id="L768">    }</span>
+
+    public LocalMUCRoom getLocalChatRoom(final String roomName) {
+<span class="nc" id="L771">        return localMUCRoomManager.getRoom(roomName);</span>
+    }
+
+    @Override
+    public List&lt;MUCRoom&gt; getChatRooms() {
+<span class="nc" id="L776">        return new ArrayList&lt;&gt;(localMUCRoomManager.getRooms());</span>
+    }
+
+    @Override
+    public boolean hasChatRoom(final String roomName) {
+<span class="nc bnc" id="L781" title="All 2 branches missed.">        return getChatRoom(roomName) != null;</span>
+    }
+
+    @Override
+    public void removeChatRoom(final String roomName) {
+<span class="nc" id="L786">        removeChatRoom(roomName, true);</span>
+<span class="nc" id="L787">    }</span>
+
+    /**
+     * Notification message indicating that the specified chat room was
+     * removed from some other cluster member.
+     *
+     * @param room the removed room in another cluster node.
+     */
+    @Override
+    public void chatRoomRemoved(final LocalMUCRoom room) {
+<span class="nc" id="L797">        removeChatRoom(room.getName(), false);</span>
+<span class="nc" id="L798">    }</span>
+
+    /**
+     * Notification message indicating that a chat room has been created
+     * in another cluster member.
+     *
+     * @param room the created room in another cluster node.
+     */
+    @Override
+    public void chatRoomAdded(final LocalMUCRoom room) {
+<span class="nc" id="L808">        localMUCRoomManager.addRoom(room.getName(), room) ;</span>
+<span class="nc" id="L809">    }</span>
+
+    private void removeChatRoom(final String roomName, final boolean notify) {
+<span class="nc" id="L812">        final LocalMUCRoom room = localMUCRoomManager.removeRoom(roomName);</span>
+<span class="nc bnc" id="L813" title="All 2 branches missed.">        if (room != null) {</span>
+<span class="nc" id="L814">            Log.info(&quot;removing chat room:&quot; + roomName + &quot;|&quot; + room.getClass().getName());</span>
+<span class="nc" id="L815">            totalChatTime += room.getChatLength();</span>
+<span class="nc bnc" id="L816" title="All 2 branches missed.">            if (notify) {</span>
+                // Notify other cluster nodes that a room has been removed
+<span class="nc" id="L818">                CacheFactory.doClusterTask(new RoomRemovedEvent(room));</span>
+            }
+        } else {
+<span class="nc" id="L821">            Log.info(&quot;No chatroom {} during removal.&quot;, roomName);</span>
+        }
+<span class="nc" id="L823">    }</span>
+
+    @Override
+    public String getServiceName() {
+<span class="nc" id="L827">        return chatServiceName;</span>
+    }
+
+    @Override
+    public String getName() {
+<span class="nc" id="L832">        return getServiceName();</span>
+    }
+
+    @Override
+    public HistoryStrategy getHistoryStrategy() {
+<span class="nc" id="L837">        return historyStrategy;</span>
+    }
+
+    /**
+     * Removes a user from all chat rooms.
+     *
+     * @param jabberID The user's normal jid, not the chat nickname jid.
+     */
+    private void removeUser(final JID jabberID) {
+<span class="nc" id="L846">        final LocalMUCUser user = users.remove(jabberID);</span>
+<span class="nc bnc" id="L847" title="All 2 branches missed.">        if (user != null) {</span>
+<span class="nc bnc" id="L848" title="All 2 branches missed.">            for (final LocalMUCRole role : user.getRoles()) {</span>
+                try {
+<span class="nc" id="L850">                    role.getChatRoom().leaveRoom(role);</span>
+                }
+<span class="nc" id="L852">                catch (final Exception e) {</span>
+<span class="nc" id="L853">                    Log.error(e.getMessage(), e);</span>
+<span class="nc" id="L854">                }</span>
+<span class="nc" id="L855">            }</span>
+        }
+<span class="nc" id="L857">    }</span>
+
+    /**
+     * Obtain a chat user by XMPPAddress. Only returns users that are connected to this JVM.
+     *
+     * @param userjid The XMPPAddress of the user.
+     * @param roomName name of the room to receive the packet.
+     * @return The chatuser corresponding to that XMPPAddress.
+     */
+    private MUCUser getChatUser(final JID userjid, final String roomName) {
+<span class="nc bnc" id="L867" title="All 2 branches missed.">        if (router == null) {</span>
+<span class="nc" id="L868">            throw new IllegalStateException(&quot;Not initialized&quot;);</span>
+        }
+        LocalMUCUser user;
+<span class="nc" id="L871">        synchronized (userjid.toString().intern()) {</span>
+<span class="nc" id="L872">            user = users.get(userjid);</span>
+<span class="nc bnc" id="L873" title="All 2 branches missed.">            if (user == null) {</span>
+<span class="nc bnc" id="L874" title="All 2 branches missed.">                if (roomName != null) {</span>
+                    // Check if the JID belong to a user hosted in another cluster node
+<span class="nc" id="L876">                    final LocalMUCRoom localMUCRoom = localMUCRoomManager.getRoom(roomName);</span>
+<span class="nc bnc" id="L877" title="All 2 branches missed.">                    if (localMUCRoom != null) {</span>
+<span class="nc" id="L878">                        final MUCRole occupant = localMUCRoom.getOccupantByFullJID(userjid);</span>
+<span class="nc bnc" id="L879" title="All 4 branches missed.">                        if (occupant != null &amp;&amp; !occupant.isLocal()) {</span>
+<span class="nc" id="L880">                            return new RemoteMUCUser(userjid, localMUCRoom);</span>
+                        }
+                    }
+                }
+<span class="nc" id="L884">                user = new LocalMUCUser(this, router, userjid);</span>
+<span class="nc" id="L885">                users.put(userjid, user);</span>
+            }
+<span class="nc" id="L887">        }</span>
+<span class="nc" id="L888">        return user;</span>
+    }
+
+    @Override
+    public Collection&lt;MUCRole&gt; getMUCRoles(final JID user) {
+<span class="nc" id="L893">        final List&lt;MUCRole&gt; userRoles = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L894" title="All 2 branches missed.">        for (final LocalMUCRoom room : localMUCRoomManager.getRooms()) {</span>
+<span class="nc" id="L895">            final MUCRole role = room.getOccupantByFullJID(user);</span>
+<span class="nc bnc" id="L896" title="All 2 branches missed.">            if (role != null) {</span>
+<span class="nc" id="L897">                userRoles.add(role);</span>
+            }
+<span class="nc" id="L899">        }</span>
+<span class="nc" id="L900">        return userRoles;</span>
+    }
+
+    /**
+     * Returns the limit date after which rooms without activity will be removed from memory.
+     *
+     * @return the limit date after which rooms without activity will be removed from memory.
+     */
+    private Date getCleanupDate() {
+<span class="nc" id="L909">        return new Date(System.currentTimeMillis() - (emptyLimit * 3600000));</span>
+    }
+
+    @Override
+    public void setKickIdleUsersTimeout(final int timeout) {
+<span class="nc bnc" id="L914" title="All 2 branches missed.">        if (this.user_timeout == timeout) {</span>
+<span class="nc" id="L915">            return;</span>
+        }
+        // Cancel the existing task because the timeout has changed
+<span class="nc bnc" id="L918" title="All 2 branches missed.">        if (userTimeoutTask != null) {</span>
+<span class="nc" id="L919">            userTimeoutTask.cancel();</span>
+        }
+<span class="nc" id="L921">        this.user_timeout = timeout;</span>
+        // Create a new task and schedule it with the new timeout
+<span class="nc" id="L923">        userTimeoutTask = new UserTimeoutTask();</span>
+<span class="nc" id="L924">        TaskEngine.getInstance().schedule(userTimeoutTask, user_timeout, user_timeout);</span>
+        // Set the new property value
+<span class="nc" id="L926">        MUCPersistenceManager.setProperty(chatServiceName, &quot;tasks.user.timeout&quot;, Integer.toString(timeout));</span>
+<span class="nc" id="L927">    }</span>
+
+    @Override
+    public int getKickIdleUsersTimeout() {
+<span class="nc" id="L931">        return user_timeout;</span>
+    }
+
+    @Override
+    public void setUserIdleTime(final int idleTime) {
+<span class="nc bnc" id="L936" title="All 2 branches missed.">        if (this.user_idle == idleTime) {</span>
+<span class="nc" id="L937">            return;</span>
+        }
+<span class="nc" id="L939">        this.user_idle = idleTime;</span>
+        // Set the new property value
+<span class="nc" id="L941">        MUCPersistenceManager.setProperty(chatServiceName, &quot;tasks.user.idle&quot;, Integer.toString(idleTime));</span>
+<span class="nc" id="L942">    }</span>
+
+    @Override
+    public int getUserIdleTime() {
+<span class="nc" id="L946">        return user_idle;</span>
+    }
+
+    @Override
+    public Collection&lt;JID&gt; getUsersAllowedToCreate() {
+<span class="nc" id="L951">        return Collections.unmodifiableCollection(allowedToCreate);</span>
+    }
+
+    @Override
+    public Collection&lt;JID&gt; getSysadmins() {
+<span class="nc" id="L956">        return Collections.unmodifiableCollection(sysadmins);</span>
+    }
+
+    @Override
+    public boolean isSysadmin(final JID bareJID) {
+<span class="nc" id="L961">        return sysadmins.includes(bareJID);</span>
+    }
+
+    @Override
+    public void addSysadmins(final Collection&lt;JID&gt; userJIDs) {
+<span class="nc bnc" id="L966" title="All 2 branches missed.">        for (final JID userJID : userJIDs) {</span>
+<span class="nc" id="L967">            addSysadmin(userJID);</span>
+<span class="nc" id="L968">        }</span>
+<span class="nc" id="L969">    }</span>
+
+    @Override
+    public void addSysadmin(final JID userJID) {
+<span class="nc" id="L973">        final JID bareJID = userJID.asBareJID();</span>
+
+<span class="nc bnc" id="L975" title="All 2 branches missed.">        if (!sysadmins.contains(userJID)) {</span>
+<span class="nc" id="L976">            sysadmins.add(bareJID);</span>
+        }
+
+        // CopyOnWriteArray does not allow sorting, so do sorting in temp list.
+<span class="nc" id="L980">        final ArrayList&lt;JID&gt; tempList = new ArrayList&lt;&gt;(sysadmins);</span>
+<span class="nc" id="L981">        Collections.sort(tempList);</span>
+<span class="nc" id="L982">        sysadmins = new ConcurrentGroupList&lt;&gt;(tempList);</span>
+
+        // Update the config.
+<span class="nc" id="L985">        final String[] jids = new String[sysadmins.size()];</span>
+<span class="nc bnc" id="L986" title="All 2 branches missed.">        for (int i = 0; i &lt; jids.length; i++) {</span>
+<span class="nc" id="L987">            jids[i] = sysadmins.get(i).toBareJID();</span>
+        }
+<span class="nc" id="L989">        MUCPersistenceManager.setProperty(chatServiceName, &quot;sysadmin.jid&quot;, fromArray(jids));</span>
+<span class="nc" id="L990">    }</span>
+
+    @Override
+    public void removeSysadmin(final JID userJID) {
+<span class="nc" id="L994">        final JID bareJID = userJID.asBareJID();</span>
+
+<span class="nc" id="L996">        sysadmins.remove(bareJID);</span>
+
+        // Update the config.
+<span class="nc" id="L999">        final String[] jids = new String[sysadmins.size()];</span>
+<span class="nc bnc" id="L1000" title="All 2 branches missed.">        for (int i = 0; i &lt; jids.length; i++) {</span>
+<span class="nc" id="L1001">            jids[i] = sysadmins.get(i).toBareJID();</span>
+        }
+<span class="nc" id="L1003">        MUCPersistenceManager.setProperty(chatServiceName, &quot;sysadmin.jid&quot;, fromArray(jids));</span>
+<span class="nc" id="L1004">    }</span>
+
+    /**
+     * Returns the flag that indicates if the service should provide information about non-public
+     * members-only rooms when handling service discovery requests.
+     *
+     * @return true if the service should provide information about non-public members-only rooms.
+     */
+    public boolean isAllowToDiscoverMembersOnlyRooms() {
+<span class="nc" id="L1013">        return allowToDiscoverMembersOnlyRooms;</span>
+    }
+
+    /**
+     * Sets the flag that indicates if the service should provide information about non-public
+     * members-only rooms when handling service discovery requests.
+     *
+     * @param allowToDiscoverMembersOnlyRooms
+     *         if the service should provide information about
+     *         non-public members-only rooms.
+     */
+    public void setAllowToDiscoverMembersOnlyRooms(final boolean allowToDiscoverMembersOnlyRooms) {
+<span class="nc" id="L1025">        this.allowToDiscoverMembersOnlyRooms = allowToDiscoverMembersOnlyRooms;</span>
+<span class="nc" id="L1026">        MUCPersistenceManager.setProperty(chatServiceName, &quot;discover.membersOnly&quot;,</span>
+<span class="nc" id="L1027">                Boolean.toString(allowToDiscoverMembersOnlyRooms));</span>
+<span class="nc" id="L1028">    }</span>
+
+    /**
+     * Returns the flag that indicates if the service should provide information about locked rooms
+     * when handling service discovery requests.
+     *
+     * @return true if the service should provide information about locked rooms.
+     */
+    public boolean isAllowToDiscoverLockedRooms() {
+<span class="nc" id="L1037">        return allowToDiscoverLockedRooms;</span>
+    }
+
+    /**
+     * Sets the flag that indicates if the service should provide information about locked rooms
+     * when handling service discovery requests.
+     * Note: Setting this flag in false is not compliant with the spec. A user may try to join a
+     * locked room thinking that the room doesn't exist because the user didn't discover it before.
+     *
+     * @param allowToDiscoverLockedRooms if the service should provide information about locked
+     *        rooms.
+     */
+    public void setAllowToDiscoverLockedRooms(final boolean allowToDiscoverLockedRooms) {
+<span class="nc" id="L1050">        this.allowToDiscoverLockedRooms = allowToDiscoverLockedRooms;</span>
+<span class="nc" id="L1051">        MUCPersistenceManager.setProperty(chatServiceName, &quot;discover.locked&quot;,</span>
+<span class="nc" id="L1052">                Boolean.toString(allowToDiscoverLockedRooms));</span>
+<span class="nc" id="L1053">    }</span>
+
+    @Override
+    public boolean isRoomCreationRestricted() {
+<span class="nc" id="L1057">        return roomCreationRestricted;</span>
+    }
+
+    @Override
+    public void setRoomCreationRestricted(final boolean roomCreationRestricted) {
+<span class="nc" id="L1062">        this.roomCreationRestricted = roomCreationRestricted;</span>
+<span class="nc" id="L1063">        MUCPersistenceManager.setProperty(chatServiceName, &quot;create.anyone&quot;, Boolean.toString(roomCreationRestricted));</span>
+<span class="nc" id="L1064">    }</span>
+
+    @Override
+    public boolean isAllRegisteredUsersAllowedToCreate() {
+<span class="nc" id="L1068">        return allRegisteredUsersAllowedToCreate;</span>
+    }
+
+    @Override
+    public void setAllRegisteredUsersAllowedToCreate( final boolean allow ) {
+<span class="nc" id="L1073">        this.allRegisteredUsersAllowedToCreate = allow;</span>
+<span class="nc" id="L1074">        MUCPersistenceManager.setProperty(chatServiceName, &quot;create.all-registered&quot;, Boolean.toString(allow));</span>
+<span class="nc" id="L1075">    }</span>
+
+    @Override
+    public void addUsersAllowedToCreate(final Collection&lt;JID&gt; userJIDs) {
+<span class="nc" id="L1079">        boolean listChanged = false;</span>
+
+<span class="nc bnc" id="L1081" title="All 2 branches missed.">        for(final JID userJID: userJIDs) {</span>
+            // Update the list of allowed JIDs to create MUC rooms. Since we are updating the instance
+            // variable there is no need to restart the service
+<span class="nc bnc" id="L1084" title="All 2 branches missed.">            if (!allowedToCreate.contains(userJID)) {</span>
+<span class="nc" id="L1085">                allowedToCreate.add(userJID);</span>
+<span class="nc" id="L1086">                listChanged = true;</span>
+            }
+<span class="nc" id="L1088">        }</span>
+
+        // if nothing was added, there's nothing to update
+<span class="nc bnc" id="L1091" title="All 2 branches missed.">        if(listChanged) {</span>
+            // CopyOnWriteArray does not allow sorting, so do sorting in temp list.
+<span class="nc" id="L1093">            final List&lt;JID&gt; tempList = new ArrayList&lt;&gt;(allowedToCreate);</span>
+<span class="nc" id="L1094">            Collections.sort(tempList);</span>
+<span class="nc" id="L1095">            allowedToCreate = new ConcurrentGroupList&lt;&gt;(tempList);</span>
+            // Update the config.
+<span class="nc" id="L1097">            MUCPersistenceManager.setProperty(chatServiceName, &quot;create.jid&quot;, fromCollection(allowedToCreate));</span>
+        }
+<span class="nc" id="L1099">    }</span>
+
+    @Override
+    public void addUserAllowedToCreate(final JID userJID) {
+<span class="nc" id="L1103">        final List&lt;JID&gt; asList = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L1104">        asList.add(userJID);</span>
+<span class="nc" id="L1105">        addUsersAllowedToCreate(asList);</span>
+<span class="nc" id="L1106">    }</span>
+
+    @Override
+    public void removeUsersAllowedToCreate(final Collection&lt;JID&gt; userJIDs) {
+<span class="nc" id="L1110">        boolean listChanged = false;</span>
+
+<span class="nc bnc" id="L1112" title="All 2 branches missed.">        for(final JID userJID: userJIDs) {</span>
+            // Update the list of allowed JIDs to create MUC rooms. Since we are updating the instance
+            // variable there is no need to restart the service
+<span class="nc" id="L1115">            listChanged |= allowedToCreate.remove(userJID);</span>
+<span class="nc" id="L1116">        }</span>
+
+        // if none of the JIDs were on the list, there's nothing to update
+<span class="nc bnc" id="L1119" title="All 2 branches missed.">        if(listChanged) {</span>
+<span class="nc" id="L1120">            MUCPersistenceManager.setProperty(chatServiceName, &quot;create.jid&quot;, fromCollection(allowedToCreate));</span>
+        }
+<span class="nc" id="L1122">    }</span>
+
+    @Override
+    public void removeUserAllowedToCreate(final JID userJID) {
+<span class="nc" id="L1126">        removeUsersAllowedToCreate(Collections.singleton(userJID));</span>
+<span class="nc" id="L1127">    }</span>
+
+    public void initialize(final XMPPServer server) {
+<span class="nc" id="L1130">        initializeSettings();</span>
+
+<span class="nc" id="L1132">        routingTable = server.getRoutingTable();</span>
+<span class="nc" id="L1133">        router = server.getPacketRouter();</span>
+        // Configure the handler of iq:register packets
+<span class="nc" id="L1135">        registerHandler = new IQMUCRegisterHandler(this);</span>
+        // Configure the handler of jabber:iq:search packets
+<span class="nc" id="L1137">        searchHandler = new IQMUCSearchHandler(this);</span>
+<span class="nc" id="L1138">    }</span>
+
+    public void initializeSettings() {
+<span class="nc" id="L1141">        serviceEnabled = JiveProperties.getInstance().getBooleanProperty(&quot;xmpp.muc.enabled&quot;, true);</span>
+<span class="nc" id="L1142">        serviceEnabled = MUCPersistenceManager.getBooleanProperty(chatServiceName, &quot;enabled&quot;, serviceEnabled);</span>
+        // Trigger the strategy to load itself from the context
+<span class="nc" id="L1144">        historyStrategy.setContext(chatServiceName, &quot;history&quot;);</span>
+        // Load the list of JIDs that are sysadmins of the MUC service
+<span class="nc" id="L1146">        String property = MUCPersistenceManager.getProperty(chatServiceName, &quot;sysadmin.jid&quot;);</span>
+
+<span class="nc" id="L1148">        sysadmins.clear();</span>
+<span class="nc bnc" id="L1149" title="All 4 branches missed.">        if (property != null &amp;&amp; property.trim().length() &gt; 0) {</span>
+<span class="nc" id="L1150">            final String[] jids = property.split(&quot;,&quot;);</span>
+<span class="nc bnc" id="L1151" title="All 2 branches missed.">            for (final String jid : jids) {</span>
+<span class="nc bnc" id="L1152" title="All 4 branches missed.">                if (jid == null || jid.trim().length() == 0) {</span>
+<span class="nc" id="L1153">                    continue;</span>
+                }
+                try {
+                    // could be a group jid
+<span class="nc" id="L1157">                    sysadmins.add(GroupJID.fromString(jid.trim().toLowerCase()).asBareJID());</span>
+<span class="nc" id="L1158">                } catch (final IllegalArgumentException e) {</span>
+<span class="nc" id="L1159">                    Log.warn(&quot;The 'sysadmin.jid' property contains a value that is not a valid JID. It is ignored. Offending value: '&quot; + jid + &quot;'.&quot;, e);</span>
+<span class="nc" id="L1160">                }</span>
+            }
+        }
+<span class="nc" id="L1163">        allowToDiscoverLockedRooms =</span>
+<span class="nc" id="L1164">                MUCPersistenceManager.getBooleanProperty(chatServiceName, &quot;discover.locked&quot;, true);</span>
+<span class="nc" id="L1165">        allowToDiscoverMembersOnlyRooms =</span>
+<span class="nc" id="L1166">                MUCPersistenceManager.getBooleanProperty(chatServiceName, &quot;discover.membersOnly&quot;, true);</span>
+<span class="nc" id="L1167">        roomCreationRestricted =</span>
+<span class="nc" id="L1168">                MUCPersistenceManager.getBooleanProperty(chatServiceName, &quot;create.anyone&quot;, false);</span>
+<span class="nc" id="L1169">        allRegisteredUsersAllowedToCreate =</span>
+<span class="nc" id="L1170">                MUCPersistenceManager.getBooleanProperty(chatServiceName, &quot;create.all-registered&quot;, false );</span>
+        // Load the list of JIDs that are allowed to create a MUC room
+<span class="nc" id="L1172">        property = MUCPersistenceManager.getProperty(chatServiceName, &quot;create.jid&quot;);</span>
+<span class="nc" id="L1173">        allowedToCreate.clear();</span>
+<span class="nc bnc" id="L1174" title="All 4 branches missed.">        if (property != null &amp;&amp; property.trim().length() &gt; 0) {</span>
+<span class="nc" id="L1175">            final String[] jids = property.split(&quot;,&quot;);</span>
+<span class="nc bnc" id="L1176" title="All 2 branches missed.">            for (final String jid : jids) {</span>
+<span class="nc bnc" id="L1177" title="All 4 branches missed.">                if (jid == null || jid.trim().length() == 0) {</span>
+<span class="nc" id="L1178">                    continue;</span>
+                }
+                try {
+                    // could be a group jid
+<span class="nc" id="L1182">                    allowedToCreate.add(GroupJID.fromString(jid.trim().toLowerCase()).asBareJID());</span>
+<span class="nc" id="L1183">                } catch (final IllegalArgumentException e) {</span>
+<span class="nc" id="L1184">                    Log.warn(&quot;The 'create.jid' property contains a value that is not a valid JID. It is ignored. Offending value: '&quot; + jid + &quot;'.&quot;, e);</span>
+<span class="nc" id="L1185">                }</span>
+            }
+        }
+<span class="nc" id="L1188">        String value = MUCPersistenceManager.getProperty(chatServiceName, &quot;tasks.user.timeout&quot;);</span>
+<span class="nc" id="L1189">        user_timeout = 300000;</span>
+<span class="nc bnc" id="L1190" title="All 2 branches missed.">        if (value != null) {</span>
+            try {
+<span class="nc" id="L1192">                user_timeout = Integer.parseInt(value);</span>
+            }
+<span class="nc" id="L1194">            catch (final NumberFormatException e) {</span>
+<span class="nc" id="L1195">                Log.error(&quot;Wrong number format of property tasks.user.timeout for service &quot;+chatServiceName, e);</span>
+<span class="nc" id="L1196">            }</span>
+        }
+<span class="nc" id="L1198">        value = MUCPersistenceManager.getProperty(chatServiceName, &quot;tasks.user.idle&quot;);</span>
+<span class="nc" id="L1199">        user_idle = -1;</span>
+<span class="nc bnc" id="L1200" title="All 2 branches missed.">        if (value != null) {</span>
+            try {
+<span class="nc" id="L1202">                user_idle = Integer.parseInt(value);</span>
+            }
+<span class="nc" id="L1204">            catch (final NumberFormatException e) {</span>
+<span class="nc" id="L1205">                Log.error(&quot;Wrong number format of property tasks.user.idle for service &quot;+chatServiceName, e);</span>
+<span class="nc" id="L1206">            }</span>
+        }
+<span class="nc" id="L1208">        value = MUCPersistenceManager.getProperty(chatServiceName, &quot;tasks.log.tasks.log.maxbatchsize&quot;);</span>
+<span class="nc" id="L1209">        logMaxConversationBatchSize = 500;</span>
+<span class="nc bnc" id="L1210" title="All 2 branches missed.">        if (value != null) {</span>
+            try {
+<span class="nc" id="L1212">                logMaxConversationBatchSize = Integer.parseInt(value);</span>
+            }
+<span class="nc" id="L1214">            catch (final NumberFormatException e) {</span>
+<span class="nc" id="L1215">                Log.error(&quot;Wrong number format of property tasks.log.maxbatchsize for service &quot;+chatServiceName, e);</span>
+<span class="nc" id="L1216">            }</span>
+        }
+<span class="nc" id="L1218">        value = MUCPersistenceManager.getProperty(chatServiceName, &quot;tasks.log.maxbatchinterval&quot;);</span>
+<span class="nc" id="L1219">        logMaxBatchInterval = Duration.ofSeconds( 1 );</span>
+<span class="nc bnc" id="L1220" title="All 2 branches missed.">        if (value != null) {</span>
+            try {
+<span class="nc" id="L1222">                logMaxBatchInterval = Duration.ofMillis( Long.parseLong(value) );</span>
+            }
+<span class="nc" id="L1224">            catch (final NumberFormatException e) {</span>
+<span class="nc" id="L1225">                Log.error(&quot;Wrong number format of property tasks.log.maxbatchinterval for service &quot;+chatServiceName, e);</span>
+<span class="nc" id="L1226">            }</span>
+        }
+<span class="nc" id="L1228">        value = MUCPersistenceManager.getProperty(chatServiceName, &quot;tasks.log.batchgrace&quot;);</span>
+<span class="nc" id="L1229">        logBatchGracePeriod = Duration.ofMillis( 50 );</span>
+<span class="nc bnc" id="L1230" title="All 2 branches missed.">        if (value != null) {</span>
+            try {
+<span class="nc" id="L1232">                logBatchGracePeriod = Duration.ofMillis( Long.parseLong(value) );</span>
+            }
+<span class="nc" id="L1234">            catch (final NumberFormatException e) {</span>
+<span class="nc" id="L1235">                Log.error(&quot;Wrong number format of property tasks.log.batchgrace for service &quot;+chatServiceName, e);</span>
+<span class="nc" id="L1236">            }</span>
+        }
+<span class="nc" id="L1238">        value = MUCPersistenceManager.getProperty(chatServiceName, &quot;unload.empty_days&quot;);</span>
+<span class="nc" id="L1239">        emptyLimit = 30 * 24;</span>
+<span class="nc bnc" id="L1240" title="All 2 branches missed.">        if (value != null) {</span>
+            try {
+<span class="nc" id="L1242">                emptyLimit = Integer.parseInt(value) * 24;</span>
+            }
+<span class="nc" id="L1244">            catch (final NumberFormatException e) {</span>
+<span class="nc" id="L1245">                Log.error(&quot;Wrong number format of property unload.empty_days for service &quot;+chatServiceName, e);</span>
+<span class="nc" id="L1246">            }</span>
+        }
+<span class="nc" id="L1248">    }</span>
+
+    public void setLogMaxConversationBatchSize( int size )
+    {
+<span class="nc bnc" id="L1252" title="All 2 branches missed.">        if ( this.logMaxConversationBatchSize == size ) {</span>
+<span class="nc" id="L1253">            return;</span>
+        }
+<span class="nc" id="L1255">        this.logMaxConversationBatchSize = size;</span>
+
+<span class="nc" id="L1257">        archiver.setMaxWorkQueueSize( size );</span>
+<span class="nc" id="L1258">        MUCPersistenceManager.setProperty( chatServiceName, &quot;tasks.log.maxbatchsize&quot;, Integer.toString( size));</span>
+<span class="nc" id="L1259">    }</span>
+
+    public int getLogMaxConversationBatchSize()
+    {
+<span class="nc" id="L1263">        return logMaxConversationBatchSize;</span>
+    }
+
+    public void setLogMaxBatchInterval( Duration interval )
+    {
+<span class="nc bnc" id="L1268" title="All 2 branches missed.">        if ( this.logMaxBatchInterval.equals( interval ) ) {</span>
+<span class="nc" id="L1269">            return;</span>
+        }
+<span class="nc" id="L1271">        this.logMaxBatchInterval = interval;</span>
+
+<span class="nc" id="L1273">        archiver.setMaxPurgeInterval( interval );</span>
+<span class="nc" id="L1274">        MUCPersistenceManager.setProperty(chatServiceName, &quot;tasks.log.maxbatchinterval&quot;, Long.toString( interval.toMillis() ) );</span>
+<span class="nc" id="L1275">    }</span>
+
+    public Duration getLogMaxBatchInterval()
+    {
+<span class="nc" id="L1279">        return logMaxBatchInterval;</span>
+    }
+
+    public void setLogBatchGracePeriod( Duration period )
+    {
+<span class="nc bnc" id="L1284" title="All 2 branches missed.">        if ( this.logBatchGracePeriod.equals( period ) ) {</span>
+<span class="nc" id="L1285">            return;</span>
+        }
+
+<span class="nc" id="L1288">        this.logBatchGracePeriod = period;</span>
+<span class="nc" id="L1289">        archiver.setGracePeriod( period );</span>
+<span class="nc" id="L1290">        MUCPersistenceManager.setProperty(chatServiceName, &quot;tasks.log.batchgrace&quot;, Long.toString( period.toMillis() ) );</span>
+<span class="nc" id="L1291">    }</span>
+
+    @Override
+    public void start() {
+<span class="nc" id="L1295">        XMPPServer.getInstance().addServerListener( this );</span>
+
+        // Run through the users every 5 minutes after a 5 minutes server startup delay (default
+        // values)
+<span class="nc" id="L1299">        userTimeoutTask = new UserTimeoutTask();</span>
+<span class="nc" id="L1300">        TaskEngine.getInstance().schedule(userTimeoutTask, user_timeout, user_timeout);</span>
+<span class="nc" id="L1301">        archiver = new ConversationLogEntryArchiver( &quot;MUC Service &quot; + this.getAddress().toString(), logMaxConversationBatchSize, logMaxBatchInterval, logBatchGracePeriod );</span>
+<span class="nc" id="L1302">        XMPPServer.getInstance().getArchiveManager().add( archiver );</span>
+
+        // Remove unused rooms from memory
+<span class="nc" id="L1305">        long cleanupFreq = JiveGlobals.getLongProperty(</span>
+            &quot;xmpp.muc.cleanupFrequency.inMinutes&quot;, CLEANUP_FREQUENCY) * 60 * 1000;
+<span class="nc" id="L1307">        TaskEngine.getInstance().schedule(new CleanupTask(), cleanupFreq, cleanupFreq);</span>
+
+        // Set us up to answer disco item requests
+<span class="nc" id="L1310">        XMPPServer.getInstance().getIQDiscoItemsHandler().addServerItemsProvider(this);</span>
+<span class="nc" id="L1311">        XMPPServer.getInstance().getIQDiscoInfoHandler().setServerNodeInfoProvider(this.getServiceDomain(), this);</span>
+
+<span class="nc" id="L1313">        final ArrayList&lt;String&gt; params = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L1314">        params.clear();</span>
+<span class="nc" id="L1315">        params.add(getServiceDomain());</span>
+<span class="nc" id="L1316">        Log.info(LocaleUtils.getLocalizedString(&quot;startup.starting.muc&quot;, params));</span>
+        // Load all the persistent rooms to memory
+<span class="nc bnc" id="L1318" title="All 2 branches missed.">        for (final LocalMUCRoom room : MUCPersistenceManager.loadRoomsFromDB(this, this.getCleanupDate(), router)) {</span>
+<span class="nc" id="L1319">            localMUCRoomManager.addRoom(room.getName().toLowerCase(),room);</span>
+<span class="nc" id="L1320">        }</span>
+<span class="nc" id="L1321">    }</span>
+
+    private void stop() {
+<span class="nc" id="L1324">        XMPPServer.getInstance().getIQDiscoItemsHandler().removeServerItemsProvider(this);</span>
+<span class="nc" id="L1325">        XMPPServer.getInstance().getIQDiscoInfoHandler().removeServerNodeInfoProvider(this.getServiceDomain());</span>
+        // Remove the route to this service
+<span class="nc" id="L1327">        routingTable.removeComponentRoute(getAddress());</span>
+<span class="nc" id="L1328">        broadcastShutdown();</span>
+<span class="nc" id="L1329">        XMPPServer.getInstance().removeServerListener( this );</span>
+<span class="nc" id="L1330">        XMPPServer.getInstance().getArchiveManager().add( archiver );</span>
+<span class="nc" id="L1331">    }</span>
+
+    @Override
+    public void enableService(final boolean enabled, final boolean persistent) {
+<span class="nc bnc" id="L1335" title="All 2 branches missed.">        if (isServiceEnabled() == enabled) {</span>
+            // Do nothing if the service status has not changed
+<span class="nc" id="L1337">            return;</span>
+        }
+<span class="nc bnc" id="L1339" title="All 2 branches missed.">        if (!enabled) {</span>
+            // Stop the service/module
+<span class="nc" id="L1341">            stop();</span>
+        }
+<span class="nc bnc" id="L1343" title="All 2 branches missed.">        if (persistent) {</span>
+<span class="nc" id="L1344">            MUCPersistenceManager.setProperty(chatServiceName, &quot;enabled&quot;, Boolean.toString(enabled));</span>
+        }
+<span class="nc" id="L1346">        serviceEnabled = enabled;</span>
+<span class="nc bnc" id="L1347" title="All 2 branches missed.">        if (enabled) {</span>
+            // Start the service/module
+<span class="nc" id="L1349">            start();</span>
+        }
+<span class="nc" id="L1351">    }</span>
+
+    @Override
+    public boolean isServiceEnabled() {
+<span class="nc" id="L1355">        return serviceEnabled;</span>
+    }
+
+    @Override
+    public long getTotalChatTime() {
+<span class="nc" id="L1360">        return totalChatTime;</span>
+    }
+
+    /**
+     * Retuns the number of existing rooms in the server (i.e. persistent or not,
+     * in memory or not).
+     *
+     * @return the number of existing rooms in the server.
+     */
+    @Override
+    public int getNumberChatRooms() {
+<span class="nc" id="L1371">         return localMUCRoomManager.getNumberChatRooms();</span>
+    }
+
+    /**
+     * Retuns the total number of occupants in all rooms in the server.
+     *
+     * @param onlyLocal true if only users connected to this JVM will be considered. Otherwise count cluster wise.
+     * @return the number of existing rooms in the server.
+     */
+    @Override
+    public int getNumberConnectedUsers(final boolean onlyLocal) {
+<span class="nc" id="L1382">        int total = 0;</span>
+<span class="nc bnc" id="L1383" title="All 2 branches missed.">        for (final LocalMUCUser user : users.values()) {</span>
+<span class="nc bnc" id="L1384" title="All 2 branches missed.">            if (user.isJoined()) {</span>
+<span class="nc" id="L1385">                total = total + 1;</span>
+            }
+<span class="nc" id="L1387">        }</span>
+        // Add users from remote cluster nodes
+<span class="nc bnc" id="L1389" title="All 2 branches missed.">        if (!onlyLocal) {</span>
+<span class="nc" id="L1390">            final Collection&lt;Integer&gt; results =</span>
+<span class="nc" id="L1391">                    CacheFactory.doSynchronousClusterTask(new GetNumberConnectedUsers(), false);</span>
+<span class="nc bnc" id="L1392" title="All 2 branches missed.">            for (final Integer result : results) {</span>
+<span class="nc bnc" id="L1393" title="All 2 branches missed.">                if (result == null) {</span>
+<span class="nc" id="L1394">                    continue;</span>
+                }
+<span class="nc" id="L1396">                total = total + result;</span>
+<span class="nc" id="L1397">            }</span>
+        }
+<span class="nc" id="L1399">        return total;</span>
+    }
+
+    /**
+     * Retuns the total number of users that have joined in all rooms in the server.
+     *
+     * @return the number of existing rooms in the server.
+     */
+    @Override
+    public int getNumberRoomOccupants() {
+<span class="nc" id="L1409">        int total = 0;</span>
+<span class="nc bnc" id="L1410" title="All 2 branches missed.">        for (final MUCRoom room : localMUCRoomManager.getRooms()) {</span>
+<span class="nc" id="L1411">            total = total + room.getOccupantsCount();</span>
+<span class="nc" id="L1412">        }</span>
+<span class="nc" id="L1413">        return total;</span>
+    }
+
+    /**
+     * Returns the total number of incoming messages since last reset.
+     *
+     * @param resetAfter True if you want the counter to be reset after results returned.
+     * @return the number of incoming messages through the service.
+     */
+    @Override
+    public long getIncomingMessageCount(final boolean resetAfter) {
+<span class="nc bnc" id="L1424" title="All 2 branches missed.">        if (resetAfter) {</span>
+<span class="nc" id="L1425">            return inMessages.getAndSet(0);</span>
+        }
+        else {
+<span class="nc" id="L1428">            return inMessages.get();</span>
+        }
+    }
+
+    /**
+     * Returns the total number of outgoing messages since last reset.
+     *
+     * @param resetAfter True if you want the counter to be reset after results returned.
+     * @return the number of outgoing messages through the service.
+     */
+    @Override
+    public long getOutgoingMessageCount(final boolean resetAfter) {
+<span class="nc bnc" id="L1440" title="All 2 branches missed.">        if (resetAfter) {</span>
+<span class="nc" id="L1441">            return outMessages.getAndSet(0);</span>
+        }
+        else {
+<span class="nc" id="L1444">            return outMessages.get();</span>
+        }
+    }
+
+    @Override
+    public void logConversation(final MUCRoom room, final Message message, final JID sender) {
+        // Only log messages that have a subject or body. Otherwise ignore it.
+<span class="nc bnc" id="L1451" title="All 4 branches missed.">        if (message.getSubject() != null || message.getBody() != null) {</span>
+<span class="nc" id="L1452">            archiver.archive( new ConversationLogEntry( new Date() ,room, message, sender) );</span>
+        }
+<span class="nc" id="L1454">    }</span>
+
+    @Override
+    public void messageBroadcastedTo(final int numOccupants) {
+        // Increment counter of received messages that where broadcasted by one
+<span class="nc" id="L1459">        inMessages.incrementAndGet();</span>
+        // Increment counter of outgoing messages with the number of room occupants
+        // that received the message
+<span class="nc" id="L1462">        outMessages.addAndGet(numOccupants);</span>
+<span class="nc" id="L1463">    }</span>
+
+    @Override
+    public Iterator&lt;DiscoServerItem&gt; getItems() {
+        // Check if the service is disabled. Info is not available when
+        // disabled.
+<span class="nc bnc" id="L1469" title="All 2 branches missed.">        if (!isServiceEnabled())</span>
+        {
+<span class="nc" id="L1471">            return null;</span>
+        }
+
+<span class="nc" id="L1474">        final ArrayList&lt;DiscoServerItem&gt; items = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L1475">        final DiscoServerItem item = new DiscoServerItem(new JID(</span>
+<span class="nc" id="L1476">            getServiceDomain()), getDescription(), null, null, this, this);</span>
+<span class="nc" id="L1477">        items.add(item);</span>
+<span class="nc" id="L1478">        return items.iterator();</span>
+    }
+
+    @Override
+    public Iterator&lt;Element&gt; getIdentities(final String name, final String node, final JID senderJID) {
+<span class="nc" id="L1483">        final ArrayList&lt;Element&gt; identities = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L1484" title="All 4 branches missed.">        if (name == null &amp;&amp; node == null) {</span>
+            // Answer the identity of the MUC service
+<span class="nc" id="L1486">            final Element identity = DocumentHelper.createElement(&quot;identity&quot;);</span>
+<span class="nc" id="L1487">            identity.addAttribute(&quot;category&quot;, &quot;conference&quot;);</span>
+<span class="nc" id="L1488">            identity.addAttribute(&quot;name&quot;, getDescription());</span>
+<span class="nc" id="L1489">            identity.addAttribute(&quot;type&quot;, &quot;text&quot;);</span>
+<span class="nc" id="L1490">            identities.add(identity);</span>
+
+            // TODO: Should internationalize Public Chatroom Search, and make it configurable.
+<span class="nc" id="L1493">            final Element searchId = DocumentHelper.createElement(&quot;identity&quot;);</span>
+<span class="nc" id="L1494">            searchId.addAttribute(&quot;category&quot;, &quot;directory&quot;);</span>
+<span class="nc" id="L1495">            searchId.addAttribute(&quot;name&quot;, &quot;Public Chatroom Search&quot;);</span>
+<span class="nc" id="L1496">            searchId.addAttribute(&quot;type&quot;, &quot;chatroom&quot;);</span>
+<span class="nc" id="L1497">            identities.add(searchId);</span>
+
+<span class="nc bnc" id="L1499" title="All 2 branches missed.">            if (!extraDiscoIdentities.isEmpty()) {</span>
+<span class="nc" id="L1500">                identities.addAll(extraDiscoIdentities);</span>
+            }
+<span class="nc" id="L1502">        }</span>
+<span class="nc bnc" id="L1503" title="All 4 branches missed.">        else if (name != null &amp;&amp; node == null) {</span>
+            // Answer the identity of a given room
+<span class="nc" id="L1505">            final MUCRoom room = getChatRoom(name);</span>
+<span class="nc bnc" id="L1506" title="All 2 branches missed.">            if (room != null) {</span>
+<span class="nc" id="L1507">                final Element identity = DocumentHelper.createElement(&quot;identity&quot;);</span>
+<span class="nc" id="L1508">                identity.addAttribute(&quot;category&quot;, &quot;conference&quot;);</span>
+<span class="nc" id="L1509">                identity.addAttribute(&quot;name&quot;, room.getNaturalLanguageName());</span>
+<span class="nc" id="L1510">                identity.addAttribute(&quot;type&quot;, &quot;text&quot;);</span>
+
+<span class="nc" id="L1512">                identities.add(identity);</span>
+            }
+<span class="nc" id="L1514">        }</span>
+<span class="nc bnc" id="L1515" title="All 4 branches missed.">        else if (name != null &amp;&amp; &quot;x-roomuser-item&quot;.equals(node)) {</span>
+            // Answer reserved nickname for the sender of the disco request in the requested room
+<span class="nc" id="L1517">            final MUCRoom room = getChatRoom(name);</span>
+<span class="nc bnc" id="L1518" title="All 2 branches missed.">            if (room != null) {</span>
+<span class="nc" id="L1519">                final String reservedNick = room.getReservedNickname(senderJID);</span>
+<span class="nc bnc" id="L1520" title="All 2 branches missed.">                if (reservedNick != null) {</span>
+<span class="nc" id="L1521">                    final Element identity = DocumentHelper.createElement(&quot;identity&quot;);</span>
+<span class="nc" id="L1522">                    identity.addAttribute(&quot;category&quot;, &quot;conference&quot;);</span>
+<span class="nc" id="L1523">                    identity.addAttribute(&quot;name&quot;, reservedNick);</span>
+<span class="nc" id="L1524">                    identity.addAttribute(&quot;type&quot;, &quot;text&quot;);</span>
+
+<span class="nc" id="L1526">                    identities.add(identity);</span>
+                }
+            }
+        }
+<span class="nc" id="L1530">        return identities.iterator();</span>
+    }
+
+    @Override
+    public Iterator&lt;String&gt; getFeatures(final String name, final String node, final JID senderJID) {
+<span class="nc" id="L1535">        final ArrayList&lt;String&gt; features = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L1536" title="All 4 branches missed.">        if (name == null &amp;&amp; node == null) {</span>
+            // Answer the features of the MUC service
+<span class="nc" id="L1538">            features.add(&quot;http://jabber.org/protocol/muc&quot;);</span>
+<span class="nc" id="L1539">            features.add(&quot;http://jabber.org/protocol/disco#info&quot;);</span>
+<span class="nc" id="L1540">            features.add(&quot;http://jabber.org/protocol/disco#items&quot;);</span>
+<span class="nc" id="L1541">            features.add(&quot;jabber:iq:search&quot;);</span>
+<span class="nc" id="L1542">            features.add(ResultSet.NAMESPACE_RESULT_SET_MANAGEMENT);</span>
+<span class="nc bnc" id="L1543" title="All 2 branches missed.">            if (!extraDiscoFeatures.isEmpty()) {</span>
+<span class="nc" id="L1544">                features.addAll(extraDiscoFeatures);</span>
+            }
+        }
+<span class="nc bnc" id="L1547" title="All 4 branches missed.">        else if (name != null &amp;&amp; node == null) {</span>
+            // Answer the features of a given room
+<span class="nc" id="L1549">            final MUCRoom room = getChatRoom(name);</span>
+<span class="nc bnc" id="L1550" title="All 2 branches missed.">            if (room != null) {</span>
+<span class="nc" id="L1551">                features.add(&quot;http://jabber.org/protocol/muc&quot;);</span>
+<span class="nc bnc" id="L1552" title="All 2 branches missed.">                if (room.isPublicRoom()) {</span>
+<span class="nc" id="L1553">                    features.add(&quot;muc_public&quot;);</span>
+                } else {
+<span class="nc" id="L1555">                    features.add(&quot;muc_hidden&quot;);</span>
+                }
+<span class="nc bnc" id="L1557" title="All 2 branches missed.">                if (room.isMembersOnly()) {</span>
+<span class="nc" id="L1558">                    features.add(&quot;muc_membersonly&quot;);</span>
+                }
+                else {
+<span class="nc" id="L1561">                    features.add(&quot;muc_open&quot;);</span>
+                }
+<span class="nc bnc" id="L1563" title="All 2 branches missed.">                if (room.isModerated()) {</span>
+<span class="nc" id="L1564">                    features.add(&quot;muc_moderated&quot;);</span>
+                }
+                else {
+<span class="nc" id="L1567">                    features.add(&quot;muc_unmoderated&quot;);</span>
+                }
+<span class="nc bnc" id="L1569" title="All 2 branches missed.">                if (room.canAnyoneDiscoverJID()) {</span>
+<span class="nc" id="L1570">                    features.add(&quot;muc_nonanonymous&quot;);</span>
+                }
+                else {
+<span class="nc" id="L1573">                    features.add(&quot;muc_semianonymous&quot;);</span>
+                }
+<span class="nc bnc" id="L1575" title="All 2 branches missed.">                if (room.isPasswordProtected()) {</span>
+<span class="nc" id="L1576">                    features.add(&quot;muc_passwordprotected&quot;);</span>
+                }
+                else {
+<span class="nc" id="L1579">                    features.add(&quot;muc_unsecured&quot;);</span>
+                }
+<span class="nc bnc" id="L1581" title="All 2 branches missed.">                if (room.isPersistent()) {</span>
+<span class="nc" id="L1582">                    features.add(&quot;muc_persistent&quot;);</span>
+                }
+                else {
+<span class="nc" id="L1585">                    features.add(&quot;muc_temporary&quot;);</span>
+                }
+<span class="nc bnc" id="L1587" title="All 2 branches missed.">                if (!extraDiscoFeatures.isEmpty()) {</span>
+<span class="nc" id="L1588">                    features.addAll(extraDiscoFeatures);</span>
+                }
+<span class="nc bnc" id="L1590" title="All 2 branches missed.">                if ( JiveGlobals.getBooleanProperty( &quot;xmpp.muc.self-ping.enabled&quot;, true ) ) {</span>
+<span class="nc" id="L1591">                    features.add( &quot;http://jabber.org/protocol/muc#self-ping-optimization&quot; );</span>
+                }
+<span class="nc" id="L1593">                features.add( &quot;urn:xmpp:sid:0&quot; );</span>
+            }
+        }
+<span class="nc" id="L1596">        return features.iterator();</span>
+    }
+
+    @Override
+    public DataForm getExtendedInfo(final String name, final String node, final JID senderJID) {
+<span class="nc bnc" id="L1601" title="All 4 branches missed.">        if (name != null &amp;&amp; node == null) {</span>
+            // Answer the extended info of a given room
+<span class="nc" id="L1603">            final MUCRoom room = getChatRoom(name);</span>
+<span class="nc bnc" id="L1604" title="All 2 branches missed.">            if (room != null) {</span>
+<span class="nc" id="L1605">                final DataForm dataForm = new DataForm(Type.result);</span>
+
+<span class="nc" id="L1607">                final FormField fieldType = dataForm.addField();</span>
+<span class="nc" id="L1608">                fieldType.setVariable(&quot;FORM_TYPE&quot;);</span>
+<span class="nc" id="L1609">                fieldType.setType(FormField.Type.hidden);</span>
+<span class="nc" id="L1610">                fieldType.addValue(&quot;http://jabber.org/protocol/muc#roominfo&quot;);</span>
+
+<span class="nc" id="L1612">                final FormField fieldDescr = dataForm.addField();</span>
+<span class="nc" id="L1613">                fieldDescr.setVariable(&quot;muc#roominfo_description&quot;);</span>
+<span class="nc" id="L1614">                fieldDescr.setLabel(LocaleUtils.getLocalizedString(&quot;muc.extended.info.desc&quot;));</span>
+<span class="nc" id="L1615">                fieldDescr.addValue(room.getDescription());</span>
+
+<span class="nc" id="L1617">                final FormField fieldSubj = dataForm.addField();</span>
+<span class="nc" id="L1618">                fieldSubj.setVariable(&quot;muc#roominfo_subject&quot;);</span>
+<span class="nc" id="L1619">                fieldSubj.setLabel(LocaleUtils.getLocalizedString(&quot;muc.extended.info.subject&quot;));</span>
+<span class="nc" id="L1620">                fieldSubj.addValue(room.getSubject());</span>
+
+<span class="nc" id="L1622">                final FormField fieldOcc = dataForm.addField();</span>
+<span class="nc" id="L1623">                fieldOcc.setVariable(&quot;muc#roominfo_occupants&quot;);</span>
+<span class="nc" id="L1624">                fieldOcc.setLabel(LocaleUtils.getLocalizedString(&quot;muc.extended.info.occupants&quot;));</span>
+<span class="nc" id="L1625">                fieldOcc.addValue(Integer.toString(room.getOccupantsCount()));</span>
+
+                /*field = new XFormFieldImpl(&quot;muc#roominfo_lang&quot;);
+                field.setLabel(LocaleUtils.getLocalizedString(&quot;muc.extended.info.language&quot;));
+                field.addValue(room.getLanguage());
+                dataForm.addField(field);*/
+
+<span class="nc" id="L1632">                final FormField fieldDate = dataForm.addField();</span>
+<span class="nc" id="L1633">                fieldDate.setVariable(&quot;x-muc#roominfo_creationdate&quot;);</span>
+<span class="nc" id="L1634">                fieldDate.setLabel(LocaleUtils.getLocalizedString(&quot;muc.extended.info.creationdate&quot;));</span>
+<span class="nc" id="L1635">                fieldDate.addValue(XMPPDateTimeFormat.format(room.getCreationDate()));</span>
+
+<span class="nc" id="L1637">                return dataForm;</span>
+            }
+        }
+<span class="nc" id="L1640">        return null;</span>
+    }
+
+    /**
+     * Adds an extra Disco feature to the list of features returned for the conference service.
+     * @param feature Feature to add.
+     */
+    @Override
+    public void addExtraFeature(final String feature) {
+<span class="nc" id="L1649">        extraDiscoFeatures.add(feature);</span>
+<span class="nc" id="L1650">    }</span>
+
+    /**
+     * Removes an extra Disco feature from the list of features returned for the conference service.
+     * @param feature Feature to remove.
+     */
+    @Override
+    public void removeExtraFeature(final String feature) {
+<span class="nc" id="L1658">        extraDiscoFeatures.remove(feature);</span>
+<span class="nc" id="L1659">    }</span>
+
+    /**
+     * Adds an extra Disco identity to the list of identities returned for the conference service.
+     * @param category Category for identity.  e.g. conference
+     * @param name Descriptive name for identity.  e.g. Public Chatrooms
+     * @param type Type for identity.  e.g. text
+     */
+    @Override
+    public void addExtraIdentity(final String category, final String name, final String type) {
+<span class="nc" id="L1669">        final Element identity = DocumentHelper.createElement(&quot;identity&quot;);</span>
+<span class="nc" id="L1670">        identity.addAttribute(&quot;category&quot;, category);</span>
+<span class="nc" id="L1671">        identity.addAttribute(&quot;name&quot;, name);</span>
+<span class="nc" id="L1672">        identity.addAttribute(&quot;type&quot;, type);</span>
+<span class="nc" id="L1673">        extraDiscoIdentities.add(identity);</span>
+<span class="nc" id="L1674">    }</span>
+
+    /**
+     * Removes an extra Disco identity from the list of identities returned for the conference service.
+     * @param name Name of identity to remove.
+     */
+    @Override
+    public void removeExtraIdentity(final String name) {
+<span class="nc" id="L1682">        final Iterator&lt;Element&gt; iter = extraDiscoIdentities.iterator();</span>
+<span class="nc bnc" id="L1683" title="All 2 branches missed.">        while (iter.hasNext()) {</span>
+<span class="nc" id="L1684">            final Element elem = iter.next();</span>
+<span class="nc bnc" id="L1685" title="All 2 branches missed.">            if (name.equals(elem.attribute(&quot;name&quot;).getStringValue())) {</span>
+<span class="nc" id="L1686">                iter.remove();</span>
+<span class="nc" id="L1687">                break;</span>
+            }
+<span class="nc" id="L1689">        }</span>
+<span class="nc" id="L1690">    }</span>
+
+    /**
+     * Sets the MUC event delegate handler for this service.
+     * @param delegate Handler for MUC events.
+     */
+    public void setMUCDelegate(final MUCEventDelegate delegate) {
+<span class="nc" id="L1697">        mucEventDelegate = delegate;</span>
+<span class="nc" id="L1698">    }</span>
+
+    /**
+     * Gets the MUC event delegate handler for this service.
+     * @return Handler for MUC events (delegate)
+     */
+    public MUCEventDelegate getMUCDelegate() {
+<span class="nc" id="L1705">        return mucEventDelegate;</span>
+    }
+
+    @Override
+    public boolean hasInfo(final String name, final String node, final JID senderJID) {
+        // Check if the service is disabled. Info is not available when disabled.
+<span class="nc bnc" id="L1711" title="All 2 branches missed.">        if (!isServiceEnabled()) {</span>
+<span class="nc" id="L1712">            return false;</span>
+        }
+<span class="nc bnc" id="L1714" title="All 4 branches missed.">        if (name == null &amp;&amp; node == null) {</span>
+            // We always have info about the MUC service
+<span class="nc" id="L1716">            return true;</span>
+        }
+<span class="nc bnc" id="L1718" title="All 4 branches missed.">        else if (name != null &amp;&amp; node == null) {</span>
+            // We only have info if the room exists
+<span class="nc" id="L1720">            return hasChatRoom(name);</span>
+        }
+<span class="nc bnc" id="L1722" title="All 4 branches missed.">        else if (name != null &amp;&amp; &quot;x-roomuser-item&quot;.equals(node)) {</span>
+            // We always have info about reserved names as long as the room exists
+<span class="nc" id="L1724">            return hasChatRoom(name);</span>
+        }
+<span class="nc" id="L1726">        return false;</span>
+    }
+
+    @Override
+    public Iterator&lt;DiscoItem&gt; getItems(final String name, final String node, final JID senderJID) {
+        // Check if the service is disabled. Info is not available when disabled.
+<span class="nc bnc" id="L1732" title="All 2 branches missed.">        if (!isServiceEnabled()) {</span>
+<span class="nc" id="L1733">            return null;</span>
+        }
+<span class="nc" id="L1735">        final Set&lt;DiscoItem&gt; answer = new HashSet&lt;&gt;();</span>
+<span class="nc bnc" id="L1736" title="All 4 branches missed.">        if (name == null &amp;&amp; node == null)</span>
+        {
+            // Answer all the public rooms as items
+<span class="nc bnc" id="L1739" title="All 2 branches missed.">            for (final MUCRoom room : localMUCRoomManager.getRooms())</span>
+            {
+<span class="nc bnc" id="L1741" title="All 2 branches missed.">                if (canDiscoverRoom(room, senderJID))</span>
+                {
+<span class="nc" id="L1743">                    answer.add(new DiscoItem(room.getRole().getRoleAddress(),</span>
+<span class="nc" id="L1744">                        room.getNaturalLanguageName(), null, null));</span>
+                }
+<span class="nc" id="L1746">            }</span>
+        }
+<span class="nc bnc" id="L1748" title="All 4 branches missed.">        else if (name != null &amp;&amp; node == null) {</span>
+            // Answer the room occupants as items if that info is publicly available
+<span class="nc" id="L1750">            final MUCRoom room = getChatRoom(name);</span>
+<span class="nc bnc" id="L1751" title="All 4 branches missed.">            if (room != null &amp;&amp; canDiscoverRoom(room, senderJID)) {</span>
+<span class="nc bnc" id="L1752" title="All 2 branches missed.">                for (final MUCRole role : room.getOccupants()) {</span>
+                    // TODO Should we filter occupants that are invisible (presence is not broadcasted)?
+<span class="nc" id="L1754">                    answer.add(new DiscoItem(role.getRoleAddress(), null, null, null));</span>
+<span class="nc" id="L1755">                }</span>
+            }
+        }
+<span class="nc" id="L1758">        return answer.iterator();</span>
+    }
+
+    private boolean canDiscoverRoom(final MUCRoom room, final JID senderJID) {
+        // Check if locked rooms may be discovered
+<span class="nc bnc" id="L1763" title="All 4 branches missed.">        if (!allowToDiscoverLockedRooms &amp;&amp; room.isLocked()) {</span>
+<span class="nc" id="L1764">            return false;</span>
+        }
+<span class="nc bnc" id="L1766" title="All 2 branches missed.">        if (!room.isPublicRoom()) {</span>
+<span class="nc bnc" id="L1767" title="All 4 branches missed.">            if (!allowToDiscoverMembersOnlyRooms &amp;&amp; room.isMembersOnly()) {</span>
+<span class="nc" id="L1768">                return false;</span>
+            }
+<span class="nc" id="L1770">            final MUCRole.Affiliation affiliation = room.getAffiliation(senderJID.asBareJID());</span>
+<span class="nc bnc" id="L1771" title="All 6 branches missed.">            return affiliation == MUCRole.Affiliation.owner</span>
+                || affiliation == MUCRole.Affiliation.admin
+                || affiliation == MUCRole.Affiliation.member;
+        }
+<span class="nc" id="L1775">        return true;</span>
+    }
+
+    /**
+     * Converts an array to a comma-delimited String.
+     *
+     * @param array the array.
+     * @return a comma delimited String of the array values.
+     */
+    private static String fromArray(final String [] array) {
+<span class="nc" id="L1785">        final StringBuilder buf = new StringBuilder();</span>
+<span class="nc bnc" id="L1786" title="All 2 branches missed.">        for (int i=0; i&lt;array.length; i++) {</span>
+<span class="nc" id="L1787">            buf.append(array[i]);</span>
+<span class="nc bnc" id="L1788" title="All 2 branches missed.">            if (i != array.length-1) {</span>
+<span class="nc" id="L1789">                buf.append(',');</span>
+            }
+        }
+<span class="nc" id="L1792">        return buf.toString();</span>
+    }
+
+    /**
+     * Converts a collection to a comma-delimited String.
+     *
+     * @param coll the collection.
+     * @return a comma delimited String of the array values.
+     */
+    private static String fromCollection(final Collection&lt;JID&gt; coll) {
+<span class="nc" id="L1802">        final StringBuilder buf = new StringBuilder();</span>
+<span class="nc bnc" id="L1803" title="All 2 branches missed.">        for (final JID elem: coll) {</span>
+<span class="nc" id="L1804">            buf.append(elem.toBareJID()).append(',');</span>
+<span class="nc" id="L1805">        }</span>
+<span class="nc bnc" id="L1806" title="All 2 branches missed.">        final int endPos = buf.length() &gt; 1 ? buf.length() - 1 : 0;</span>
+<span class="nc" id="L1807">        return buf.substring(0, endPos);</span>
+    }
+
+    @Override
+    public boolean isHidden() {
+<span class="nc" id="L1812">        return isHidden;</span>
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

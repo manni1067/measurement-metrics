@@ -1,0 +1,192 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>DefaultUserPropertyProvider.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.user.property</a> &gt; <span class="el_source">DefaultUserPropertyProvider.java</span></div><h1>DefaultUserPropertyProvider.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2017 IgniteRealtime.org
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.jivesoftware.openfire.user.property;
+
+import org.jivesoftware.database.DbConnectionManager;
+import org.jivesoftware.openfire.user.User;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+
+/**
+ * Default implementation of the UserPropertyProvider interface, which reads and writes data from the
+ * {@code ofUserProp} database table.
+ *
+ * This implementation will not explicitly verify if a user exists, when operating on its properties. The methods of
+ * this implementation will &lt;em&gt;not&lt;/em&gt; throw {@link org.jivesoftware.openfire.user.UserNotFoundException}.
+ *
+ * &lt;b&gt;Warning:&lt;/b&gt; in virtually all cases a user property provider should not be used directly. Instead, use the
+ * Map returned by {@link User#getProperties()} to create, read, update or delete user properties. Failure to do so
+ * is likely to result in inconsistent data behavior and race conditions. Direct access to the user property
+ * provider is only provided for special-case logic.
+ *
+ * @author Guus der Kinderen, guus@goodbytes.nl
+ * @see User#getProperties
+ */
+<span class="fc" id="L45">public class DefaultUserPropertyProvider implements UserPropertyProvider</span>
+{
+<span class="fc" id="L47">    private static final Logger Log = LoggerFactory.getLogger( DefaultUserPropertyProvider.class );</span>
+
+    private static final String LOAD_PROPERTIES = &quot;SELECT name, propValue FROM ofUserProp WHERE username=?&quot;;
+    private static final String LOAD_PROPERTY = &quot;SELECT propValue FROM ofUserProp WHERE username=? AND name=?&quot;;
+    private static final String DELETE_PROPERTY = &quot;DELETE FROM ofUserProp WHERE username=? AND name=?&quot;;
+    private static final String UPDATE_PROPERTY = &quot;UPDATE ofUserProp SET propValue=? WHERE name=? AND username=?&quot;;
+    private static final String INSERT_PROPERTY = &quot;INSERT INTO ofUserProp (username, name, propValue) VALUES (?, ?, ?)&quot;;
+
+    @Override
+    public Map&lt;String, String&gt; loadProperties( String username )
+    {
+<span class="nc" id="L58">        Connection con = null;</span>
+<span class="nc" id="L59">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L60">        ResultSet rs = null;</span>
+<span class="nc" id="L61">        final Map&lt;String, String&gt; properties = new ConcurrentHashMap&lt;&gt;();</span>
+        try
+        {
+<span class="nc" id="L64">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L65">            pstmt = con.prepareStatement( LOAD_PROPERTIES );</span>
+<span class="nc" id="L66">            pstmt.setString( 1, username );</span>
+<span class="nc" id="L67">            rs = pstmt.executeQuery();</span>
+<span class="nc bnc" id="L68" title="All 2 branches missed.">            while ( rs.next() )</span>
+            {
+<span class="nc" id="L70">                properties.put( rs.getString( 1 ), rs.getString( 2 ) );</span>
+            }
+        }
+<span class="nc" id="L73">        catch ( SQLException sqle )</span>
+        {
+<span class="nc" id="L75">            Log.error( sqle.getMessage(), sqle );</span>
+        }
+        finally
+        {
+<span class="nc" id="L79">            DbConnectionManager.closeConnection( rs, pstmt, con );</span>
+<span class="nc" id="L80">        }</span>
+<span class="nc" id="L81">        return properties;</span>
+    }
+
+    @Override
+    public String loadProperty( String username, String propertyName )
+    {
+<span class="nc" id="L87">        String propertyValue = null;</span>
+<span class="nc" id="L88">        Connection con = null;</span>
+<span class="nc" id="L89">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L90">        ResultSet rs = null;</span>
+        try
+        {
+<span class="nc" id="L93">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L94">            pstmt = con.prepareStatement( LOAD_PROPERTY );</span>
+<span class="nc" id="L95">            pstmt.setString( 1, username );</span>
+<span class="nc" id="L96">            pstmt.setString( 2, propertyName );</span>
+<span class="nc" id="L97">            rs = pstmt.executeQuery();</span>
+<span class="nc bnc" id="L98" title="All 2 branches missed.">            while ( rs.next() )</span>
+            {
+<span class="nc" id="L100">                propertyValue = rs.getString( 1 );</span>
+            }
+        }
+<span class="nc" id="L103">        catch ( SQLException sqle )</span>
+        {
+<span class="nc" id="L105">            Log.error( sqle.getMessage(), sqle );</span>
+        }
+        finally
+        {
+<span class="nc" id="L109">            DbConnectionManager.closeConnection( rs, pstmt, con );</span>
+<span class="nc" id="L110">        }</span>
+<span class="nc" id="L111">        return propertyValue;</span>
+    }
+
+    @Override
+    public void insertProperty( String username, String propName, String propValue )
+    {
+<span class="nc" id="L117">        Connection con = null;</span>
+<span class="nc" id="L118">        PreparedStatement pstmt = null;</span>
+        try
+        {
+<span class="nc" id="L121">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L122">            pstmt = con.prepareStatement( INSERT_PROPERTY );</span>
+<span class="nc" id="L123">            pstmt.setString( 1, username );</span>
+<span class="nc" id="L124">            pstmt.setString( 2, propName );</span>
+<span class="nc" id="L125">            pstmt.setString( 3, propValue );</span>
+<span class="nc" id="L126">            pstmt.executeUpdate();</span>
+        }
+<span class="nc" id="L128">        catch ( SQLException e )</span>
+        {
+<span class="nc" id="L130">            Log.error( e.getMessage(), e );</span>
+        }
+        finally
+        {
+<span class="nc" id="L134">            DbConnectionManager.closeConnection( pstmt, con );</span>
+<span class="nc" id="L135">        }</span>
+<span class="nc" id="L136">    }</span>
+
+    @Override
+    public void updateProperty( String username, String propName, String propValue )
+    {
+<span class="nc" id="L141">        Connection con = null;</span>
+<span class="nc" id="L142">        PreparedStatement pstmt = null;</span>
+        try
+        {
+<span class="nc" id="L145">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L146">            pstmt = con.prepareStatement( UPDATE_PROPERTY );</span>
+<span class="nc" id="L147">            pstmt.setString( 1, propValue );</span>
+<span class="nc" id="L148">            pstmt.setString( 2, propName );</span>
+<span class="nc" id="L149">            pstmt.setString( 3, username );</span>
+<span class="nc" id="L150">            pstmt.executeUpdate();</span>
+        }
+<span class="nc" id="L152">        catch ( SQLException e )</span>
+        {
+<span class="nc" id="L154">            Log.error( e.getMessage(), e );</span>
+        }
+        finally
+        {
+<span class="nc" id="L158">            DbConnectionManager.closeConnection( pstmt, con );</span>
+<span class="nc" id="L159">        }</span>
+<span class="nc" id="L160">    }</span>
+
+    @Override
+    public void deleteProperty( String username, String propName )
+    {
+<span class="nc" id="L165">        Connection con = null;</span>
+<span class="nc" id="L166">        PreparedStatement pstmt = null;</span>
+        try
+        {
+<span class="nc" id="L169">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L170">            pstmt = con.prepareStatement( DELETE_PROPERTY );</span>
+<span class="nc" id="L171">            pstmt.setString( 1, username );</span>
+<span class="nc" id="L172">            pstmt.setString( 2, propName );</span>
+<span class="nc" id="L173">            pstmt.executeUpdate();</span>
+        }
+<span class="nc" id="L175">        catch ( SQLException e )</span>
+        {
+<span class="nc" id="L177">            Log.error( e.getMessage(), e );</span>
+        }
+        finally
+        {
+<span class="nc" id="L181">            DbConnectionManager.closeConnection( pstmt, con );</span>
+<span class="nc" id="L182">        }</span>
+<span class="nc" id="L183">    }</span>
+
+    @Override
+    public boolean isReadOnly()
+    {
+<span class="nc" id="L188">        return false;</span>
+    }
+}
+
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

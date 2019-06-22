@@ -1,0 +1,363 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>IQRosterHandler.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.handler</a> &gt; <span class="el_source">IQRosterHandler.java</span></div><h1>IQRosterHandler.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2004-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.handler;
+
+import gnu.inet.encoding.IDNAException;
+
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.Set;
+
+import org.jivesoftware.openfire.IQHandlerInfo;
+import org.jivesoftware.openfire.PacketException;
+import org.jivesoftware.openfire.PacketRouter;
+import org.jivesoftware.openfire.SharedGroupException;
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.auth.UnauthorizedException;
+import org.jivesoftware.openfire.disco.ServerFeaturesProvider;
+import org.jivesoftware.openfire.roster.Roster;
+import org.jivesoftware.openfire.roster.RosterItem;
+import org.jivesoftware.openfire.roster.RosterManager;
+import org.jivesoftware.openfire.user.UserAlreadyExistsException;
+import org.jivesoftware.openfire.user.UserManager;
+import org.jivesoftware.openfire.user.UserNotFoundException;
+import org.jivesoftware.util.LocaleUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmpp.packet.IQ;
+import org.xmpp.packet.JID;
+import org.xmpp.packet.Packet;
+import org.xmpp.packet.PacketError;
+
+/**
+ * Implements the TYPE_IQ jabber:iq:roster protocol. Clients
+ * use this protocol to retrieve, update, and rosterMonitor roster
+ * entries (buddy lists). The server manages the basics of
+ * roster subscriptions and roster updates based on presence
+ * and iq:roster packets, while the client maintains the user
+ * interface aspects of rosters such as organizing roster
+ * entries into groups.
+ * &lt;p&gt;
+ * A 'get' query retrieves a snapshot of the roster.
+ * A 'set' query updates the roster (typically with new group info).
+ * The server sends 'set' updates asynchronously when roster
+ * entries change status.
+ * &lt;/p&gt;
+ * &lt;p&gt;
+ * Currently an empty implementation to allow usage with normal
+ * clients. Future implementation needed.&lt;/p&gt;
+ * &lt;h2&gt;Assumptions&lt;/h2&gt;
+ * This handler assumes that the request is addressed to the server.
+ * An appropriate TYPE_IQ tag matcher should be placed in front of this
+ * one to route TYPE_IQ requests not addressed to the server to
+ * another channel (probably for direct delivery to the recipient).
+ * &lt;h2&gt;Warning&lt;/h2&gt;
+ * There should be a way of determining whether a session has
+ * authorization to access this feature. I'm not sure it is a good
+ * idea to do authorization in each handler. It would be nice if
+ * the framework could assert authorization policies across channels.
+ *
+ * @author Iain Shigeoka
+ */
+public class IQRosterHandler extends IQHandler implements ServerFeaturesProvider {
+
+<span class="nc" id="L79">    private static final Logger Log = LoggerFactory.getLogger(IQRosterHandler.class);</span>
+
+    private IQHandlerInfo info;
+
+    private UserManager userManager;
+    private XMPPServer localServer;
+    private PacketRouter router;
+
+    public IQRosterHandler() {
+<span class="nc" id="L88">        super(&quot;XMPP Roster Handler&quot;);</span>
+<span class="nc" id="L89">        info = new IQHandlerInfo(&quot;query&quot;, &quot;jabber:iq:roster&quot;);</span>
+<span class="nc" id="L90">    }</span>
+
+    /**
+     * Handles all roster queries. There are two major types of queries:
+     *
+     * &lt;ul&gt;
+     *      &lt;li&gt;Roster remove - A forced removal of items from a roster. Roster
+     *      removals are the only roster queries allowed to
+     *      directly affect the roster from another user.
+     *      &lt;/li&gt;
+     *      &lt;li&gt;Roster management - A local user looking up or updating their
+     *      roster.
+     *      &lt;/li&gt;
+     * &lt;/ul&gt;
+     *
+     * @param packet The update packet
+     * @return The reply or null if no reply
+     */
+    @Override
+    public IQ handleIQ(IQ packet) throws UnauthorizedException, PacketException {
+        try {
+            IQ returnPacket;
+<span class="nc" id="L112">            org.xmpp.packet.Roster roster = (org.xmpp.packet.Roster)packet;</span>
+
+<span class="nc" id="L114">            JID recipientJID = packet.getTo();</span>
+
+            // The packet is bound for the server and must be roster management
+<span class="nc bnc" id="L117" title="All 4 branches missed.">            if (recipientJID == null || recipientJID.equals(packet.getFrom().asBareJID())) {</span>
+<span class="nc" id="L118">                returnPacket = manageRoster(roster);</span>
+            } else {
+<span class="nc" id="L120">                returnPacket = IQ.createResultIQ(packet);</span>
+                // The server MUST return a &lt;forbidden/&gt; stanza error to the client if the sender of the roster set is not authorized to update the roster
+                // (where typically only an authenticated resource of the account itself is authorized).
+<span class="nc" id="L123">                returnPacket.setError(PacketError.Condition.forbidden);</span>
+            }
+<span class="nc" id="L125">            return returnPacket;</span>
+        }
+<span class="nc" id="L127">        catch (SharedGroupException e) {</span>
+<span class="nc" id="L128">            IQ result = IQ.createResultIQ(packet);</span>
+<span class="nc" id="L129">            result.setChildElement(packet.getChildElement().createCopy());</span>
+<span class="nc" id="L130">            result.setError(PacketError.Condition.not_acceptable);</span>
+<span class="nc" id="L131">            return result;</span>
+        }
+<span class="nc" id="L133">        catch (Exception e) {</span>
+<span class="nc bnc" id="L134" title="All 4 branches missed.">            if (e.getCause() instanceof IDNAException || e.getCause() instanceof IllegalArgumentException) {</span>
+<span class="nc" id="L135">                Log.warn(LocaleUtils.getLocalizedString(&quot;admin.error&quot;) + e.getMessage());</span>
+<span class="nc" id="L136">                IQ result = IQ.createResultIQ(packet);</span>
+<span class="nc" id="L137">                result.setChildElement(packet.getChildElement().createCopy());</span>
+<span class="nc" id="L138">                result.setError(PacketError.Condition.jid_malformed);</span>
+<span class="nc" id="L139">                return result;</span>
+            }
+            else {
+<span class="nc" id="L142">                Log.error(LocaleUtils.getLocalizedString(&quot;admin.error&quot;), e);</span>
+<span class="nc" id="L143">                IQ result = IQ.createResultIQ(packet);</span>
+<span class="nc" id="L144">                result.setChildElement(packet.getChildElement().createCopy());</span>
+<span class="nc" id="L145">                result.setError(PacketError.Condition.internal_server_error);</span>
+<span class="nc" id="L146">                return result;</span>
+            }
+        }
+    }
+
+    /**
+     * The packet is a typical 'set' or 'get' update targeted at the server.
+     * Notice that the set could be a roster removal in which case we have to
+     * generate a local roster removal update as well as a new roster removal
+     * to send to the the roster item's owner.
+     *
+     * @param packet The packet that triggered this update
+     * @return Either a response to the roster update or null if the packet is corrupt and the session was closed down
+     */
+    private IQ manageRoster(org.xmpp.packet.Roster packet) throws UnauthorizedException,
+            UserAlreadyExistsException, SharedGroupException {
+
+<span class="nc" id="L163">        IQ returnPacket = null;</span>
+<span class="nc" id="L164">        JID sender = packet.getFrom();</span>
+<span class="nc" id="L165">        IQ.Type type = packet.getType();</span>
+
+        try {
+<span class="nc bnc" id="L168" title="All 4 branches missed.">            if ((sender.getNode() == null || !RosterManager.isRosterServiceEnabled() ||</span>
+<span class="nc bnc" id="L169" title="All 4 branches missed.">                    !userManager.isRegisteredUser(sender.getNode())) &amp;&amp;</span>
+                    IQ.Type.get == type) {
+                // If anonymous user asks for his roster or roster service is disabled then
+                // return an empty roster
+<span class="nc" id="L173">                IQ reply = IQ.createResultIQ(packet);</span>
+<span class="nc" id="L174">                reply.setChildElement(&quot;query&quot;, &quot;jabber:iq:roster&quot;);</span>
+<span class="nc" id="L175">                return reply;</span>
+            }
+<span class="nc bnc" id="L177" title="All 2 branches missed.">            if (!localServer.isLocal(sender)) {</span>
+                // Sender belongs to a remote server so discard this IQ request
+<span class="nc" id="L179">                Log.warn(&quot;Discarding IQ roster packet of remote user: &quot; + packet);</span>
+<span class="nc" id="L180">                return null;</span>
+            }
+
+<span class="nc" id="L183">            Roster cachedRoster = userManager.getUser(sender.getNode()).getRoster();</span>
+<span class="nc bnc" id="L184" title="All 2 branches missed.">            if (IQ.Type.get == type) {</span>
+
+<span class="nc bnc" id="L186" title="All 2 branches missed.">                if (RosterManager.isRosterVersioningEnabled()) {</span>
+<span class="nc" id="L187">                    String clientVersion = packet.getChildElement().attributeValue(&quot;ver&quot;);</span>
+<span class="nc" id="L188">                    String latestVersion = String.valueOf( cachedRoster.hashCode() );</span>
+                    // Whether or not the roster has been modified since the version ID enumerated by the client, ...
+<span class="nc bnc" id="L190" title="All 2 branches missed.">                    if (!latestVersion.equals(clientVersion)) {</span>
+                        // ... the server MUST either return the complete roster
+                        // (including a 'ver' attribute that signals the latest version)
+<span class="nc" id="L193">                        returnPacket = cachedRoster.getReset();</span>
+<span class="nc" id="L194">                        returnPacket.getChildElement().addAttribute(&quot;ver&quot;, latestVersion );</span>
+                    } else {
+                        // ... or return an empty IQ-result
+<span class="nc" id="L197">                        returnPacket = new org.xmpp.packet.IQ();</span>
+                    }
+<span class="nc" id="L199">                } else {</span>
+<span class="nc" id="L200">                    returnPacket = cachedRoster.getReset();</span>
+                }
+<span class="nc" id="L202">                returnPacket.setType(IQ.Type.result);</span>
+<span class="nc" id="L203">                returnPacket.setTo(sender);</span>
+<span class="nc" id="L204">                returnPacket.setID(packet.getID());</span>
+                // Force delivery of the response because we need to trigger
+                // a presence probe from all contacts
+<span class="nc" id="L207">                deliverer.deliver(returnPacket);</span>
+<span class="nc" id="L208">                returnPacket = null;</span>
+            }
+<span class="nc bnc" id="L210" title="All 2 branches missed.">            else if (IQ.Type.set == type) {</span>
+<span class="nc" id="L211">                returnPacket = IQ.createResultIQ(packet);</span>
+
+                // RFC 6121 2.3.3.  Error Cases:
+                // The server MUST return a &lt;bad-request/&gt; stanza error to the client if the roster set contains any of the following violations:
+                // The &lt;query/&gt; element contains more than one &lt;item/&gt; child element.
+<span class="nc bnc" id="L216" title="All 2 branches missed.">                if (packet.getItems().size() &gt; 1) {</span>
+<span class="nc" id="L217">                    returnPacket.setError(new PacketError(PacketError.Condition.bad_request, PacketError.Type.modify, &quot;Query contains more than one item&quot;));</span>
+                } else {
+<span class="nc bnc" id="L219" title="All 2 branches missed.">                    for (org.xmpp.packet.Roster.Item item : packet.getItems()) {</span>
+<span class="nc bnc" id="L220" title="All 2 branches missed.">                        if (item.getSubscription() == org.xmpp.packet.Roster.Subscription.remove) {</span>
+<span class="nc bnc" id="L221" title="All 2 branches missed.">                            if (removeItem(cachedRoster, packet.getFrom(), item) == null) {</span>
+                                // RFC 6121 2.5.3.  Error Cases: If the value of the 'jid' attribute specifies an item that is not in the roster, then the server MUST return an &lt;item-not-found/&gt; stanza error.
+<span class="nc" id="L223">                                returnPacket.setError(PacketError.Condition.item_not_found);</span>
+                            }
+                        } else {
+<span class="nc" id="L226">                            PacketError error = checkGroups(item.getGroups());</span>
+<span class="nc bnc" id="L227" title="All 2 branches missed.">                            if (error != null) {</span>
+<span class="nc" id="L228">                                returnPacket.setError(error);</span>
+                            } else {
+<span class="nc bnc" id="L230" title="All 2 branches missed.">                                if (cachedRoster.isRosterItem(item.getJID())) {</span>
+                                    // existing item
+<span class="nc" id="L232">                                    RosterItem cachedItem = cachedRoster.getRosterItem(item.getJID());</span>
+<span class="nc" id="L233">                                    cachedItem.setAsCopyOf(item);</span>
+<span class="nc" id="L234">                                    cachedRoster.updateRosterItem(cachedItem);</span>
+<span class="nc" id="L235">                                } else {</span>
+                                    // new item
+<span class="nc" id="L237">                                    cachedRoster.createRosterItem(item);</span>
+                                }
+                            }
+                        }
+<span class="nc" id="L241">                    }</span>
+                }
+            }
+        }
+<span class="nc" id="L245">        catch (UserNotFoundException e) {</span>
+<span class="nc" id="L246">            throw new UnauthorizedException(e);</span>
+<span class="nc" id="L247">        }</span>
+
+<span class="nc" id="L249">        return returnPacket;</span>
+
+    }
+
+    /**
+     * Checks the roster groups for error conditions described in RFC 6121 § 2.3.3.
+     *
+     * @param groups The groups.
+     * @return An error if the specification is violated or null if everything is fine.
+     */
+    private static PacketError checkGroups(Iterable&lt;String&gt; groups) {
+<span class="nc" id="L260">        Set&lt;String&gt; set = new HashSet&lt;&gt;();</span>
+<span class="nc bnc" id="L261" title="All 2 branches missed.">        for (String group : groups) {</span>
+<span class="nc bnc" id="L262" title="All 2 branches missed.">            if (!set.add(group)) {</span>
+                // Duplicate group found.
+                // RFC 6121 2.3.3.  Error Cases: 2. The &lt;item/&gt; element contains more than one &lt;group/&gt; element, but there are duplicate groups
+<span class="nc" id="L265">                return new PacketError(PacketError.Condition.bad_request, PacketError.Type.modify, &quot;Item contains duplicate groups&quot;);</span>
+            }
+<span class="nc bnc" id="L267" title="All 2 branches missed.">            if (group.isEmpty()) {</span>
+                // The server MUST return a &lt;not-acceptable/&gt; stanza error to the client if the roster set contains any of the following violations:
+                // 2. The XML character data of the &lt;group/&gt; element is of zero length.
+<span class="nc" id="L270">                return new PacketError(PacketError.Condition.not_acceptable, PacketError.Type.modify, &quot;Group is of zero length&quot;);</span>
+            }
+<span class="nc" id="L272">        }</span>
+<span class="nc" id="L273">        return null;</span>
+    }
+
+    /**
+     * Remove the roster item from the sender's roster (and possibly the recipient's).
+     * Actual roster removal is done in the removeItem(Roster,RosterItem) method.
+     *
+     * @param roster The sender's roster.
+     * @param sender The JID of the sender of the removal request
+     * @param item   The removal item element
+     * @return The removed item or null, if not item has been removed.
+     */
+    private RosterItem removeItem(org.jivesoftware.openfire.roster.Roster roster, JID sender,
+            org.xmpp.packet.Roster.Item item) throws SharedGroupException {
+<span class="nc" id="L287">        JID recipient = item.getJID();</span>
+        // Remove recipient from the sender's roster
+<span class="nc" id="L289">        RosterItem removedItem = roster.deleteRosterItem(item.getJID(), true);</span>
+
+        // Forward set packet to the subscriber
+<span class="nc bnc" id="L292" title="All 2 branches missed.">        if (localServer.isLocal(recipient)) { // Recipient is local so let's handle it here</span>
+            try {
+<span class="nc" id="L294">                Roster recipientRoster = userManager.getUser(recipient.getNode()).getRoster();</span>
+                // Instead of deleting the sender in the recipient's roster, update it.
+                // http://issues.igniterealtime.org/browse/OF-720
+<span class="nc" id="L297">                RosterItem rosterItem = recipientRoster.getRosterItem(sender);</span>
+                // If the receiver doesn't have subscribed yet, delete the sender from the receiver's roster, too.
+<span class="nc bnc" id="L299" title="All 2 branches missed.">                if (rosterItem.getRecvStatus().equals(RosterItem.RECV_SUBSCRIBE)) {</span>
+<span class="nc" id="L300">                    recipientRoster.deleteRosterItem(sender, true);</span>
+                }
+                // Otherwise only update it, so that the sender is not deleted from the receivers roster.
+                else {
+<span class="nc" id="L304">                    rosterItem.setAskStatus(RosterItem.ASK_NONE);</span>
+<span class="nc" id="L305">                    rosterItem.setRecvStatus(RosterItem.RECV_NONE);</span>
+<span class="nc" id="L306">                    rosterItem.setSubStatus(RosterItem.SUB_NONE);</span>
+<span class="nc" id="L307">                    recipientRoster.updateRosterItem(rosterItem);</span>
+                }
+            }
+<span class="nc" id="L310">            catch (UserNotFoundException e) {</span>
+                // Do nothing
+<span class="nc" id="L312">            }</span>
+        }
+        else {
+            // Recipient is remote so we just forward the packet to them
+<span class="nc" id="L316">            String serverDomain = localServer.getServerInfo().getXMPPDomain();</span>
+            // Check if the recipient may be hosted by this server
+<span class="nc bnc" id="L318" title="All 2 branches missed.">            if (!recipient.getDomain().contains(serverDomain)) {</span>
+                // TODO Implete when s2s is implemented
+            }
+            else {
+<span class="nc" id="L322">                Packet removePacket = createRemoveForward(sender, recipient);</span>
+<span class="nc" id="L323">                router.route(removePacket);</span>
+            }
+        }
+<span class="nc" id="L326">        return removedItem;</span>
+    }
+
+    /**
+     * Creates a forwarded removal packet.
+     *
+     * @param from The sender address to use
+     * @param to   The recipient address to use
+     * @return The forwarded packet generated
+     */
+    private Packet createRemoveForward(JID from, JID to) {
+<span class="nc" id="L337">        org.xmpp.packet.Roster response = new org.xmpp.packet.Roster(IQ.Type.set);</span>
+<span class="nc" id="L338">        response.setFrom(from);</span>
+<span class="nc" id="L339">        response.setTo(to);</span>
+<span class="nc" id="L340">        response.addItem(from, org.xmpp.packet.Roster.Subscription.remove);</span>
+
+<span class="nc" id="L342">        return response;</span>
+    }
+
+    @Override
+    public void initialize(XMPPServer server) {
+<span class="nc" id="L347">        super.initialize(server);</span>
+<span class="nc" id="L348">        localServer = server;</span>
+<span class="nc" id="L349">        userManager = server.getUserManager();</span>
+<span class="nc" id="L350">        router = server.getPacketRouter();</span>
+<span class="nc" id="L351">    }</span>
+
+    @Override
+    public IQHandlerInfo getInfo() {
+<span class="nc" id="L355">        return info;</span>
+    }
+
+    @Override
+    public Iterator&lt;String&gt; getFeatures() {
+<span class="nc" id="L360">        return Collections.singleton(&quot;jabber:iq:roster&quot;).iterator();</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

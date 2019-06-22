@@ -1,0 +1,125 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>AuthorizationBasedAuthProviderMapper.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.auth</a> &gt; <span class="el_source">AuthorizationBasedAuthProviderMapper.java</span></div><h1>AuthorizationBasedAuthProviderMapper.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2016 IgniteRealtime.org
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.auth;
+
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.admin.AdminManager;
+import org.jivesoftware.util.ClassUtils;
+import org.jivesoftware.util.JiveGlobals;
+import org.xmpp.packet.JID;
+
+import java.util.LinkedHashSet;
+import java.util.Set;
+
+/**
+ * A {@link AuthProviderMapper} that can be used to draw administrative users from another source than the regular, non-
+ * administrative users.
+ *
+ * This implementation uses {@link AdminManager} to determine if a particular user is an administrative user. When a
+ * user is not recognized, it is deemed a regular, non-administrative user.
+ *
+ * To configure this provider, the both system properties from the example below &lt;em&gt;must&lt;/em&gt; be defined. Their value
+ * must reference the classname of an {@link AuthProvider}.
+ *
+ * &lt;ul&gt;
+ * &lt;li&gt;{@code authorizationBasedAuthMapper.adminProvider.className = org.jivesoftware.openfire.auth.DefaultAuthProvider}&lt;/li&gt;
+ * &lt;li&gt;{@code authorizationBasedAuthMapper.userProvider.className = org.jivesoftware.openfire.auth.NativeAuthProvider}&lt;/li&gt;
+ * &lt;/ul&gt;
+ *
+ * @author Guus der Kinderen, guus@goodbytes.nl
+ */
+public class AuthorizationBasedAuthProviderMapper implements AuthProviderMapper
+{
+    /**
+     * Name of the property of which the value is expected to be the classname of the AuthProvider which will serve the
+     * administrative users.
+     */
+    public static final String PROPERTY_ADMINPROVIDER_CLASSNAME = &quot;authorizationBasedAuthMapper.adminProvider.className&quot;;
+
+    /**
+     * Name of the property of which the value is expected to be the classname of the AuthProvider which will serve the
+     * regular, non-administrative users.
+     */
+    public static final String PROPERTY_USERPROVIDER_CLASSNAME = &quot;authorizationBasedAuthMapper.userProvider.className&quot;;
+
+    /**
+     * Serves the administrative users.
+     */
+    protected final AuthProvider adminProvider;
+
+    /**
+     * Serves the regular, non-administrative users.
+     */
+    protected final AuthProvider userProvider;
+
+    public AuthorizationBasedAuthProviderMapper()
+<span class="nc" id="L70">    {</span>
+        // Migrate properties.
+<span class="nc" id="L72">        JiveGlobals.migrateProperty( PROPERTY_ADMINPROVIDER_CLASSNAME );</span>
+<span class="nc" id="L73">        JiveGlobals.migrateProperty( PROPERTY_USERPROVIDER_CLASSNAME );</span>
+
+        // Instantiate providers.
+<span class="nc" id="L76">        adminProvider = instantiateProvider( PROPERTY_ADMINPROVIDER_CLASSNAME );</span>
+<span class="nc" id="L77">        userProvider = instantiateProvider( PROPERTY_USERPROVIDER_CLASSNAME );</span>
+<span class="nc" id="L78">    }</span>
+
+    protected static AuthProvider instantiateProvider( String propertyName )
+    {
+<span class="nc" id="L82">        final String className = JiveGlobals.getProperty( propertyName );</span>
+<span class="nc bnc" id="L83" title="All 2 branches missed.">        if ( className == null )</span>
+        {
+<span class="nc" id="L85">            throw new IllegalStateException( &quot;A class name must be specified via openfire.xml or the system properties.&quot; );</span>
+        }
+
+        try
+        {
+<span class="nc" id="L90">            final Class c = ClassUtils.forName( className );</span>
+<span class="nc" id="L91">            return (AuthProvider) c.newInstance();</span>
+        }
+<span class="nc" id="L93">        catch ( Exception e )</span>
+        {
+<span class="nc" id="L95">            throw new IllegalStateException( &quot;Unable to create new instance of AuthProvider: &quot; + className, e );</span>
+        }
+    }
+
+    @Override
+    public AuthProvider getAuthProvider( String username )
+    {
+        // TODO add optional caching, to prevent retrieving the administrative users upon every invocation.
+<span class="nc" id="L103">        final JID jid = XMPPServer.getInstance().createJID( username, null );</span>
+<span class="nc" id="L104">        final boolean isAdmin = AdminManager.getAdminProvider().getAdmins().contains( jid );</span>
+
+<span class="nc bnc" id="L106" title="All 2 branches missed.">        if ( isAdmin )</span>
+        {
+<span class="nc" id="L108">            return adminProvider;</span>
+        } else
+        {
+<span class="nc" id="L111">            return userProvider;</span>
+        }
+    }
+
+    @Override
+    public Set&lt;AuthProvider&gt; getAuthProviders()
+    {
+<span class="nc" id="L118">        final Set&lt;AuthProvider&gt; result = new LinkedHashSet&lt;&gt;();</span>
+<span class="nc" id="L119">        result.add( adminProvider );</span>
+<span class="nc" id="L120">        result.add( userProvider );</span>
+
+<span class="nc" id="L122">        return result;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

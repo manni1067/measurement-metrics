@@ -1,0 +1,271 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>TLSWrapper.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.net</a> &gt; <span class="el_source">TLSWrapper.java</span></div><h1>TLSWrapper.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software and Artur Hefczyc. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.net;
+
+import java.nio.ByteBuffer;
+import java.security.*;
+
+import javax.net.ssl.SSLEngine;
+import javax.net.ssl.SSLEngineResult;
+import javax.net.ssl.SSLException;
+import javax.net.ssl.SSLSession;
+import javax.net.ssl.SSLEngineResult.HandshakeStatus;
+import javax.net.ssl.SSLEngineResult.Status;
+
+import org.jivesoftware.openfire.Connection;
+import org.jivesoftware.openfire.spi.ConnectionConfiguration;
+import org.jivesoftware.openfire.spi.EncryptionArtifactFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Creates and initializes the SSLContext instance to use to secure the plain connection. This
+ * class is also responsible for encoding and decoding the encrypted data and place it into
+ * the corresponding the {@link ByteBuffer}.
+ *
+ * @author Artur Hefczyc
+ * @author Hao Chen
+ */
+public class TLSWrapper {
+
+<span class="nc" id="L45">    private static final Logger Log = LoggerFactory.getLogger(TLSWrapper.class);</span>
+
+    /*
+     * Enables logging of the SSLEngine operations.
+     */
+<span class="nc" id="L50">    private boolean logging = false;</span>
+
+    private SSLEngine tlsEngine;
+    private SSLEngineResult tlsEngineResult;
+
+    private int netBuffSize;
+    private int appBuffSize;
+
+    /**
+     * @deprecated Use the other constructor.
+     * @param connection the connection to wrap
+     * @param clientMode {@code true} to use client mode, {@code false} to use server mode
+     * @param needClientAuth unused parameter
+     * @param remoteServer unused parameter
+     */
+    @Deprecated
+    public TLSWrapper(Connection connection, boolean clientMode, boolean needClientAuth, String remoteServer)
+    {
+<span class="nc" id="L68">        this(</span>
+<span class="nc" id="L69">            connection.getConfiguration(),</span>
+            clientMode
+        );
+<span class="nc" id="L72">    }</span>
+
+<span class="nc" id="L74">    public TLSWrapper(ConnectionConfiguration configuration, boolean clientMode ) {</span>
+
+        try
+        {
+<span class="nc" id="L78">            final EncryptionArtifactFactory factory = new EncryptionArtifactFactory( configuration );</span>
+<span class="nc bnc" id="L79" title="All 2 branches missed.">            if ( clientMode )</span>
+            {
+<span class="nc" id="L81">                tlsEngine = factory.createClientModeSSLEngine();</span>
+            }
+            else
+            {
+<span class="nc" id="L85">                tlsEngine = factory .createServerModeSSLEngine();</span>
+            }
+
+<span class="nc" id="L88">            final SSLSession sslSession = tlsEngine.getSession();</span>
+
+<span class="nc" id="L90">            netBuffSize = sslSession.getPacketBufferSize();</span>
+<span class="nc" id="L91">            appBuffSize = sslSession.getApplicationBufferSize();</span>
+        }
+<span class="nc" id="L93">        catch ( NoSuchAlgorithmException | KeyManagementException | KeyStoreException | UnrecoverableKeyException ex )</span>
+        {
+<span class="nc" id="L95">            Log.error(&quot;TLSHandler startup problem. SSLContext initialisation failed.&quot;, ex );</span>
+<span class="nc" id="L96">        }</span>
+<span class="nc" id="L97">    }</span>
+
+    public int getNetBuffSize() {
+<span class="nc" id="L100">        return netBuffSize;</span>
+    }
+
+    public int getAppBuffSize() {
+<span class="nc" id="L104">        return appBuffSize;</span>
+    }
+
+    /**
+     * Returns whether unwrap(ByteBuffer, ByteBuffer) will accept any more inbound data messages and
+     * whether wrap(ByteBuffer, ByteBuffer) will produce any more outbound data messages.
+     *
+     * @return true if the TLSHandler will not consume anymore network data and will not produce any
+     *         anymore network data.
+     */
+    public boolean isEngineClosed() {
+<span class="nc bnc" id="L115" title="All 4 branches missed.">        return (tlsEngine.isOutboundDone() &amp;&amp; tlsEngine.isInboundDone());</span>
+    }
+
+    public void enableLogging(boolean logging) {
+<span class="nc" id="L119">        this.logging = logging;</span>
+<span class="nc" id="L120">    }</span>
+
+    /**
+     * Attempts to decode SSL/TLS network data into a subsequence of plaintext application data
+     * buffers. Depending on the state of the TLSWrapper, this method may consume network data
+     * without producing any application data (for example, it may consume handshake data.)
+     *
+     * If this TLSWrapper has not yet started its initial handshake, this method will automatically
+     * start the handshake.
+     *
+     * @param net a ByteBuffer containing inbound network data
+     * @param app a ByteBuffer to hold inbound application data
+     * @return a ByteBuffer containing inbound application data
+     * @throws SSLException A problem was encountered while processing the data that caused the
+     *             TLSHandler to abort.
+     */
+    public ByteBuffer unwrap(ByteBuffer net, ByteBuffer app) throws SSLException {
+<span class="nc" id="L137">        ByteBuffer out = app;</span>
+<span class="nc" id="L138">        out = resizeApplicationBuffer(out);// guarantees enough room for unwrap</span>
+        try {
+<span class="nc" id="L140">            tlsEngineResult = tlsEngine.unwrap( net, out );</span>
+<span class="nc" id="L141">        } catch ( SSLException e ) {</span>
+<span class="nc bnc" id="L142" title="All 2 branches missed.">            if ( e.getMessage().startsWith( &quot;Unsupported record version Unknown-&quot; ) ) {</span>
+<span class="nc" id="L143">                throw new SSLException( &quot;We appear to have received plain text data where we expected encrypted data. A common cause for this is a peer sending us a plain-text error message when it shouldn't send a message, but close the socket instead).&quot;, e );</span>
+            }
+            else {
+<span class="nc" id="L146">                throw e;</span>
+            }
+<span class="nc" id="L148">        }</span>
+<span class="nc" id="L149">        log(&quot;server unwrap: &quot;, tlsEngineResult);</span>
+<span class="nc bnc" id="L150" title="All 2 branches missed.">        if (tlsEngineResult.getHandshakeStatus() == HandshakeStatus.NEED_TASK) {</span>
+            // If the result indicates that we have outstanding tasks to do, go
+            // ahead and run them in this thread.
+<span class="nc" id="L153">            doTasks();</span>
+        }
+<span class="nc" id="L155">        return out;</span>
+    }
+
+    /**
+     * Attempts to encode a buffer of plaintext application data into TLS network data. Depending on
+     * the state of the TLSWrapper, this method may produce network data without consuming any
+     * application data (for example, it may generate handshake data).
+     *
+     * If this TLSWrapper has not yet started its initial handshake, this method will automatically
+     * start the handshake.
+     *
+     * @param app a ByteBuffer containing outbound application data
+     * @param net a ByteBuffer to hold outbound network data
+     * @throws SSLException A problem was encountered while processing the data that caused the
+     *             TLSWrapper to abort.
+     */
+    public void wrap(ByteBuffer app, ByteBuffer net) throws SSLException {
+<span class="nc" id="L172">        tlsEngineResult = tlsEngine.wrap(app, net);</span>
+<span class="nc" id="L173">        log(&quot;server wrap: &quot;, tlsEngineResult);</span>
+<span class="nc bnc" id="L174" title="All 2 branches missed.">        if (tlsEngineResult.getHandshakeStatus() == HandshakeStatus.NEED_TASK) {</span>
+            // If the result indicates that we have outstanding tasks to do, go
+            // ahead and run them in this thread.
+<span class="nc" id="L177">            doTasks();</span>
+        }
+<span class="nc" id="L179">    }</span>
+
+    /**
+     * Signals that no more outbound application data will be sent on this TLSHandler.
+     *
+     * @throws SSLException never
+     */
+    public void close() throws SSLException {
+        // Indicate that application is done with engine
+<span class="nc" id="L188">        tlsEngine.closeOutbound();</span>
+<span class="nc" id="L189">    }</span>
+
+    /**
+     * Returns the current status for this TLSHandler.
+     *
+     * @return the current TLSStatus
+     */
+    public TLSStatus getStatus() {
+<span class="nc bnc" id="L197" title="All 4 branches missed.">        if (tlsEngineResult != null &amp;&amp; tlsEngineResult.getStatus() == Status.BUFFER_UNDERFLOW) {</span>
+<span class="nc" id="L198">            return TLSStatus.UNDERFLOW;</span>
+        } else {
+<span class="nc bnc" id="L200" title="All 4 branches missed.">            if (tlsEngineResult != null &amp;&amp; tlsEngineResult.getStatus() == Status.CLOSED) {</span>
+<span class="nc" id="L201">                return TLSStatus.CLOSED;</span>
+            } else {
+<span class="nc bnc" id="L203" title="All 3 branches missed.">                switch (tlsEngine.getHandshakeStatus()) {</span>
+                case NEED_WRAP:
+<span class="nc" id="L205">                    return TLSStatus.NEED_WRITE;</span>
+                case NEED_UNWRAP:
+<span class="nc" id="L207">                    return TLSStatus.NEED_READ;</span>
+                default:
+<span class="nc" id="L209">                    return TLSStatus.OK;</span>
+                }
+            }
+        }
+    }
+
+    private ByteBuffer resizeApplicationBuffer(ByteBuffer app) {
+        // TODO Creating new buffers and copying over old one may not scale and may even be a
+        // security risk. Consider using views. Thanks to Noah for the tip.
+<span class="nc bnc" id="L218" title="All 2 branches missed.">        if (app.remaining() &lt; appBuffSize) {</span>
+<span class="nc" id="L219">            ByteBuffer bb = ByteBuffer.allocate(app.capacity() + appBuffSize);</span>
+<span class="nc" id="L220">            app.flip();</span>
+<span class="nc" id="L221">            bb.put(app);</span>
+<span class="nc" id="L222">            return bb;</span>
+        } else {
+<span class="nc" id="L224">            return app;</span>
+        }
+    }
+
+    /*
+      * Do all the outstanding handshake tasks in the current Thread.
+      */
+    private SSLEngineResult.HandshakeStatus doTasks() {
+
+        Runnable runnable;
+
+        /*
+           * We could run this in a separate thread, but do in the current for now.
+           */
+<span class="nc bnc" id="L238" title="All 2 branches missed.">        while ((runnable = tlsEngine.getDelegatedTask()) != null) {</span>
+<span class="nc" id="L239">            runnable.run();</span>
+        }
+<span class="nc" id="L241">        return tlsEngine.getHandshakeStatus();</span>
+    }
+
+    /*
+      * Logging code
+      */
+<span class="nc" id="L247">    private boolean resultOnce = true;</span>
+
+    private void log(String str, SSLEngineResult result) {
+<span class="nc bnc" id="L250" title="All 2 branches missed.">        if (!logging) {</span>
+<span class="nc" id="L251">            return;</span>
+        }
+<span class="nc bnc" id="L253" title="All 2 branches missed.">        if (resultOnce) {</span>
+<span class="nc" id="L254">            resultOnce = false;</span>
+<span class="nc" id="L255">            Log.info(&quot;The format of the SSLEngineResult is: \n&quot;</span>
+                    + &quot;\t\&quot;getStatus() / getHandshakeStatus()\&quot; +\n&quot;
+                    + &quot;\t\&quot;bytesConsumed() / bytesProduced()\&quot;\n&quot;);
+        }
+<span class="nc" id="L259">        HandshakeStatus hsStatus = result.getHandshakeStatus();</span>
+<span class="nc" id="L260">        Log.info(str + result.getStatus() + &quot;/&quot; + hsStatus + &quot;, &quot; + result.bytesConsumed() + &quot;/&quot;</span>
+<span class="nc" id="L261">                + result.bytesProduced() + &quot; bytes&quot;);</span>
+<span class="nc bnc" id="L262" title="All 2 branches missed.">        if (hsStatus == HandshakeStatus.FINISHED) {</span>
+<span class="nc" id="L263">            Log.info(&quot;\t...ready for application data&quot;);</span>
+        }
+<span class="nc" id="L265">    }</span>
+
+    protected SSLEngine getTlsEngine() {
+<span class="nc" id="L268">        return tlsEngine;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

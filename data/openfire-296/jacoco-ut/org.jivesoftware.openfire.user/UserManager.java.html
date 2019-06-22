@@ -1,0 +1,522 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>UserManager.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.user</a> &gt; <span class="el_source">UserManager.java</span></div><h1>UserManager.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2004-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.user;
+
+import java.time.Duration;
+import java.time.temporal.ChronoUnit;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Iterator;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
+
+import org.dom4j.Element;
+import org.jivesoftware.openfire.IQRouter;
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.event.UserEventDispatcher;
+import org.jivesoftware.openfire.event.UserEventListener;
+import org.jivesoftware.openfire.user.property.DefaultUserPropertyProvider;
+import org.jivesoftware.openfire.user.property.UserPropertyProvider;
+import org.jivesoftware.util.StringUtils;
+import org.jivesoftware.util.SystemProperty;
+import org.jivesoftware.util.cache.Cache;
+import org.jivesoftware.util.cache.CacheFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmpp.component.IQResultListener;
+import org.xmpp.packet.IQ;
+import org.xmpp.packet.JID;
+
+import gnu.inet.encoding.Stringprep;
+import gnu.inet.encoding.StringprepException;
+
+/**
+ * Manages users, including loading, creating and deleting.
+ *
+ * @author Matt Tucker
+ * @see User
+ */
+@SuppressWarnings({&quot;WeakerAccess&quot;, &quot;unused&quot;})
+public final class UserManager {
+
+<span class="fc" id="L58">    public static final SystemProperty&lt;Class&gt; USER_PROVIDER = SystemProperty.Builder.ofType(Class.class)</span>
+<span class="fc" id="L59">        .setKey(&quot;provider.user.className&quot;)</span>
+<span class="fc" id="L60">        .setBaseClass(UserProvider.class)</span>
+<span class="fc" id="L61">        .setDefaultValue(DefaultUserProvider.class)</span>
+<span class="fc" id="L62">        .addListener(UserManager::initProvider)</span>
+<span class="fc" id="L63">        .setDynamic(true)</span>
+<span class="fc" id="L64">        .build();</span>
+<span class="fc" id="L65">    private static final SystemProperty&lt;Duration&gt; REMOTE_DISCO_INFO_TIMEOUT = SystemProperty.Builder.ofType(Duration.class)</span>
+<span class="fc" id="L66">        .setKey(&quot;usermanager.remote-disco-info-timeout-seconds&quot;)</span>
+<span class="fc" id="L67">        .setDefaultValue(Duration.ofMinutes(1))</span>
+<span class="fc" id="L68">        .setChronoUnit(ChronoUnit.SECONDS)</span>
+<span class="fc" id="L69">        .setDynamic(true)</span>
+<span class="fc" id="L70">        .build();</span>
+<span class="fc" id="L71">    public static final SystemProperty&lt;Class&gt; USER_PROPERTY_PROVIDER = SystemProperty.Builder.ofType(Class.class)</span>
+<span class="fc" id="L72">        .setKey(&quot;provider.userproperty.className&quot;)</span>
+<span class="fc" id="L73">        .setBaseClass(UserPropertyProvider.class)</span>
+<span class="fc" id="L74">        .setDefaultValue(DefaultUserPropertyProvider.class)</span>
+<span class="fc" id="L75">        .addListener(UserManager::initPropertyProvider)</span>
+<span class="fc" id="L76">        .setDynamic(true)</span>
+<span class="fc" id="L77">        .build();</span>
+
+<span class="fc" id="L79">    private static final Logger Log = LoggerFactory.getLogger(UserManager.class);</span>
+
+    private static final String MUTEX_SUFFIX = &quot; usr&quot;;
+    
+    // Wrap this guy up so we can mock out the UserManager class.
+<span class="nc" id="L84">    private static final class UserManagerContainer {</span>
+<span class="nc" id="L85">        private static final UserManager instance = new UserManager();</span>
+    }
+
+    /**
+     * Returns the currently-installed UserProvider. &lt;b&gt;Warning:&lt;/b&gt; in virtually all
+     * cases the user provider should not be used directly. Instead, the appropriate
+     * methods in UserManager should be called. Direct access to the user provider is
+     * only provided for special-case logic.
+     *
+     * @return the current UserProvider.
+     */
+    @SuppressWarnings(&quot;AccessStaticViaInstance&quot;)
+    public static UserProvider getUserProvider() {
+<span class="nc" id="L98">        return UserManagerContainer.instance.provider;</span>
+    }
+
+    /**
+     * Returns the currently-installed UserPropertyProvider.
+     *
+     * &lt;b&gt;Warning:&lt;/b&gt; in virtually all cases the user property provider should not be used directly. Instead, use the
+     * Map returned by {@link User#getProperties()} to create, read, update or delete user properties. Failure to do so
+     * is likely to result in inconsistent data behavior and race conditions. Direct access to the user property
+     * provider is only provided for special-case logic.
+     *
+     * @return the current UserPropertyProvider.
+     * @see User#getProperties
+     */
+    @SuppressWarnings(&quot;AccessStaticViaInstance&quot;)
+    public static UserPropertyProvider getUserPropertyProvider() {
+<span class="nc" id="L114">        return UserManagerContainer.instance.propertyProvider;</span>
+    }
+
+    /**
+     * Returns a singleton UserManager instance.
+     *
+     * @return a UserManager instance.
+     */
+    public static UserManager getInstance() {
+<span class="nc" id="L123">        return UserManagerContainer.instance;</span>
+    }
+
+    private final XMPPServer xmppServer;
+    /** Cache of local users. */
+    private final Cache&lt;String, User&gt; userCache;
+    /** Cache if a local or remote user exists. */
+    private final Cache&lt;String, Boolean&gt; remoteUsersCache;
+    private static UserProvider provider;
+    private static UserPropertyProvider propertyProvider;
+
+    private UserManager() {
+<span class="nc" id="L135">        this(XMPPServer.getInstance());</span>
+<span class="nc" id="L136">    }</span>
+
+    /* Exposed for test use only */
+<span class="fc" id="L139">    UserManager(final XMPPServer xmppServer) {</span>
+<span class="fc" id="L140">        this.xmppServer = xmppServer;</span>
+        // Initialize caches.
+<span class="fc" id="L142">        userCache = CacheFactory.createCache(&quot;User&quot;);</span>
+<span class="fc" id="L143">        remoteUsersCache = CacheFactory.createCache(&quot;Remote Users Existence&quot;);</span>
+
+        // Load a user &amp; property provider.
+<span class="fc" id="L146">        initProvider(USER_PROVIDER.getValue());</span>
+<span class="fc" id="L147">        initPropertyProvider(USER_PROPERTY_PROVIDER.getValue());</span>
+
+<span class="fc" id="L149">        final UserEventListener userListener = new UserEventListener() {</span>
+            @Override
+            public void userCreated(final User user, final Map&lt;String, Object&gt; params) {
+                // Since the user could be created by the provider, add it possible again
+<span class="fc" id="L153">                userCache.put(user.getUsername(), user);</span>
+<span class="fc" id="L154">            }</span>
+
+            @Override
+            public void userDeleting(final User user, final Map&lt;String, Object&gt; params) {
+                // Since the user could be deleted by the provider, remove it possible again
+<span class="nc" id="L159">                userCache.remove(user.getUsername());</span>
+<span class="nc" id="L160">            }</span>
+
+            @Override
+            public void userModified(final User user, final Map&lt;String, Object&gt; params) {
+                // Set object again in cache. This is done so that other cluster nodes
+                // get refreshed with latest version of the user
+<span class="nc" id="L166">                userCache.put(user.getUsername(), user);</span>
+<span class="nc" id="L167">            }</span>
+        };
+<span class="fc" id="L169">        UserEventDispatcher.addListener(userListener);</span>
+<span class="fc" id="L170">    }</span>
+
+    /**
+     * Creates a new User. Required values are username and password. The email address
+     * and name can optionally be {@code null}, unless the UserProvider deems that
+     * either of them are required.
+     *
+     * @param username the new and unique username for the account.
+     * @param password the password for the account (plain text).
+     * @param name the name of the user, which can be {@code null} unless the UserProvider
+     *      deems that it's required.
+     * @param email the email address to associate with the new account, which can
+     *      be {@code null}, unless the UserProvider deems that it's required.
+     * @return a new User.
+     * @throws UserAlreadyExistsException if the username already exists in the system.
+     * @throws UnsupportedOperationException if the provider does not support the
+     *      operation.
+     */
+    public User createUser(String username, final String password, final String name, final String email)
+            throws UserAlreadyExistsException
+    {
+<span class="pc bpc" id="L191" title="1 of 2 branches missed.">        if (provider.isReadOnly()) {</span>
+<span class="nc" id="L192">            throw new UnsupportedOperationException(&quot;User provider is read-only.&quot;);</span>
+        }
+<span class="pc bpc" id="L194" title="2 of 4 branches missed.">        if (username == null || username.isEmpty()) {</span>
+<span class="nc" id="L195">            throw new IllegalArgumentException(&quot;Null or empty username.&quot;);</span>
+        }
+<span class="pc bpc" id="L197" title="2 of 4 branches missed.">        if (password == null || password.isEmpty()) {</span>
+<span class="nc" id="L198">            throw new IllegalArgumentException(&quot;Null or empty password.&quot;);</span>
+        }
+        // Make sure that the username is valid.
+        try {
+<span class="fc" id="L202">            username = Stringprep.nodeprep(username);</span>
+        }
+<span class="nc" id="L204">        catch (final StringprepException se) {</span>
+<span class="nc" id="L205">            throw new IllegalArgumentException(&quot;Invalid username: &quot; + username,  se);</span>
+<span class="fc" id="L206">        }</span>
+<span class="pc bpc" id="L207" title="5 of 6 branches missed.">        if (provider.isNameRequired() &amp;&amp; (name == null || name.matches(&quot;\\s*&quot;))) {</span>
+<span class="nc" id="L208">            throw new IllegalArgumentException(&quot;Invalid or empty name specified with provider that requires name. User: &quot;</span>
+                                                + username + &quot; Name: &quot; + name);
+        }
+<span class="pc bpc" id="L211" title="3 of 4 branches missed.">        if (provider.isEmailRequired() &amp;&amp; !StringUtils.isValidEmailAddress(email)) {</span>
+<span class="nc" id="L212">            throw new IllegalArgumentException(&quot;Invalid or empty email address specified with provider that requires email address. User: &quot;</span>
+                                                + username + &quot; Email: &quot; + email);
+        }
+<span class="fc" id="L215">        final User user = provider.createUser(username, password, name, email);</span>
+<span class="fc" id="L216">        userCache.put(username, user);</span>
+
+        // Fire event.
+<span class="fc" id="L219">        final Map&lt;String,Object&gt; params = Collections.emptyMap();</span>
+<span class="fc" id="L220">        UserEventDispatcher.dispatchEvent(user, UserEventDispatcher.EventType.user_created, params);</span>
+
+<span class="fc" id="L222">        return user;</span>
+    }
+
+    /**
+     * Deletes a user (optional operation).
+     *
+     * @param user the user to delete.
+     */
+    public void deleteUser(final User user) {
+<span class="nc bnc" id="L231" title="All 2 branches missed.">        if (provider.isReadOnly()) {</span>
+<span class="nc" id="L232">            throw new UnsupportedOperationException(&quot;User provider is read-only.&quot;);</span>
+        }
+
+<span class="nc" id="L235">        final String username = user.getUsername();</span>
+        // Make sure that the username is valid.
+        try {
+<span class="nc" id="L238">            /*username =*/ Stringprep.nodeprep(username);</span>
+        }
+<span class="nc" id="L240">        catch (final StringprepException se) {</span>
+<span class="nc" id="L241">            throw new IllegalArgumentException(&quot;Invalid username: &quot; + username,  se);</span>
+<span class="nc" id="L242">        }</span>
+
+        // Fire event.
+<span class="nc" id="L245">        final Map&lt;String,Object&gt; params = Collections.emptyMap();</span>
+<span class="nc" id="L246">        UserEventDispatcher.dispatchEvent(user, UserEventDispatcher.EventType.user_deleting, params);</span>
+
+<span class="nc" id="L248">        provider.deleteUser(user.getUsername());</span>
+        // Remove the user from cache.
+<span class="nc" id="L250">        userCache.remove(user.getUsername());</span>
+<span class="nc" id="L251">    }</span>
+
+    /**
+     * Returns the User specified by username.
+     *
+     * @param username the username of the user.
+     * @return the User that matches {@code username}.
+     * @throws UserNotFoundException if the user does not exist.
+     */
+    public User getUser(String username) throws UserNotFoundException {
+<span class="pc bpc" id="L261" title="1 of 2 branches missed.">        if (username == null) {</span>
+<span class="nc" id="L262">            throw new UserNotFoundException(&quot;Username cannot be null&quot;);</span>
+        }
+        // Make sure that the username is valid.
+<span class="fc" id="L265">        username = username.trim().toLowerCase();</span>
+<span class="fc" id="L266">        User user = userCache.get(username);</span>
+<span class="fc bfc" id="L267" title="All 2 branches covered.">        if (user == null) {</span>
+<span class="fc" id="L268">            synchronized ((username + MUTEX_SUFFIX).intern()) {</span>
+<span class="fc" id="L269">                user = userCache.get(username);</span>
+<span class="pc bpc" id="L270" title="1 of 2 branches missed.">                if (user == null) {</span>
+<span class="nc" id="L271">                    user = provider.loadUser(username);</span>
+<span class="nc" id="L272">                    userCache.put(username, user);</span>
+                }
+<span class="pc" id="L274">            }</span>
+        }
+<span class="fc" id="L276">        return user;</span>
+    }
+
+    /**
+     * Returns the total number of users in the system.
+     *
+     * @return the total number of users.
+     */
+    public int getUserCount() {
+<span class="nc" id="L285">        return provider.getUserCount();</span>
+    }
+
+    /**
+     * Returns an unmodifiable Collection of all users in the system.
+     *
+     * @return an unmodifiable Collection of all users.
+     */
+    public Collection&lt;User&gt; getUsers() {
+<span class="nc" id="L294">        return provider.getUsers();</span>
+    }
+
+    /**
+     * Returns an unmodifiable Collection of usernames of all users in the system.
+     *
+     * @return an unmodifiable Collection of all usernames in the system.
+     */
+    public Collection&lt;String&gt; getUsernames() {
+<span class="nc" id="L303">        return provider.getUsernames();</span>
+    }
+
+    /**
+     * Returns an unmodifiable Collection of all users starting at {@code startIndex}
+     * with the given number of results. This is useful to support pagination in a GUI
+     * where you may only want to display a certain number of results per page. It is
+     * possible that the number of results returned will be less than that specified
+     * by {@code numResults} if {@code numResults} is greater than the number of
+     * records left to display.
+     *
+     * @param startIndex the beginning index to start the results at.
+     * @param numResults the total number of results to return.
+     * @return a Collection of users in the specified range.
+     */
+    public Collection&lt;User&gt; getUsers(final int startIndex, final int numResults) {
+<span class="nc" id="L319">        return provider.getUsers(startIndex, numResults);</span>
+    }
+
+    /**
+     * Returns the set of fields that can be used for searching for users. Each field
+     * returned must support wild-card and keyword searching. For example, an
+     * implementation might send back the set {&quot;Username&quot;, &quot;Name&quot;, &quot;Email&quot;}. Any of
+     * those three fields can then be used in a search with the
+     * {@link #findUsers(Set,String)} method.&lt;p&gt;
+     *
+     * This method should throw an UnsupportedOperationException if this
+     * operation is not supported by the backend user store.
+     *
+     * @return the valid search fields.
+     * @throws UnsupportedOperationException if the provider does not
+     *      support the operation (this is an optional operation).
+     */
+    public Set&lt;String&gt; getSearchFields() throws UnsupportedOperationException {
+<span class="nc" id="L337">        return provider.getSearchFields();</span>
+    }
+
+    /**
+     * Searches for users based on a set of fields and a query string. The fields must
+     * be taken from the values returned by {@link #getSearchFields()}. The query can
+     * include wildcards. For example, a search on the field &quot;Name&quot; with a query of &quot;Ma*&quot;
+     * might return user's with the name &quot;Matt&quot;, &quot;Martha&quot; and &quot;Madeline&quot;.&lt;p&gt;
+     *
+     * This method throws an UnsupportedOperationException if this operation is
+     * not supported by the user provider.
+     *
+     * @param fields the fields to search on.
+     * @param query the query string.
+     * @return a Collection of users that match the search.
+     * @throws UnsupportedOperationException if the provider does not
+     *      support the operation (this is an optional operation).
+     */
+    public Collection&lt;User&gt; findUsers(final Set&lt;String&gt; fields, final String query)
+            throws UnsupportedOperationException
+    {
+<span class="nc" id="L358">        return provider.findUsers(fields, query);</span>
+    }
+
+    /**
+     * Searches for users based on a set of fields and a query string. The fields must
+     * be taken from the values returned by {@link #getSearchFields()}. The query can
+     * include wildcards. For example, a search on the field &quot;Name&quot; with a query of &quot;Ma*&quot;
+     * might return user's with the name &quot;Matt&quot;, &quot;Martha&quot; and &quot;Madeline&quot;.&lt;p&gt;
+     *
+     * The startIndex and numResults parameters are used to page through search
+     * results. For example, if the startIndex is 0 and numResults is 10, the first
+     * 10 search results will be returned. Note that numResults is a request for the
+     * number of results to return and that the actual number of results returned
+     * may be fewer.&lt;p&gt;
+     *
+     * This method should throw an UnsupportedOperationException if this
+     * operation is not supported by the backend user store.
+     *
+     * @param fields the fields to search on.
+     * @param query the query string.
+     * @param startIndex the starting index in the search result to return.
+     * @param numResults the number of users to return in the search result.
+     * @return a Collection of users that match the search.
+     * @throws UnsupportedOperationException if the provider does not
+     *      support the operation (this is an optional operation).
+     */
+    public Collection&lt;User&gt; findUsers(final Set&lt;String&gt; fields, final String query, final int startIndex,
+                                      final int numResults)
+            throws UnsupportedOperationException
+    {
+<span class="nc" id="L388">        return provider.findUsers(fields, query, startIndex, numResults);</span>
+    }
+
+    /**
+     * Returns true if the specified local username belongs to a registered local user.
+     *
+     * @param username to username of the user to check it it's a registered user.
+     * @return true if the specified JID belongs to a local registered user.
+     */
+    public boolean isRegisteredUser(final String username) {
+<span class="nc bnc" id="L398" title="All 4 branches missed.">        if (username == null || &quot;&quot;.equals(username)) {</span>
+<span class="nc" id="L399">            return false;</span>
+        }
+        try {
+<span class="nc" id="L402">            getUser(username);</span>
+<span class="nc" id="L403">            return true;</span>
+        }
+<span class="nc" id="L405">        catch (final UserNotFoundException e) {</span>
+<span class="nc" id="L406">            return false;</span>
+        }
+    }
+
+    /**
+     * Returns true if the specified JID belongs to a local or remote registered user. For
+     * remote users (i.e. domain does not match local domain) a disco#info request is going
+     * to be sent to the bare JID of the user.
+     *
+     * &lt;p&gt;WARNING: If the supplied JID could be a remote user and the disco#info result packet comes back on the same
+     * thread as the one the calls this method then it will not be processed, and this method will block for 60 seconds
+     * by default. To change the timeout, update the system property &lt;code&gt;usermanager.remote-disco-info-timeout-seconds&lt;/code&gt;
+     *
+     * @param user to JID of the user to check it it's a registered user.
+     * @return true if the specified JID belongs to a local or remote registered user.
+     */
+    public boolean isRegisteredUser(final JID user) {
+<span class="fc bfc" id="L423" title="All 2 branches covered.">        if (xmppServer.isLocal(user)) {</span>
+            try {
+<span class="fc" id="L425">                getUser(user.getNode());</span>
+<span class="fc" id="L426">                return true;</span>
+            }
+<span class="fc" id="L428">            catch (final UserNotFoundException e) {</span>
+<span class="fc" id="L429">                return false;</span>
+            }
+        }
+        else {
+            // Look up in the cache using the full JID
+<span class="fc" id="L434">            Boolean isRegistered = remoteUsersCache.get(user.toString());</span>
+<span class="pc bpc" id="L435" title="1 of 2 branches missed.">            if (isRegistered == null) {</span>
+                // Check if the bare JID of the user is cached
+<span class="fc" id="L437">                isRegistered = remoteUsersCache.get(user.toBareJID());</span>
+<span class="pc bpc" id="L438" title="1 of 2 branches missed.">                if (isRegistered == null) {</span>
+                    // No information is cached so check user identity and cache it
+                    // A disco#info is going to be sent to the bare JID of the user. This packet
+                    // is going to be handled by the remote server.
+<span class="fc" id="L442">                    final IQ iq = new IQ(IQ.Type.get);</span>
+<span class="fc" id="L443">                    iq.setFrom(xmppServer.getServerInfo().getXMPPDomain());</span>
+<span class="fc" id="L444">                    iq.setTo(user.toBareJID());</span>
+<span class="fc" id="L445">                    iq.setChildElement(&quot;query&quot;, &quot;http://jabber.org/protocol/disco#info&quot;);</span>
+<span class="fc" id="L446">                    final Semaphore completionSemaphore = new Semaphore(0);</span>
+                    // Send the disco#info request to the remote server.
+<span class="fc" id="L448">                    final IQRouter iqRouter = xmppServer.getIQRouter();</span>
+<span class="fc" id="L449">                    final long timeoutInMillis = REMOTE_DISCO_INFO_TIMEOUT.getValue().toMillis();</span>
+<span class="fc" id="L450">                    iqRouter.addIQResultListener(iq.getID(), new IQResultListener() {</span>
+                        @Override
+                        public void receivedAnswer(final IQ packet) {
+<span class="fc" id="L453">                            final JID from = packet.getFrom();</span>
+                            // Assume that the user is not a registered user
+<span class="fc" id="L455">                            Boolean isRegistered = Boolean.FALSE;</span>
+                            // Analyze the disco result packet
+<span class="fc bfc" id="L457" title="All 2 branches covered.">                            if (IQ.Type.result == packet.getType()) {</span>
+<span class="fc" id="L458">                                final Element child = packet.getChildElement();</span>
+<span class="pc bpc" id="L459" title="1 of 2 branches missed.">                                if (child != null) {</span>
+<span class="pc bpc" id="L460" title="1 of 2 branches missed.">                                    for (final Iterator it = child.elementIterator(&quot;identity&quot;); it.hasNext();) {</span>
+<span class="fc" id="L461">                                        final Element identity = (Element) it.next();</span>
+<span class="fc" id="L462">                                        final String accountType = identity.attributeValue(&quot;type&quot;);</span>
+<span class="pc bpc" id="L463" title="3 of 4 branches missed.">                                        if (&quot;registered&quot;.equals(accountType) || &quot;admin&quot;.equals(accountType)) {</span>
+<span class="fc" id="L464">                                            isRegistered = Boolean.TRUE;</span>
+<span class="fc" id="L465">                                            break;</span>
+                                        }
+<span class="nc" id="L467">                                    }</span>
+                                }
+                            }
+                            // Update cache of remote registered users
+<span class="fc" id="L471">                            remoteUsersCache.put(from.toBareJID(), isRegistered);</span>
+<span class="fc" id="L472">                            completionSemaphore.release();</span>
+<span class="fc" id="L473">                        }</span>
+
+                        @Override
+                        public void answerTimeout(final String packetId) {
+<span class="fc" id="L477">                            Log.warn(&quot;The result from the disco#info request was never received. request: {}&quot;, iq);</span>
+<span class="fc" id="L478">                            completionSemaphore.release();</span>
+<span class="fc" id="L479">                        }</span>
+                    }, timeoutInMillis);
+                    // Send the request
+<span class="fc" id="L482">                    iqRouter.route(iq);</span>
+                    // Wait for the response
+                    try {
+<span class="fc" id="L485">                        completionSemaphore.tryAcquire(timeoutInMillis, TimeUnit.MILLISECONDS);</span>
+<span class="nc" id="L486">                    } catch (final InterruptedException e) {</span>
+<span class="nc" id="L487">                        Thread.currentThread().interrupt();</span>
+<span class="nc" id="L488">                        Log.warn(&quot;Interrupted whilst waiting for response from remote server&quot;, e);</span>
+<span class="fc" id="L489">                    }</span>
+<span class="fc" id="L490">                    isRegistered = remoteUsersCache.computeIfAbsent(user.toBareJID(), ignored -&gt; Boolean.FALSE);</span>
+                }
+            }
+<span class="fc" id="L493">            return isRegistered;</span>
+        }
+    }
+
+    private static void initProvider(final Class clazz) {
+<span class="fc bfc" id="L498" title="All 4 branches covered.">        if (provider == null || !clazz.equals(provider.getClass())) {</span>
+            try {
+<span class="fc" id="L500">                provider = (UserProvider) clazz.newInstance();</span>
+            }
+<span class="nc" id="L502">            catch (final Exception e) {</span>
+<span class="nc" id="L503">                Log.error(&quot;Error loading user provider: &quot; + clazz.getName(), e);</span>
+<span class="nc" id="L504">                provider = new DefaultUserProvider();</span>
+<span class="fc" id="L505">            }</span>
+        }
+<span class="fc" id="L507">    }</span>
+
+    private static void initPropertyProvider(final Class clazz) {
+        // Check if we need to reset the provider class
+<span class="pc bpc" id="L511" title="1 of 4 branches missed.">        if (propertyProvider == null || !clazz.equals(propertyProvider.getClass())) {</span>
+            try {
+<span class="fc" id="L513">                propertyProvider = (UserPropertyProvider) clazz.newInstance();</span>
+            }
+<span class="nc" id="L515">            catch (final Exception e) {</span>
+<span class="nc" id="L516">                Log.error(&quot;Error loading user property provider: &quot; + clazz.getName(), e);</span>
+<span class="nc" id="L517">                propertyProvider = new DefaultUserPropertyProvider();</span>
+<span class="fc" id="L518">            }</span>
+        }
+<span class="fc" id="L520">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

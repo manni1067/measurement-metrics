@@ -1,0 +1,211 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>AuthorizationManager.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.auth</a> &gt; <span class="el_source">AuthorizationManager.java</span></div><h1>AuthorizationManager.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2004-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.auth;
+
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.StringTokenizer;
+
+import org.jivesoftware.openfire.user.UserAlreadyExistsException;
+import org.jivesoftware.openfire.user.UserManager;
+import org.jivesoftware.openfire.user.UserNotFoundException;
+import org.jivesoftware.util.ClassUtils;
+import org.jivesoftware.util.JiveGlobals;
+import org.jivesoftware.util.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Manages the AuthorizationProvider objects.
+ * &lt;p&gt;
+ * Overall description of the authentication and authorization process:
+ * &lt;/p&gt;
+ * After a client connects, and indicates a desire to use SASL, the
+ * SASLAuthentication object decides which SASL mechanisms to advertise,
+ * and then performs the authentication. If authentication is successful,
+ * the XMPPCallbackHandler is asked to handle() an AuthorizeCallback.  The
+ * XMPPCallbackHandler asks the AuthorizationManager to authorize the
+ * principal to the requested username.  The AuthorizationManager manages
+ * a list of AuthorizationProvider classes, and tries them one at a time
+ * and returns true with the first AuthorizationProvider that authorizes
+ * the principal to the username.  If no classes authorize the principal,
+ * false is returned, which traces all the way back to give the client an
+ * unauthorized message. Its important to note that the message the client
+ * receives will give no indication if the principal authenticated successfully,
+ * you will need to check the server logs for that information.
+ *
+ * @author Jay Kline
+ */
+public class AuthorizationManager {
+
+<span class="nc" id="L55">    private static final Logger Log = LoggerFactory.getLogger(AuthorizationManager.class);</span>
+
+<span class="nc" id="L57">    private static ArrayList&lt;AuthorizationPolicy&gt; authorizationPolicies = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L58">    private static ArrayList&lt;AuthorizationMapping&gt; authorizationMapping = new ArrayList&lt;&gt;();</span>
+
+    static {
+        // Convert XML based provider setup to Database based
+<span class="nc" id="L62">        JiveGlobals.migrateProperty(&quot;provider.authorization.classList&quot;);</span>
+<span class="nc" id="L63">        JiveGlobals.migrateProperty(&quot;provider.authorizationMapping.classList&quot;);</span>
+<span class="nc" id="L64">        JiveGlobals.migrateProperty(&quot;sasl.approvedRealms&quot;);</span>
+<span class="nc" id="L65">        JiveGlobals.migrateProperty(&quot;sasl.realm&quot;);</span>
+
+<span class="nc" id="L67">        String classList = JiveGlobals.getProperty(&quot;provider.authorization.classList&quot;);</span>
+<span class="nc bnc" id="L68" title="All 2 branches missed.">        if (classList != null) {</span>
+<span class="nc" id="L69">            StringTokenizer st = new StringTokenizer(classList, &quot; ,\t\n\r\f&quot;);</span>
+<span class="nc bnc" id="L70" title="All 2 branches missed.">            while (st.hasMoreTokens()) {</span>
+<span class="nc" id="L71">                String s_provider = st.nextToken();</span>
+                try {
+<span class="nc" id="L73">                    Class c_provider = ClassUtils.forName(s_provider);</span>
+<span class="nc" id="L74">                    AuthorizationPolicy provider =</span>
+<span class="nc" id="L75">                            (AuthorizationPolicy)(c_provider.newInstance());</span>
+<span class="nc" id="L76">                    Log.debug(&quot;AuthorizationManager: Loaded &quot; + s_provider);</span>
+<span class="nc" id="L77">                    authorizationPolicies.add(provider);</span>
+                }
+<span class="nc" id="L79">                catch (Exception e) {</span>
+<span class="nc" id="L80">                    Log.error(&quot;AuthorizationManager: Error loading AuthorizationProvider: &quot; + s_provider + &quot;\n&quot; + e);</span>
+<span class="nc" id="L81">                }</span>
+<span class="nc" id="L82">            }</span>
+        }
+<span class="nc bnc" id="L84" title="All 2 branches missed.">        if (authorizationPolicies.isEmpty()) {</span>
+<span class="nc" id="L85">            Log.debug(&quot;AuthorizationManager: No AuthorizationProvider's found. Loading DefaultAuthorizationPolicy&quot;);</span>
+<span class="nc" id="L86">            authorizationPolicies.add(new DefaultAuthorizationPolicy());</span>
+        }
+
+<span class="nc" id="L89">        classList = JiveGlobals.getProperty(&quot;provider.authorizationMapping.classList&quot;);</span>
+<span class="nc bnc" id="L90" title="All 2 branches missed.">        if (classList != null) {</span>
+<span class="nc" id="L91">            StringTokenizer st = new StringTokenizer(classList, &quot; ,\t\n\r\f&quot;);</span>
+<span class="nc bnc" id="L92" title="All 2 branches missed.">            while (st.hasMoreTokens()) {</span>
+<span class="nc" id="L93">                String s_provider = st.nextToken();</span>
+                try {
+<span class="nc" id="L95">                    Class c_provider = ClassUtils.forName(s_provider);</span>
+<span class="nc" id="L96">                    Object o_provider = c_provider.newInstance();</span>
+<span class="nc bnc" id="L97" title="All 2 branches missed.">                    if(o_provider instanceof AuthorizationMapping) {</span>
+<span class="nc" id="L98">                        AuthorizationMapping provider = (AuthorizationMapping)(o_provider);</span>
+<span class="nc" id="L99">                        Log.debug(&quot;AuthorizationManager: Loaded &quot; + s_provider);</span>
+<span class="nc" id="L100">                        authorizationMapping.add(provider);</span>
+<span class="nc" id="L101">                    } else {</span>
+<span class="nc" id="L102">                        Log.debug(&quot;AuthorizationManager: Unknown class type.&quot;);</span>
+                    }
+<span class="nc" id="L104">                } catch (Exception e) {</span>
+<span class="nc" id="L105">                    Log.error(&quot;AuthorizationManager: Error loading AuthorizationMapping: &quot; + s_provider + &quot;\n&quot; + e);</span>
+<span class="nc" id="L106">                }</span>
+<span class="nc" id="L107">            }</span>
+        }
+<span class="nc bnc" id="L109" title="All 2 branches missed.">        if (authorizationMapping.isEmpty()) {</span>
+<span class="nc" id="L110">            Log.debug(&quot;AuthorizationManager: No AuthorizationMapping's found. Loading DefaultAuthorizationMapping&quot;);</span>
+<span class="nc" id="L111">            authorizationMapping.add(new DefaultAuthorizationMapping());</span>
+        }
+<span class="nc" id="L113">    }</span>
+
+    // static utility class; do not instantiate
+<span class="nc" id="L116">    private AuthorizationManager() { }</span>
+
+    /**
+     * Returns the currently-installed AuthorizationProvider. Warning: You
+     * should not be calling the AuthorizationProvider directly to perform
+     * authorizations, it will not take into account the policy selected in
+     * the {@code openfire.xml}.  Use @see{authorize} in this class, instead.
+     *
+     * @return the current AuthorizationProvider.
+     */
+    public static Collection&lt;AuthorizationPolicy&gt; getAuthorizationPolicies() {
+<span class="nc" id="L127">        return authorizationPolicies;</span>
+    }
+
+    /**
+     * Authorize the authenticated used to the requested username.  This uses the
+     * selected the selected AuthenticationProviders.
+     *
+     * @param username The requested username.
+     * @param principal The authenticated principal.
+     * @return true if the user is authorized.
+     */
+
+    public static boolean authorize(String username, String principal) {
+<span class="nc bnc" id="L140" title="All 2 branches missed.">        for (AuthorizationPolicy ap : authorizationPolicies) {</span>
+<span class="nc bnc" id="L141" title="All 2 branches missed.">            if (Log.isDebugEnabled()) {</span>
+<span class="nc" id="L142">                Log.debug(&quot;AuthorizationManager: Trying &quot;+ap.name()+&quot;.authorize(&quot;+username+&quot; , &quot;+principal+&quot;)&quot;);</span>
+            }
+
+<span class="nc bnc" id="L145" title="All 2 branches missed.">            if (ap.authorize(username, principal)) {</span>
+                // Authorized..  but do you exist?
+                try {
+<span class="nc" id="L148">                    UserManager.getUserProvider().loadUser(username);</span>
+                }
+<span class="nc" id="L150">                catch (UserNotFoundException nfe) {</span>
+<span class="nc bnc" id="L151" title="All 2 branches missed.">                    if (Log.isDebugEnabled()) {</span>
+<span class="nc" id="L152">                        Log.debug(&quot;AuthorizationManager: User &quot; + username + &quot; not found &quot; + nfe.toString());</span>
+                    }
+                    // Should we add the user?
+<span class="nc bnc" id="L155" title="All 2 branches missed.">                    if(JiveGlobals.getBooleanProperty(&quot;xmpp.auth.autoadd&quot;,false)) {</span>
+<span class="nc bnc" id="L156" title="All 2 branches missed.">                        if (UserManager.getUserProvider().isReadOnly()) {</span>
+<span class="nc" id="L157">                            return false;</span>
+                        }
+<span class="nc bnc" id="L159" title="All 4 branches missed.">                        if (UserManager.getUserProvider().isNameRequired() || UserManager.getUserProvider().isEmailRequired()) {</span>
+                            // If these are required, there's no way we can arbitrarily auto-create this account.
+<span class="nc" id="L161">                            return false;</span>
+                        }
+                        try {
+<span class="nc" id="L164">                            UserManager.getInstance().createUser(username, StringUtils.randomString(8), null, null);</span>
+<span class="nc bnc" id="L165" title="All 2 branches missed.">                            if (Log.isDebugEnabled()) {</span>
+<span class="nc" id="L166">                                Log.info(&quot;AuthorizationManager: User &quot;+username+&quot; created.&quot;);</span>
+                            }
+<span class="nc" id="L168">                            return true;</span>
+                        }
+<span class="nc" id="L170">                        catch (UserAlreadyExistsException uaee) {</span>
+                            // Somehow the user got created in this very short timeframe.. 
+                            // To be safe, lets fail here. The user can always try again.
+<span class="nc bnc" id="L173" title="All 2 branches missed.">                            if (Log.isDebugEnabled()) {</span>
+<span class="nc" id="L174">                                Log.error(&quot;AuthorizationManager: User &quot; + username +</span>
+                                        &quot; already exists while attempting to add user.&quot;);
+                            }
+<span class="nc" id="L177">                            return false;</span>
+                        }
+                    }
+<span class="nc" id="L180">                    return false;</span>
+<span class="nc" id="L181">                }</span>
+                // User exists
+<span class="nc" id="L183">                return true;</span>
+            }
+<span class="nc" id="L185">        }</span>
+        // Not authorized.
+<span class="nc" id="L187">        return false;</span>
+    }
+
+    /**
+     * Map the authenticated principal to the default username.  If the authenticated 
+     * principal did not supply a username, determine the default to use.
+     *
+     * @param principal The authentiated principal to determine the default username.
+     * @return The default username for the authentiated principal.
+     */
+
+    public static String map(String principal) {
+<span class="nc bnc" id="L199" title="All 2 branches missed.">        for (AuthorizationMapping am : authorizationMapping) {</span>
+<span class="nc bnc" id="L200" title="All 2 branches missed.">            if (Log.isDebugEnabled()) {</span>
+<span class="nc" id="L201">                Log.debug(&quot;AuthorizationManager: Trying &quot; + am.name() + &quot;.map(&quot; + principal + &quot;)&quot;);</span>
+            }
+<span class="nc" id="L203">            String username = am.map(principal);</span>
+<span class="nc bnc" id="L204" title="All 2 branches missed.">            if( ! username.equals(principal) ) {</span>
+<span class="nc" id="L205">                return username;</span>
+            }
+<span class="nc" id="L207">        }</span>
+<span class="nc" id="L208">        return principal;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

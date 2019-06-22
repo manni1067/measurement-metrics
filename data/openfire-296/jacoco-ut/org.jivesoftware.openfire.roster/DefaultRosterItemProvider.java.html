@@ -1,0 +1,321 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>DefaultRosterItemProvider.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.roster</a> &gt; <span class="el_source">DefaultRosterItemProvider.java</span></div><h1>DefaultRosterItemProvider.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.roster;
+
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
+
+import org.jivesoftware.database.DbConnectionManager;
+import org.jivesoftware.database.SequenceManager;
+import org.jivesoftware.openfire.user.UserAlreadyExistsException;
+import org.jivesoftware.util.JiveConstants;
+import org.jivesoftware.util.LocaleUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmpp.packet.JID;
+
+/**
+ * Defines the provider methods required for creating, reading, updating and deleting roster
+ * items.&lt;p&gt;
+ *
+ * Rosters are another user resource accessed via the user or chatbot's long ID. A user/chatbot
+ * may have zero or more roster items and each roster item may have zero or more groups. Each
+ * roster item is additionaly keyed on a XMPP jid. In most cases, the entire roster will be read
+ * in from memory and manipulated or sent to the user. However some operations will need to retrive
+ * specific roster items rather than the entire roster.
+ *
+ * @author Iain Shigeoka
+ */
+<span class="nc" id="L51">public class DefaultRosterItemProvider implements RosterItemProvider {</span>
+
+<span class="nc" id="L53">    private static final Logger Log = LoggerFactory.getLogger(DefaultRosterItemProvider.class);</span>
+
+    private static final String CREATE_ROSTER_ITEM =
+            &quot;INSERT INTO ofRoster (username, rosterID, jid, sub, ask, recv, nick) &quot; +
+            &quot;VALUES (?, ?, ?, ?, ?, ?, ?)&quot;;
+    private static final String UPDATE_ROSTER_ITEM =
+            &quot;UPDATE ofRoster SET sub=?, ask=?, recv=?, nick=? WHERE rosterID=?&quot;;
+    private static final String DELETE_ROSTER_ITEM_GROUPS =
+            &quot;DELETE FROM ofRosterGroups WHERE rosterID=?&quot;;
+    private static final String CREATE_ROSTER_ITEM_GROUPS =
+            &quot;INSERT INTO ofRosterGroups (rosterID, %s, groupName) VALUES (?, ?, ?)&quot;;
+    private static final String DELETE_ROSTER_ITEM =
+            &quot;DELETE FROM ofRoster WHERE rosterID=?&quot;;
+    private static final String LOAD_USERNAMES =
+            &quot;SELECT DISTINCT username from ofRoster WHERE jid=?&quot;;
+    private static final String COUNT_ROSTER_ITEMS =
+            &quot;SELECT COUNT(rosterID) FROM ofRoster WHERE username=?&quot;;
+     private static final String LOAD_ROSTER =
+             &quot;SELECT jid, rosterID, sub, ask, recv, nick FROM ofRoster WHERE username=?&quot;;
+    private static final String LOAD_ROSTER_ITEM_GROUPS =
+             &quot;SELECT ofRosterGroups.rosterID,groupName FROM ofRosterGroups &quot; +
+             &quot;INNER JOIN ofRoster ON ofRosterGroups.rosterID = ofRoster.rosterID &quot; +
+             &quot;WHERE username=? ORDER BY ofRosterGroups.rosterID, %s&quot;;
+
+    /* (non-Javadoc)
+     * @see org.jivesoftware.openfire.roster.RosterItemProvider#createItem(java.lang.String, org.jivesoftware.openfire.roster.RosterItem)
+     */
+    @Override
+    public RosterItem createItem(String username, RosterItem item)
+            throws UserAlreadyExistsException
+    {
+<span class="nc" id="L84">        Connection con = null;</span>
+<span class="nc" id="L85">        PreparedStatement pstmt = null;</span>
+        try {
+<span class="nc" id="L87">            long rosterID = SequenceManager.nextID(JiveConstants.ROSTER);</span>
+<span class="nc" id="L88">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L89">            pstmt = con.prepareStatement(CREATE_ROSTER_ITEM);</span>
+<span class="nc" id="L90">            pstmt.setString(1, username);</span>
+<span class="nc" id="L91">            pstmt.setLong(2, rosterID);</span>
+<span class="nc" id="L92">            pstmt.setString(3, item.getJid().toBareJID());</span>
+<span class="nc" id="L93">            pstmt.setInt(4, item.getSubStatus().getValue());</span>
+<span class="nc" id="L94">            pstmt.setInt(5, item.getAskStatus().getValue());</span>
+<span class="nc" id="L95">            pstmt.setInt(6, item.getRecvStatus().getValue());</span>
+<span class="nc" id="L96">            pstmt.setString(7, item.getNickname());</span>
+<span class="nc" id="L97">            pstmt.executeUpdate();</span>
+
+<span class="nc" id="L99">            item.setID(rosterID);</span>
+<span class="nc" id="L100">            insertGroups(rosterID, item.getGroups().iterator(), con);</span>
+        }
+<span class="nc" id="L102">        catch (SQLException e) {</span>
+<span class="nc" id="L103">            Log.warn(&quot;Error trying to insert a new row in ofRoster&quot;, e);</span>
+<span class="nc" id="L104">            throw new UserAlreadyExistsException(item.getJid().toBareJID());</span>
+        }
+        finally {
+<span class="nc" id="L107">            DbConnectionManager.closeConnection(pstmt, con);</span>
+<span class="nc" id="L108">        }</span>
+<span class="nc" id="L109">        return item;</span>
+    }
+
+    /* (non-Javadoc)
+     * @see org.jivesoftware.openfire.roster.RosterItemProvider#updateItem(java.lang.String, org.jivesoftware.openfire.roster.RosterItem)
+     */
+    @Override
+    public void updateItem(String username, RosterItem item) {
+<span class="nc" id="L117">        Connection con = null;</span>
+<span class="nc" id="L118">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L119">        long rosterID = item.getID();</span>
+        try {
+<span class="nc" id="L121">            con = DbConnectionManager.getConnection();</span>
+            // Update existing roster item
+<span class="nc" id="L123">            pstmt = con.prepareStatement(UPDATE_ROSTER_ITEM);</span>
+<span class="nc" id="L124">            pstmt.setInt(1, item.getSubStatus().getValue());</span>
+<span class="nc" id="L125">            pstmt.setInt(2, item.getAskStatus().getValue());</span>
+<span class="nc" id="L126">            pstmt.setInt(3, item.getRecvStatus().getValue());</span>
+<span class="nc" id="L127">            pstmt.setString(4, item.getNickname());</span>
+<span class="nc" id="L128">            pstmt.setLong(5, rosterID);</span>
+<span class="nc" id="L129">            pstmt.executeUpdate();</span>
+            // Close now the statement (do not wait to be GC'ed)
+<span class="nc" id="L131">            DbConnectionManager.fastcloseStmt(pstmt);</span>
+
+            // Delete old group list
+<span class="nc" id="L134">            pstmt = con.prepareStatement(DELETE_ROSTER_ITEM_GROUPS);</span>
+<span class="nc" id="L135">            pstmt.setLong(1, rosterID);</span>
+<span class="nc" id="L136">            pstmt.executeUpdate();</span>
+
+<span class="nc" id="L138">            insertGroups(rosterID, item.getGroups().iterator(), con);</span>
+        }
+<span class="nc" id="L140">        catch (SQLException e) {</span>
+<span class="nc" id="L141">            Log.error(LocaleUtils.getLocalizedString(&quot;admin.error&quot;), e);</span>
+        }
+        finally {
+<span class="nc" id="L144">            DbConnectionManager.closeConnection(pstmt, con);</span>
+<span class="nc" id="L145">        }</span>
+<span class="nc" id="L146">    }</span>
+
+    /* (non-Javadoc)
+     * @see org.jivesoftware.openfire.roster.RosterItemProvider#deleteItem(java.lang.String, long)
+     */
+    @Override
+    public void deleteItem(String username, long rosterItemID) {
+        // Only try to remove the user if they exist in the roster already:
+<span class="nc" id="L154">        Connection con = null;</span>
+<span class="nc" id="L155">        PreparedStatement pstmt = null;</span>
+        try {
+<span class="nc" id="L157">            con = DbConnectionManager.getConnection();</span>
+            // Remove roster groups
+<span class="nc" id="L159">            pstmt = con.prepareStatement(DELETE_ROSTER_ITEM_GROUPS);</span>
+
+<span class="nc" id="L161">            pstmt.setLong(1, rosterItemID);</span>
+<span class="nc" id="L162">            pstmt.executeUpdate();</span>
+            // Close now the statement (do not wait to be GC'ed)
+<span class="nc" id="L164">            DbConnectionManager.fastcloseStmt(pstmt);</span>
+
+            // Remove roster
+<span class="nc" id="L167">            pstmt = con.prepareStatement(DELETE_ROSTER_ITEM);</span>
+
+<span class="nc" id="L169">            pstmt.setLong(1, rosterItemID);</span>
+<span class="nc" id="L170">            pstmt.executeUpdate();</span>
+        }
+<span class="nc" id="L172">        catch (SQLException e) {</span>
+<span class="nc" id="L173">            Log.error(LocaleUtils.getLocalizedString(&quot;admin.error&quot;), e);</span>
+        }
+        finally {
+<span class="nc" id="L176">            DbConnectionManager.closeConnection(pstmt, con);</span>
+<span class="nc" id="L177">        }</span>
+<span class="nc" id="L178">    }</span>
+
+    /* (non-Javadoc)
+     * @see org.jivesoftware.openfire.roster.RosterItemProvider#getUsernames(java.lang.String)
+     */
+    @Override
+    public Iterator&lt;String&gt; getUsernames(String jid) {
+<span class="nc" id="L185">        List&lt;String&gt; answer = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L186">        Connection con = null;</span>
+<span class="nc" id="L187">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L188">        ResultSet rs = null;</span>
+        try {
+<span class="nc" id="L190">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L191">            pstmt = con.prepareStatement(LOAD_USERNAMES);</span>
+<span class="nc" id="L192">            pstmt.setString(1, jid);</span>
+<span class="nc" id="L193">            rs = pstmt.executeQuery();</span>
+<span class="nc bnc" id="L194" title="All 2 branches missed.">            while (rs.next()) {</span>
+<span class="nc" id="L195">                answer.add(rs.getString(1));</span>
+            }
+        }
+<span class="nc" id="L198">        catch (SQLException e) {</span>
+<span class="nc" id="L199">            Log.error(LocaleUtils.getLocalizedString(&quot;admin.error&quot;), e);</span>
+        }
+        finally {
+<span class="nc" id="L202">            DbConnectionManager.closeConnection(rs, pstmt, con);</span>
+<span class="nc" id="L203">        }</span>
+<span class="nc" id="L204">        return answer.iterator();</span>
+    }
+
+    /* (non-Javadoc)
+     * @see org.jivesoftware.openfire.roster.RosterItemProvider#getItemCount(java.lang.String)
+     */
+    @Override
+    public int getItemCount(String username) {
+<span class="nc" id="L212">        int count = 0;</span>
+<span class="nc" id="L213">        Connection con = null;</span>
+<span class="nc" id="L214">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L215">        ResultSet rs = null;</span>
+        try {
+<span class="nc" id="L217">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L218">            pstmt = con.prepareStatement(COUNT_ROSTER_ITEMS);</span>
+<span class="nc" id="L219">            pstmt.setString(1, username);</span>
+<span class="nc" id="L220">            rs = pstmt.executeQuery();</span>
+<span class="nc bnc" id="L221" title="All 2 branches missed.">            if (rs.next()) {</span>
+<span class="nc" id="L222">                count = rs.getInt(1);</span>
+            }
+        }
+<span class="nc" id="L225">        catch (SQLException e) {</span>
+<span class="nc" id="L226">            Log.error(LocaleUtils.getLocalizedString(&quot;admin.error&quot;), e);</span>
+        }
+        finally {
+<span class="nc" id="L229">            DbConnectionManager.closeConnection(rs, pstmt, con);</span>
+<span class="nc" id="L230">        }</span>
+<span class="nc" id="L231">        return count;</span>
+    }
+
+    /* (non-Javadoc)
+     * @see org.jivesoftware.openfire.roster.RosterItemProvider#getItems(java.lang.String)
+     */
+    @Override
+    public Iterator&lt;RosterItem&gt; getItems(String username) {
+<span class="nc" id="L239">        LinkedList&lt;RosterItem&gt; itemList = new LinkedList&lt;&gt;();</span>
+<span class="nc" id="L240">        Map&lt;Long, RosterItem&gt; itemsByID = new HashMap&lt;&gt;();</span>
+<span class="nc" id="L241">        Connection con = null;</span>
+<span class="nc" id="L242">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L243">        ResultSet rs = null;</span>
+        try {
+            // Load all the contacts in the roster
+<span class="nc" id="L246">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L247">            pstmt = con.prepareStatement(LOAD_ROSTER);</span>
+<span class="nc" id="L248">            pstmt.setString(1, username);</span>
+<span class="nc" id="L249">            rs = pstmt.executeQuery();</span>
+<span class="nc bnc" id="L250" title="All 2 branches missed.">            while (rs.next()) {</span>
+                // Create a new RosterItem (ie. user contact) from the stored information
+<span class="nc" id="L252">                RosterItem item = new RosterItem(rs.getLong(2),</span>
+<span class="nc" id="L253">                        new JID(rs.getString(1)),</span>
+<span class="nc" id="L254">                        RosterItem.SubType.getTypeFromInt(rs.getInt(3)),</span>
+<span class="nc" id="L255">                        RosterItem.AskType.getTypeFromInt(rs.getInt(4)),</span>
+<span class="nc" id="L256">                        RosterItem.RecvType.getTypeFromInt(rs.getInt(5)),</span>
+<span class="nc" id="L257">                        rs.getString(6),</span>
+                        null);
+                // Add the loaded RosterItem (ie. user contact) to the result
+<span class="nc" id="L260">                itemList.add(item);</span>
+<span class="nc" id="L261">                itemsByID.put(item.getID(), item);</span>
+<span class="nc" id="L262">            }</span>
+            // Close the statement and result set
+<span class="nc" id="L264">            DbConnectionManager.fastcloseStmt(rs, pstmt);</span>
+            // Set null to pstmt to be sure that it's not closed twice. It seems that
+            // Sybase driver is raising an error when trying to close an already closed statement.
+            // it2000 comment: TODO interesting, that's the only place with the sybase fix
+            // it2000 comment: one should move this in closeStatement()
+<span class="nc" id="L269">            pstmt = null;</span>
+
+            // Load the groups for the loaded contact
+<span class="nc bnc" id="L272" title="All 2 branches missed.">            if (!itemList.isEmpty()) {</span>
+<span class="nc" id="L273">                pstmt = con.prepareStatement(String.format(LOAD_ROSTER_ITEM_GROUPS, DbConnectionManager.getDatabaseType().escapeIdentifier(&quot;rank&quot;)));</span>
+<span class="nc" id="L274">                pstmt.setString(1, username);</span>
+<span class="nc" id="L275">                rs = pstmt.executeQuery();</span>
+<span class="nc bnc" id="L276" title="All 2 branches missed.">                while (rs.next()) {</span>
+<span class="nc" id="L277">                    itemsByID.get(rs.getLong(1)).getGroups().add(rs.getString(2));</span>
+                }
+            }
+        }
+<span class="nc" id="L281">        catch (SQLException e) {</span>
+<span class="nc" id="L282">            Log.error(LocaleUtils.getLocalizedString(&quot;admin.error&quot;), e);</span>
+        }
+        finally {
+<span class="nc" id="L285">            DbConnectionManager.closeConnection(rs, pstmt, con);</span>
+<span class="nc" id="L286">        }</span>
+<span class="nc" id="L287">        return itemList.iterator();</span>
+    }
+
+    /**
+     * Insert the groups into the given roster item.
+     *
+     * @param rosterID the roster ID of the item the groups belong to
+     * @param iter an iterator over the group names to insert
+     * @param con the database connection to use for the operation.
+     * @throws SQLException if an SQL exception occurs.
+     */
+    private void insertGroups(long rosterID, Iterator&lt;String&gt; iter, Connection con) throws SQLException
+    {
+<span class="nc" id="L300">        PreparedStatement pstmt = null;</span>
+        try {
+<span class="nc" id="L302">            pstmt = con.prepareStatement(String.format(CREATE_ROSTER_ITEM_GROUPS, DbConnectionManager.getDatabaseType().escapeIdentifier(&quot;rank&quot;)));</span>
+<span class="nc" id="L303">            pstmt.setLong(1, rosterID);</span>
+<span class="nc bnc" id="L304" title="All 2 branches missed.">            for (int i = 0; iter.hasNext(); i++) {</span>
+<span class="nc" id="L305">                pstmt.setInt(2, i);</span>
+<span class="nc" id="L306">                String groupName = iter.next();</span>
+<span class="nc" id="L307">                pstmt.setString(3, groupName);</span>
+                try {
+<span class="nc" id="L309">                    pstmt.executeUpdate();</span>
+                }
+<span class="nc" id="L311">                catch (SQLException e) {</span>
+<span class="nc" id="L312">                    Log.error(e.getMessage(), e);</span>
+<span class="nc" id="L313">                }</span>
+            }
+        }
+        finally {
+<span class="nc" id="L317">            DbConnectionManager.closeStatement(pstmt);</span>
+<span class="nc" id="L318">        }</span>
+<span class="nc" id="L319">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

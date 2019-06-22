@@ -1,0 +1,175 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>PrivateStorage.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire</a> &gt; <span class="el_source">PrivateStorage.java</span></div><h1>PrivateStorage.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2004-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire;
+
+import org.dom4j.DocumentHelper;
+import org.dom4j.Element;
+import org.jivesoftware.openfire.container.BasicModule;
+import org.jivesoftware.openfire.pep.PEPService;
+import org.jivesoftware.openfire.pep.PEPServiceManager;
+import org.jivesoftware.openfire.pubsub.LeafNode;
+import org.jivesoftware.openfire.pubsub.Node;
+import org.jivesoftware.openfire.pubsub.PubSubEngine;
+import org.jivesoftware.openfire.pubsub.PublishedItem;
+import org.jivesoftware.util.JiveGlobals;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmpp.forms.DataForm;
+import org.xmpp.forms.FormField;
+import org.xmpp.packet.JID;
+
+import java.util.Collections;
+
+/**
+ * Private storage for user accounts (XEP-0049). It is used by some XMPP systems for saving client settings on the server.
+ *
+ * This implementation uses the Personal Eventing Protocol implementation to store and retrieve data. This ensures that
+ * XEP-0049 operates on the same data as XEP-0223.
+ *
+ * @author Iain Shigeoka
+ * @author Guus der Kinderen, guus.der.kinderen@gmail.com
+ */
+public class PrivateStorage extends BasicModule {
+
+<span class="nc" id="L48">    private static final Logger Log = LoggerFactory.getLogger(PrivateStorage.class);</span>
+
+    /**
+     * PubSub 7.1.5 specificy Publishing Options that are applicable to private data storage (as described in XEP-0223).
+     */
+    private static final DataForm PRIVATE_DATA_PUBLISHING_OPTIONS;
+
+    static {
+<span class="nc" id="L56">        PRIVATE_DATA_PUBLISHING_OPTIONS = new DataForm( DataForm.Type.submit );</span>
+<span class="nc" id="L57">        PRIVATE_DATA_PUBLISHING_OPTIONS.addField( &quot;FORM_TYPE&quot;, null, FormField.Type.hidden ).addValue( &quot;http://jabber.org/protocol/pubsub#publish-options&quot; );</span>
+<span class="nc" id="L58">        PRIVATE_DATA_PUBLISHING_OPTIONS.addField( &quot;pubsub#persist_items&quot;, null, null ).addValue( &quot;true&quot; );</span>
+<span class="nc" id="L59">        PRIVATE_DATA_PUBLISHING_OPTIONS.addField( &quot;pubsub#access_model&quot;, null, null ).addValue( &quot;whitelist&quot; );</span>
+<span class="nc" id="L60">    }</span>
+
+<span class="nc" id="L62">    private boolean enabled = JiveGlobals.getBooleanProperty(&quot;xmpp.privateStorageEnabled&quot;, true);</span>
+
+    /**
+     * Constructs a new PrivateStore instance.
+     */
+    public PrivateStorage() {
+<span class="nc" id="L68">        super(&quot;Private user data storage&quot;);</span>
+<span class="nc" id="L69">    }</span>
+
+    /**
+     * Returns true if private storage is enabled.
+     *
+     * @return true if private storage is enabled.
+     */
+    public boolean isEnabled() {
+<span class="nc" id="L77">        return enabled;</span>
+    }
+
+    /**
+     * Sets whether private storage is enabled.
+     *
+     * @param enabled true if this private store is enabled.
+     */
+    public void setEnabled(boolean enabled) {
+<span class="nc" id="L86">        this.enabled = enabled;</span>
+<span class="nc" id="L87">        JiveGlobals.setProperty(&quot;xmpp.privateStorageEnabled&quot;, Boolean.toString(enabled));</span>
+<span class="nc" id="L88">    }</span>
+
+    /**
+     * Stores private data. If the name and namespace of the element matches another
+     * stored private data XML document, then replace it with the new one.
+     *
+     * @param data the data to store (XML element)
+     * @param username the username of the account where private data is being stored
+     */
+    public void add(String username, Element data) {
+<span class="nc bnc" id="L98" title="All 2 branches missed.">        if (!enabled)</span>
+        {
+<span class="nc" id="L100">            return;</span>
+        }
+
+<span class="nc" id="L103">        final JID owner = XMPPServer.getInstance().createJID( username, null );</span>
+<span class="nc" id="L104">        final PEPServiceManager serviceMgr = XMPPServer.getInstance().getIQPEPHandler().getServiceManager();</span>
+<span class="nc" id="L105">        PEPService pepService = serviceMgr.getPEPService( owner );</span>
+<span class="nc bnc" id="L106" title="All 2 branches missed.">        if ( pepService == null )</span>
+        {
+<span class="nc" id="L108">            pepService = serviceMgr.create( owner );</span>
+        }
+
+<span class="nc" id="L111">        Node node = pepService.getNode( data.getNamespaceURI() );</span>
+<span class="nc bnc" id="L112" title="All 2 branches missed.">        if ( node == null )</span>
+        {
+<span class="nc" id="L114">            PubSubEngine.CreateNodeResponse response = PubSubEngine.createNodeHelper( pepService, owner, pepService.getDefaultNodeConfiguration( true ).getConfigurationForm().getElement(), data.getNamespaceURI(), PRIVATE_DATA_PUBLISHING_OPTIONS );</span>
+<span class="nc" id="L115">            node = response.newNode;</span>
+
+<span class="nc bnc" id="L117" title="All 2 branches missed.">            if ( node == null )</span>
+            {
+<span class="nc" id="L119">                Log.error( &quot;Unable to create new PEP node, to be used to store private data. Error condition: {}&quot;, response.creationStatus.toXMPP() );</span>
+<span class="nc" id="L120">                return;</span>
+            }
+        }
+
+<span class="nc bnc" id="L124" title="All 2 branches missed.">        if (!(node instanceof LeafNode))</span>
+        {
+<span class="nc" id="L126">            Log.error( &quot;Unable to store private data into a PEP node. The node that is available is not a leaf node.&quot; );</span>
+<span class="nc" id="L127">            return;</span>
+        }
+
+<span class="nc" id="L130">        data.detach();</span>
+<span class="nc" id="L131">        final Element item = DocumentHelper.createElement( &quot;item&quot; );</span>
+<span class="nc" id="L132">        item.addAttribute( &quot;id&quot;, &quot;current&quot; );</span>
+<span class="nc" id="L133">        item.add( data );</span>
+
+<span class="nc" id="L135">        ((LeafNode) node).publishItems( owner, Collections.singletonList( item ) );</span>
+<span class="nc" id="L136">    }</span>
+
+    /**
+     * Returns the data stored under a key corresponding to the name and namespace
+     * of the given element. The Element must be in the form:&lt;p&gt;
+     *
+     * &lt;code&gt;&amp;lt;name xmlns='namespace'/&amp;gt;&lt;/code&gt;&lt;p&gt;
+     *
+     * If no data is currently stored under the given key, an empty element will be
+     * returned.
+     *
+     * @param data an XML document who's element name and namespace is used to
+     *      match previously stored private data.
+     * @param username the username of the account where private data is being stored.
+     * @return the data stored under the given key or the data element.
+     */
+    public Element get(String username, Element data)
+    {
+<span class="nc bnc" id="L154" title="All 2 branches missed.">        if (enabled)</span>
+        {
+<span class="nc" id="L156">            final PEPServiceManager serviceMgr = XMPPServer.getInstance().getIQPEPHandler().getServiceManager();</span>
+<span class="nc" id="L157">            final PEPService pepService = serviceMgr.getPEPService( XMPPServer.getInstance().createJID( username, null ) );</span>
+<span class="nc bnc" id="L158" title="All 2 branches missed.">            if ( pepService != null )</span>
+            {
+<span class="nc" id="L160">                final Node node = pepService.getNode( data.getNamespaceURI() );</span>
+<span class="nc bnc" id="L161" title="All 2 branches missed.">                if ( node != null )</span>
+                {
+<span class="nc" id="L163">                    final PublishedItem item = node.getPublishedItem( &quot;current&quot; );</span>
+<span class="nc bnc" id="L164" title="All 2 branches missed.">                    if ( item != null )</span>
+                    {
+<span class="nc" id="L166">                        data.clearContent();</span>
+<span class="nc" id="L167">                        data = item.getPayload();</span>
+                    }
+                }
+            }
+        }
+<span class="nc" id="L172">        return data;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

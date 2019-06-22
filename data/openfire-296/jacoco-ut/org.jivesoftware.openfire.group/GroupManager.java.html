@@ -1,0 +1,873 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>GroupManager.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.group</a> &gt; <span class="el_source">GroupManager.java</span></div><h1>GroupManager.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2004-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.group;
+
+import java.io.Serializable;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.StringTokenizer;
+
+import org.apache.commons.lang3.StringUtils;
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.event.GroupEventDispatcher;
+import org.jivesoftware.openfire.event.GroupEventListener;
+import org.jivesoftware.openfire.event.UserEventDispatcher;
+import org.jivesoftware.openfire.event.UserEventListener;
+import org.jivesoftware.openfire.user.User;
+import org.jivesoftware.util.CacheableOptional;
+import org.jivesoftware.util.SystemProperty;
+import org.jivesoftware.util.cache.Cache;
+import org.jivesoftware.util.cache.CacheFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmpp.packet.JID;
+
+/**
+ * Manages groups.
+ *
+ * @see Group
+ * @author Matt Tucker
+ */
+public class GroupManager {
+
+<span class="nc" id="L49">    public static final SystemProperty&lt;Class&gt; GROUP_PROVIDER = SystemProperty.Builder.ofType(Class.class)</span>
+<span class="nc" id="L50">        .setKey(&quot;provider.group.className&quot;)</span>
+<span class="nc" id="L51">        .setBaseClass(GroupProvider.class)</span>
+<span class="nc" id="L52">        .setDefaultValue(DefaultGroupProvider.class)</span>
+<span class="nc" id="L53">        .addListener(GroupManager::initProvider)</span>
+<span class="nc" id="L54">        .setDynamic(true)</span>
+<span class="nc" id="L55">        .build();</span>
+
+<span class="nc" id="L57">    private static final Logger Log = LoggerFactory.getLogger(GroupManager.class);</span>
+
+<span class="nc" id="L59">    private static final class GroupManagerContainer {</span>
+<span class="nc" id="L60">        private static final GroupManager instance = new GroupManager();</span>
+    }
+
+    private static final String MUTEX_SUFFIX_GROUP = &quot; grp&quot;;
+    private static final String MUTEX_SUFFIX_USER = &quot; grpu&quot;;
+    private static final String MUTEX_SUFFIX_KEY = &quot; grpk&quot;;
+    
+    private static final String GROUP_COUNT_KEY = &quot;GROUP_COUNT&quot;;
+    private static final String SHARED_GROUPS_KEY = &quot;SHARED_GROUPS&quot;;
+    private static final String GROUP_NAMES_KEY = &quot;GROUP_NAMES&quot;;
+    private static final String PUBLIC_GROUPS = &quot;PUBLIC_GROUPS&quot;;
+    private static final String USER_SHARED_GROUPS_KEY = &quot;USER_SHARED_GROUPS&quot;;
+    private static final String USER_GROUPS_KEY = &quot;USER_GROUPS&quot;;
+
+    /**
+     * Returns a singleton instance of GroupManager.
+     *
+     * @return a GroupManager instance.
+     */
+    public static GroupManager getInstance() {
+<span class="nc" id="L80">        return GroupManagerContainer.instance;</span>
+    }
+
+    private Cache&lt;String, CacheableOptional&lt;Group&gt;&gt; groupCache;
+    private Cache&lt;String, Serializable&gt; groupMetaCache;
+    private static GroupProvider provider;
+
+<span class="nc" id="L87">    private GroupManager() {</span>
+        // Initialize caches.
+<span class="nc" id="L89">        groupCache = CacheFactory.createCache(&quot;Group&quot;);</span>
+
+        // A cache for meta-data around groups: count, group names, groups associated with
+        // a particular user
+<span class="nc" id="L93">        groupMetaCache = CacheFactory.createCache(&quot;Group Metadata Cache&quot;);</span>
+
+<span class="nc" id="L95">        initProvider(GROUP_PROVIDER.getValue());</span>
+
+<span class="nc" id="L97">        GroupEventDispatcher.addListener(new GroupEventListener() {</span>
+            @Override
+            public void groupCreated(Group group, Map params) {
+
+                // Adds default properties if they don't exists, since the creator of
+                // the group could set them.
+<span class="nc bnc" id="L103" title="All 2 branches missed.">                if (group.getProperties().get(&quot;sharedRoster.showInRoster&quot;) == null) {</span>
+<span class="nc" id="L104">                    group.getProperties().put(&quot;sharedRoster.showInRoster&quot;, &quot;nobody&quot;);</span>
+<span class="nc" id="L105">                    group.getProperties().put(&quot;sharedRoster.displayName&quot;, &quot;&quot;);</span>
+<span class="nc" id="L106">                    group.getProperties().put(&quot;sharedRoster.groupList&quot;, &quot;&quot;);</span>
+                }
+                
+                // Since the group could be created by the provider, add it possible again
+<span class="nc" id="L110">                groupCache.put(group.getName(), CacheableOptional.of(group));</span>
+
+                // Evict only the information related to Groups.
+                // Do not evict groups with 'user' as keys.
+<span class="nc" id="L114">                clearGroupCountCache();</span>
+<span class="nc" id="L115">                clearGroupNameCache();</span>
+<span class="nc" id="L116">                clearSharedGroupCache();</span>
+
+                // Evict cached information for affected users
+<span class="nc" id="L119">                evictCachedUsersForGroup(group);</span>
+
+                // Evict cached paginated group names
+<span class="nc" id="L122">                evictCachedPaginatedGroupNames();</span>
+<span class="nc" id="L123">            }</span>
+
+            @Override
+            public void groupDeleting(Group group, Map params) {
+                // Since the group could be deleted by the provider, remove it possible again
+<span class="nc" id="L128">                groupCache.put(group.getName(), CacheableOptional.of( null ));</span>
+
+                // Evict only the information related to Groups.
+                // Do not evict groups with 'user' as keys.
+<span class="nc" id="L132">                clearGroupCountCache();</span>
+<span class="nc" id="L133">                clearGroupNameCache();</span>
+<span class="nc" id="L134">                clearSharedGroupCache();</span>
+
+                // Evict cached information for affected users
+<span class="nc" id="L137">                evictCachedUsersForGroup(group);</span>
+
+                // Evict cached paginated group names
+<span class="nc" id="L140">                evictCachedPaginatedGroupNames();</span>
+<span class="nc" id="L141">            }</span>
+
+            @Override
+            public void groupModified(Group group, Map params) {
+<span class="nc" id="L145">                String type = (String)params.get(&quot;type&quot;);</span>
+                // If shared group settings changed, expire the cache.
+<span class="nc bnc" id="L147" title="All 2 branches missed.">                if (type != null) {</span>
+<span class="nc bnc" id="L148" title="All 2 branches missed.">                    if (type.equals(&quot;propertyModified&quot;) ||</span>
+<span class="nc bnc" id="L149" title="All 4 branches missed.">                        type.equals(&quot;propertyDeleted&quot;) || type.equals(&quot;propertyAdded&quot;))</span>
+                    {
+<span class="nc" id="L151">                        Object key = params.get(&quot;propertyKey&quot;);</span>
+<span class="nc bnc" id="L152" title="All 4 branches missed.">                        if (&quot;sharedRoster.showInRoster&quot;.equals(key) || &quot;*&quot;.equals(key))</span>
+                        {
+<span class="nc" id="L154">                            clearGroupNameCache();</span>
+<span class="nc" id="L155">                            clearSharedGroupCache();</span>
+
+<span class="nc" id="L157">                            String originalValue = (String) params.get(&quot;originalValue&quot;);</span>
+<span class="nc" id="L158">                            String newValue = group.getProperties().get(&quot;sharedRoster.showInRoster&quot;);</span>
+
+                            // 'showInRoster' has changed
+<span class="nc bnc" id="L161" title="All 2 branches missed.">                            if (!StringUtils.equals(originalValue, newValue)) {</span>
+
+<span class="nc bnc" id="L163" title="All 4 branches missed.">                                if (&quot;everybody&quot;.equals(originalValue) || &quot;everybody&quot;.equals(newValue)) {</span>
+<span class="nc" id="L164">                                    evictCachedUserSharedGroups();</span>
+                                }
+                            }
+<span class="nc bnc" id="L167" title="All 2 branches missed.">                        } else if (&quot;sharedRoster.groupList&quot;.equals(key)) {</span>
+
+<span class="nc" id="L169">                            String originalValue = (String) params.get(&quot;originalValue&quot;);</span>
+<span class="nc" id="L170">                            String newValue = group.getProperties().get(&quot;sharedRoster.groupList&quot;);</span>
+
+                            // 'groupList' has changed
+<span class="nc bnc" id="L173" title="All 2 branches missed.">                            if (!StringUtils.equals(originalValue, newValue)) {</span>
+<span class="nc" id="L174">                                evictCachedUsersForGroup(group, originalValue);</span>
+                            }
+                        }
+                    }
+                    // clean up cache for old group name
+<span class="nc bnc" id="L179" title="All 2 branches missed.">                    if (type.equals(&quot;nameModified&quot;)) {</span>
+<span class="nc" id="L180">                        String originalName = (String) params.get(&quot;originalValue&quot;);</span>
+<span class="nc bnc" id="L181" title="All 2 branches missed.">                        if (originalName != null) {</span>
+<span class="nc" id="L182">                            groupCache.remove(originalName);</span>
+                        }
+
+<span class="nc" id="L185">                        clearGroupNameCache();</span>
+<span class="nc" id="L186">                        clearSharedGroupCache();</span>
+                        
+                        // Evict cached information for affected users
+<span class="nc" id="L189">                        evictCachedUsersForGroup(group);</span>
+
+                        // Evict cached paginated group names
+<span class="nc" id="L192">                        evictCachedPaginatedGroupNames();</span>
+                        
+                    }
+                }
+                // Set object again in cache. This is done so that other cluster nodes
+                // get refreshed with latest version of the object
+<span class="nc" id="L198">                groupCache.put(group.getName(), CacheableOptional.of(group));</span>
+<span class="nc" id="L199">            }</span>
+
+            @Override
+            public void memberAdded(Group group, Map params) {
+                // Set object again in cache. This is done so that other cluster nodes
+                // get refreshed with latest version of the object
+<span class="nc" id="L205">                groupCache.put(group.getName(), CacheableOptional.of(group));</span>
+                
+                // Remove only the collection of groups the member belongs to.
+<span class="nc" id="L208">                String member = (String) params.get(&quot;member&quot;);</span>
+<span class="nc" id="L209">                evictCachedUserForGroup(member);</span>
+<span class="nc" id="L210">            }</span>
+
+            @Override
+            public void memberRemoved(Group group, Map params) {
+                // Set object again in cache. This is done so that other cluster nodes
+                // get refreshed with latest version of the object
+<span class="nc" id="L216">                groupCache.put(group.getName(), CacheableOptional.of(group));</span>
+                
+                // Remove only the collection of groups the member belongs to.
+<span class="nc" id="L219">                String member = (String) params.get(&quot;member&quot;);</span>
+<span class="nc" id="L220">                evictCachedUserForGroup(member);</span>
+<span class="nc" id="L221">            }</span>
+
+            @Override
+            public void adminAdded(Group group, Map params) {
+                // Set object again in cache. This is done so that other cluster nodes
+                // get refreshed with latest version of the object
+<span class="nc" id="L227">                groupCache.put(group.getName(), CacheableOptional.of(group));</span>
+                
+                // Remove only the collection of groups the member belongs to.
+<span class="nc" id="L230">                String member = (String) params.get(&quot;admin&quot;);</span>
+<span class="nc" id="L231">                evictCachedUserForGroup(member);</span>
+<span class="nc" id="L232">            }</span>
+
+            @Override
+            public void adminRemoved(Group group, Map params) {
+                // Set object again in cache. This is done so that other cluster nodes
+                // get refreshed with latest version of the object
+<span class="nc" id="L238">                groupCache.put(group.getName(), CacheableOptional.of(group));</span>
+                
+                // Remove only the collection of groups the member belongs to.
+<span class="nc" id="L241">                String member = (String) params.get(&quot;admin&quot;);</span>
+<span class="nc" id="L242">                evictCachedUserForGroup(member);</span>
+<span class="nc" id="L243">            }</span>
+
+        });
+
+<span class="nc" id="L247">        UserEventDispatcher.addListener(new UserEventListener() {</span>
+            @Override
+            public void userCreated(User user, Map&lt;String, Object&gt; params) {
+                // ignore
+<span class="nc" id="L251">            }</span>
+
+            @Override
+            public void userDeleting(User user, Map&lt;String, Object&gt; params) {
+<span class="nc" id="L255">                deleteUser(user);</span>
+<span class="nc" id="L256">            }</span>
+
+            @Override
+            public void userModified(User user, Map&lt;String, Object&gt; params) {
+                // ignore
+<span class="nc" id="L261">            }</span>
+        });
+<span class="nc" id="L263">    }</span>
+
+    private static void initProvider(final Class clazz) {
+<span class="nc bnc" id="L266" title="All 4 branches missed.">        if (provider == null || !clazz.equals(provider.getClass())) {</span>
+            try {
+<span class="nc" id="L268">                provider = (GroupProvider) clazz.newInstance();</span>
+<span class="nc" id="L269">            } catch (Exception e) {</span>
+<span class="nc" id="L270">                Log.error(&quot;Error loading group provider: &quot; + clazz.getName(), e);</span>
+<span class="nc" id="L271">                provider = new DefaultGroupProvider();</span>
+<span class="nc" id="L272">            }</span>
+        }
+<span class="nc" id="L274">    }</span>
+
+    /**
+     * Factory method for creating a new Group. A unique name is the only required field.
+     *
+     * @param name the new and unique name for the group.
+     * @return a new Group.
+     * @throws GroupAlreadyExistsException if the group name already exists in the system.
+     */
+    public Group createGroup(String name) throws GroupAlreadyExistsException {
+<span class="nc" id="L284">        synchronized ((name + MUTEX_SUFFIX_GROUP).intern()) {</span>
+            Group newGroup;
+            try {
+<span class="nc" id="L287">                getGroup(name);</span>
+                // The group already exists since now exception, so:
+<span class="nc" id="L289">                throw new GroupAlreadyExistsException();</span>
+            }
+<span class="nc" id="L291">            catch (GroupNotFoundException unfe) {</span>
+                // The group doesn't already exist so we can create a new group
+<span class="nc" id="L293">                newGroup = provider.createGroup(name);</span>
+                // Update caches.
+<span class="nc" id="L295">                clearGroupNameCache();</span>
+<span class="nc" id="L296">                clearGroupCountCache();</span>
+<span class="nc" id="L297">                groupCache.put(name, CacheableOptional.of(newGroup));</span>
+
+                // Fire event.
+<span class="nc" id="L300">                GroupEventDispatcher.dispatchEvent(newGroup,</span>
+<span class="nc" id="L301">                        GroupEventDispatcher.EventType.group_created, Collections.emptyMap());</span>
+            }
+<span class="nc" id="L303">            return newGroup;</span>
+<span class="nc" id="L304">        }</span>
+    }
+
+    /**
+     * Returns the corresponding group if the given JID represents a group. 
+     *
+     * @param jid The JID for the group to retrieve
+     * @return The group corresponding to the JID, or null if the JID does not represent a group
+     * @throws GroupNotFoundException if the JID represents a group that does not exist
+     */
+    public Group getGroup(JID jid) throws GroupNotFoundException {
+<span class="nc" id="L315">        JID groupJID = GroupJID.fromJID(jid);</span>
+<span class="nc bnc" id="L316" title="All 2 branches missed.">        return (groupJID instanceof GroupJID) ? getGroup(((GroupJID)groupJID).getGroupName()) : null;</span>
+    }
+
+    /**
+     * Returns a Group by name.
+     *
+     * @param name The name of the group to retrieve
+     * @return The group corresponding to that name
+     * @throws GroupNotFoundException if the group does not exist.
+     */
+    public Group getGroup(String name) throws GroupNotFoundException {
+<span class="nc" id="L327">        return getGroup(name, false);</span>
+    }
+
+    /**
+     * Returns a Group by name.
+     *
+     * @param name The name of the group to retrieve
+     * @param forceLookup Invalidate the group cache for this group
+     * @return The group corresponding to that name
+     * @throws GroupNotFoundException if the group does not exist.
+     */
+    public Group getGroup(String name, boolean forceLookup) throws GroupNotFoundException {
+<span class="nc" id="L339">        CacheableOptional&lt;Group&gt; coGroup = null;</span>
+<span class="nc bnc" id="L340" title="All 2 branches missed.">        if (forceLookup) {</span>
+<span class="nc" id="L341">            groupCache.remove(name);</span>
+        } else {
+<span class="nc" id="L343">            coGroup = groupCache.get(name);</span>
+        }
+
+<span class="nc bnc" id="L346" title="All 2 branches missed.">        if (coGroup == null) {</span>
+<span class="nc" id="L347">            synchronized ((name + MUTEX_SUFFIX_GROUP).intern()) {</span>
+<span class="nc" id="L348">                coGroup = groupCache.get(name);</span>
+<span class="nc bnc" id="L349" title="All 4 branches missed.">                if (coGroup == null || coGroup.isAbsent()) {</span>
+<span class="nc bnc" id="L350" title="All 4 branches missed.">                    if (groupCache.containsKey(name) &amp;&amp; !forceLookup) {</span>
+<span class="nc" id="L351">                        throw new GroupNotFoundException( &quot;Group with name &quot; + name + &quot; not found (cached).&quot; );</span>
+                    }
+                    try
+                    {
+<span class="nc" id="L355">                        final Group group = provider.getGroup( name );</span>
+<span class="nc" id="L356">                        coGroup = CacheableOptional.of(group);</span>
+<span class="nc" id="L357">                        groupCache.put(name, coGroup);</span>
+                    }
+<span class="nc" id="L359">                    catch (GroupNotFoundException e)</span>
+                    {
+<span class="nc" id="L361">                        groupCache.put( name, CacheableOptional.of(null));</span>
+<span class="nc" id="L362">                        throw e;</span>
+<span class="nc" id="L363">                    }</span>
+                }
+<span class="nc" id="L365">            }</span>
+        }
+<span class="nc" id="L367">        return coGroup.get();</span>
+    }
+
+    /**
+     * Deletes a group from the system.
+     *
+     * @param group the group to delete.
+     */
+    public void deleteGroup(Group group) {
+        // Fire event.
+<span class="nc" id="L377">        GroupEventDispatcher.dispatchEvent(group, GroupEventDispatcher.EventType.group_deleting,</span>
+<span class="nc" id="L378">                Collections.emptyMap());</span>
+
+        // Delete the group.
+<span class="nc" id="L381">        provider.deleteGroup(group.getName());</span>
+
+        // Add a no-hit to the cache.
+<span class="nc" id="L384">        groupCache.put(group.getName(), CacheableOptional.of(null));</span>
+<span class="nc" id="L385">        clearGroupNameCache();</span>
+<span class="nc" id="L386">        clearGroupCountCache();</span>
+<span class="nc" id="L387">    }</span>
+
+    /**
+     * Deletes a user from all the groups where he/she belongs. The most probable cause
+     * for this request is that the user has been deleted from the system.
+     *
+     * @param user the deleted user from the system.
+     */
+    public void deleteUser(User user) {
+<span class="nc" id="L396">        JID userJID = XMPPServer.getInstance().createJID(user.getUsername(), null);</span>
+<span class="nc bnc" id="L397" title="All 2 branches missed.">        for (Group group : getGroups(userJID)) {</span>
+<span class="nc bnc" id="L398" title="All 2 branches missed.">            if (group.getAdmins().contains(userJID)) {</span>
+<span class="nc bnc" id="L399" title="All 2 branches missed.">                if (group.getAdmins().remove(userJID)) {</span>
+                    // Remove the group from cache.
+<span class="nc" id="L401">                    groupCache.remove(group.getName());</span>
+                }
+            }
+            else {
+<span class="nc bnc" id="L405" title="All 2 branches missed.">                if (group.getMembers().remove(userJID)) {</span>
+                    // Remove the group from cache.
+<span class="nc" id="L407">                    groupCache.remove(group.getName());</span>
+                }
+            }
+<span class="nc" id="L410">        }</span>
+<span class="nc" id="L411">        evictCachedUserForGroup(userJID.toBareJID());</span>
+<span class="nc" id="L412">    }</span>
+
+    /**
+     * Returns the total number of groups in the system.
+     *
+     * @return the total number of groups.
+     */
+    public int getGroupCount() {
+<span class="nc" id="L420">            Integer count = getGroupCountFromCache();</span>
+<span class="nc bnc" id="L421" title="All 2 branches missed.">        if (count == null) {</span>
+<span class="nc" id="L422">            synchronized(GROUP_COUNT_KEY) {</span>
+<span class="nc" id="L423">                count = getGroupCountFromCache();</span>
+<span class="nc bnc" id="L424" title="All 2 branches missed.">                if (count == null) {</span>
+<span class="nc" id="L425">                    count = provider.getGroupCount();</span>
+<span class="nc" id="L426">                    saveGroupCountInCache(count);</span>
+                }
+<span class="nc" id="L428">            }</span>
+        }
+<span class="nc" id="L430">        return count;</span>
+    }
+
+    /**
+     * Returns an unmodifiable Collection of all groups in the system.
+     * 
+     * NOTE: Iterating through the resulting collection has the effect of loading
+     * every group into memory. This may be an issue for large deployments. You
+     * may call the size() method on the resulting collection to determine the best
+     * approach to take before iterating over (and thus instantiating) the groups.
+     *
+     * @return an unmodifiable Collection of all groups.
+     */
+    public Collection&lt;Group&gt; getGroups() {
+<span class="nc" id="L444">        HashSet&lt;String&gt; groupNames = getGroupNamesFromCache();</span>
+<span class="nc bnc" id="L445" title="All 2 branches missed.">        if (groupNames == null) {</span>
+<span class="nc" id="L446">            synchronized(GROUP_NAMES_KEY) {</span>
+<span class="nc" id="L447">                groupNames = getGroupNamesFromCache();</span>
+<span class="nc bnc" id="L448" title="All 2 branches missed.">                if (groupNames == null) {</span>
+<span class="nc" id="L449">                    groupNames = new HashSet&lt;&gt;(provider.getGroupNames());</span>
+<span class="nc" id="L450">                    saveGroupNamesInCache(groupNames);</span>
+                }
+<span class="nc" id="L452">            }</span>
+        }
+<span class="nc" id="L454">        return new GroupCollection(groupNames);</span>
+    }
+
+    /**
+     * Returns an unmodifiable Collection of all shared groups in the system.
+     * 
+     * NOTE: Iterating through the resulting collection has the effect of loading all
+     * shared groups into memory. This may be an issue for large deployments. You
+     * may call the size() method on the resulting collection to determine the best
+     * approach to take before iterating over (and thus instantiating) the groups.
+     *
+     * @return an unmodifiable Collection of all shared groups.
+     */
+    public Collection&lt;Group&gt; getSharedGroups() {
+<span class="nc" id="L468">        HashSet&lt;String&gt; groupNames = getSharedGroupsFromCache();</span>
+<span class="nc bnc" id="L469" title="All 2 branches missed.">        if (groupNames == null) {</span>
+<span class="nc" id="L470">            synchronized(SHARED_GROUPS_KEY) {</span>
+<span class="nc" id="L471">                groupNames = getSharedGroupsFromCache();</span>
+<span class="nc bnc" id="L472" title="All 2 branches missed.">                if (groupNames == null) {</span>
+<span class="nc" id="L473">                    groupNames = new HashSet&lt;&gt;(provider.getSharedGroupNames());</span>
+<span class="nc" id="L474">                    saveSharedGroupsInCache(groupNames);</span>
+                }
+<span class="nc" id="L476">            }</span>
+        }
+<span class="nc" id="L478">        return new GroupCollection(groupNames);</span>
+    }
+    
+    /**
+     * Returns an unmodifiable Collection of all shared groups in the system for a given userName.
+     *
+     * @param userName the user to check
+     * @return an unmodifiable Collection of all shared groups for the given userName.
+     */
+    public Collection&lt;Group&gt; getSharedGroups(String userName) {
+<span class="nc" id="L488">        HashSet&lt;String&gt; groupNames = getSharedGroupsForUserFromCache(userName);</span>
+<span class="nc bnc" id="L489" title="All 2 branches missed.">        if (groupNames == null) {</span>
+<span class="nc" id="L490">            synchronized((userName + MUTEX_SUFFIX_USER).intern()) {</span>
+<span class="nc" id="L491">                groupNames = getSharedGroupsForUserFromCache(userName);</span>
+<span class="nc bnc" id="L492" title="All 2 branches missed.">                if (groupNames == null) {</span>
+                    // assume this is a local user
+<span class="nc" id="L494">                    groupNames = new HashSet&lt;&gt;(provider.getSharedGroupNames(new JID(userName,</span>
+<span class="nc" id="L495">                            XMPPServer.getInstance().getServerInfo().getXMPPDomain(), null)));</span>
+<span class="nc" id="L496">                    saveSharedGroupsForUserInCache(userName, groupNames);</span>
+                }
+<span class="nc" id="L498">            }</span>
+        }
+<span class="nc" id="L500">        return new GroupCollection(groupNames);</span>
+    }
+    
+    /**
+     * Returns an unmodifiable Collection of all shared groups in the system for a given userName.
+     *
+     * @param groupToCheck The group to check
+     * @return an unmodifiable Collection of all shared groups for the given userName.
+     */
+    public Collection&lt;Group&gt; getVisibleGroups(Group groupToCheck) {
+        // Get all the public shared groups.
+<span class="nc" id="L511">        HashSet&lt;String&gt; groupNames = getPublicGroupsFromCache();</span>
+<span class="nc bnc" id="L512" title="All 2 branches missed.">        if (groupNames == null) {</span>
+<span class="nc" id="L513">            synchronized(PUBLIC_GROUPS) {</span>
+<span class="nc" id="L514">                groupNames = getPublicGroupsFromCache();</span>
+<span class="nc bnc" id="L515" title="All 2 branches missed.">                if (groupNames == null) {</span>
+<span class="nc" id="L516">                    groupNames = new HashSet&lt;&gt;(provider.getPublicSharedGroupNames());</span>
+<span class="nc" id="L517">                    savePublicGroupsInCache(groupNames);</span>
+                }
+<span class="nc" id="L519">            }</span>
+        }
+        // Now get all visible groups to the given group.
+<span class="nc" id="L522">        groupNames.addAll(provider.getVisibleGroupNames(groupToCheck.getName()));</span>
+<span class="nc" id="L523">        return new GroupCollection(groupNames);</span>
+    }
+    
+    /**
+     * Returns an unmodifiable Collection of all public shared groups in the system.
+     *
+     * @return an unmodifiable Collection of all shared groups.
+     */
+    public Collection&lt;Group&gt; getPublicSharedGroups() {
+<span class="nc" id="L532">        HashSet&lt;String&gt; groupNames = getPublicGroupsFromCache();</span>
+<span class="nc bnc" id="L533" title="All 2 branches missed.">        if (groupNames == null) {</span>
+<span class="nc" id="L534">            synchronized(PUBLIC_GROUPS) {</span>
+<span class="nc" id="L535">                groupNames = getPublicGroupsFromCache();</span>
+<span class="nc bnc" id="L536" title="All 2 branches missed.">                if (groupNames == null) {</span>
+<span class="nc" id="L537">                    groupNames = new HashSet&lt;&gt;(provider.getPublicSharedGroupNames());</span>
+<span class="nc" id="L538">                    savePublicGroupsInCache(groupNames);</span>
+                }
+<span class="nc" id="L540">            }</span>
+        }
+<span class="nc" id="L542">        return new GroupCollection(groupNames);</span>
+    }
+    
+    /**
+     * Returns an unmodifiable Collection of all groups in the system that
+     * match given propValue for the specified propName.
+     *
+     * @param propName the property name to search for
+     * @param propValue the property value to search for
+     * @return an unmodifiable Collection of all shared groups.
+     */
+    public Collection&lt;Group&gt; search(String propName, String propValue) {
+<span class="nc" id="L554">        Collection&lt;String&gt; groupsWithProps = provider.search(propName, propValue);</span>
+<span class="nc" id="L555">        return new GroupCollection(groupsWithProps);</span>
+    }
+
+    /**
+     * Returns all groups given a start index and desired number of results. This is
+     * useful to support pagination in a GUI where you may only want to display a certain
+     * number of results per page. It is possible that the number of results returned will
+     * be less than that specified by numResults if numResults is greater than the number
+     * of records left in the system to display.
+     *
+     * @param startIndex start index in results.
+     * @param numResults number of results to return.
+     * @return an Iterator for all groups in the specified range.
+     */
+    public Collection&lt;Group&gt; getGroups(int startIndex, int numResults) {
+<span class="nc" id="L570">        HashSet&lt;String&gt; groupNames = getPagedGroupNamesFromCache(startIndex, numResults);</span>
+<span class="nc bnc" id="L571" title="All 2 branches missed.">        if (groupNames == null) {</span>
+<span class="nc" id="L572">            synchronized((getPagedGroupNameKey(startIndex, numResults) + MUTEX_SUFFIX_KEY).intern()) {</span>
+<span class="nc" id="L573">                groupNames = getPagedGroupNamesFromCache(startIndex, numResults);</span>
+<span class="nc bnc" id="L574" title="All 2 branches missed.">                if (groupNames == null) {</span>
+<span class="nc" id="L575">                    groupNames = new HashSet&lt;&gt;(provider.getGroupNames(startIndex, numResults));</span>
+<span class="nc" id="L576">                    savePagedGroupNamesFromCache(groupNames, startIndex, numResults);</span>
+                }
+<span class="nc" id="L578">            }</span>
+        }
+<span class="nc" id="L580">        return new GroupCollection(groupNames);</span>
+    }
+
+    /**
+     * Returns an iterator for all groups that the User is a member of.
+     *
+     * @param user the user.
+     * @return all groups the user belongs to.
+     */
+    public Collection&lt;Group&gt; getGroups(User user) {
+<span class="nc" id="L590">        return getGroups(XMPPServer.getInstance().createJID(user.getUsername(), null, true));</span>
+    }
+
+    /**
+     * Returns an iterator for all groups that the entity with the specified JID is a member of.
+     *
+     * @param user the JID of the entity to get a list of groups for.
+     * @return all groups that an entity belongs to.
+     */
+    public Collection&lt;Group&gt; getGroups(JID user) {
+<span class="nc" id="L600">        HashSet&lt;String&gt; groupNames = getUserGroupsFromCache(user);</span>
+<span class="nc bnc" id="L601" title="All 2 branches missed.">        if (groupNames == null) {</span>
+<span class="nc" id="L602">            synchronized((user.getNode() + MUTEX_SUFFIX_USER).intern()) {</span>
+<span class="nc" id="L603">                groupNames = getUserGroupsFromCache(user);</span>
+<span class="nc bnc" id="L604" title="All 2 branches missed.">                if (groupNames == null) {</span>
+<span class="nc" id="L605">                    groupNames = new HashSet&lt;&gt;(provider.getGroupNames(user));</span>
+<span class="nc" id="L606">                    saveUserGroupsInCache(user, groupNames);</span>
+                }
+<span class="nc" id="L608">            }</span>
+        }
+<span class="nc" id="L610">        return new GroupCollection(groupNames);</span>
+    }
+
+    /**
+     * Returns true if groups are read-only.
+     *
+     * @return true if groups are read-only.
+     */
+    public boolean isReadOnly() {
+<span class="nc" id="L619">        return provider.isReadOnly();</span>
+    }
+
+    /**
+     * Returns true if searching for groups is supported.
+     *
+     * @return true if searching for groups are supported.
+     */
+    public boolean isSearchSupported() {
+<span class="nc" id="L628">        return provider.isSearchSupported();</span>
+    }
+
+    /**
+     * Returns the groups that match the search. The search is over group names and
+     * implicitly uses wildcard matching (although the exact search semantics are left
+     * up to each provider implementation). For example, a search for &quot;HR&quot; should match
+     * the groups &quot;HR&quot;, &quot;HR Department&quot;, and &quot;The HR People&quot;.&lt;p&gt;
+     *
+     * Before searching or showing a search UI, use the {@link #isSearchSupported} method
+     * to ensure that searching is supported.
+     *
+     * @param query the search string for group names.
+     * @return all groups that match the search.
+     */
+    public Collection&lt;Group&gt; search(String query) {
+<span class="nc" id="L644">        Collection&lt;String&gt; groupNames = provider.search(query);</span>
+<span class="nc" id="L645">        return new GroupCollection(groupNames);</span>
+    }
+
+    /**
+     * Returns the groups that match the search given a start index and desired number
+     * of results. The search is over group names and implicitly uses wildcard matching
+     * (although the exact search semantics are left up to each provider implementation).
+     * For example, a search for &quot;HR&quot; should match the groups &quot;HR&quot;, &quot;HR Department&quot;, and
+     * &quot;The HR People&quot;.&lt;p&gt;
+     *
+     * Before searching or showing a search UI, use the {@link #isSearchSupported} method
+     * to ensure that searching is supported.
+     *
+     * @param query the search string for group names.
+     * @param startIndex the start index to retrieve the group list from
+     * @param numResults the maximum number of results to return
+     * @return all groups that match the search.
+     */
+    public Collection&lt;Group&gt; search(String query, int startIndex, int numResults) {
+<span class="nc" id="L664">        Collection&lt;String&gt; groupNames = provider.search(query, startIndex, numResults);</span>
+<span class="nc" id="L665">        return new GroupCollection(groupNames);</span>
+    }
+
+    /**
+     * Returns the configured group provider. Note that this method has special access
+     * privileges since only a few certain classes need to access the provider directly.
+     *
+     * @return the group provider.
+     */
+    public GroupProvider getProvider() {
+<span class="nc" id="L675">        return provider;</span>
+    }
+
+    private void evictCachedUserForGroup(String userJid) {
+<span class="nc bnc" id="L679" title="All 2 branches missed.">        if (userJid != null) {</span>
+<span class="nc" id="L680">            JID user = new JID(userJid);</span>
+
+            // remove cache for getGroups
+<span class="nc" id="L683">            synchronized (USER_GROUPS_KEY) {</span>
+<span class="nc" id="L684">                clearUserGroupsCache(user);</span>
+<span class="nc" id="L685">            }</span>
+
+            // remove cache for getSharedGroups
+<span class="nc bnc" id="L688" title="All 2 branches missed.">            if (XMPPServer.getInstance().isLocal(user)) {</span>
+<span class="nc" id="L689">                synchronized (USER_SHARED_GROUPS_KEY) {</span>
+<span class="nc" id="L690">                    clearSharedGroupsForUserCache(user.getNode());</span>
+<span class="nc" id="L691">                }</span>
+            }
+        }
+<span class="nc" id="L694">    }</span>
+
+    private void evictCachedUsersForGroup(Group group) {
+<span class="nc" id="L697">        evictCachedUsersForGroup(group, null);</span>
+<span class="nc" id="L698">    }</span>
+
+    private void evictCachedUsersForGroup(Group group, String oldGroupList) {
+        // Evict cached information for affected users
+<span class="nc bnc" id="L702" title="All 2 branches missed.">        for (JID user : group.getAdmins()) {</span>
+<span class="nc" id="L703">            evictCachedUserForGroup(user.toBareJID());</span>
+<span class="nc" id="L704">        }</span>
+<span class="nc bnc" id="L705" title="All 2 branches missed.">        for (JID user : group.getMembers()) {</span>
+<span class="nc" id="L706">            evictCachedUserForGroup(user.toBareJID());</span>
+<span class="nc" id="L707">        }</span>
+
+<span class="nc" id="L709">        final String showInRoster = group.getProperties().get(&quot;sharedRoster.showInRoster&quot;);</span>
+<span class="nc bnc" id="L710" title="All 2 branches missed.">        if (showInRoster != null )</span>
+        {
+<span class="nc bnc" id="L712" title="All 10 branches missed.">            switch ( showInRoster.toLowerCase() )</span>
+            {
+                case &quot;everybody&quot;:
+<span class="nc" id="L715">                    evictCachedUserSharedGroups();</span>
+<span class="nc" id="L716">                    break;</span>
+
+                case &quot;onlygroup&quot;:
+<span class="nc" id="L719">                    String groupList = group.getProperties().get( &quot;sharedRoster.groupList&quot; );</span>
+<span class="nc bnc" id="L720" title="All 4 branches missed.">                    if (groupList != null &amp;&amp; oldGroupList != null) {</span>
+<span class="nc" id="L721">                        groupList = groupList + &quot;,&quot; + oldGroupList;</span>
+<span class="nc bnc" id="L722" title="All 2 branches missed.">                    } else if (groupList == null) {</span>
+<span class="nc" id="L723">                        groupList = oldGroupList;</span>
+                    }
+<span class="nc bnc" id="L725" title="All 2 branches missed.">                    if (groupList != null) {</span>
+<span class="nc" id="L726">                        HashSet&lt;String&gt; spefgroups = new HashSet&lt;&gt;();</span>
+<span class="nc" id="L727">                        final StringTokenizer tokenizer = new StringTokenizer( groupList, &quot;,\t\n\r\f&quot; );</span>
+<span class="nc bnc" id="L728" title="All 2 branches missed.">                        while ( tokenizer.hasMoreTokens() ) {</span>
+<span class="nc" id="L729">                            spefgroups.add(tokenizer.nextToken().trim());</span>
+                        }
+<span class="nc bnc" id="L731" title="All 2 branches missed.">                        for (String spefgroup : spefgroups){</span>
+                            try
+                            {
+<span class="nc" id="L734">                                final Group nested = getGroup( spefgroup );</span>
+<span class="nc" id="L735">                                evictCachedUsersForGroup( nested );</span>
+                            }
+<span class="nc" id="L737">                            catch ( StackOverflowError e )</span>
+                            {
+<span class="nc" id="L739">                                Log.warn( &quot;Cyclic sharing groups found. Please remove the cycle of groups '{}' and '{}'&quot;, group.getName(), spefgroup );</span>
+                            }
+<span class="nc" id="L741">                            catch ( GroupNotFoundException e )</span>
+                            {
+<span class="nc" id="L743">                                Log.debug( &quot;While evicting cached users for group '{}', an unrecognized spefgroup was found: '{}'&quot;, group.getName(), spefgroup, e );</span>
+<span class="nc" id="L744">                            }</span>
+<span class="nc" id="L745">                        }</span>
+                    }
+                    break;
+
+
+            }
+        }
+<span class="nc" id="L752">    }</span>
+
+    private void evictCachedPaginatedGroupNames() {
+<span class="nc" id="L755">        groupMetaCache.keySet().stream()</span>
+<span class="nc" id="L756">            .filter(key -&gt; key.startsWith(GROUP_NAMES_KEY))</span>
+<span class="nc" id="L757">            .forEach(key -&gt; groupMetaCache.remove(key));</span>
+<span class="nc" id="L758">    }</span>
+
+    private void evictCachedUserSharedGroups() {
+<span class="nc" id="L761">        synchronized (USER_SHARED_GROUPS_KEY) {</span>
+<span class="nc" id="L762">            groupMetaCache.keySet().stream()</span>
+<span class="nc bnc" id="L763" title="All 4 branches missed.">                .filter(key -&gt; key.startsWith(USER_SHARED_GROUPS_KEY) || key.startsWith(GROUP_NAMES_KEY))</span>
+<span class="nc" id="L764">                .forEach(key -&gt; groupMetaCache.remove(key));</span>
+<span class="nc" id="L765">        }</span>
+<span class="nc" id="L766">    }</span>
+
+    /*
+        For reasons currently unclear, this class stores a number of different objects in the groupMetaCache. To
+        better encapsulate this, all access to the groupMetaCache is via these methods
+     */
+    @SuppressWarnings(&quot;unchecked&quot;)
+    private HashSet&lt;String&gt; getGroupNamesFromCache() {
+<span class="nc" id="L774">        return (HashSet&lt;String&gt;)groupMetaCache.get(GROUP_NAMES_KEY);</span>
+    }
+
+    private void clearGroupNameCache() {
+<span class="nc" id="L778">        groupMetaCache.remove(GROUP_NAMES_KEY);</span>
+<span class="nc" id="L779">    }</span>
+
+    private void saveGroupNamesInCache(final HashSet&lt;String&gt; groupNames) {
+<span class="nc" id="L782">        groupMetaCache.put(GROUP_NAMES_KEY, groupNames);</span>
+<span class="nc" id="L783">    }</span>
+
+    private String getPagedGroupNameKey(final int startIndex, final int numResults) {
+<span class="nc" id="L786">        return GROUP_NAMES_KEY + startIndex + &quot;,&quot; + numResults;</span>
+    }
+
+    @SuppressWarnings(&quot;unchecked&quot;)
+    private HashSet&lt;String&gt; getPagedGroupNamesFromCache(final int startIndex, final int numResults) {
+<span class="nc" id="L791">        return (HashSet&lt;String&gt;)groupMetaCache.get(getPagedGroupNameKey(startIndex, numResults));</span>
+    }
+
+    private void savePagedGroupNamesFromCache(final HashSet&lt;String&gt; groupNames, final int startIndex, final int numResults) {
+<span class="nc" id="L795">        groupMetaCache.put(getPagedGroupNameKey(startIndex, numResults), groupNames);</span>
+
+<span class="nc" id="L797">    }</span>
+
+    private Integer getGroupCountFromCache() {
+<span class="nc" id="L800">        return (Integer)groupMetaCache.get(GROUP_COUNT_KEY);</span>
+    }
+
+    private void saveGroupCountInCache(final int count) {
+<span class="nc" id="L804">        groupMetaCache.put(GROUP_COUNT_KEY, count);</span>
+<span class="nc" id="L805">    }</span>
+
+    private void clearGroupCountCache() {
+<span class="nc" id="L808">        groupMetaCache.remove(GROUP_COUNT_KEY);</span>
+<span class="nc" id="L809">    }</span>
+
+    @SuppressWarnings(&quot;unchecked&quot;)
+    private HashSet&lt;String&gt; getSharedGroupsFromCache() {
+<span class="nc" id="L813">        return (HashSet&lt;String&gt;)groupMetaCache.get(SHARED_GROUPS_KEY);</span>
+    }
+
+    private void clearSharedGroupCache() {
+<span class="nc" id="L817">        groupMetaCache.remove(SHARED_GROUPS_KEY);</span>
+<span class="nc" id="L818">    }</span>
+
+    private void saveSharedGroupsInCache(final HashSet&lt;String&gt; groupNames) {
+<span class="nc" id="L821">        groupMetaCache.put(SHARED_GROUPS_KEY, groupNames);</span>
+<span class="nc" id="L822">    }</span>
+
+
+    private String getSharedGroupsForUserKey(final String userName) {
+<span class="nc" id="L826">        return USER_SHARED_GROUPS_KEY + userName;</span>
+    }
+
+    @SuppressWarnings(&quot;unchecked&quot;)
+    private HashSet&lt;String&gt; getSharedGroupsForUserFromCache(final String userName) {
+<span class="nc" id="L831">        return (HashSet&lt;String&gt;)groupMetaCache.get(getSharedGroupsForUserKey(userName));</span>
+    }
+
+    private void clearSharedGroupsForUserCache(final String userName) {
+<span class="nc" id="L835">        groupMetaCache.remove(getSharedGroupsForUserKey(userName));</span>
+<span class="nc" id="L836">    }</span>
+
+    private void saveSharedGroupsForUserInCache(final String userName, final HashSet&lt;String&gt; groupNames) {
+<span class="nc" id="L839">        groupMetaCache.put(getSharedGroupsForUserKey(userName), groupNames);</span>
+<span class="nc" id="L840">    }</span>
+
+    @SuppressWarnings(&quot;unchecked&quot;)
+    private HashSet&lt;String&gt; getPublicGroupsFromCache() {
+<span class="nc" id="L844">        return (HashSet&lt;String&gt;)groupMetaCache.get(PUBLIC_GROUPS);</span>
+    }
+
+    private void clearPublicGroupsCache() {
+<span class="nc" id="L848">        groupMetaCache.remove(PUBLIC_GROUPS);</span>
+<span class="nc" id="L849">    }</span>
+
+    private void savePublicGroupsInCache(final HashSet&lt;String&gt; groupNames) {
+<span class="nc" id="L852">        groupMetaCache.put(PUBLIC_GROUPS, groupNames);</span>
+<span class="nc" id="L853">    }</span>
+
+    @SuppressWarnings(&quot;unchecked&quot;)
+    private HashSet&lt;String&gt; getUserGroupsFromCache(final JID user) {
+<span class="nc" id="L857">        return (HashSet&lt;String&gt;)groupMetaCache.get(getUserGroupsKey(user));</span>
+    }
+
+    private void clearUserGroupsCache(final JID user) {
+<span class="nc" id="L861">        groupMetaCache.remove(getUserGroupsKey(user));</span>
+<span class="nc" id="L862">    }</span>
+
+    private void saveUserGroupsInCache(final JID user, final HashSet&lt;String&gt; groupNames) {
+<span class="nc" id="L865">        groupMetaCache.put(getUserGroupsKey(user), groupNames);</span>
+<span class="nc" id="L866">    }</span>
+
+    private String getUserGroupsKey(final JID user) {
+<span class="nc" id="L869">        return USER_GROUPS_KEY + user.toBareJID();</span>
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

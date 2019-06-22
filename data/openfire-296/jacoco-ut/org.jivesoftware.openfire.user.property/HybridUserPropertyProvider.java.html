@@ -1,0 +1,281 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>HybridUserPropertyProvider.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.user.property</a> &gt; <span class="el_source">HybridUserPropertyProvider.java</span></div><h1>HybridUserPropertyProvider.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2017 IgniteRealtime.org
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.jivesoftware.openfire.user.property;
+
+import org.jivesoftware.openfire.user.UserNotFoundException;
+import org.jivesoftware.util.JiveGlobals;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+
+/**
+ * Delegate UserPropertyProvider operations among up to three configurable provider implementation classes.
+ *
+ * This implementation will not explicitly verify if a user exists, when operating on its properties. The methods of
+ * this implementation will &lt;em&gt;not&lt;/em&gt; throw {@link org.jivesoftware.openfire.user.UserNotFoundException}.
+ *
+ * This class related to, but is distinct from {@link MappedUserPropertyProvider}. The Hybrid variant of the provider
+ * iterates over providers, operating on the first applicable instance. The Mapped variant, however, maps each user to
+ * exactly one provider.
+ *
+ * To use this provider, use the following system property definition:
+ *
+ * &lt;ul&gt;
+ * &lt;li&gt;{@code provider.userproperty.className = org.jivesoftware.openfire.user.HybridUserPropertyProvider}&lt;/li&gt;
+ * &lt;/ul&gt;
+ *
+ * Next, configure up to three providers, by setting these properties:
+ * &lt;ol&gt;
+ * &lt;li&gt;{@code hybridUserPropertyProvider.primaryProvider.className = fully.qualified.ClassUserPropertyProvider}&lt;/li&gt;
+ * &lt;li&gt;{@code hybridUserPropertyProvider.secondaryProvider.className = fully.qualified.ClassUserPropertyProvider}&lt;/li&gt;
+ * &lt;li&gt;{@code hybridUserPropertyProvider.tertiaryProvider.className = fully.qualified.ClassUserPropertyProvider}&lt;/li&gt;
+ * &lt;/ol&gt;
+ *
+ * @author Guus der Kinderen, guus.der.kinderen@gmail.com
+ */
+public class HybridUserPropertyProvider implements UserPropertyProvider
+{
+<span class="nc" id="L55">    private static final Logger Log = LoggerFactory.getLogger( HybridUserPropertyProvider.class );</span>
+
+<span class="nc" id="L57">    private final List&lt;UserPropertyProvider&gt; providers = new ArrayList&lt;&gt;();</span>
+
+    public HybridUserPropertyProvider()
+<span class="nc" id="L60">    {</span>
+        // Migrate user provider properties
+<span class="nc" id="L62">        JiveGlobals.migrateProperty( &quot;hybridUserPropertyProvider.primaryProvider.className&quot; );</span>
+<span class="nc" id="L63">        JiveGlobals.migrateProperty( &quot;hybridUserPropertyProvider.secondaryProvider.className&quot; );</span>
+<span class="nc" id="L64">        JiveGlobals.migrateProperty( &quot;hybridUserPropertyProvider.tertiaryProvider.className&quot; );</span>
+
+        // Load primary, secondary, and tertiary user providers.
+<span class="nc" id="L67">        final UserPropertyProvider primary = MappedUserPropertyProvider.instantiate( &quot;hybridUserPropertyProvider.primaryProvider.className&quot; );</span>
+<span class="nc bnc" id="L68" title="All 2 branches missed.">        if ( primary != null )</span>
+        {
+<span class="nc" id="L70">            providers.add( primary );</span>
+        }
+<span class="nc" id="L72">        final UserPropertyProvider secondary = MappedUserPropertyProvider.instantiate( &quot;hybridUserPropertyProvider.secondaryProvider.className&quot; );</span>
+<span class="nc bnc" id="L73" title="All 2 branches missed.">        if ( secondary != null )</span>
+        {
+<span class="nc" id="L75">            providers.add( secondary );</span>
+        }
+<span class="nc" id="L77">        final UserPropertyProvider tertiary = MappedUserPropertyProvider.instantiate( &quot;hybridUserPropertyProvider.tertiaryProvider.className&quot; );</span>
+<span class="nc bnc" id="L78" title="All 2 branches missed.">        if ( tertiary != null )</span>
+        {
+<span class="nc" id="L80">            providers.add( tertiary );</span>
+        }
+
+        // Verify that there's at least one provider available.
+<span class="nc bnc" id="L84" title="All 2 branches missed.">        if ( providers.isEmpty() )</span>
+        {
+<span class="nc" id="L86">            Log.error( &quot;At least one UserPropertyProvider must be specified via openfire.xml or the system properties!&quot; );</span>
+        }
+<span class="nc" id="L88">    }</span>
+
+    /**
+     * Returns the properties from the first provider that returns a non-empty collection.
+     *
+     * When none of the providers provide properties an empty collection is returned.
+     *
+     * @param username The identifier of the user (cannot be null or empty).
+     * @return A collection, possibly empty, never null.
+     */
+    @Override
+    public Map&lt;String, String&gt; loadProperties( String username )
+    {
+<span class="nc bnc" id="L101" title="All 2 branches missed.">        for ( final UserPropertyProvider provider : providers )</span>
+        {
+            try
+            {
+<span class="nc" id="L105">                final Map&lt;String, String&gt; properties = provider.loadProperties( username );</span>
+<span class="nc bnc" id="L106" title="All 2 branches missed.">                if ( !properties.isEmpty() )</span>
+                {
+<span class="nc" id="L108">                    return properties;</span>
+                }
+            }
+<span class="nc" id="L111">            catch ( UserNotFoundException e )</span>
+            {
+                // User not in this provider. Try other providers;
+<span class="nc" id="L114">            }</span>
+<span class="nc" id="L115">        }</span>
+<span class="nc" id="L116">        return Collections.emptyMap();</span>
+    }
+
+    /**
+     * Returns a property from the first provider that returns a non-null value.
+     *
+     * This method will return null when the desired property was not defined in any provider.
+     *
+     * @param username The identifier of the user (cannot be null or empty).
+     * @param propName The property name (cannot be null or empty).
+     * @return The property value (possibly null).
+     */
+    @Override
+    public String loadProperty( String username, String propName )
+    {
+<span class="nc bnc" id="L131" title="All 2 branches missed.">        for ( final UserPropertyProvider provider : providers )</span>
+        {
+            try
+            {
+<span class="nc" id="L135">                final String property = provider.loadProperty( username, propName );</span>
+<span class="nc bnc" id="L136" title="All 2 branches missed.">                if ( property != null )</span>
+                {
+<span class="nc" id="L138">                    return property;</span>
+                }
+            }
+<span class="nc" id="L141">            catch ( UserNotFoundException e )</span>
+            {
+                // User not in this provider. Try other providers;
+<span class="nc" id="L144">            }</span>
+<span class="nc" id="L145">        }</span>
+<span class="nc" id="L146">        return null;</span>
+    }
+
+    /**
+     * Adds a new property, updating a previous property value if one already exists.
+     *
+     * Note that the implementation of this method is equal to that of {@link #updateProperty(String, String, String)}.
+     *
+     * First, tries to find a provider that has the property for the provided user. If that provider is read-only, an
+     * UnsupportedOperationException is thrown. If the provider is not read-only, the existing property value will be
+     * updated.
+     *
+     * When the property is not defined in any provider, it will be added in the first non-read-only provider.
+     *
+     * When all providers are read-only, an UnsupportedOperationException is thrown.
+     *
+     * @param username  The identifier of the user (cannot be null or empty).
+     * @param propName  The property name (cannot be null or empty).
+     * @param propValue The property value (cannot be null).
+     */
+    @Override
+    public void insertProperty( String username, String propName, String propValue ) throws UnsupportedOperationException
+    {
+<span class="nc" id="L169">        updateProperty( username, propName, propValue );</span>
+<span class="nc" id="L170">    }</span>
+
+    /**
+     * Updates a property (or adds a new property when the property does not exist).
+     *
+     * Note that the implementation of this method is equal to that of {@link #insertProperty(String, String, String)}.
+     *
+     * First, tries to find a provider that has the property for the provided user. If that provider is read-only, an
+     * UnsupportedOperationException is thrown. If the provider is not read-only, the existing property value will be
+     * updated.
+     *
+     * When the property is not defined in any provider, it will be added in the first non-read-only provider.
+     *
+     * When all providers are read-only, an UnsupportedOperationException is thrown.
+     *
+     * @param username  The identifier of the user (cannot be null or empty).
+     * @param propName  The property name (cannot be null or empty).
+     * @param propValue The property value (cannot be null).
+     */
+    @Override
+    public void updateProperty( String username, String propName, String propValue ) throws UnsupportedOperationException
+    {
+<span class="nc bnc" id="L192" title="All 2 branches missed.">        for ( final UserPropertyProvider provider : providers )</span>
+        {
+            try
+            {
+<span class="nc bnc" id="L196" title="All 2 branches missed.">                if ( provider.loadProperty( username, propName ) != null )</span>
+                {
+<span class="nc" id="L198">                    provider.updateProperty( username, propName, propValue );</span>
+<span class="nc" id="L199">                    return;</span>
+                }
+            }
+<span class="nc" id="L202">            catch ( UserNotFoundException e )</span>
+            {
+                // User not in this provider. Try other providers;
+<span class="nc" id="L205">            }</span>
+<span class="nc" id="L206">        }</span>
+
+<span class="nc bnc" id="L208" title="All 2 branches missed.">        for ( final UserPropertyProvider provider : providers )</span>
+        {
+            try
+            {
+<span class="nc bnc" id="L212" title="All 2 branches missed.">                if ( !provider.isReadOnly() )</span>
+                {
+<span class="nc" id="L214">                    provider.insertProperty( username, propName, propValue );</span>
+<span class="nc" id="L215">                    return;</span>
+                }
+            }
+<span class="nc" id="L218">            catch ( UserNotFoundException e )</span>
+            {
+                // User not in this provider. Try other providers;
+<span class="nc" id="L221">            }</span>
+<span class="nc" id="L222">        }</span>
+<span class="nc" id="L223">        throw new UnsupportedOperationException();</span>
+    }
+
+    /**
+     * Removes a property from all non-read-only providers.
+     *
+     * @param username The identifier of the user (cannot be null or empty).
+     * @param propName The property name (cannot be null or empty).
+     */
+    @Override
+    public void deleteProperty( String username, String propName ) throws UnsupportedOperationException
+    {
+        // all providers are read-only
+<span class="nc bnc" id="L236" title="All 2 branches missed.">        if ( isReadOnly() )</span>
+        {
+<span class="nc" id="L238">            throw new UnsupportedOperationException();</span>
+        }
+
+<span class="nc bnc" id="L241" title="All 2 branches missed.">        for ( final UserPropertyProvider provider : providers )</span>
+        {
+<span class="nc bnc" id="L243" title="All 2 branches missed.">            if ( provider.isReadOnly() )</span>
+            {
+<span class="nc" id="L245">                continue;</span>
+            }
+
+            try
+            {
+<span class="nc" id="L250">                provider.deleteProperty( username, propName );</span>
+            }
+<span class="nc" id="L252">            catch ( UserNotFoundException e )</span>
+            {
+                // User not in this provider. Try other providers;
+<span class="nc" id="L255">            }</span>
+<span class="nc" id="L256">        }</span>
+<span class="nc" id="L257">    }</span>
+
+    /**
+     * Returns whether &lt;em&gt;all&lt;/em&gt; backing providers are read-only. When read-only, properties can not be created,
+     * deleted, or modified. If at least one provider is not read-only, this method returns false.
+     *
+     * @return true when all backing providers are read-only, otherwise false.
+     */
+    @Override
+    public boolean isReadOnly()
+    {
+        // TODO Make calls concurrent for improved throughput.
+<span class="nc bnc" id="L269" title="All 2 branches missed.">        for ( final UserPropertyProvider provider : providers )</span>
+        {
+            // If at least one provider is not readonly, neither is this proxy.
+<span class="nc bnc" id="L272" title="All 2 branches missed.">            if ( !provider.isReadOnly() )</span>
+            {
+<span class="nc" id="L274">                return false;</span>
+            }
+<span class="nc" id="L276">        }</span>
+
+<span class="nc" id="L278">        return true;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

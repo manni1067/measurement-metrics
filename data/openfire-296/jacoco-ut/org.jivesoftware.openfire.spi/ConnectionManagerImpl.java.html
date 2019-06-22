@@ -1,0 +1,970 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>ConnectionManagerImpl.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.spi</a> &gt; <span class="el_source">ConnectionManagerImpl.java</span></div><h1>ConnectionManagerImpl.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.spi;
+
+import org.apache.mina.core.buffer.IoBuffer;
+import org.apache.mina.core.buffer.SimpleBufferAllocator;
+import org.apache.mina.transport.socket.nio.NioSocketAcceptor;
+import org.jivesoftware.openfire.Connection;
+import org.jivesoftware.openfire.ConnectionManager;
+import org.jivesoftware.openfire.ServerPort;
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.container.BasicModule;
+import org.jivesoftware.openfire.container.PluginManager;
+import org.jivesoftware.openfire.container.PluginManagerListener;
+import org.jivesoftware.openfire.http.HttpBindManager;
+import org.jivesoftware.openfire.keystore.CertificateStore;
+import org.jivesoftware.openfire.keystore.CertificateStoreManager;
+import org.jivesoftware.openfire.net.SocketSendingTracker;
+import org.jivesoftware.openfire.session.ConnectionSettings;
+import org.jivesoftware.util.CertificateEventListener;
+import org.jivesoftware.util.CertificateManager;
+import org.jivesoftware.util.JiveGlobals;
+import org.jivesoftware.util.PropertyEventListener;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.io.IOException;
+import java.net.InetAddress;
+import java.net.UnknownHostException;
+import java.util.*;
+
+public class ConnectionManagerImpl extends BasicModule implements ConnectionManager, CertificateEventListener, PropertyEventListener
+{
+    public static final String EXECUTOR_FILTER_NAME = &quot;threadModel&quot;;
+    public static final String TLS_FILTER_NAME = &quot;tls&quot;;
+    public static final String COMPRESSION_FILTER_NAME = &quot;compression&quot;;
+    public static final String XMPP_CODEC_FILTER_NAME = &quot;xmpp&quot;;
+    public static final String CAPACITY_FILTER_NAME = &quot;outCap&quot;;
+
+<span class="nc" id="L54">    private static final Logger Log = LoggerFactory.getLogger(ConnectionManagerImpl.class);</span>
+
+    private final ConnectionListener clientListener;
+    private final ConnectionListener clientSslListener;
+    private final ConnectionListener boshListener;
+    private final ConnectionListener boshSslListener;
+    private final ConnectionListener serverListener;
+    private final ConnectionListener serverSslListener;
+    private final ConnectionListener componentListener;
+    private final ConnectionListener componentSslListener;
+    private final ConnectionListener connectionManagerListener; // Also known as 'multiplexer'
+    private final ConnectionListener connectionManagerSslListener; // Also known as 'multiplexer'
+    private final ConnectionListener webAdminListener;
+    private final ConnectionListener webAdminSslListener;
+
+    /**
+     * Instantiates a new connection manager.
+     * @throws IOException if the identity or trust stores could not be loaded
+     */
+    public ConnectionManagerImpl() throws IOException
+    {
+<span class="nc" id="L75">        super(&quot;Connection Manager&quot;);</span>
+
+<span class="nc" id="L77">        InetAddress bindAddress = null;</span>
+<span class="nc" id="L78">        InetAddress adminConsoleBindAddress = null;</span>
+
+        try
+        {
+<span class="nc" id="L82">            bindAddress = getListenAddress();</span>
+        }
+<span class="nc" id="L84">        catch ( UnknownHostException e )</span>
+        {
+<span class="nc" id="L86">            Log.warn( &quot;Unable to resolve bind address: &quot;, e );</span>
+<span class="nc" id="L87">        }</span>
+
+        try
+        {
+<span class="nc" id="L91">            adminConsoleBindAddress = getAdminConsoleListenAddress();</span>
+<span class="nc bnc" id="L92" title="All 2 branches missed.">            if( adminConsoleBindAddress == null )</span>
+            {
+<span class="nc" id="L94">                adminConsoleBindAddress = bindAddress;</span>
+            }
+        }
+<span class="nc" id="L97">        catch( UnknownHostException e )</span>
+        {
+<span class="nc" id="L99">            Log.warn(  &quot;Unable to resolve admin console bind address: &quot;, e );</span>
+<span class="nc" id="L100">        }</span>
+
+<span class="nc" id="L102">        final CertificateStoreManager certificateStoreManager = XMPPServer.getInstance().getCertificateStoreManager();</span>
+
+        // client-to-server
+<span class="nc" id="L105">        clientListener = new ConnectionListener(</span>
+                ConnectionType.SOCKET_C2S,
+                ConnectionSettings.Client.PORT,
+                DEFAULT_PORT,
+                ConnectionSettings.Client.SOCKET_ACTIVE,
+                ConnectionSettings.Client.MAX_THREADS,
+                ConnectionSettings.Client.MAX_READ_BUFFER,
+                ConnectionSettings.Client.TLS_POLICY,
+                ConnectionSettings.Client.AUTH_PER_CLIENTCERT_POLICY,
+                bindAddress,
+<span class="nc" id="L115">                certificateStoreManager.getIdentityStoreConfiguration( ConnectionType.SOCKET_C2S ),</span>
+<span class="nc" id="L116">                certificateStoreManager.getTrustStoreConfiguration( ConnectionType.SOCKET_C2S ),</span>
+                ConnectionSettings.Client.COMPRESSION_SETTINGS
+        );
+<span class="nc" id="L119">        clientSslListener = new ConnectionListener(</span>
+                ConnectionType.SOCKET_C2S,
+                ConnectionSettings.Client.OLD_SSLPORT,
+                DEFAULT_SSL_PORT,
+<span class="nc" id="L123">                ConnectionSettings.Client.ENABLE_OLD_SSLPORT_PROPERTY.getKey(),</span>
+                ConnectionSettings.Client.MAX_THREADS_SSL,
+                ConnectionSettings.Client.MAX_READ_BUFFER_SSL,
+<span class="nc" id="L126">                Connection.TLSPolicy.legacyMode.name(), // force legacy mode</span>
+                ConnectionSettings.Client.AUTH_PER_CLIENTCERT_POLICY,
+                bindAddress,
+<span class="nc" id="L129">                certificateStoreManager.getIdentityStoreConfiguration( ConnectionType.SOCKET_C2S ),</span>
+<span class="nc" id="L130">                certificateStoreManager.getTrustStoreConfiguration( ConnectionType.SOCKET_C2S ),</span>
+                ConnectionSettings.Client.COMPRESSION_SETTINGS
+        );
+        // BOSH / HTTP-bind
+<span class="nc" id="L134">        boshListener = new ConnectionListener(</span>
+                ConnectionType.BOSH_C2S,
+                HttpBindManager.HTTP_BIND_PORT,
+                HttpBindManager.HTTP_BIND_PORT_DEFAULT,
+                HttpBindManager.HTTP_BIND_ENABLED, // TODO this one property enables/disables both normal and legacymode port. Should be separated into two.
+                HttpBindManager.HTTP_BIND_THREADS,
+                null,
+<span class="nc" id="L141">                Connection.TLSPolicy.disabled.name(), // StartTLS over HTTP? Should use boshSslListener instead.</span>
+                HttpBindManager.HTTP_BIND_AUTH_PER_CLIENTCERT_POLICY,
+                bindAddress,
+<span class="nc" id="L144">                certificateStoreManager.getIdentityStoreConfiguration( ConnectionType.BOSH_C2S ),</span>
+<span class="nc" id="L145">                certificateStoreManager.getTrustStoreConfiguration( ConnectionType.BOSH_C2S ),</span>
+                ConnectionSettings.Client.COMPRESSION_SETTINGS // Existing code re-used the generic client compression property. Should we have a BOSH-specific one?
+        );
+<span class="nc" id="L148">        boshSslListener = new ConnectionListener(</span>
+                ConnectionType.BOSH_C2S,
+                HttpBindManager.HTTP_BIND_SECURE_PORT,
+                HttpBindManager.HTTP_BIND_SECURE_PORT_DEFAULT,
+                HttpBindManager.HTTP_BIND_ENABLED, // TODO this one property enables/disables both normal and legacymode port. Should be separated into two.
+                HttpBindManager.HTTP_BIND_THREADS,
+                null,
+<span class="nc" id="L155">                Connection.TLSPolicy.legacyMode.name(),</span>
+                HttpBindManager.HTTP_BIND_AUTH_PER_CLIENTCERT_POLICY,
+                bindAddress,
+<span class="nc" id="L158">                certificateStoreManager.getIdentityStoreConfiguration( ConnectionType.BOSH_C2S ),</span>
+<span class="nc" id="L159">                certificateStoreManager.getTrustStoreConfiguration( ConnectionType.BOSH_C2S ),</span>
+                ConnectionSettings.Client.COMPRESSION_SETTINGS // Existing code re-used the generic client compression property. Should we have a BOSH-specific one?
+        );
+        // server-to-server (federation)
+<span class="nc" id="L163">        serverListener = new ConnectionListener(</span>
+                ConnectionType.SOCKET_S2S,
+                ConnectionSettings.Server.PORT,
+                DEFAULT_SERVER_PORT,
+                ConnectionSettings.Server.SOCKET_ACTIVE,
+                &quot;xmpp.server.processing.threads&quot;,
+                null,
+                ConnectionSettings.Server.TLS_POLICY,
+                ConnectionSettings.Server.AUTH_PER_CLIENTCERT_POLICY,
+                bindAddress,
+<span class="nc" id="L173">                certificateStoreManager.getIdentityStoreConfiguration( ConnectionType.SOCKET_S2S ),</span>
+<span class="nc" id="L174">                certificateStoreManager.getTrustStoreConfiguration( ConnectionType.SOCKET_S2S ),</span>
+                ConnectionSettings.Server.COMPRESSION_SETTINGS
+        );
+<span class="nc" id="L177">        serverSslListener = new ConnectionListener(</span>
+            ConnectionType.SOCKET_S2S,
+            ConnectionSettings.Server.OLD_SSLPORT,
+            DEFAULT_SERVER_SSL_PORT,
+            ConnectionSettings.Server.ENABLE_OLD_SSLPORT,
+            &quot;xmpp.server.processing.threads&quot;,
+            null,
+<span class="nc" id="L184">            Connection.TLSPolicy.legacyMode.name(), // force legacy mode</span>
+            ConnectionSettings.Server.AUTH_PER_CLIENTCERT_POLICY,
+            bindAddress,
+<span class="nc" id="L187">            certificateStoreManager.getIdentityStoreConfiguration( ConnectionType.SOCKET_S2S ),</span>
+<span class="nc" id="L188">            certificateStoreManager.getTrustStoreConfiguration( ConnectionType.SOCKET_S2S ),</span>
+            ConnectionSettings.Server.COMPRESSION_SETTINGS
+        );
+
+        // external components (XEP 0114)
+<span class="nc" id="L193">        componentListener = new ConnectionListener(</span>
+                ConnectionType.COMPONENT,
+                ConnectionSettings.Component.PORT,
+                DEFAULT_COMPONENT_PORT,
+                ConnectionSettings.Component.SOCKET_ACTIVE,
+                ConnectionSettings.Component.MAX_THREADS,
+                null,
+                ConnectionSettings.Component.TLS_POLICY,
+                ConnectionSettings.Component.AUTH_PER_CLIENTCERT_POLICY,
+                bindAddress,
+<span class="nc" id="L203">                certificateStoreManager.getIdentityStoreConfiguration( ConnectionType.COMPONENT ),</span>
+<span class="nc" id="L204">                certificateStoreManager.getTrustStoreConfiguration( ConnectionType.COMPONENT ),</span>
+                ConnectionSettings.Component.COMPRESSION_SETTINGS
+        );
+<span class="nc" id="L207">        componentSslListener = new ConnectionListener(</span>
+                ConnectionType.COMPONENT,
+                ConnectionSettings.Component.OLD_SSLPORT,
+                DEFAULT_COMPONENT_SSL_PORT,
+<span class="nc" id="L211">                ConnectionSettings.Component.ENABLE_OLD_SSLPORT_PROPERTY.getKey(),</span>
+                ConnectionSettings.Component.MAX_THREADS_SSL,
+                null,
+<span class="nc" id="L214">                Connection.TLSPolicy.legacyMode.name(), // force legacy mode</span>
+                ConnectionSettings.Component.AUTH_PER_CLIENTCERT_POLICY,
+                bindAddress,
+<span class="nc" id="L217">                certificateStoreManager.getIdentityStoreConfiguration( ConnectionType.COMPONENT ),</span>
+<span class="nc" id="L218">                certificateStoreManager.getTrustStoreConfiguration( ConnectionType.COMPONENT ),</span>
+                ConnectionSettings.Component.COMPRESSION_SETTINGS
+        );
+
+        // Multiplexers (our propertietary connection manager implementation)
+<span class="nc" id="L223">        connectionManagerListener = new ConnectionListener(</span>
+                ConnectionType.CONNECTION_MANAGER,
+                ConnectionSettings.Multiplex.PORT,
+                DEFAULT_MULTIPLEX_PORT,
+                ConnectionSettings.Multiplex.SOCKET_ACTIVE,
+                ConnectionSettings.Multiplex.MAX_THREADS,
+                null,
+                ConnectionSettings.Multiplex.TLS_POLICY,
+                ConnectionSettings.Multiplex.AUTH_PER_CLIENTCERT_POLICY,
+                bindAddress,
+<span class="nc" id="L233">                certificateStoreManager.getIdentityStoreConfiguration( ConnectionType.CONNECTION_MANAGER ),</span>
+<span class="nc" id="L234">                certificateStoreManager.getTrustStoreConfiguration( ConnectionType.CONNECTION_MANAGER ),</span>
+                ConnectionSettings.Multiplex.COMPRESSION_SETTINGS
+        );
+<span class="nc" id="L237">        connectionManagerSslListener = new ConnectionListener(</span>
+                ConnectionType.CONNECTION_MANAGER,
+                ConnectionSettings.Multiplex.OLD_SSLPORT,
+                DEFAULT_MULTIPLEX_SSL_PORT,
+                ConnectionSettings.Multiplex.ENABLE_OLD_SSLPORT,
+                ConnectionSettings.Multiplex.MAX_THREADS_SSL,
+                null,
+<span class="nc" id="L244">                Connection.TLSPolicy.legacyMode.name(), // force legacy mode</span>
+                ConnectionSettings.Multiplex.AUTH_PER_CLIENTCERT_POLICY,
+                bindAddress,
+<span class="nc" id="L247">                certificateStoreManager.getIdentityStoreConfiguration( ConnectionType.CONNECTION_MANAGER ),</span>
+<span class="nc" id="L248">                certificateStoreManager.getTrustStoreConfiguration( ConnectionType.CONNECTION_MANAGER ),</span>
+                ConnectionSettings.Multiplex.COMPRESSION_SETTINGS
+        );
+
+        // Admin console (the Openfire web-admin) // TODO these use the XML properties instead of normal properties!
+<span class="nc" id="L253">        webAdminListener = new ConnectionListener(</span>
+                ConnectionType.WEBADMIN,
+                &quot;adminConsole.port&quot;,
+                9090,
+                null,
+                &quot;adminConsole.serverThreads&quot;,
+                null,
+<span class="nc" id="L260">                Connection.TLSPolicy.disabled.name(), // StartTLS over HTTP? Should use webAdminSslListener instead.</span>
+                null,
+                adminConsoleBindAddress,
+<span class="nc" id="L263">                certificateStoreManager.getIdentityStoreConfiguration( ConnectionType.WEBADMIN ),</span>
+<span class="nc" id="L264">                certificateStoreManager.getTrustStoreConfiguration( ConnectionType.WEBADMIN ),</span>
+                null // Should we have compression on the admin console?
+        );
+
+<span class="nc" id="L268">        webAdminSslListener = new ConnectionListener(</span>
+                ConnectionType.WEBADMIN,
+                &quot;adminConsole.securePort&quot;,
+                9091,
+                null,
+                &quot;adminConsole.serverThreads&quot;,
+                null,
+<span class="nc" id="L275">                Connection.TLSPolicy.legacyMode.name(),</span>
+                null,
+                adminConsoleBindAddress,
+<span class="nc" id="L278">                certificateStoreManager.getIdentityStoreConfiguration( ConnectionType.WEBADMIN ),</span>
+<span class="nc" id="L279">                certificateStoreManager.getTrustStoreConfiguration( ConnectionType.WEBADMIN ),</span>
+                null // Should we have compression on the admin console?
+        );
+
+<span class="nc" id="L283">    }</span>
+
+    /**
+     * Starts all listeners. This ensures that all those that are enabled will start accept connections.
+     */
+    private synchronized void startListeners()
+    {
+        // Check if plugins have been loaded
+<span class="nc" id="L291">        Log.debug( &quot;Received a request to start listeners. Have plugins been loaded?&quot; );</span>
+<span class="nc" id="L292">        PluginManager pluginManager = XMPPServer.getInstance().getPluginManager();</span>
+<span class="nc bnc" id="L293" title="All 2 branches missed.">        if ( !pluginManager.isExecuted() )</span>
+        {
+<span class="nc" id="L295">            Log.debug( &quot;Plugins not yet loaded. Waiting for plugins to be loaded...&quot; );</span>
+<span class="nc" id="L296">            pluginManager.addPluginManagerListener( new PluginManagerListener()</span>
+<span class="nc" id="L297">            {</span>
+                public void pluginsMonitored()
+                {
+<span class="nc" id="L300">                    Log.debug( &quot;Received plugin monitor event! Plugins should now be loaded.&quot; );</span>
+                    // Stop listening for plugin events
+<span class="nc" id="L302">                    XMPPServer.getInstance().getPluginManager().removePluginManagerListener( this );</span>
+                    // Start listeners
+<span class="nc" id="L304">                    startListeners();</span>
+<span class="nc" id="L305">                }</span>
+            } );
+<span class="nc" id="L307">            return;</span>
+        }
+
+<span class="nc" id="L310">        Log.debug( &quot;Starting listeners...&quot; );</span>
+<span class="nc bnc" id="L311" title="All 2 branches missed.">        for ( final ConnectionListener listener : getListeners() )</span>
+        {
+            try
+            {
+<span class="nc" id="L315">                listener.start();</span>
+<span class="nc" id="L316">                Log.debug( &quot;Started '{}' (port {}) listener.&quot;, listener.getType(), listener.getPort() );</span>
+            }
+<span class="nc" id="L318">            catch ( RuntimeException ex )</span>
+            {
+<span class="nc" id="L320">                Log.error( &quot;An exception occurred while starting listener &quot; + listener, ex );</span>
+<span class="nc" id="L321">            }</span>
+<span class="nc" id="L322">        }</span>
+
+        // Start the HTTP client listener.
+        try
+        {
+<span class="nc" id="L327">            HttpBindManager.getInstance().start();</span>
+<span class="nc" id="L328">            Log.debug( &quot;Started HTTP client listener.&quot; );</span>
+        }
+<span class="nc" id="L330">        catch ( RuntimeException ex )</span>
+        {
+<span class="nc" id="L332">            Log.error( &quot;An exception occurred while starting HTTP Bind listener &quot;, ex );</span>
+<span class="nc" id="L333">        }</span>
+<span class="nc" id="L334">    }</span>
+
+    /**
+     * Stops all listeners. This ensures no listener will accept new connections.
+     */
+    private synchronized void stopListeners()
+    {
+<span class="nc bnc" id="L341" title="All 2 branches missed.">        for ( final ConnectionListener listener : getListeners() )</span>
+        {
+            // TODO determine by purpose exactly what needs and what need not be restarted.
+            try
+            {
+<span class="nc" id="L346">                listener.stop();</span>
+            }
+<span class="nc" id="L348">            catch ( RuntimeException ex )</span>
+            {
+<span class="nc" id="L350">                Log.error( &quot;An exception occurred while stopping listener &quot; + listener, ex );</span>
+<span class="nc" id="L351">            }</span>
+<span class="nc" id="L352">        }</span>
+
+        // Stop the HTTP client listener.
+        try
+        {
+<span class="nc" id="L357">            HttpBindManager.getInstance().stop();</span>
+        }
+<span class="nc" id="L359">        catch ( RuntimeException ex )</span>
+        {
+<span class="nc" id="L361">            Log.error( &quot;An exception occurred while stopping HTTP Bind listener &quot;, ex );</span>
+<span class="nc" id="L362">        }</span>
+<span class="nc" id="L363">    }</span>
+
+    /**
+     * Returns the specific network interface on which Openfire is configured to listen, or null when no such preference
+     * has been configured.
+     *
+     * @return A network interface or null.
+     * @throws UnknownHostException When the configured network name cannot be resolved.
+     */
+    public InetAddress getListenAddress() throws UnknownHostException
+    {
+<span class="nc" id="L374">        String interfaceName = JiveGlobals.getXMLProperty( &quot;network.interface&quot; );</span>
+<span class="nc" id="L375">        InetAddress bindInterface = null;</span>
+<span class="nc bnc" id="L376" title="All 2 branches missed.">        if (interfaceName != null) {</span>
+<span class="nc bnc" id="L377" title="All 2 branches missed.">            if (interfaceName.trim().length() &gt; 0) {</span>
+<span class="nc" id="L378">                bindInterface = InetAddress.getByName(interfaceName);</span>
+            }
+        }
+<span class="nc" id="L381">        return bindInterface;</span>
+    }
+
+    /**
+     * Returns the specific network interface on which the Openfire administration
+     * console should be configured to listen, or null when no such preference
+     * has been configured.
+     *
+     * @return A network interface or null.
+     * @throws UnknownHostException When the configured network name cannot be resolved.
+     */
+    public InetAddress getAdminConsoleListenAddress() throws UnknownHostException
+    {
+<span class="nc" id="L394">        String acInterfaceName = JiveGlobals.getXMLProperty( &quot;adminConsole.interface&quot; );</span>
+<span class="nc" id="L395">        InetAddress acBindInterface = null;</span>
+<span class="nc bnc" id="L396" title="All 2 branches missed.">        if (acInterfaceName != null) {</span>
+<span class="nc bnc" id="L397" title="All 2 branches missed.">            if (acInterfaceName.trim().length() &gt; 0) {</span>
+<span class="nc" id="L398">                acBindInterface = InetAddress.getByName(acInterfaceName);</span>
+            }
+        }
+<span class="nc" id="L401">        return acBindInterface;</span>
+    }
+
+    /**
+     * Returns all connection listeners.
+     *
+     * @return All connection listeners (never null).
+     */
+    public Set&lt;ConnectionListener&gt; getListeners() {
+<span class="nc" id="L410">        final Set&lt;ConnectionListener&gt; listeners = new LinkedHashSet&lt;&gt;();</span>
+<span class="nc" id="L411">        listeners.add( clientListener );</span>
+<span class="nc" id="L412">        listeners.add( clientSslListener );</span>
+<span class="nc" id="L413">        listeners.add( boshListener );</span>
+<span class="nc" id="L414">        listeners.add( boshSslListener );</span>
+<span class="nc" id="L415">        listeners.add( serverListener );</span>
+<span class="nc" id="L416">        listeners.add( serverSslListener );</span>
+<span class="nc" id="L417">        listeners.add( componentListener );</span>
+<span class="nc" id="L418">        listeners.add( componentSslListener );</span>
+<span class="nc" id="L419">        listeners.add( connectionManagerListener );</span>
+<span class="nc" id="L420">        listeners.add( connectionManagerSslListener );</span>
+<span class="nc" id="L421">        listeners.add( webAdminListener );</span>
+<span class="nc" id="L422">        listeners.add( webAdminSslListener );</span>
+<span class="nc" id="L423">        return listeners;</span>
+    }
+
+    /**
+     * Returns a connection listener.
+     *
+     * The #startInSslMode parameter is used to distinguish between listeners that expect to receive SSL encrypted data
+     * immediately, as opposed to connections that initially accept plain text data (the latter are typically subject to
+     * StartTLS for in-band encryption configuration). When for a particular connection type only one of these options
+     * is implemented, the parameter value is ignored.
+     *
+     * @param type The connection type for which a listener is to be configured.
+     * @param startInSslMode true when the listener to be configured is in legacy SSL mode, otherwise false.
+     * @return The connection listener (never null).
+     */
+    public ConnectionListener getListener( ConnectionType type, boolean startInSslMode )
+    {
+<span class="nc bnc" id="L440" title="All 7 branches missed.">        switch ( type )</span>
+        {
+            case SOCKET_C2S:
+<span class="nc bnc" id="L443" title="All 2 branches missed.">                if (startInSslMode) {</span>
+<span class="nc" id="L444">                    return clientSslListener;</span>
+                } else {
+<span class="nc" id="L446">                    return clientListener;</span>
+                }
+
+            case BOSH_C2S:
+<span class="nc bnc" id="L450" title="All 2 branches missed.">                if (startInSslMode) {</span>
+<span class="nc" id="L451">                    return boshSslListener;</span>
+                } else {
+<span class="nc" id="L453">                    return boshListener;</span>
+                }
+            case SOCKET_S2S:
+<span class="nc bnc" id="L456" title="All 2 branches missed.">                if (startInSslMode) {</span>
+<span class="nc" id="L457">                    return serverSslListener;</span>
+                } else {
+<span class="nc" id="L459">                    return serverListener;</span>
+                }
+
+            case COMPONENT:
+<span class="nc bnc" id="L463" title="All 2 branches missed.">                if (startInSslMode) {</span>
+<span class="nc" id="L464">                    return componentSslListener;</span>
+                } else {
+<span class="nc" id="L466">                    return componentListener;</span>
+                }
+
+            case CONNECTION_MANAGER:
+<span class="nc bnc" id="L470" title="All 2 branches missed.">                if (startInSslMode) {</span>
+<span class="nc" id="L471">                    return connectionManagerSslListener;</span>
+                } else {
+<span class="nc" id="L473">                    return connectionManagerListener;</span>
+                }
+
+            case WEBADMIN:
+<span class="nc bnc" id="L477" title="All 2 branches missed.">                if (startInSslMode) {</span>
+<span class="nc" id="L478">                    return webAdminSslListener;</span>
+                } else {
+<span class="nc" id="L480">                    return webAdminListener;</span>
+                }
+            default:
+<span class="nc" id="L483">                throw new IllegalStateException( &quot;Unknown connection type: &quot;+ type );</span>
+        }
+    }
+
+    /**
+     * Returns al connection listeners for the provided type.
+     *
+     * @param type The connection type for which a listener is to be configured.
+     * @return The connection listener (never null).
+     */
+    public Set&lt;ConnectionListener&gt; getListeners( ConnectionType type )
+    {
+<span class="nc" id="L495">        final Set&lt;ConnectionListener&gt; result = new HashSet&lt;&gt;();</span>
+<span class="nc bnc" id="L496" title="All 7 branches missed.">        switch ( type )</span>
+        {
+            case SOCKET_C2S:
+<span class="nc" id="L499">                result.add( clientListener );</span>
+<span class="nc" id="L500">                result.add( clientSslListener );</span>
+<span class="nc" id="L501">                break;</span>
+
+            case BOSH_C2S:
+<span class="nc" id="L504">                result.add( boshListener );</span>
+<span class="nc" id="L505">                result.add( boshSslListener );</span>
+<span class="nc" id="L506">                break;</span>
+
+            case SOCKET_S2S:
+<span class="nc" id="L509">                result.add( serverListener );</span>
+<span class="nc" id="L510">                result.add( serverSslListener );</span>
+<span class="nc" id="L511">                break;</span>
+
+            case COMPONENT:
+<span class="nc" id="L514">                result.add( componentListener );</span>
+<span class="nc" id="L515">                result.add( componentSslListener );</span>
+<span class="nc" id="L516">                break;</span>
+
+            case CONNECTION_MANAGER:
+<span class="nc" id="L519">                result.add( connectionManagerListener );</span>
+<span class="nc" id="L520">                result.add( connectionManagerSslListener );</span>
+<span class="nc" id="L521">                break;</span>
+
+            case WEBADMIN:
+<span class="nc" id="L524">                result.add( webAdminListener );</span>
+<span class="nc" id="L525">                result.add( webAdminSslListener );</span>
+<span class="nc" id="L526">                break;</span>
+
+            default:
+<span class="nc" id="L529">                throw new IllegalStateException( &quot;Unknown connection type: &quot;+ type );</span>
+        }
+
+<span class="nc" id="L532">        return result;</span>
+    }
+
+    /**
+     * Return if the configuration allows this listener to be enabled (but does not verify that the listener is
+     * indeed active)
+     *
+     * The #startInSslMode parameter is used to distinguish between listeners that expect to receive SSL encrypted data
+     * immediately, as opposed to connections that initially accept plain text data (the latter are typically subject to
+     * StartTLS for in-band encryption configuration). When for a particular connection type only one of these options
+     * is implemented, the parameter value is ignored.
+     *
+     * @param type The connection type for which a listener is to be configured.
+     * @param startInSslMode true when the listener to be configured is in legacy SSL mode, otherwise false.
+     * @return true if configuration allows this listener to be enabled, otherwise false.
+     */
+    public boolean isEnabled( ConnectionType type, boolean startInSslMode )
+    {
+<span class="nc" id="L550">        return getListener( type, startInSslMode ).isEnabled();</span>
+    }
+
+    /**
+     * Enables or disables a connection listener. Does nothing if the particular listener is already in the requested
+     * state.
+     *
+     * The #startInSslMode parameter is used to distinguish between listeners that expect to receive SSL encrypted data
+     * immediately, as opposed to connections that initially accept plain text data (the latter are typically subject to
+     * StartTLS for in-band encryption configuration). When for a particular connection type only one of these options
+     * is implemented, the parameter value is ignored.
+     *
+     * @param type The connection type for which a listener is to be configured.
+     * @param startInSslMode true when the listener to be configured is in legacy SSL mode, otherwise false.
+     * @param enabled true if the listener is to be enabled, otherwise false.
+     */
+    public void enable( ConnectionType type, boolean startInSslMode, boolean enabled )
+    {
+<span class="nc" id="L568">        getListener( type, startInSslMode ).enable( enabled );</span>
+<span class="nc" id="L569">    }</span>
+
+    /**
+     * Retrieves the configured TCP port on which a listener accepts connections.
+     *
+     * @param type The connection type for which a listener is to be configured.
+     * @param startInSslMode true when the listener to be configured is in legacy SSL mode, otherwise false.
+     * @return a port number.
+     */
+    public int getPort( ConnectionType type, boolean startInSslMode )
+    {
+<span class="nc" id="L580">        return getListener( type, startInSslMode ).getPort();</span>
+    }
+
+    /**
+     * Sets the TCP port on which a listener accepts connections.
+     *
+     * @param type The connection type for which a listener is to be configured.
+     * @param startInSslMode true when the listener to be configured is in legacy SSL mode, otherwise false.
+     * @param port a port number.
+     */
+    public void setPort( ConnectionType type, boolean startInSslMode, int port )
+    {
+<span class="nc" id="L592">        getListener( type, startInSslMode ).setPort( port );</span>
+<span class="nc" id="L593">    }</span>
+
+    // TODO see if we can avoid exposing MINA internals.
+    public NioSocketAcceptor getSocketAcceptor( ConnectionType type, boolean startInSslMode )
+    {
+<span class="nc" id="L598">        return getListener( type, startInSslMode ).getSocketAcceptor();</span>
+    }
+
+    // #####################################################################
+    // Certificates events
+    // #####################################################################
+
+    @Override
+    public void storeContentChanged( CertificateStore store )
+    {
+        // Note that all non-SSL listeners can be using TLS - these also need to be restarted.
+<span class="nc bnc" id="L609" title="All 2 branches missed.">        for ( final ConnectionListener listener : getListeners() )</span>
+        {
+<span class="nc bnc" id="L611" title="All 4 branches missed.">            if ( listener.getIdentityStoreConfiguration().equals( store.getConfiguration() ) || listener.getTrustStoreConfiguration().equals( store.getConfiguration() ) )</span>
+            {
+                try
+                {
+<span class="nc" id="L615">                    listener.reloadConfiguration();</span>
+                }
+<span class="nc" id="L617">                catch ( RuntimeException ex )</span>
+                {
+<span class="nc" id="L619">                    Log.error( &quot;An exception occurred while reloading listener &quot; + listener + &quot;. The reason for the reload was a certificate store change.&quot;, ex );</span>
+<span class="nc" id="L620">                }</span>
+            }
+<span class="nc" id="L622">        }</span>
+<span class="nc" id="L623">    }</span>
+
+    // #####################################################################
+    // Property events
+    // #####################################################################
+    @Override
+    public void propertySet( String property, Map&lt;String, Object&gt; params ) {
+<span class="nc" id="L630">        processPropertyValueChange( property, params );</span>
+<span class="nc" id="L631">    }</span>
+
+    @Override
+    public void propertyDeleted( String property, Map&lt;String, Object&gt; params ) {
+<span class="nc" id="L635">        processPropertyValueChange( property, params );</span>
+<span class="nc" id="L636">    }</span>
+
+    @Override
+    public void xmlPropertySet( String property, Map&lt;String, Object&gt; params ) {
+<span class="nc" id="L640">        processPropertyValueChange( property, params );</span>
+<span class="nc" id="L641">    }</span>
+
+    @Override
+    public void xmlPropertyDeleted( String property, Map&lt;String, Object&gt; params ) {
+<span class="nc" id="L645">        processPropertyValueChange( property, params );</span>
+<span class="nc" id="L646">    }</span>
+
+    private void processPropertyValueChange( String property, Map&lt;String, Object&gt; params ) {
+<span class="nc" id="L649">        Log.debug( &quot;Processing property value change for '&quot;+property +&quot;'. Params: &quot; + params );</span>
+
+        // TODO there are more properties on which a restart is required (and this also applies to other listeners)!
+<span class="nc bnc" id="L652" title="All 2 branches missed.">        if (&quot;xmpp.client.cert.policy&quot;.equalsIgnoreCase( property )) {</span>
+<span class="nc" id="L653">            clientSslListener.restart();</span>
+        }
+<span class="nc" id="L655">    }</span>
+
+    // #####################################################################
+    // Module management
+    // #####################################################################
+
+    @Override
+    public void initialize(XMPPServer server) {
+<span class="nc" id="L663">        super.initialize(server);</span>
+
+        // Check if we need to configure MINA to use Direct or Heap Buffers
+        // Note: It has been reported that heap buffers are 50% faster than direct buffers
+<span class="nc bnc" id="L667" title="All 2 branches missed.">        if (JiveGlobals.getBooleanProperty(&quot;xmpp.socket.heapBuffer&quot;, true)) {</span>
+<span class="nc" id="L668">            IoBuffer.setUseDirectBuffer(false);</span>
+<span class="nc" id="L669">            IoBuffer.setAllocator(new SimpleBufferAllocator());</span>
+        }
+<span class="nc" id="L671">    }</span>
+
+    @Override
+    public void start() {
+<span class="nc" id="L675">        super.start();</span>
+<span class="nc" id="L676">        startListeners();</span>
+<span class="nc" id="L677">        SocketSendingTracker.getInstance().start();</span>
+<span class="nc" id="L678">        CertificateManager.addListener(this);</span>
+<span class="nc" id="L679">    }</span>
+
+    @Override
+    public void stop() {
+<span class="nc" id="L683">        CertificateManager.removeListener(this);</span>
+<span class="nc" id="L684">        SocketSendingTracker.getInstance().shutdown();</span>
+<span class="nc" id="L685">        stopListeners();</span>
+<span class="nc" id="L686">        super.stop();</span>
+<span class="nc" id="L687">    }</span>
+
+    // #####################################################################
+    // Deprecated delegation methods to individual listeners (as dictated by legacy API design).
+    // #####################################################################
+
+    // Client
+    @Deprecated
+    public void enableClientListener( boolean enabled )
+    {
+<span class="nc" id="L697">        enable( ConnectionType.SOCKET_C2S, false, enabled);</span>
+<span class="nc" id="L698">    }</span>
+
+    @Deprecated
+    public boolean isClientListenerEnabled()
+    {
+<span class="nc" id="L703">        return isEnabled( ConnectionType.SOCKET_C2S, false );</span>
+    }
+
+    @Deprecated
+    public NioSocketAcceptor getSocketAcceptor()
+    {
+<span class="nc" id="L709">        return getSocketAcceptor( ConnectionType.SOCKET_C2S, false );</span>
+    }
+
+    @Deprecated
+    public void setClientListenerPort( int port )
+    {
+<span class="nc" id="L715">        setPort( ConnectionType.SOCKET_C2S, false, port );</span>
+<span class="nc" id="L716">    }</span>
+
+    @Deprecated
+    public int getClientListenerPort()
+    {
+<span class="nc" id="L721">        return getPort( ConnectionType.SOCKET_C2S, false );</span>
+    }
+
+    // Client in legacy mode
+    @Deprecated
+    public void enableClientSSLListener( boolean enabled )
+    {
+<span class="nc" id="L728">        enable( ConnectionType.SOCKET_C2S, true, enabled );</span>
+<span class="nc" id="L729">    }</span>
+
+    @Deprecated
+    public boolean isClientSSLListenerEnabled()
+    {
+<span class="nc" id="L734">        return isEnabled( ConnectionType.SOCKET_C2S, true );</span>
+    }
+
+    @Deprecated
+    public NioSocketAcceptor getSSLSocketAcceptor()
+    {
+<span class="nc" id="L740">        return getSocketAcceptor( ConnectionType.SOCKET_C2S, true );</span>
+    }
+
+    @Deprecated
+    public void setClientSSLListenerPort( int port )
+    {
+<span class="nc" id="L746">        setPort( ConnectionType.SOCKET_C2S, true, port );</span>
+<span class="nc" id="L747">    }</span>
+
+    @Deprecated
+    public int getClientSSLListenerPort()
+    {
+<span class="nc" id="L752">        return getPort( ConnectionType.SOCKET_C2S, true );</span>
+    }
+
+    // Component
+    @Deprecated
+    public void enableComponentListener( boolean enabled )
+    {
+<span class="nc" id="L759">        enable( ConnectionType.COMPONENT, false, enabled );</span>
+<span class="nc" id="L760">    }</span>
+
+    @Deprecated
+    public boolean isComponentListenerEnabled()
+    {
+<span class="nc" id="L765">        return isEnabled( ConnectionType.COMPONENT, false );</span>
+    }
+
+    @Deprecated
+    public NioSocketAcceptor getComponentAcceptor()
+    {
+<span class="nc" id="L771">        return getSocketAcceptor( ConnectionType.COMPONENT, false );</span>
+    }
+
+    @Deprecated
+    public void setComponentListenerPort( int port )
+    {
+<span class="nc" id="L777">        setPort( ConnectionType.COMPONENT, false, port );</span>
+<span class="nc" id="L778">    }</span>
+
+    @Deprecated
+    public int getComponentListenerPort()
+    {
+<span class="nc" id="L783">        return getPort( ConnectionType.COMPONENT, false );</span>
+    }
+
+    // Component in legacy mode
+    @Deprecated
+    public void enableComponentSslListener( boolean enabled )
+    {
+<span class="nc" id="L790">        enable( ConnectionType.COMPONENT, true, enabled );</span>
+<span class="nc" id="L791">    }</span>
+
+    @Deprecated
+    public boolean isComponentSslListenerEnabled()
+    {
+<span class="nc" id="L796">        return isEnabled( ConnectionType.COMPONENT, true );</span>
+    }
+
+    @Deprecated
+    public NioSocketAcceptor getComponentSslAcceptor()
+    {
+<span class="nc" id="L802">        return getSocketAcceptor( ConnectionType.COMPONENT, true);</span>
+    }
+
+    @Deprecated
+    public void setComponentSslListenerPort( int port )
+    {
+<span class="nc" id="L808">        setPort( ConnectionType.COMPONENT, true, port );</span>
+<span class="nc" id="L809">    }</span>
+
+    @Deprecated
+    public int getComponentSslListenerPort()
+    {
+<span class="nc" id="L814">        return getPort( ConnectionType.COMPONENT, true );</span>
+    }
+
+    // Server
+    @Deprecated
+    public void enableServerListener( boolean enabled )
+    {
+<span class="nc" id="L821">        enable( ConnectionType.SOCKET_S2S, false, enabled );</span>
+<span class="nc" id="L822">    }</span>
+
+    @Deprecated
+    public boolean isServerListenerEnabled()
+    {
+<span class="nc" id="L827">        return isEnabled( ConnectionType.SOCKET_S2S, false );</span>
+    }
+
+    @Deprecated
+    public NioSocketAcceptor getServerListenerSocketAcceptor()
+    {
+<span class="nc" id="L833">        return getSocketAcceptor( ConnectionType.SOCKET_S2S, false );</span>
+    }
+
+    @Deprecated
+    public void setServerListenerPort( int port )
+    {
+<span class="nc" id="L839">        setPort( ConnectionType.SOCKET_S2S, false, port );</span>
+<span class="nc" id="L840">    }</span>
+
+    @Deprecated
+    public int getServerListenerPort()
+    {
+<span class="nc" id="L845">        return getPort( ConnectionType.SOCKET_S2S, false );</span>
+    }
+
+    @Deprecated
+    public void enableServerSslListener( boolean enabled )
+    {
+<span class="nc" id="L851">        enable( ConnectionType.SOCKET_S2S, true, enabled );</span>
+<span class="nc" id="L852">    }</span>
+
+    @Deprecated
+    public boolean isServerSslListenerEnabled()
+    {
+<span class="nc" id="L857">        return isEnabled( ConnectionType.SOCKET_S2S, true );</span>
+    }
+
+    @Deprecated
+    public NioSocketAcceptor getServerSslListenerSocketAcceptor()
+    {
+<span class="nc" id="L863">        return getSocketAcceptor( ConnectionType.SOCKET_S2S, true );</span>
+    }
+
+    @Deprecated
+    public void setServerSslListenerPort( int port )
+    {
+<span class="nc" id="L869">        setPort( ConnectionType.SOCKET_S2S, true, port );</span>
+<span class="nc" id="L870">    }</span>
+
+    @Deprecated
+    public int getServerSslListenerPort()
+    {
+<span class="nc" id="L875">        return getPort( ConnectionType.SOCKET_S2S, true );</span>
+    }
+
+    // Connection Manager
+    @Deprecated
+    public void enableConnectionManagerListener( boolean enabled )
+    {
+<span class="nc" id="L882">        enable( ConnectionType.CONNECTION_MANAGER, false, enabled );</span>
+<span class="nc" id="L883">    }</span>
+
+    @Deprecated
+    public boolean isConnectionManagerListenerEnabled()
+    {
+<span class="nc" id="L888">        return isEnabled( ConnectionType.CONNECTION_MANAGER, false );</span>
+    }
+
+    /**
+     * @deprecated Replaced by #getConnectionManagerSocketAcceptor
+     * @return the socket acceptor
+     */
+    @Deprecated
+    public NioSocketAcceptor getMultiplexerSocketAcceptor()
+    {
+<span class="nc" id="L898">        return getSocketAcceptor( ConnectionType.CONNECTION_MANAGER, false );</span>
+    }
+
+    @Deprecated
+    public NioSocketAcceptor getConnectionManagerSocketAcceptor()
+    {
+<span class="nc" id="L904">        return getSocketAcceptor( ConnectionType.CONNECTION_MANAGER, false );</span>
+    }
+
+    @Deprecated
+    public void setConnectionManagerListenerPort( int port )
+    {
+<span class="nc" id="L910">        setPort( ConnectionType.CONNECTION_MANAGER, false, port );</span>
+<span class="nc" id="L911">    }</span>
+
+    @Deprecated
+    public int getConnectionManagerListenerPort()
+    {
+<span class="nc" id="L916">        return getPort( ConnectionType.CONNECTION_MANAGER, false );</span>
+    }
+
+    // Connection Manager in legacy mode
+    @Deprecated
+    public void enableConnectionManagerSslListener( boolean enabled )
+    {
+<span class="nc" id="L923">        enable( ConnectionType.CONNECTION_MANAGER, true, enabled );</span>
+<span class="nc" id="L924">    }</span>
+
+    @Deprecated
+    public boolean isConnectionManagerSslListenerEnabled()
+    {
+<span class="nc" id="L929">        return isEnabled( ConnectionType.CONNECTION_MANAGER, true );</span>
+    }
+
+    @Deprecated
+    public NioSocketAcceptor getConnectionManagerSslSocketAcceptor()
+    {
+<span class="nc" id="L935">        return getSocketAcceptor( ConnectionType.CONNECTION_MANAGER, true );</span>
+    }
+
+    @Deprecated
+    public void setConnectionManagerSslListenerPort( int port )
+    {
+<span class="nc" id="L941">        setPort( ConnectionType.CONNECTION_MANAGER, true, port );</span>
+<span class="nc" id="L942">    }</span>
+
+    @Deprecated
+    public int getConnectionManagerSslListenerPort()
+    {
+<span class="nc" id="L947">        return getPort( ConnectionType.CONNECTION_MANAGER, true );</span>
+    }
+
+    // #####################################################################
+    // Other deprecated implementations.
+    // #####################################################################
+
+    /**
+     * @deprecated use #getListeners
+     */
+    @Deprecated
+    public Collection&lt;ServerPort&gt; getPorts() {
+<span class="nc" id="L959">        final Set&lt;ServerPort&gt; result = new LinkedHashSet&lt;&gt;();</span>
+<span class="nc bnc" id="L960" title="All 2 branches missed.">        for ( ConnectionListener listener : getListeners() )</span>
+        {
+<span class="nc bnc" id="L962" title="All 2 branches missed.">            if (listener.getServerPort() != null)</span>
+            {
+<span class="nc" id="L964">                result.add( listener.getServerPort() );</span>
+            }
+<span class="nc" id="L966">        }</span>
+<span class="nc" id="L967">        return result;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

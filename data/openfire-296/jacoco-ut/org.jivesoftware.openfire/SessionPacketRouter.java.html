@@ -1,0 +1,122 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>SessionPacketRouter.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire</a> &gt; <span class="el_source">SessionPacketRouter.java</span></div><h1>SessionPacketRouter.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.jivesoftware.openfire;
+
+import org.dom4j.Element;
+import org.jivesoftware.openfire.multiplex.UnknownStanzaException;
+import org.jivesoftware.openfire.net.SASLAuthentication;
+import org.jivesoftware.openfire.session.LocalClientSession;
+import org.xmpp.packet.*;
+
+/**
+ * Handles the routing of packets to a particular session. It will invoke all of the appropriate
+ * interceptors, before and after having the server process the message.
+ *
+ * @author Alexander Wenckus
+ */
+public class SessionPacketRouter implements PacketRouter {
+
+    protected LocalClientSession session;
+    private PacketRouter router;
+<span class="nc" id="L34">    private boolean skipJIDValidation = false;</span>
+
+<span class="nc" id="L36">    public SessionPacketRouter(LocalClientSession session) {</span>
+<span class="nc" id="L37">        this.session = session;</span>
+<span class="nc" id="L38">        router = XMPPServer.getInstance().getPacketRouter();</span>
+<span class="nc" id="L39">    }</span>
+
+    /**
+     * Sets if TO addresses of Elements being routed should be validated. Doing stringprep operations
+     * is very expensive and sometimes we already validated the TO address so there is no need to
+     * validate again the address. For instance, when using Connection Managers the validation
+     * is done by the Connection Manager so we can just trust the TO address. On the other hand,
+     * the FROM address is set by the server so there is no need to validate it.&lt;p&gt;
+     *
+     * By default validation is enabled.
+     *
+     * @param skipJIDValidation true if validation of TO address is enabled.
+     */
+    public void setSkipJIDValidation(boolean skipJIDValidation) {
+<span class="nc" id="L53">        this.skipJIDValidation = skipJIDValidation;</span>
+<span class="nc" id="L54">    }</span>
+
+    public void route(Element wrappedElement)
+            throws UnknownStanzaException {
+<span class="nc" id="L58">        String tag = wrappedElement.getName();</span>
+<span class="nc bnc" id="L59" title="All 4 branches missed.">        if (&quot;auth&quot;.equals(tag) || &quot;response&quot;.equals(tag)) {</span>
+<span class="nc" id="L60">            SASLAuthentication.handle(session, wrappedElement);</span>
+        }
+<span class="nc bnc" id="L62" title="All 2 branches missed.">        else if (&quot;iq&quot;.equals(tag)) {</span>
+<span class="nc" id="L63">            route(getIQ(wrappedElement));</span>
+        }
+<span class="nc bnc" id="L65" title="All 2 branches missed.">        else if (&quot;message&quot;.equals(tag)) {</span>
+<span class="nc" id="L66">            route(new Message(wrappedElement, skipJIDValidation));</span>
+        }
+<span class="nc bnc" id="L68" title="All 2 branches missed.">        else if (&quot;presence&quot;.equals(tag)) {</span>
+<span class="nc" id="L69">            route(new Presence(wrappedElement, skipJIDValidation));</span>
+        }
+        else {
+<span class="nc" id="L72">            throw new UnknownStanzaException();</span>
+        }
+<span class="nc" id="L74">    }</span>
+
+    private IQ getIQ(Element doc) {
+<span class="nc" id="L77">        Element query = doc.element(&quot;query&quot;);</span>
+<span class="nc bnc" id="L78" title="All 4 branches missed.">        if (query != null &amp;&amp; &quot;jabber:iq:roster&quot;.equals(query.getNamespaceURI())) {</span>
+<span class="nc" id="L79">            return new Roster(doc);</span>
+        }
+        else {
+<span class="nc" id="L82">            return new IQ(doc, skipJIDValidation);</span>
+        }
+    }
+
+    @Override
+    public void route(Packet packet) {
+        // Security: Don't allow users to send packets on behalf of other users
+<span class="nc" id="L89">        packet.setFrom(session.getAddress());</span>
+<span class="nc bnc" id="L90" title="All 2 branches missed.">        if(packet instanceof IQ) {</span>
+<span class="nc" id="L91">            route((IQ)packet);</span>
+        }
+<span class="nc bnc" id="L93" title="All 2 branches missed.">        else if(packet instanceof Message) {</span>
+<span class="nc" id="L94">            route((Message)packet);</span>
+        }
+<span class="nc bnc" id="L96" title="All 2 branches missed.">        else if(packet instanceof Presence) {</span>
+<span class="nc" id="L97">            route((Presence)packet);</span>
+        }
+<span class="nc" id="L99">    }</span>
+
+    @Override
+    public void route(IQ packet) {
+<span class="nc" id="L103">        packet.setFrom(session.getAddress());</span>
+<span class="nc" id="L104">        router.route(packet);</span>
+<span class="nc" id="L105">        session.incrementClientPacketCount();</span>
+<span class="nc" id="L106">    }</span>
+
+    @Override
+    public void route(Message packet) {
+<span class="nc" id="L110">        packet.setFrom(session.getAddress());</span>
+<span class="nc" id="L111">        router.route(packet);</span>
+<span class="nc" id="L112">        session.incrementClientPacketCount();</span>
+<span class="nc" id="L113">    }</span>
+
+    @Override
+    public void route(Presence packet) {
+<span class="nc" id="L117">        packet.setFrom(session.getAddress());</span>
+<span class="nc" id="L118">        router.route(packet);</span>
+<span class="nc" id="L119">        session.incrementClientPacketCount();</span>
+<span class="nc" id="L120">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

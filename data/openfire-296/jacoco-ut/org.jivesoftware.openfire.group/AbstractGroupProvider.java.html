@@ -1,0 +1,317 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>AbstractGroupProvider.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.group</a> &gt; <span class="el_source">AbstractGroupProvider.java</span></div><h1>AbstractGroupProvider.java</h1><pre class="source lang-java linenums">package org.jivesoftware.openfire.group;
+
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Set;
+
+import org.jivesoftware.database.DbConnectionManager;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.jivesoftware.util.PersistableMap;
+import org.xmpp.packet.JID;
+
+/**
+ * Shared base class for Openfire GroupProvider implementations. By default
+ * all mutator methods throw {@link UnsupportedOperationException}. In
+ * addition, group search operations are disabled.
+ * 
+ * Subclasses may optionally implement these capabilities, and must also
+ * at minimum implement the {@link GroupProvider#getGroup(String)} method.
+ *
+ * @author Tom Evans
+ */
+<span class="nc" id="L29">public abstract class AbstractGroupProvider implements GroupProvider {</span>
+    
+<span class="nc" id="L31">    private static final Logger Log = LoggerFactory.getLogger(AbstractGroupProvider.class);</span>
+
+    private static final String GROUPLIST_CONTAINERS =
+            &quot;SELECT groupName from ofGroupProp &quot; +
+            &quot;where name='sharedRoster.groupList' &quot; +
+            &quot;AND propValue LIKE ?&quot;;
+    private static final String PUBLIC_GROUPS = 
+            &quot;SELECT groupName from ofGroupProp &quot; +
+            &quot;WHERE name='sharedRoster.showInRoster' &quot; +
+            &quot;AND propValue='everybody'&quot;;
+    private static final String GROUPS_FOR_PROP = 
+            &quot;SELECT groupName from ofGroupProp &quot; +
+            &quot;WHERE name=? &quot; +
+            &quot;AND propValue=?&quot;;
+    private static final String LOAD_SHARED_GROUPS =
+            &quot;SELECT groupName FROM ofGroupProp WHERE name='sharedRoster.showInRoster' &quot; +
+            &quot;AND propValue IS NOT NULL AND propValue &lt;&gt; 'nobody'&quot;;
+    private static final String LOAD_PROPERTIES =
+            &quot;SELECT name, propValue FROM ofGroupProp WHERE groupName=?&quot;;    	
+
+
+    // Mutator methods disabled for read-only group providers
+
+    /**
+     * @throws UnsupportedOperationException if the provider is read only
+     */
+    @Override
+    public void addMember(String groupName, JID user, boolean administrator)
+    {
+<span class="nc" id="L60">        throw new UnsupportedOperationException(&quot;Cannot add members to read-only groups&quot;);</span>
+    }
+
+    /**
+     * @throws UnsupportedOperationException if the provider is read only
+     */
+    @Override
+    public void updateMember(String groupName, JID user, boolean administrator)
+    {
+<span class="nc" id="L69">        throw new UnsupportedOperationException(&quot;Cannot update members for read-only groups&quot;);</span>
+    }
+
+    /**
+     * @throws UnsupportedOperationException if the provider is read only
+     */
+    @Override
+    public void deleteMember(String groupName, JID user)
+    {
+<span class="nc" id="L78">        throw new UnsupportedOperationException(&quot;Cannot remove members from read-only groups&quot;);</span>
+    }
+
+    /**
+     * Always true for a read-only provider
+     */
+    @Override
+    public boolean isReadOnly() {
+<span class="nc" id="L86">        return true;</span>
+    }
+
+    /**
+     * @throws UnsupportedOperationException if the provider is read only
+     */
+    @Override
+    public Group createGroup(String name) throws GroupAlreadyExistsException {
+<span class="nc" id="L94">        throw new UnsupportedOperationException(&quot;Cannot create groups via read-only provider&quot;);</span>
+    }
+
+    /**
+     * @throws UnsupportedOperationException if the provider is read only
+     */
+    @Override
+    public void deleteGroup(String name) {
+<span class="nc" id="L102">        throw new UnsupportedOperationException(&quot;Cannot remove groups via read-only provider&quot;);</span>
+    }
+
+    /**
+     * @throws GroupAlreadyExistsException if the group alrady exists
+     * @throws UnsupportedOperationException if the provider is read only
+     */
+    @Override
+    public void setName(String oldName, String newName) throws GroupAlreadyExistsException {
+<span class="nc" id="L111">        throw new UnsupportedOperationException(&quot;Cannot modify read-only groups&quot;);</span>
+    }
+
+    /**
+     * @throws GroupNotFoundException if the group could not be found
+     * @throws UnsupportedOperationException if the provider is read only
+     */
+    @Override
+    public void setDescription(String name, String description) throws GroupNotFoundException {
+<span class="nc" id="L120">        throw new UnsupportedOperationException(&quot;Cannot modify read-only groups&quot;);</span>
+    }
+
+    // Search methods may be overridden by read-only group providers
+    
+    /**
+     * Returns true if the provider supports group search capability. This implementation
+     * always returns false.
+     */
+    @Override
+    public boolean isSearchSupported() {
+<span class="nc" id="L131">        return false;</span>
+    }
+
+    /**
+     * Returns a collection of group search results. This implementation
+     * returns an empty collection.
+     */
+    @Override
+    public Collection&lt;String&gt; search(String query) {
+<span class="nc" id="L140">        return Collections.emptyList();</span>
+    }
+
+    /**
+     * Returns a collection of group search results. This implementation
+     * returns an empty collection.
+     */
+    @Override
+    public Collection&lt;String&gt; search(String query, int startIndex, int numResults) {
+<span class="nc" id="L149">        return Collections.emptyList();</span>
+    }
+
+    // Shared group methods may be overridden by read-only group providers
+
+    /**
+     * Returns the name of the groups that are shared groups.
+     *
+     * @return the name of the groups that are shared groups.
+     */
+    @Override
+    public Collection&lt;String&gt; getSharedGroupNames() {
+<span class="nc" id="L161">        Collection&lt;String&gt; groupNames = new HashSet&lt;&gt;();</span>
+<span class="nc" id="L162">        Connection con = null;</span>
+<span class="nc" id="L163">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L164">        ResultSet rs = null;</span>
+        try {
+<span class="nc" id="L166">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L167">            pstmt = con.prepareStatement(LOAD_SHARED_GROUPS);</span>
+<span class="nc" id="L168">            rs = pstmt.executeQuery();</span>
+<span class="nc bnc" id="L169" title="All 2 branches missed.">            while (rs.next()) {</span>
+<span class="nc" id="L170">                groupNames.add(rs.getString(1));</span>
+            }
+        }
+<span class="nc" id="L173">        catch (SQLException sqle) {</span>
+<span class="nc" id="L174">            Log.error(sqle.getMessage(), sqle);</span>
+        }
+        finally {
+<span class="nc" id="L177">            DbConnectionManager.closeConnection(rs, pstmt, con);</span>
+<span class="nc" id="L178">        }</span>
+<span class="nc" id="L179">        return groupNames;</span>
+    }
+
+    @Override
+    public Collection&lt;String&gt; getSharedGroupNames(JID user) {
+<span class="nc" id="L184">        Set&lt;String&gt; answer = new HashSet&lt;&gt;();</span>
+<span class="nc" id="L185">        Collection&lt;String&gt; userGroups = getGroupNames(user);</span>
+<span class="nc" id="L186">        answer.addAll(userGroups);</span>
+<span class="nc bnc" id="L187" title="All 2 branches missed.">        for (String userGroup : userGroups) {</span>
+<span class="nc" id="L188">            answer.addAll(getVisibleGroupNames(userGroup));</span>
+<span class="nc" id="L189">        }</span>
+<span class="nc" id="L190">        answer.addAll(getPublicSharedGroupNames());</span>
+<span class="nc" id="L191">        return answer;</span>
+    }
+
+    @Override
+    public Collection&lt;String&gt; getVisibleGroupNames(String userGroup) {
+<span class="nc" id="L196">        Set&lt;String&gt; groupNames = new HashSet&lt;&gt;();</span>
+<span class="nc" id="L197">        Connection con = null;</span>
+<span class="nc" id="L198">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L199">        ResultSet rs = null;</span>
+        try {
+<span class="nc" id="L201">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L202">            pstmt = con.prepareStatement(GROUPLIST_CONTAINERS);</span>
+<span class="nc" id="L203">            pstmt.setString(1, &quot;%&quot; + userGroup + &quot;%&quot;);</span>
+<span class="nc" id="L204">            rs = pstmt.executeQuery();</span>
+<span class="nc bnc" id="L205" title="All 2 branches missed.">            while (rs.next()) {</span>
+<span class="nc" id="L206">                groupNames.add(rs.getString(1));</span>
+            }
+        }
+<span class="nc" id="L209">        catch (SQLException sqle) {</span>
+<span class="nc" id="L210">            Log.error(sqle.getMessage(), sqle);</span>
+        }
+        finally {
+<span class="nc" id="L213">            DbConnectionManager.closeConnection(rs, pstmt, con);</span>
+<span class="nc" id="L214">        }</span>
+<span class="nc" id="L215">        return groupNames;</span>
+    }
+    
+    @Override
+    public Collection&lt;String&gt; search(String key, String value) {
+<span class="nc" id="L220">        Set&lt;String&gt; groupNames = new HashSet&lt;&gt;();</span>
+<span class="nc" id="L221">        Connection con = null;</span>
+<span class="nc" id="L222">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L223">        ResultSet rs = null;</span>
+        try {
+<span class="nc" id="L225">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L226">            pstmt = con.prepareStatement(GROUPS_FOR_PROP);</span>
+<span class="nc" id="L227">            pstmt.setString(1, key);</span>
+<span class="nc" id="L228">            pstmt.setString(2, value);</span>
+<span class="nc" id="L229">            rs = pstmt.executeQuery();</span>
+<span class="nc bnc" id="L230" title="All 2 branches missed.">            while (rs.next()) {</span>
+<span class="nc" id="L231">                groupNames.add(rs.getString(1));</span>
+            }
+        }
+<span class="nc" id="L234">        catch (SQLException sqle) {</span>
+<span class="nc" id="L235">            Log.error(sqle.getMessage(), sqle);</span>
+        }
+        finally {
+<span class="nc" id="L238">            DbConnectionManager.closeConnection(rs, pstmt, con);</span>
+<span class="nc" id="L239">        }</span>
+<span class="nc" id="L240">        return groupNames;</span>
+    }
+
+    @Override
+    public Collection&lt;String&gt; getPublicSharedGroupNames() {
+<span class="nc" id="L245">        Set&lt;String&gt; groupNames = new HashSet&lt;&gt;();</span>
+<span class="nc" id="L246">        Connection con = null;</span>
+<span class="nc" id="L247">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L248">        ResultSet rs = null;</span>
+        try {
+<span class="nc" id="L250">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L251">            pstmt = con.prepareStatement(PUBLIC_GROUPS);</span>
+<span class="nc" id="L252">            rs = pstmt.executeQuery();</span>
+<span class="nc bnc" id="L253" title="All 2 branches missed.">            while (rs.next()) {</span>
+<span class="nc" id="L254">                groupNames.add(rs.getString(1));</span>
+            }
+        }
+<span class="nc" id="L257">        catch (SQLException sqle) {</span>
+<span class="nc" id="L258">            Log.error(sqle.getMessage(), sqle);</span>
+        }
+        finally {
+<span class="nc" id="L261">            DbConnectionManager.closeConnection(rs, pstmt, con);</span>
+<span class="nc" id="L262">        }</span>
+<span class="nc" id="L263">        return groupNames;</span>
+    }
+
+    @Override
+    public boolean isSharingSupported() {
+<span class="nc" id="L268">        return true;</span>
+    }
+
+    /**
+     * Returns a custom {@link Map} that updates the database whenever
+     * a property value is added, changed, or deleted.
+     * 
+     * @param group The target group
+     * @return The properties for the given group
+     */
+    @Override
+    public PersistableMap&lt;String,String&gt; loadProperties(Group group) {
+        // custom map implementation persists group property changes
+        // whenever one of the standard mutator methods are called
+<span class="nc" id="L282">        String name = group.getName();</span>
+<span class="nc" id="L283">        PersistableMap&lt;String,String&gt; result = new DefaultGroupPropertyMap&lt;&gt;(group);</span>
+<span class="nc" id="L284">        Connection con = null;</span>
+<span class="nc" id="L285">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L286">        ResultSet rs = null;</span>
+        try {
+<span class="nc" id="L288">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L289">            pstmt = con.prepareStatement(LOAD_PROPERTIES);</span>
+<span class="nc" id="L290">            pstmt.setString(1, name);</span>
+<span class="nc" id="L291">            rs = pstmt.executeQuery();</span>
+<span class="nc bnc" id="L292" title="All 2 branches missed.">            while (rs.next()) {</span>
+<span class="nc" id="L293">                String key = rs.getString(1);</span>
+<span class="nc" id="L294">                String value = rs.getString(2);</span>
+<span class="nc bnc" id="L295" title="All 2 branches missed.">                if (key != null) {</span>
+<span class="nc bnc" id="L296" title="All 2 branches missed.">                    if (value == null) {</span>
+<span class="nc" id="L297">                        result.remove(key);</span>
+<span class="nc" id="L298">                        Log.warn(&quot;Deleted null property &quot; + key + &quot; for group: &quot; + name);</span>
+                    } else {
+<span class="nc" id="L300">                        result.put(key, value, false); // skip persistence during load</span>
+                    }
+                }
+                else { // should not happen, but ...
+<span class="nc" id="L304">                    Log.warn(&quot;Ignoring null property key for group: &quot; + name);</span>
+                }
+<span class="nc" id="L306">            }</span>
+        }
+<span class="nc" id="L308">        catch (SQLException sqle) {</span>
+<span class="nc" id="L309">            Log.error(sqle.getMessage(), sqle);</span>
+        }
+        finally {
+<span class="nc" id="L312">            DbConnectionManager.closeConnection(rs, pstmt, con);</span>
+<span class="nc" id="L313">        }</span>
+<span class="nc" id="L314">        return result;</span>
+    }	
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

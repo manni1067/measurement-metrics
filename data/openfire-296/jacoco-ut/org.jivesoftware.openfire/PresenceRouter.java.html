@@ -1,0 +1,226 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>PresenceRouter.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire</a> &gt; <span class="el_source">PresenceRouter.java</span></div><h1>PresenceRouter.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire;
+
+import org.jivesoftware.openfire.container.BasicModule;
+import org.jivesoftware.openfire.entitycaps.EntityCapabilitiesManager;
+import org.jivesoftware.openfire.handler.PresenceSubscribeHandler;
+import org.jivesoftware.openfire.handler.PresenceUpdateHandler;
+import org.jivesoftware.openfire.interceptor.InterceptorManager;
+import org.jivesoftware.openfire.interceptor.PacketRejectedException;
+import org.jivesoftware.openfire.session.ClientSession;
+import org.jivesoftware.openfire.session.Session;
+import org.jivesoftware.util.LocaleUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmpp.packet.*;
+
+/**
+ * &lt;p&gt;Route presence packets throughout the server.&lt;/p&gt;
+ * &lt;p&gt;Routing is based on the recipient and sender addresses. The typical
+ * packet will often be routed twice, once from the sender to some internal
+ * server component for handling or processing, and then back to the router
+ * to be delivered to it's final destination.&lt;/p&gt;
+ *
+ * @author Iain Shigeoka
+ */
+public class PresenceRouter extends BasicModule {
+
+<span class="nc" id="L43">    private static final Logger Log = LoggerFactory.getLogger(PresenceRouter.class);</span>
+
+    private RoutingTable routingTable;
+    private PresenceUpdateHandler updateHandler;
+    private PresenceSubscribeHandler subscribeHandler;
+    private PresenceManager presenceManager;
+    private SessionManager sessionManager;
+    private EntityCapabilitiesManager entityCapsManager;
+    private MulticastRouter multicastRouter;
+    private String serverName;
+
+    /**
+     * Constructs a presence router.
+     */
+    public PresenceRouter() {
+<span class="nc" id="L58">        super(&quot;XMPP Presence Router&quot;);</span>
+<span class="nc" id="L59">    }</span>
+
+    /**
+     * Routes presence packets.
+     *
+     * @param packet the packet to route.
+     * @throws NullPointerException if the packet is null.
+     */
+    public void route(Presence packet) {
+<span class="nc bnc" id="L68" title="All 2 branches missed.">        if (packet == null) {</span>
+<span class="nc" id="L69">            throw new NullPointerException();</span>
+        }
+<span class="nc" id="L71">        ClientSession session = sessionManager.getSession(packet.getFrom());</span>
+        try {
+            // Invoke the interceptors before we process the read packet
+<span class="nc" id="L74">            InterceptorManager.getInstance().invokeInterceptors(packet, session, true, false);</span>
+<span class="nc bnc" id="L75" title="All 4 branches missed.">            if (session == null || session.getStatus() != Session.STATUS_CONNECTED) {</span>
+<span class="nc" id="L76">                handle(packet);</span>
+            }
+            else {
+<span class="nc" id="L79">                packet.setTo(session.getAddress());</span>
+<span class="nc" id="L80">                packet.setFrom((JID)null);</span>
+<span class="nc" id="L81">                packet.setError(PacketError.Condition.not_authorized);</span>
+<span class="nc" id="L82">                session.process(packet);</span>
+            }
+            // Invoke the interceptors after we have processed the read packet
+<span class="nc" id="L85">            InterceptorManager.getInstance().invokeInterceptors(packet, session, true, true);</span>
+        }
+<span class="nc" id="L87">        catch (PacketRejectedException e) {</span>
+<span class="nc bnc" id="L88" title="All 2 branches missed.">            if (session != null) {</span>
+                // An interceptor rejected this packet so answer a not_allowed error
+<span class="nc" id="L90">                Presence reply = new Presence();</span>
+<span class="nc" id="L91">                reply.setID(packet.getID());</span>
+<span class="nc" id="L92">                reply.setTo(session.getAddress());</span>
+<span class="nc" id="L93">                reply.setFrom(packet.getTo());</span>
+<span class="nc" id="L94">                reply.setError(PacketError.Condition.not_allowed);</span>
+<span class="nc" id="L95">                session.process(reply);</span>
+                // Check if a message notifying the rejection should be sent
+<span class="nc bnc" id="L97" title="All 4 branches missed.">                if (e.getRejectionMessage() != null &amp;&amp; e.getRejectionMessage().trim().length() &gt; 0) {</span>
+                    // A message for the rejection will be sent to the sender of the rejected packet
+<span class="nc" id="L99">                    Message notification = new Message();</span>
+<span class="nc" id="L100">                    notification.setTo(session.getAddress());</span>
+<span class="nc" id="L101">                    notification.setFrom(packet.getTo());</span>
+<span class="nc" id="L102">                    notification.setBody(e.getRejectionMessage());</span>
+<span class="nc" id="L103">                    session.process(notification);</span>
+                }
+            }
+<span class="nc" id="L106">        }</span>
+<span class="nc" id="L107">    }</span>
+
+    private void handle(Presence packet) {
+<span class="nc" id="L110">        JID recipientJID = packet.getTo();</span>
+<span class="nc" id="L111">        JID senderJID = packet.getFrom();</span>
+        // Check if the packet was sent to the server hostname
+<span class="nc bnc" id="L113" title="All 4 branches missed.">        if (recipientJID != null &amp;&amp; recipientJID.getNode() == null &amp;&amp;</span>
+<span class="nc bnc" id="L114" title="All 4 branches missed.">                recipientJID.getResource() == null &amp;&amp; serverName.equals(recipientJID.getDomain())) {</span>
+<span class="nc bnc" id="L115" title="All 2 branches missed.">            if (packet.getElement().element(&quot;addresses&quot;) != null) {</span>
+                // Presence includes multicast processing instructions. Ask the multicastRouter
+                // to route this packet
+<span class="nc" id="L118">                multicastRouter.route(packet);</span>
+<span class="nc" id="L119">                return;</span>
+            }
+        }
+        try {
+            // Presences sent between components are just routed to the component
+<span class="nc bnc" id="L124" title="All 4 branches missed.">            if (recipientJID != null &amp;&amp; !XMPPServer.getInstance().isLocal(recipientJID) &amp;&amp;</span>
+<span class="nc bnc" id="L125" title="All 2 branches missed.">                    !XMPPServer.getInstance().isLocal(senderJID)) {</span>
+                // Route the packet
+<span class="nc" id="L127">                routingTable.routePacket(recipientJID, packet, false);</span>
+<span class="nc" id="L128">                return;</span>
+            }
+
+<span class="nc" id="L131">            Presence.Type type = packet.getType();</span>
+            // Presence updates (null is 'available')
+<span class="nc bnc" id="L133" title="All 4 branches missed.">            if (type == null || Presence.Type.unavailable == type) {</span>
+                // check for local server target
+<span class="nc bnc" id="L135" title="All 4 branches missed.">                if (recipientJID == null || recipientJID.getDomain() == null ||</span>
+<span class="nc bnc" id="L136" title="All 4 branches missed.">                        &quot;&quot;.equals(recipientJID.getDomain()) || (recipientJID.getNode() == null &amp;&amp;</span>
+<span class="nc bnc" id="L137" title="All 2 branches missed.">                        recipientJID.getResource() == null) &amp;&amp;</span>
+<span class="nc bnc" id="L138" title="All 2 branches missed.">                        serverName.equals(recipientJID.getDomain())) {</span>
+<span class="nc" id="L139">                    entityCapsManager.process(packet);</span>
+<span class="nc" id="L140">                    updateHandler.process(packet);</span>
+                }
+                else {
+                    // Trigger events for presences of remote users
+<span class="nc bnc" id="L144" title="All 4 branches missed.">                    if (senderJID != null &amp;&amp; !serverName.equals(senderJID.getDomain()) &amp;&amp;</span>
+<span class="nc bnc" id="L145" title="All 2 branches missed.">                            !routingTable.hasComponentRoute(senderJID)) {</span>
+<span class="nc" id="L146">                        entityCapsManager.process(packet);</span>
+                    }
+                    
+                    // Check that sender session is still active (let unavailable presence go through)
+<span class="nc" id="L150">                    Session session = sessionManager.getSession(packet.getFrom());</span>
+<span class="nc bnc" id="L151" title="All 6 branches missed.">                    if (session != null &amp;&amp; session.getStatus() == Session.STATUS_CLOSED &amp;&amp; type == null) {</span>
+<span class="nc" id="L152">                        Log.warn(&quot;Rejected available presence: &quot; + packet + &quot; - &quot; + session);</span>
+<span class="nc" id="L153">                        return;</span>
+                    }
+
+                    // The user sent a directed presence to an entity
+                    // Broadcast it to all connected resources
+<span class="nc bnc" id="L158" title="All 2 branches missed.">                    for (JID jid : routingTable.getRoutes(recipientJID, senderJID)) {</span>
+                        // Register the sent directed presence
+<span class="nc" id="L160">                        updateHandler.directedPresenceSent(packet, jid, recipientJID.toString());</span>
+                        // Route the packet
+<span class="nc" id="L162">                        routingTable.routePacket(jid, packet, false);</span>
+<span class="nc" id="L163">                    }</span>
+<span class="nc" id="L164">                }</span>
+
+            }
+<span class="nc bnc" id="L167" title="All 8 branches missed.">            else if (Presence.Type.subscribe == type // presence subscriptions</span>
+                    || Presence.Type.unsubscribe == type
+                    || Presence.Type.subscribed == type
+                    || Presence.Type.unsubscribed == type)
+            {
+<span class="nc" id="L172">                subscribeHandler.process(packet);</span>
+            }
+<span class="nc bnc" id="L174" title="All 2 branches missed.">            else if (Presence.Type.probe == type) {</span>
+                // Handle a presence probe sent by a remote server
+<span class="nc bnc" id="L176" title="All 2 branches missed.">                if (!XMPPServer.getInstance().isLocal(recipientJID)) {</span>
+<span class="nc" id="L177">                    routingTable.routePacket(recipientJID, packet, false);</span>
+                }
+                else {
+                    // Handle probe to a local user
+<span class="nc" id="L181">                    presenceManager.handleProbe(packet);</span>
+                }
+            }
+            else {
+                // It's an unknown or ERROR type, just deliver it because there's nothing
+                // else to do with it
+<span class="nc" id="L187">                routingTable.routePacket(recipientJID, packet, false);</span>
+            }
+
+        }
+<span class="nc" id="L191">        catch (Exception e) {</span>
+<span class="nc" id="L192">            Log.error(LocaleUtils.getLocalizedString(&quot;admin.error.routing&quot;), e);</span>
+<span class="nc" id="L193">            Session session = sessionManager.getSession(packet.getFrom());</span>
+<span class="nc bnc" id="L194" title="All 2 branches missed.">            if (session != null) {</span>
+<span class="nc" id="L195">                Log.debug( &quot;Closing session of '{}': {}&quot;, packet.getFrom(), session );</span>
+<span class="nc" id="L196">                session.close();</span>
+            }
+<span class="nc" id="L198">        }</span>
+<span class="nc" id="L199">    }</span>
+
+    @Override
+    public void initialize(XMPPServer server) {
+<span class="nc" id="L203">        super.initialize(server);</span>
+<span class="nc" id="L204">        serverName = server.getServerInfo().getXMPPDomain();</span>
+<span class="nc" id="L205">        routingTable = server.getRoutingTable();</span>
+<span class="nc" id="L206">        updateHandler = server.getPresenceUpdateHandler();</span>
+<span class="nc" id="L207">        subscribeHandler = server.getPresenceSubscribeHandler();</span>
+<span class="nc" id="L208">        presenceManager = server.getPresenceManager();</span>
+<span class="nc" id="L209">        multicastRouter = server.getMulticastRouter();</span>
+<span class="nc" id="L210">        sessionManager = server.getSessionManager();</span>
+<span class="nc" id="L211">        entityCapsManager = server.getEntityCapabilitiesManager();</span>
+<span class="nc" id="L212">    }</span>
+
+    /**
+     * Notification message indicating that a packet has failed to be routed to the recipient.
+     *
+     * @param recipient address of the entity that failed to receive the packet.
+     * @param packet    Presence packet that failed to be sent to the recipient.
+     */
+    public void routingFailed( JID recipient, Packet packet )
+    {
+<span class="nc" id="L222">        Log.debug( &quot;Presence sent to unreachable address: &quot; + packet.toXML() );</span>
+        // presence packets are dropped silently
+<span class="nc" id="L224">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

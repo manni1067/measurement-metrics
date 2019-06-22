@@ -1,0 +1,330 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>CrowdUserProvider.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.crowd</a> &gt; <span class="el_source">CrowdUserProvider.java</span></div><h1>CrowdUserProvider.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2012 Issa Gorissen &lt;issa-gorissen@usa.net&gt;. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.jivesoftware.openfire.crowd;
+
+import java.rmi.RemoteException;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Date;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.TreeMap;
+import java.util.TreeSet;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
+
+import org.jivesoftware.openfire.user.User;
+import org.jivesoftware.openfire.user.UserAlreadyExistsException;
+import org.jivesoftware.openfire.user.UserNotFoundException;
+import org.jivesoftware.openfire.user.UserProvider;
+import org.jivesoftware.util.JiveGlobals;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Atlassian Crowd implementation of the UserProvider. We do not permit
+ * modifications of users from this provider - only read-only access.
+ */
+public class CrowdUserProvider implements UserProvider {
+<span class="nc" id="L46">    private static final Logger LOG = LoggerFactory.getLogger(CrowdUserProvider.class);</span>
+    
+    private static final int CACHE_TTL = 3600; // default ttl in seconds - 1 hour
+    private static final String JIVE_CROWD_USERS_CACHE_TTL_SECS = &quot;crowd.users.cache.ttl.seconds&quot;;
+    
+    private static final String SEARCH_FIELD_USERNAME = &quot;Username&quot;;
+    private static final String SEARCH_FIELD_NAME = &quot;Name&quot;;
+    private static final String SEARCH_FIELD_EMAIL = &quot;Email&quot;;
+<span class="nc" id="L54">    private static final Set&lt;String&gt; SEARCH_FIELDS = new TreeSet&lt;&gt;(Arrays.asList(</span>
+            new String[]{SEARCH_FIELD_USERNAME, SEARCH_FIELD_NAME, SEARCH_FIELD_EMAIL}));
+    
+<span class="nc" id="L57">    private final ReentrantReadWriteLock lock = new ReentrantReadWriteLock();</span>
+<span class="nc" id="L58">    private final ScheduledExecutorService crowdUserSync = Executors.newSingleThreadScheduledExecutor();</span>
+    
+<span class="nc" id="L60">    private Map&lt;String, org.jivesoftware.openfire.crowd.jaxb.User&gt; usersCache = new TreeMap&lt;&gt;();</span>
+<span class="nc" id="L61">    private List&lt;org.jivesoftware.openfire.crowd.jaxb.User&gt; users = new ArrayList&lt;&gt;();</span>
+    
+<span class="nc" id="L63">    public CrowdUserProvider() {</span>
+<span class="nc" id="L64">        String propertyValue = JiveGlobals.getProperty(JIVE_CROWD_USERS_CACHE_TTL_SECS);</span>
+<span class="nc bnc" id="L65" title="All 4 branches missed.">        int ttl = (propertyValue == null || propertyValue.trim().length() == 0) ? CACHE_TTL : Integer.parseInt(propertyValue);</span>
+        
+<span class="nc" id="L67">        crowdUserSync.scheduleAtFixedRate(new UserSynch(this), 0, ttl, TimeUnit.SECONDS);</span>
+        
+<span class="nc" id="L69">        JiveGlobals.setProperty(JIVE_CROWD_USERS_CACHE_TTL_SECS, String.valueOf(ttl));</span>
+        
+        // workaround to load the sync of groups with crowd
+<span class="nc" id="L72">        new CrowdGroupProvider();</span>
+<span class="nc" id="L73">    }</span>
+
+    @Override
+    public User loadUser(String username) throws UserNotFoundException {
+<span class="nc" id="L77">        lock.readLock().lock();</span>
+        try {
+<span class="nc" id="L79">            return getCrowdUser(username).getOpenfireUser();</span>
+        } finally {
+<span class="nc" id="L81">            lock.readLock().unlock();</span>
+<span class="nc" id="L82">        }</span>
+    }
+    
+    
+    public org.jivesoftware.openfire.crowd.jaxb.User getCrowdUser(String username) throws UserNotFoundException {
+<span class="nc" id="L87">        lock.readLock().lock();</span>
+        try {
+<span class="nc bnc" id="L89" title="All 2 branches missed.">            if (usersCache.containsKey(username)) {</span>
+<span class="nc" id="L90">                return usersCache.get(username);</span>
+            } else {
+<span class="nc" id="L92">                throw new UserNotFoundException(&quot;User : '&quot; + String.valueOf(username) + &quot;'&quot;);</span>
+            }
+        } finally {
+<span class="nc" id="L95">            lock.readLock().unlock();</span>
+<span class="nc" id="L96">        }</span>
+    }
+
+    
+    @Override
+    public int getUserCount() {
+<span class="nc" id="L102">        lock.readLock().lock();</span>
+        try {
+<span class="nc" id="L104">            return usersCache.size();</span>
+        } finally {
+<span class="nc" id="L106">            lock.readLock().unlock();</span>
+<span class="nc" id="L107">        }</span>
+    }
+
+    @Override
+    public Collection&lt;User&gt; getUsers() {
+<span class="nc" id="L112">        lock.readLock().lock();</span>
+        try {
+<span class="nc" id="L114">            Collection&lt;User&gt; results = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L115" title="All 2 branches missed.">            for (org.jivesoftware.openfire.crowd.jaxb.User user : usersCache.values()) {</span>
+<span class="nc" id="L116">                results.add(user.getOpenfireUser());</span>
+<span class="nc" id="L117">            }</span>
+<span class="nc" id="L118">            return results;</span>
+        } finally {
+<span class="nc" id="L120">            lock.readLock().unlock();</span>
+<span class="nc" id="L121">        }</span>
+    }
+
+    @Override
+    public Collection&lt;String&gt; getUsernames() {
+<span class="nc" id="L126">        lock.readLock().lock();</span>
+        try {
+<span class="nc" id="L128">            return usersCache.keySet();</span>
+        } finally {
+<span class="nc" id="L130">            lock.readLock().unlock();</span>
+<span class="nc" id="L131">        }</span>
+    }
+
+    @Override
+    public Collection&lt;User&gt; getUsers(int startIndex, int numResults) {
+<span class="nc" id="L136">        lock.readLock().lock();</span>
+        try {
+<span class="nc" id="L138">            Collection&lt;User&gt; results = new ArrayList&lt;&gt;(numResults);</span>
+            
+<span class="nc bnc" id="L140" title="All 4 branches missed.">            for (int i = 0, j = startIndex; i &lt; numResults &amp;&amp; j &lt; users.size(); ++i, ++j) {</span>
+<span class="nc" id="L141">                results.add(users.get(j).getOpenfireUser());</span>
+            }
+            
+<span class="nc" id="L144">            return results;</span>
+        } finally {
+<span class="nc" id="L146">            lock.readLock().unlock();</span>
+<span class="nc" id="L147">        }</span>
+    }
+
+    @Override
+    public Set&lt;String&gt; getSearchFields() throws UnsupportedOperationException {
+<span class="nc" id="L152">        return SEARCH_FIELDS;</span>
+    }
+
+    @Override
+    public Collection&lt;User&gt; findUsers(Set&lt;String&gt; fields, String query) throws UnsupportedOperationException {
+<span class="nc" id="L157">        lock.readLock().lock();</span>
+        try {
+<span class="nc" id="L159">            ArrayList&lt;User&gt; results = new ArrayList&lt;&gt;();</span>
+            
+<span class="nc bnc" id="L161" title="All 4 branches missed.">            if (query != null &amp;&amp; query.trim().length() &gt; 0) {</span>
+                
+<span class="nc bnc" id="L163" title="All 2 branches missed.">                if (query.endsWith(&quot;*&quot;)) {</span>
+<span class="nc" id="L164">                    query = query.substring(0, query.length() - 1);</span>
+                }
+<span class="nc bnc" id="L166" title="All 2 branches missed.">                if (query.startsWith(&quot;*&quot;)) {</span>
+<span class="nc" id="L167">                    query = query.substring(1);</span>
+                }
+<span class="nc" id="L169">                query = query.toLowerCase();</span>
+                
+<span class="nc bnc" id="L171" title="All 2 branches missed.">                if (SEARCH_FIELDS.containsAll(fields)) {</span>
+<span class="nc bnc" id="L172" title="All 2 branches missed.">                    if (fields.contains(SEARCH_FIELD_USERNAME)) {</span>
+<span class="nc bnc" id="L173" title="All 2 branches missed.">                        for (org.jivesoftware.openfire.crowd.jaxb.User user : users) {</span>
+<span class="nc bnc" id="L174" title="All 2 branches missed.">                            if (user.name.toLowerCase().contains(query)) {</span>
+<span class="nc" id="L175">                                results.add(user.getOpenfireUser());</span>
+                            }
+<span class="nc" id="L177">                        }</span>
+                        
+<span class="nc bnc" id="L179" title="All 2 branches missed.">                    } else if (fields.contains(SEARCH_FIELD_NAME)) {</span>
+<span class="nc bnc" id="L180" title="All 2 branches missed.">                        for (org.jivesoftware.openfire.crowd.jaxb.User user : users) {</span>
+<span class="nc bnc" id="L181" title="All 2 branches missed.">                            if (user.displayName.toLowerCase().contains(query)) {</span>
+<span class="nc" id="L182">                                results.add(user.getOpenfireUser());</span>
+                            }
+<span class="nc" id="L184">                        }</span>
+                        
+                    } else {
+<span class="nc bnc" id="L187" title="All 2 branches missed.">                        for (org.jivesoftware.openfire.crowd.jaxb.User user : users) {</span>
+<span class="nc bnc" id="L188" title="All 2 branches missed.">                            if (user.email.toLowerCase().contains(query)) {</span>
+<span class="nc" id="L189">                                results.add(user.getOpenfireUser());</span>
+                            }
+<span class="nc" id="L191">                        }</span>
+
+                    }
+                }
+            }
+            
+<span class="nc" id="L197">            return results;</span>
+            
+        } finally {
+<span class="nc" id="L200">            lock.readLock().unlock();</span>
+<span class="nc" id="L201">        }</span>
+    }
+
+    @Override
+    public Collection&lt;User&gt; findUsers(Set&lt;String&gt; fields, String query, int startIndex, int numResults) throws UnsupportedOperationException {
+<span class="nc" id="L206">        lock.readLock().lock();</span>
+        try {
+<span class="nc" id="L208">            ArrayList&lt;User&gt; foundUsers = (ArrayList&lt;User&gt;) findUsers(fields, query);</span>
+            
+<span class="nc" id="L210">            Collection&lt;User&gt; results = new ArrayList&lt;&gt;(foundUsers.size());</span>
+            
+<span class="nc bnc" id="L212" title="All 4 branches missed.">            for (int i = 0, j = startIndex; i &lt; numResults &amp;&amp; j &lt; foundUsers.size(); ++i, ++j) {</span>
+<span class="nc" id="L213">                results.add(foundUsers.get(j));</span>
+            }
+            
+<span class="nc" id="L216">            return results;</span>
+            
+        } finally {
+<span class="nc" id="L219">            lock.readLock().unlock();</span>
+<span class="nc" id="L220">        }</span>
+    }
+
+    @Override
+    public boolean isReadOnly() {
+<span class="nc" id="L225">        return true;</span>
+    }
+
+    @Override
+    public boolean isNameRequired() {
+<span class="nc" id="L230">        return false;</span>
+    }
+
+    @Override
+    public boolean isEmailRequired() {
+<span class="nc" id="L235">        return false;</span>
+    }
+
+    
+    
+    
+    
+    
+    /*
+     * Not implemented methods
+     */
+    
+    @Override
+    public User createUser(String username, String password, String name, String email) throws UserAlreadyExistsException {
+<span class="nc" id="L249">        throw new UnsupportedOperationException(&quot;Create new user not implemented by this version of user provider&quot;);</span>
+    }
+
+    @Override
+    public void deleteUser(String username) {
+<span class="nc" id="L254">        throw new UnsupportedOperationException(&quot;Delete a user not implemented by this version of user provider&quot;);</span>
+    }
+
+    @Override
+    public void setName(String username, String name) throws UserNotFoundException {
+<span class="nc" id="L259">        throw new UnsupportedOperationException(&quot;Setting user name not implemented by this version of user provider&quot;);</span>
+    }
+
+    @Override
+    public void setEmail(String username, String email) throws UserNotFoundException {
+<span class="nc" id="L264">        throw new UnsupportedOperationException(&quot;Setting user email not implemented by this version of user provider&quot;);</span>
+    }
+
+    @Override
+    public void setCreationDate(String username, Date creationDate) throws UserNotFoundException {
+<span class="nc" id="L269">        throw new UnsupportedOperationException(&quot;Setting user creation date unsupported by this version of user provider&quot;);</span>
+    }
+
+    @Override
+    public void setModificationDate(String username, Date modificationDate) throws UserNotFoundException {
+<span class="nc" id="L274">        throw new UnsupportedOperationException(&quot;Setting user modification date unsupported by this version of user provider&quot;);</span>
+    }
+    
+
+    
+    
+    
+    static class UserSynch implements Runnable {
+        CrowdUserProvider userProvider;
+        
+<span class="nc" id="L284">        public UserSynch(CrowdUserProvider userProvider) {</span>
+<span class="nc" id="L285">            this.userProvider = userProvider;</span>
+<span class="nc" id="L286">        }</span>
+        
+        @Override
+        public void run() {
+<span class="nc" id="L290">            LOG.info(&quot;running synch with crowd...&quot;);</span>
+<span class="nc" id="L291">            CrowdManager manager = null;</span>
+            try {
+<span class="nc" id="L293">                manager = CrowdManager.getInstance();</span>
+<span class="nc" id="L294">            } catch (Exception e) {</span>
+<span class="nc" id="L295">                LOG.error(&quot;Failure to load the Crowd manager&quot;, e);</span>
+<span class="nc" id="L296">                return;</span>
+<span class="nc" id="L297">            }</span>
+            
+<span class="nc" id="L299">            List&lt;org.jivesoftware.openfire.crowd.jaxb.User&gt; allUsers = null;</span>
+            try {
+<span class="nc" id="L301">                allUsers = manager.getAllUsers();</span>
+<span class="nc" id="L302">            } catch (RemoteException re) {</span>
+<span class="nc" id="L303">                LOG.error(&quot;Failure to fetch all crowd users&quot;, re);</span>
+<span class="nc" id="L304">                return;</span>
+<span class="nc" id="L305">            }</span>
+
+<span class="nc bnc" id="L307" title="All 4 branches missed.">            if (allUsers != null &amp;&amp; allUsers.size() &gt; 0) {</span>
+                
+<span class="nc" id="L309">                Map&lt;String, org.jivesoftware.openfire.crowd.jaxb.User&gt; usersMap = new TreeMap&lt;&gt;();</span>
+<span class="nc bnc" id="L310" title="All 2 branches missed.">                for (org.jivesoftware.openfire.crowd.jaxb.User user : allUsers) {</span>
+<span class="nc" id="L311">                    usersMap.put(user.name, user);</span>
+<span class="nc" id="L312">                }</span>
+                
+<span class="nc" id="L314">                userProvider.lock.writeLock().lock();</span>
+                try {
+<span class="nc" id="L316">                    userProvider.users = allUsers;</span>
+<span class="nc" id="L317">                    userProvider.usersCache = usersMap;</span>
+                } finally {
+<span class="nc" id="L319">                    userProvider.lock.writeLock().unlock();</span>
+<span class="nc" id="L320">                }</span>
+            }
+            
+<span class="nc" id="L323">            LOG.info(&quot;crowd synch done, returned &quot; + allUsers.size() + &quot; users&quot;);</span>
+            
+<span class="nc" id="L325">        }</span>
+        
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

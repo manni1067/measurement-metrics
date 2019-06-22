@@ -1,0 +1,189 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>LocalSessionManager.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire</a> &gt; <span class="el_source">LocalSessionManager.java</span></div><h1>LocalSessionManager.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire;
+
+import java.util.Collection;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.TimerTask;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
+
+import org.jivesoftware.openfire.session.LocalClientSession;
+import org.jivesoftware.openfire.session.LocalComponentSession;
+import org.jivesoftware.openfire.session.LocalConnectionMultiplexerSession;
+import org.jivesoftware.openfire.session.LocalIncomingServerSession;
+import org.jivesoftware.openfire.session.LocalSession;
+import org.jivesoftware.util.LocaleUtils;
+import org.jivesoftware.util.TaskEngine;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * A LocalSessionManager keeps track of sessions that are connected to this JVM and for
+ * which there is no route. That is, sessions that are added to the routing table are
+ * not going to be stored by this manager.&lt;p&gt;
+ *
+ * For external component sessions, incoming server sessions and connection manager
+ * sessions there is never going to be a route so they are only kept here. Client
+ * sessions before they authenticate are kept in this manager but once authenticated
+ * they are removed since a new route is created for authenticated client sessions.&lt;p&gt;
+ *
+ * Sessions stored in this manager are not accessible from other cluster nodes. However,
+ * sessions for which there is a route in the routing table can be accessed from other
+ * cluster nodes. The only exception to this rule are the sessions of external components.
+ * External component sessions are kept in this manager but all components (internal and
+ * external) create a route in the routing table for the service they provide. That means
+ * that services of components are accessible from other cluster nodes and when the
+ * component is an external component then its session will be used to deliver packets
+ * through the external component's session. 
+ *
+ * @author Gaston Dombiak
+ */
+<span class="nc" id="L59">class LocalSessionManager {</span>
+    
+<span class="nc" id="L61">    private static final Logger Log = LoggerFactory.getLogger(LocalSessionManager.class);</span>
+
+    /**
+     * Map that holds sessions that has been created but haven't been authenticated yet. The Map
+     * will hold client sessions.
+     */
+<span class="nc" id="L67">    private Map&lt;String, LocalClientSession&gt; preAuthenticatedSessions = new ConcurrentHashMap&lt;&gt;();</span>
+
+    /**
+     * The sessions contained in this List are component sessions. For each connected component
+     * this Map will keep the component's session.
+     */
+<span class="nc" id="L73">    private List&lt;LocalComponentSession&gt; componentsSessions = new CopyOnWriteArrayList&lt;&gt;();</span>
+
+    /**
+     * Map of connection multiplexer sessions grouped by connection managers. Each connection
+     * manager may have many connections to the server (i.e. connection pool). All connections
+     * originated from the same connection manager are grouped as a single entry in the map.
+     * Once all connections have been closed users that were logged using the connection manager
+     * will become unavailable.
+     */
+<span class="nc" id="L82">    private Map&lt;String, LocalConnectionMultiplexerSession&gt; connnectionManagerSessions =</span>
+            new ConcurrentHashMap&lt;&gt;();
+
+    /**
+     * The sessions contained in this Map are server sessions originated by a remote server. These
+     * sessions can only receive packets from the remote server but are not capable of sending
+     * packets to the remote server. Sessions will be added to this collection only after they were
+     * authenticated.
+     * Key: streamID, Value: the IncomingServerSession associated to the streamID.
+     */
+<span class="nc" id="L92">    private final Map&lt;StreamID, LocalIncomingServerSession&gt; incomingServerSessions =</span>
+            new ConcurrentHashMap&lt;&gt;();
+
+
+    public Map&lt;String, LocalClientSession&gt; getPreAuthenticatedSessions() {
+<span class="nc" id="L97">        return preAuthenticatedSessions;</span>
+    }
+
+    public List&lt;LocalComponentSession&gt; getComponentsSessions() {
+<span class="nc" id="L101">        return componentsSessions;</span>
+    }
+
+    public Map&lt;String, LocalConnectionMultiplexerSession&gt; getConnnectionManagerSessions() {
+<span class="nc" id="L105">        return connnectionManagerSessions;</span>
+    }
+
+    public LocalIncomingServerSession getIncomingServerSession(StreamID streamID) {
+<span class="nc" id="L109">        return incomingServerSessions.get(streamID);</span>
+    }
+
+    public Collection&lt;LocalIncomingServerSession&gt; getIncomingServerSessions() {
+<span class="nc" id="L113">        return incomingServerSessions.values();</span>
+    }
+
+    public void addIncomingServerSessions(StreamID streamID, LocalIncomingServerSession  session) {
+<span class="nc" id="L117">        incomingServerSessions.put(streamID, session);</span>
+<span class="nc" id="L118">    }</span>
+
+    public void removeIncomingServerSessions(StreamID streamID) {
+<span class="nc" id="L121">        incomingServerSessions.remove(streamID);</span>
+<span class="nc" id="L122">    }</span>
+
+    public void start() {
+        // Run through the server sessions every 3 minutes after a 3 minutes server startup delay (default values)
+<span class="nc" id="L126">        int period = 3 * 60 * 1000;</span>
+<span class="nc" id="L127">        TaskEngine.getInstance().scheduleAtFixedRate(new ServerCleanupTask(), period, period);</span>
+<span class="nc" id="L128">    }</span>
+
+    public void stop() {
+        try {
+            // Send the close stream header to all connected connections
+<span class="nc" id="L133">            Set&lt;LocalSession&gt; sessions = new HashSet&lt;&gt;();</span>
+<span class="nc" id="L134">            sessions.addAll(preAuthenticatedSessions.values());</span>
+<span class="nc" id="L135">            sessions.addAll(componentsSessions);</span>
+<span class="nc bnc" id="L136" title="All 2 branches missed.">            for (LocalIncomingServerSession incomingSession : incomingServerSessions.values()) {</span>
+<span class="nc" id="L137">                sessions.add(incomingSession);</span>
+<span class="nc" id="L138">            }</span>
+<span class="nc bnc" id="L139" title="All 2 branches missed.">            for (LocalConnectionMultiplexerSession multiplexer : connnectionManagerSessions.values()) {</span>
+<span class="nc" id="L140">                sessions.add(multiplexer);</span>
+<span class="nc" id="L141">            }</span>
+
+<span class="nc bnc" id="L143" title="All 2 branches missed.">            for (LocalSession session : sessions) {</span>
+                try {
+                    // Notify connected client that the server is being shut down
+<span class="nc bnc" id="L146" title="All 2 branches missed.">                    if (!session.isDetached()) {</span>
+<span class="nc" id="L147">                        session.getConnection().systemShutdown();</span>
+                    }
+                }
+<span class="nc" id="L150">                catch (Throwable t) {</span>
+                    // Ignore.
+<span class="nc" id="L152">                }</span>
+<span class="nc" id="L153">            }</span>
+        }
+<span class="nc" id="L155">        catch (Exception e) {</span>
+            // Ignore.
+<span class="nc" id="L157">        }</span>
+<span class="nc" id="L158">    }</span>
+
+    /**
+     * Task that closes idle server sessions.
+     */
+<span class="nc" id="L163">    private class ServerCleanupTask extends TimerTask {</span>
+        /**
+         * Close incoming server sessions that have been idle for a long time.
+         */
+        @Override
+        public void run() {
+            // Do nothing if this feature is disabled
+<span class="nc" id="L170">            int idleTime = SessionManager.getInstance().getServerSessionIdleTime();</span>
+<span class="nc bnc" id="L171" title="All 2 branches missed.">            if (idleTime == -1) {</span>
+<span class="nc" id="L172">                return;</span>
+            }
+<span class="nc" id="L174">            final long deadline = System.currentTimeMillis() - idleTime;</span>
+<span class="nc bnc" id="L175" title="All 2 branches missed.">            for (LocalIncomingServerSession session : incomingServerSessions.values()) {</span>
+                try {
+<span class="nc bnc" id="L177" title="All 2 branches missed.">                    if (session.getLastActiveDate().getTime() &lt; deadline) {</span>
+<span class="nc" id="L178">                        Log.debug( &quot;ServerCleanupTask is closing an incoming server session that has been idle for a long time. Last active: {}. Session to be closed: {}&quot;, session.getLastActiveDate(), session );</span>
+<span class="nc" id="L179">                        session.close();</span>
+                    }
+                }
+<span class="nc" id="L182">                catch (Throwable e) {</span>
+<span class="nc" id="L183">                    Log.error(LocaleUtils.getLocalizedString(&quot;admin.error&quot;), e);</span>
+<span class="nc" id="L184">                }</span>
+<span class="nc" id="L185">            }</span>
+<span class="nc" id="L186">        }</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

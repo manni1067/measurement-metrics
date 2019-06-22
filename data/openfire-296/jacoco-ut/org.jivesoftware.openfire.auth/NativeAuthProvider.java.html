@@ -1,0 +1,224 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>NativeAuthProvider.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.auth</a> &gt; <span class="el_source">NativeAuthProvider.java</span></div><h1>NativeAuthProvider.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.auth;
+
+import java.io.File;
+import java.lang.reflect.Field;
+import java.net.URL;
+
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.user.NativeUserProvider;
+import org.jivesoftware.openfire.user.UserAlreadyExistsException;
+import org.jivesoftware.openfire.user.UserManager;
+import org.jivesoftware.openfire.user.UserNotFoundException;
+import org.jivesoftware.openfire.user.UserProvider;
+import org.jivesoftware.util.JiveGlobals;
+import org.jivesoftware.util.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import com.cenqua.shaj.Shaj;
+
+/**
+ * Authenticates using the native operating system authentication method. On Windows,
+ * this means Win32 authentication; on Unix/Linux, PAM authentication. New user accounts
+ * will be created automatically as needed.&lt;p&gt;
+ *
+ * Authentication is handled using the &lt;a href=&quot;http://opensource.cenqua.com/shaj&quot;&gt;Shaj&lt;/a&gt;
+ * library. In order for this provider to work, the appropriate native library must be loaded.
+ * The appropriate native library must be manually moved from the resources/nativeAuth
+ * directory to the lib directory.&lt;p&gt;
+ *
+ * To enable this provider, set the following in the system properties:
+ *
+ * &lt;ul&gt;
+ * &lt;li&gt;{@code provider.auth.className = org.jivesoftware.openfire.auth.NativeAuthProvider}&lt;/li&gt;
+ * &lt;li&gt;{@code provider.user.className = org.jivesoftware.openfire.user.NativeUserProvider}&lt;/li&gt;
+ * &lt;/ul&gt;
+ *
+ * The properties to configure the provider are as follows:
+ *
+ * &lt;ul&gt;
+ *      &lt;li&gt;nativeAuth.domain -- &lt;i&gt; on Windows, the domain to use for authentication.
+ *      If the value is not set, the machine's default domain will be used or standard OS
+ *      auth will be used if the machine is not part of a domain. On Unix/Linux, this
+ *      value specifies the PAM module to use for authentication. If the value is not set,
+ *      the PAM module &quot;other&quot; will be used.&lt;/i&gt;&lt;/li&gt;
+ * &lt;/ul&gt;
+ *
+ * For more information about configuring the domain value and other aspects of Shaj,
+ * please see: &lt;a href=&quot;http://opensource.cenqua.com/shaj/doc.html&quot;&gt;
+ * http://opensource.cenqua.com/shaj/doc.html&lt;/a&gt;.
+ *
+ * @author Matt Tucker
+ */
+public class NativeAuthProvider implements AuthProvider {
+
+<span class="nc" id="L71">    private static final Logger Log = LoggerFactory.getLogger(NativeAuthProvider.class);</span>
+
+    private String domain;
+
+<span class="nc" id="L75">    public NativeAuthProvider() {</span>
+        // Convert XML based provider setup to Database based
+<span class="nc" id="L77">        JiveGlobals.migrateProperty(&quot;nativeAuth.domain&quot;);</span>
+
+<span class="nc" id="L79">        this.domain = JiveGlobals.getProperty(&quot;nativeAuth.domain&quot;);</span>
+
+        // Configure the library path so that we can load the shaj native library
+        // from the Openfire lib directory.
+        // Find the root path of this class.
+        try {
+<span class="nc" id="L85">            String binaryPath = (new URL(Shaj.class.getProtectionDomain()</span>
+<span class="nc" id="L86">                    .getCodeSource().getLocation(), &quot;.&quot;)).openConnection()</span>
+<span class="nc" id="L87">                    .getPermission().getName();</span>
+<span class="nc" id="L88">            binaryPath = (new File(binaryPath)).getCanonicalPath();</span>
+
+            // Add the binary path to &quot;java.library.path&quot;.
+<span class="nc" id="L91">            String newLibPath = binaryPath + File.pathSeparator +</span>
+<span class="nc" id="L92">                    System.getProperty(&quot;java.library.path&quot;);</span>
+<span class="nc" id="L93">            System.setProperty(&quot;java.library.path&quot;, newLibPath);</span>
+<span class="nc" id="L94">            Field fieldSysPath = ClassLoader.class.getDeclaredField(&quot;sys_paths&quot;);</span>
+<span class="nc" id="L95">            fieldSysPath.setAccessible(true);</span>
+<span class="nc" id="L96">            fieldSysPath.set(System.class.getClassLoader(), null);</span>
+        }
+<span class="nc" id="L98">        catch (Exception e) {</span>
+<span class="nc" id="L99">            Log.error(e.getMessage(), e);</span>
+<span class="nc" id="L100">        }</span>
+
+        // Configure Shaj to log output to the Openfire logger.
+<span class="nc" id="L103">        com.cenqua.shaj.log.Log.Factory.setInstance(new com.cenqua.shaj.log.Log() {</span>
+            @Override
+            public boolean isDebug() {
+<span class="nc" id="L106">                return Log.isDebugEnabled();</span>
+            }
+
+            @Override
+            public void error(String string) {
+<span class="nc" id="L111">                Log.error(string);</span>
+<span class="nc" id="L112">            }</span>
+
+            @Override
+            public void error(String string, Throwable throwable) {
+<span class="nc" id="L116">                Log.error(string, throwable);</span>
+<span class="nc" id="L117">            }</span>
+
+            @Override
+            public void debug(String string) {
+<span class="nc" id="L121">                Log.debug(&quot;NativeAuthProvider: &quot;+string);</span>
+<span class="nc" id="L122">            }</span>
+        });
+<span class="nc" id="L124">    }</span>
+
+    @Override
+    public void authenticate(String username, String password) throws UnauthorizedException {
+<span class="nc bnc" id="L128" title="All 2 branches missed.">        if (username.contains(&quot;@&quot;)) {</span>
+            // Check that the specified domain matches the server's domain
+<span class="nc" id="L130">            int index = username.indexOf(&quot;@&quot;);</span>
+<span class="nc" id="L131">            String domain = username.substring(index + 1);</span>
+<span class="nc bnc" id="L132" title="All 2 branches missed.">            if (domain.equals(XMPPServer.getInstance().getServerInfo().getXMPPDomain())) {</span>
+<span class="nc" id="L133">                username = username.substring(0, index);</span>
+            } else {
+                // Unknown domain. Return authentication failed.
+<span class="nc" id="L136">                throw new UnauthorizedException();</span>
+            }
+        }
+        try {
+            // Some native authentication mechanisms appear to not handle high load
+            // very well. Therefore, synchronize access to Shaj to throttle auth checks.
+<span class="nc" id="L142">            synchronized (this) {</span>
+<span class="nc bnc" id="L143" title="All 2 branches missed.">                if (!Shaj.checkPassword(domain, username, password)) {</span>
+<span class="nc" id="L144">                    throw new UnauthorizedException();</span>
+                }
+<span class="nc" id="L146">            }</span>
+        }
+<span class="nc" id="L148">        catch (UnauthorizedException ue) {</span>
+<span class="nc" id="L149">            throw ue;</span>
+        }
+<span class="nc" id="L151">        catch (Exception e) {</span>
+<span class="nc" id="L152">            throw new UnauthorizedException(e);</span>
+<span class="nc" id="L153">        }</span>
+
+        // See if the user exists in the database. If not, automatically create them.
+<span class="nc" id="L156">        UserManager userManager = UserManager.getInstance();</span>
+        try {
+<span class="nc" id="L158">            userManager.getUser(username);</span>
+        }
+<span class="nc" id="L160">        catch (UserNotFoundException unfe) {</span>
+            try {
+<span class="nc" id="L162">                Log.debug(&quot;Automatically creating new user account for &quot; + username);</span>
+                // Create user; use a random password for better safety in the future.
+                // Note that we have to go to the user provider directly -- because the
+                // provider is read-only, UserManager will usually deny access to createUser.
+<span class="nc" id="L166">                UserProvider provider = UserManager.getUserProvider();</span>
+<span class="nc bnc" id="L167" title="All 2 branches missed.">                if (!(provider instanceof NativeUserProvider)) {</span>
+<span class="nc" id="L168">                    Log.error(&quot;Error: not using NativeUserProvider so authentication with &quot; +</span>
+                            &quot;NativeAuthProvider will likely fail. Using: &quot; +
+<span class="nc" id="L170">                            provider.getClass().getName());</span>
+                }
+<span class="nc" id="L172">                UserManager.getUserProvider().createUser(username, StringUtils.randomString(8),</span>
+                        null, null);
+            }
+<span class="nc" id="L175">            catch (UserAlreadyExistsException uaee) {</span>
+                // Ignore.
+<span class="nc" id="L177">            }</span>
+<span class="nc" id="L178">        }</span>
+<span class="nc" id="L179">    }</span>
+
+    @Override
+    public String getPassword(String username)
+            throws UserNotFoundException, UnsupportedOperationException
+    {
+<span class="nc" id="L185">        throw new UnsupportedOperationException();    </span>
+    }
+
+    @Override
+    public void setPassword(String username, String password) throws UserNotFoundException {
+<span class="nc" id="L190">        throw new UnsupportedOperationException();</span>
+    }
+
+    @Override
+    public boolean supportsPasswordRetrieval() {
+<span class="nc" id="L195">        return false;</span>
+    }
+
+    @Override
+    public boolean isScramSupported() {
+        // TODO Auto-generated method stub
+<span class="nc" id="L201">        return false;</span>
+    }
+
+    @Override
+    public String getSalt(String username) throws UnsupportedOperationException, UserNotFoundException {
+<span class="nc" id="L206">        throw new UnsupportedOperationException();</span>
+    }
+
+    @Override
+    public int getIterations(String username) throws UnsupportedOperationException, UserNotFoundException {
+<span class="nc" id="L211">        throw new UnsupportedOperationException();</span>
+    }
+
+    @Override
+    public String getServerKey(String username) throws UnsupportedOperationException, UserNotFoundException {
+<span class="nc" id="L216">        throw new UnsupportedOperationException();</span>
+    }
+
+    @Override
+    public String getStoredKey(String username) throws UnsupportedOperationException, UserNotFoundException {
+<span class="nc" id="L221">        throw new UnsupportedOperationException();</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

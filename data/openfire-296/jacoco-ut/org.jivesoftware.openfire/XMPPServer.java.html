@@ -1,0 +1,1830 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>XMPPServer.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire</a> &gt; <span class="el_source">XMPPServer.java</span></div><h1>XMPPServer.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2004-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire;
+
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileNotFoundException;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.net.InetAddress;
+import java.net.UnknownHostException;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Date;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.TimerTask;
+import java.util.UUID;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.Future;
+
+import org.dom4j.Document;
+import org.dom4j.io.SAXReader;
+import org.jivesoftware.database.DbConnectionManager;
+import org.jivesoftware.database.JNDIDataSourceProvider;
+import org.jivesoftware.openfire.admin.AdminManager;
+import org.jivesoftware.openfire.audit.AuditManager;
+import org.jivesoftware.openfire.audit.spi.AuditManagerImpl;
+import org.jivesoftware.openfire.auth.AuthFactory;
+import org.jivesoftware.openfire.cluster.ClusterManager;
+import org.jivesoftware.openfire.cluster.ClusterMonitor;
+import org.jivesoftware.openfire.cluster.NodeID;
+import org.jivesoftware.openfire.commands.AdHocCommandHandler;
+import org.jivesoftware.openfire.component.InternalComponentManager;
+import org.jivesoftware.openfire.container.AdminConsolePlugin;
+import org.jivesoftware.openfire.container.Module;
+import org.jivesoftware.openfire.container.PluginManager;
+import org.jivesoftware.openfire.disco.IQDiscoInfoHandler;
+import org.jivesoftware.openfire.disco.IQDiscoItemsHandler;
+import org.jivesoftware.openfire.disco.ServerFeaturesProvider;
+import org.jivesoftware.openfire.disco.ServerIdentitiesProvider;
+import org.jivesoftware.openfire.disco.ServerItemsProvider;
+import org.jivesoftware.openfire.disco.UserFeaturesProvider;
+import org.jivesoftware.openfire.disco.UserIdentitiesProvider;
+import org.jivesoftware.openfire.disco.UserItemsProvider;
+import org.jivesoftware.openfire.entitycaps.EntityCapabilitiesManager;
+import org.jivesoftware.openfire.filetransfer.DefaultFileTransferManager;
+import org.jivesoftware.openfire.filetransfer.FileTransferManager;
+import org.jivesoftware.openfire.filetransfer.proxy.FileTransferProxy;
+import org.jivesoftware.openfire.group.GroupManager;
+import org.jivesoftware.openfire.handler.IQBindHandler;
+import org.jivesoftware.openfire.handler.IQBlockingHandler;
+import org.jivesoftware.openfire.handler.IQEntityTimeHandler;
+import org.jivesoftware.openfire.handler.IQHandler;
+import org.jivesoftware.openfire.handler.IQLastActivityHandler;
+import org.jivesoftware.openfire.handler.IQMessageCarbonsHandler;
+import org.jivesoftware.openfire.handler.IQOfflineMessagesHandler;
+import org.jivesoftware.openfire.handler.IQPingHandler;
+import org.jivesoftware.openfire.handler.IQPrivacyHandler;
+import org.jivesoftware.openfire.handler.IQPrivateHandler;
+import org.jivesoftware.openfire.handler.IQRegisterHandler;
+import org.jivesoftware.openfire.handler.IQRosterHandler;
+import org.jivesoftware.openfire.handler.IQSessionEstablishmentHandler;
+import org.jivesoftware.openfire.handler.IQSharedGroupHandler;
+import org.jivesoftware.openfire.handler.IQVersionHandler;
+import org.jivesoftware.openfire.handler.IQvCardHandler;
+import org.jivesoftware.openfire.handler.PresenceSubscribeHandler;
+import org.jivesoftware.openfire.handler.PresenceUpdateHandler;
+import org.jivesoftware.openfire.keystore.CertificateStoreManager;
+import org.jivesoftware.openfire.keystore.IdentityStore;
+import org.jivesoftware.openfire.lockout.LockOutManager;
+import org.jivesoftware.openfire.mediaproxy.MediaProxyService;
+import org.jivesoftware.openfire.muc.MultiUserChatManager;
+import org.jivesoftware.openfire.net.MulticastDNSService;
+import org.jivesoftware.openfire.net.ServerTrafficCounter;
+import org.jivesoftware.openfire.pep.IQPEPHandler;
+import org.jivesoftware.openfire.pep.IQPEPOwnerHandler;
+import org.jivesoftware.openfire.pubsub.PubSubModule;
+import org.jivesoftware.openfire.roster.RosterManager;
+import org.jivesoftware.openfire.sasl.AnonymousSaslServer;
+import org.jivesoftware.openfire.security.SecurityAuditManager;
+import org.jivesoftware.openfire.session.ConnectionSettings;
+import org.jivesoftware.openfire.session.RemoteSessionLocator;
+import org.jivesoftware.openfire.session.SoftwareVersionManager;
+import org.jivesoftware.openfire.spi.ConnectionManagerImpl;
+import org.jivesoftware.openfire.spi.ConnectionType;
+import org.jivesoftware.openfire.spi.PacketDelivererImpl;
+import org.jivesoftware.openfire.spi.PacketRouterImpl;
+import org.jivesoftware.openfire.spi.PacketTransporterImpl;
+import org.jivesoftware.openfire.spi.PresenceManagerImpl;
+import org.jivesoftware.openfire.spi.RoutingTableImpl;
+import org.jivesoftware.openfire.spi.XMPPServerInfoImpl;
+import org.jivesoftware.openfire.transport.TransportHandler;
+import org.jivesoftware.openfire.update.UpdateManager;
+import org.jivesoftware.openfire.user.User;
+import org.jivesoftware.openfire.user.UserManager;
+import org.jivesoftware.openfire.vcard.VCardManager;
+import org.jivesoftware.util.InitializationException;
+import org.jivesoftware.util.JiveGlobals;
+import org.jivesoftware.util.LocaleUtils;
+import org.jivesoftware.util.Log;
+import org.jivesoftware.util.SystemProperty;
+import org.jivesoftware.util.TaskEngine;
+import org.jivesoftware.openfire.archive.ArchiveManager;
+import org.jivesoftware.util.cache.CacheFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmpp.packet.JID;
+import org.xmpp.packet.Message;
+
+import com.google.common.reflect.ClassPath;
+
+/**
+ * The main XMPP server that will load, initialize and start all the server's
+ * modules. The server is unique in the JVM and could be obtained by using the
+ * {@link #getInstance()} method.
+ * &lt;p&gt;
+ * The loaded modules will be initialized and may access through the server other
+ * modules. This means that the only way for a module to locate another module is
+ * through the server. The server maintains a list of loaded modules.
+ * &lt;/p&gt;
+ * &lt;p&gt;
+ * After starting up all the modules the server will load any available plugin.
+ * For more information see: {@link org.jivesoftware.openfire.container.PluginManager}.
+ * &lt;/p&gt;
+ * &lt;p&gt;A configuration file keeps the server configuration. This information is required for the
+ * server to work correctly. The server assumes that the configuration file is named
+ * &lt;b&gt;openfire.xml&lt;/b&gt; and is located in the &lt;b&gt;conf&lt;/b&gt; folder. The folder that keeps
+ * the configuration file must be located under the home folder. The server will try different
+ * methods to locate the home folder.&lt;/p&gt;
+ * &lt;ol&gt;
+ * &lt;li&gt;&lt;b&gt;system property&lt;/b&gt; - The server will use the value defined in the &lt;i&gt;openfireHome&lt;/i&gt;
+ * system property.&lt;/li&gt;
+ * &lt;li&gt;&lt;b&gt;working folder&lt;/b&gt; -  The server will check if there is a &lt;i&gt;conf&lt;/i&gt; folder in the
+ * working directory. This is the case when running in standalone mode.&lt;/li&gt;
+ * &lt;li&gt;&lt;b&gt;openfire_init.xml file&lt;/b&gt; - Attempt to load the value from openfire_init.xml which
+ * must be in the classpath&lt;/li&gt;
+ * &lt;/ol&gt;
+ *
+ * @author Gaston Dombiak
+ */
+public class XMPPServer {
+
+<span class="fc" id="L169">    private static final Logger logger = LoggerFactory.getLogger(XMPPServer.class);</span>
+
+    private static XMPPServer instance;
+
+<span class="nc" id="L173">    private boolean initialized = false;</span>
+<span class="nc" id="L174">    private boolean started = false;</span>
+    private NodeID nodeID;
+<span class="fc" id="L176">    private static final NodeID DEFAULT_NODE_ID = NodeID.getInstance( UUID.randomUUID().toString().getBytes() );</span>
+
+    public static final String EXIT = &quot;exit&quot;;
+    private final static Set&lt;String&gt; XML_ONLY_PROPERTIES;
+    static {
+<span class="fc" id="L181">        final List&lt;String&gt; properties = new ArrayList&lt;&gt;(Arrays.asList(</span>
+            // Admin console network settings
+            &quot;adminConsole.port&quot;, &quot;adminConsole.securePort&quot;, &quot;adminConsole.interface&quot;, &quot;network.interface&quot;,
+            // Misc. settings
+            &quot;locale&quot;, &quot;fqdn&quot;, &quot;setup&quot;, ClusterManager.CLUSTER_PROPERTY_NAME,
+            // Database config
+            &quot;connectionProvider.className&quot;,
+            &quot;database.defaultProvider.driver&quot;, &quot;database.defaultProvider.serverURL&quot;, &quot;database.defaultProvider.username&quot;,
+            &quot;database.defaultProvider.password&quot;, &quot;database.defaultProvider.testSQL&quot;, &quot;database.defaultProvider.testBeforeUse&quot;,
+            &quot;database.defaultProvider.testAfterUse&quot;, &quot;database.defaultProvider.testTimeout&quot;, &quot;database.defaultProvider.timeBetweenEvictionRuns&quot;,
+            &quot;database.defaultProvider.minIdleTime&quot;, &quot;database.defaultProvider.maxWaitTime&quot;, &quot;database.defaultProvider.minConnections&quot;,
+            &quot;database.defaultProvider.maxConnections&quot;, &quot;database.defaultProvider.connectionTimeout&quot;, &quot;database.mysql.useUnicode&quot;,
+            &quot;database.JNDIProvider.name&quot;
+        ));
+        // JDNI database config
+<span class="fc" id="L196">        properties.addAll(Arrays.asList(JNDIDataSourceProvider.jndiPropertyKeys));</span>
+<span class="fc" id="L197">        XML_ONLY_PROPERTIES = Collections.unmodifiableSet(new HashSet&lt;&gt;(properties));</span>
+    }
+
+    /**
+     * All modules loaded by this server
+     */
+<span class="nc" id="L203">    private Map&lt;Class, Module&gt; modules = new LinkedHashMap&lt;&gt;();</span>
+
+    /**
+     * Listeners that will be notified when the server has started or is about to be stopped.
+     */
+<span class="nc" id="L208">    private List&lt;XMPPServerListener&gt; listeners = new CopyOnWriteArrayList&lt;&gt;();</span>
+
+    /**
+     * Location of the home directory. All configuration files should be
+     * located here.
+     */
+    private File openfireHome;
+    private ClassLoader loader;
+
+    private PluginManager pluginManager;
+    private InternalComponentManager componentManager;
+    private RemoteSessionLocator remoteSessionLocator;
+
+    /**
+     * True if in setup mode
+     */
+<span class="nc" id="L224">    private boolean setupMode = true;</span>
+
+    private static final String STARTER_CLASSNAME =
+            &quot;org.jivesoftware.openfire.starter.ServerStarter&quot;;
+    private static final String WRAPPER_CLASSNAME =
+            &quot;org.tanukisoftware.wrapper.WrapperManager&quot;;
+    private boolean shuttingDown;
+    private XMPPServerInfoImpl xmppServerInfo;
+
+    /**
+     * Returns a singleton instance of XMPPServer.
+     *
+     * @return an instance.
+     */
+    public static XMPPServer getInstance() {
+<span class="fc" id="L239">        return instance;</span>
+    }
+
+    /**
+     * TODO: (2019-04-24) Remove and replace with &lt;a href=&quot;https://github.com/mockito/mockito/issues/1013&quot;&gt;Mockito mocking of static methods&lt;/a&gt;, when available
+     *
+     * @param instance the mock/stub/spy XMPPServer to return when {@link #getInstance()} is called.
+     * @deprecated - for test use only
+     */
+    @Deprecated
+    public static void setInstance(final XMPPServer instance) {
+<span class="fc" id="L250">        XMPPServer.instance = instance;</span>
+<span class="fc" id="L251">    }</span>
+
+    /**
+     * Creates a server and starts it.
+     */
+<span class="nc" id="L256">    public XMPPServer() {</span>
+        // We may only have one instance of the server running on the JVM
+<span class="nc bnc" id="L258" title="All 2 branches missed.">        if (instance != null) {</span>
+<span class="nc" id="L259">            throw new IllegalStateException(&quot;A server is already running&quot;);</span>
+        }
+<span class="nc" id="L261">        instance = this;</span>
+<span class="nc" id="L262">        start();</span>
+<span class="nc" id="L263">    }</span>
+
+    /**
+     * Returns a snapshot of the server's status.
+     *
+     * @return the server information current at the time of the method call.
+     */
+    public XMPPServerInfo getServerInfo() {
+<span class="nc bnc" id="L271" title="All 2 branches missed.">        if (!initialized) {</span>
+<span class="nc" id="L272">            throw new IllegalStateException(&quot;Not initialized yet&quot;);</span>
+        }
+<span class="nc" id="L274">        return xmppServerInfo;</span>
+    }
+
+    /**
+     * Returns true if the given address is local to the server (managed by this
+     * server domain). Return false even if the jid's domain matches a local component's
+     * service JID.
+     *
+     * @param jid the JID to check.
+     * @return true if the address is a local address to this server.
+     */
+    public boolean isLocal( JID jid )
+    {
+<span class="nc bnc" id="L287" title="All 4 branches missed.">        return jid != null &amp;&amp; jid.getDomain().equals( xmppServerInfo.getXMPPDomain() );</span>
+    }
+
+    /**
+     * Returns true if the given address does not match the local server hostname and does not
+     * match a component service JID.
+     *
+     * @param jid the JID to check.
+     * @return true if the given address does not match the local server hostname and does not
+     *         match a component service JID.
+     */
+    public boolean isRemote( JID jid )
+    {
+<span class="nc bnc" id="L300" title="All 2 branches missed.">        return jid != null</span>
+<span class="nc bnc" id="L301" title="All 2 branches missed.">                &amp;&amp; !jid.getDomain().equals( xmppServerInfo.getXMPPDomain() )</span>
+<span class="nc bnc" id="L302" title="All 2 branches missed.">                &amp;&amp; !componentManager.hasComponent( jid );</span>
+    }
+
+    /**
+     * Returns an ID that uniquely identifies this server in a cluster. When not running in cluster mode
+     * the returned value is always the same. However, when in cluster mode the value should be set
+     * when joining the cluster and must be unique even upon restarts of this node.
+     *
+     * @return an ID that uniquely identifies this server in a cluster.
+     */
+    public NodeID getNodeID() {
+<span class="nc bnc" id="L313" title="All 2 branches missed.">        return nodeID == null ? DEFAULT_NODE_ID : nodeID;</span>
+    }
+
+    /**
+     * Sets an ID that uniquely identifies this server in a cluster. When not running in cluster mode
+     * the returned value is always the same. However, when in cluster mode the value should be set
+     * when joining the cluster and must be unique even upon restarts of this node.
+     *
+     * @param nodeID an ID that uniquely identifies this server in a cluster or null if not in a cluster.
+     */
+    public void setNodeID(NodeID nodeID) {
+<span class="nc" id="L324">        this.nodeID = nodeID;</span>
+<span class="nc" id="L325">    }</span>
+
+    /**
+     * Returns the default node ID used by this server before clustering is
+     * initialized.
+     *
+     * @return The default node ID.
+     */
+    public NodeID getDefaultNodeID() {
+<span class="nc" id="L334">        return DEFAULT_NODE_ID;</span>
+    }
+
+    /**
+     * Returns true if the given address matches a component service JID.
+     *
+     * @param jid the JID to check.
+     * @return true if the given address matches a component service JID.
+     */
+    public boolean matchesComponent( JID jid )
+    {
+<span class="nc bnc" id="L345" title="All 2 branches missed.">        return jid != null</span>
+<span class="nc bnc" id="L346" title="All 2 branches missed.">                &amp;&amp; !jid.getDomain().equals( xmppServerInfo.getXMPPDomain() )</span>
+<span class="nc bnc" id="L347" title="All 2 branches missed.">                &amp;&amp; componentManager.hasComponent( jid );</span>
+    }
+
+    /**
+     * Creates an XMPPAddress local to this server.
+     *
+     * @param username the user name portion of the id or null to indicate none is needed.
+     * @param resource the resource portion of the id or null to indicate none is needed.
+     * @return an XMPPAddress for the server.
+     */
+    public JID createJID(String username, String resource) {
+<span class="nc" id="L358">        return new JID(username, xmppServerInfo.getXMPPDomain(), resource);</span>
+    }
+
+    /**
+     * Creates an XMPPAddress local to this server. The construction of the new JID
+     * can be optimized by skipping stringprep operations.
+     *
+     * @param username the user name portion of the id or null to indicate none is needed.
+     * @param resource the resource portion of the id or null to indicate none is needed.
+     * @param skipStringprep true if stringprep should not be applied.
+     * @return an XMPPAddress for the server.
+     */
+    public JID createJID(String username, String resource, boolean skipStringprep) {
+<span class="nc" id="L371">        return new JID(username, xmppServerInfo.getXMPPDomain(), resource, skipStringprep);</span>
+    }
+
+    /**
+     * Returns a collection with the JIDs of the server's admins. The collection may include
+     * JIDs of local users and users of remote servers.
+     *
+     * @return a collection with the JIDs of the server's admins.
+     */
+    public Collection&lt;JID&gt; getAdmins() {
+<span class="nc" id="L381">        return AdminManager.getInstance().getAdminAccounts();</span>
+    }
+
+    /**
+     * Adds a new server listener that will be notified when the server has been started
+     * or is about to be stopped.
+     *
+     * @param listener the new server listener to add.
+     */
+    public void addServerListener(XMPPServerListener listener) {
+<span class="nc" id="L391">        listeners.add(listener);</span>
+<span class="nc" id="L392">    }</span>
+
+    /**
+     * Removes a server listener that was being notified when the server was being started
+     * or was about to be stopped.
+     *
+     * @param listener the server listener to remove.
+     */
+    public void removeServerListener(XMPPServerListener listener) {
+<span class="nc" id="L401">        listeners.remove(listener);</span>
+<span class="nc" id="L402">    }</span>
+
+    private void initialize() throws FileNotFoundException {
+<span class="nc" id="L405">        locateOpenfire();</span>
+
+<span class="nc bnc" id="L407" title="All 2 branches missed.">        if (&quot;true&quot;.equals(JiveGlobals.getXMLProperty(&quot;setup&quot;))) {</span>
+<span class="nc" id="L408">            setupMode = false;</span>
+        }
+
+<span class="nc bnc" id="L411" title="All 2 branches missed.">        if (isStandAlone()) {</span>
+<span class="nc" id="L412">            logger.info(&quot;Registering shutdown hook (standalone mode)&quot;);</span>
+<span class="nc" id="L413">            Runtime.getRuntime().addShutdownHook(new ShutdownHookThread());</span>
+<span class="nc" id="L414">            TaskEngine.getInstance().schedule(new Terminator(), 1000, 1000);</span>
+        }
+
+<span class="nc" id="L417">        loader = Thread.currentThread().getContextClassLoader();</span>
+
+        try {
+<span class="nc" id="L420">            CacheFactory.initialize();</span>
+<span class="nc" id="L421">        } catch (InitializationException e) {</span>
+<span class="nc" id="L422">            e.printStackTrace();</span>
+<span class="nc" id="L423">            logger.error(e.getMessage(), e);</span>
+<span class="nc" id="L424">        }</span>
+
+<span class="nc" id="L426">        JiveGlobals.migrateProperty(XMPPServerInfo.XMPP_DOMAIN.getKey());</span>
+
+<span class="nc" id="L428">        JiveGlobals.migrateProperty(Log.DEBUG_ENABLED.getKey());</span>
+<span class="nc" id="L429">        Log.setDebugEnabled(Log.DEBUG_ENABLED.getValue());</span>
+<span class="nc" id="L430">        Log.setTraceEnabled(Log.TRACE_ENABLED.getValue());</span>
+
+        // Update server info
+<span class="nc" id="L433">        xmppServerInfo = new XMPPServerInfoImpl(new Date());</span>
+
+<span class="nc" id="L435">        initialized = true;</span>
+
+<span class="nc bnc" id="L437" title="All 4 branches missed.">        if (setupMode &amp;&amp; &quot;true&quot;.equals(JiveGlobals.getXMLProperty(&quot;autosetup.run&quot;))) {</span>
+<span class="nc" id="L438">            this.runAutoSetup();</span>
+<span class="nc" id="L439">            JiveGlobals.deleteXMLProperty(&quot;autosetup&quot;);</span>
+<span class="nc" id="L440">            JiveGlobals.deleteProperty(&quot;autosetup&quot;);</span>
+        }
+
+        // OF-1548: Move the storage of the FQDN from the database to the XML configuration
+<span class="nc" id="L444">        final String hostNameFromDatabase = JiveGlobals.getProperty(&quot;xmpp.fqdn&quot;, &quot;&quot;);</span>
+<span class="nc" id="L445">        final String hostNameFromXML = JiveGlobals.getXMLProperty(&quot;fqdn&quot;, &quot;&quot;);</span>
+<span class="nc bnc" id="L446" title="All 4 branches missed.">        if (!hostNameFromDatabase.isEmpty() &amp;&amp; hostNameFromXML.isEmpty()) {</span>
+            final String hostname;
+<span class="nc bnc" id="L448" title="All 2 branches missed.">            if (ClusterManager.isClusteringEnabled()) {</span>
+                // The database value has at best a 50% chance of being right - so instead use a sensible default
+                String hostnameFromOS;
+                try {
+<span class="nc" id="L452">                    hostnameFromOS = InetAddress.getLocalHost().getCanonicalHostName();</span>
+<span class="nc" id="L453">                } catch (final UnknownHostException e) {</span>
+<span class="nc" id="L454">                    logger.warn(&quot;Unable to determine local hostname&quot;, e);</span>
+<span class="nc" id="L455">                    hostnameFromOS = &quot;localhost&quot;;</span>
+<span class="nc" id="L456">                }</span>
+<span class="nc" id="L457">                hostname = hostnameFromOS;</span>
+<span class="nc" id="L458">            } else {</span>
+<span class="nc" id="L459">                hostname = hostNameFromDatabase;</span>
+            }
+<span class="nc" id="L461">            JiveGlobals.setXMLProperty(&quot;fqdn&quot;, hostname);</span>
+<span class="nc" id="L462">            JiveGlobals.deleteProperty(&quot;xmpp.fqdn&quot;);</span>
+        }
+<span class="nc" id="L464">    }</span>
+
+    void runAutoSetup() {
+        // Setup property encryptor as early as possible so that database related properties can use it
+<span class="nc" id="L468">        JiveGlobals.setupPropertyEncryptionAlgorithm(JiveGlobals.getXMLProperty(&quot;autosetup.encryption.algorithm&quot;, &quot;Blowfish&quot;)); // or AES</span>
+<span class="nc" id="L469">        JiveGlobals.setupPropertyEncryptionKey(JiveGlobals.getXMLProperty(&quot;autosetup.encryption.key&quot;, null));</span>
+
+        // steps from setup-datasource-standard.jsp
+        // do this first so that other changes persist
+<span class="nc bnc" id="L473" title="All 2 branches missed.">        if (&quot;standard&quot;.equals(JiveGlobals.getXMLProperty(&quot;autosetup.database.mode&quot;))) {</span>
+<span class="nc" id="L474">            JiveGlobals.setXMLProperty(&quot;database.defaultProvider.driver&quot;, JiveGlobals.getXMLProperty(&quot;autosetup.database.defaultProvider.driver&quot;));</span>
+<span class="nc" id="L475">            JiveGlobals.setXMLProperty(&quot;database.defaultProvider.serverURL&quot;, JiveGlobals.getXMLProperty(&quot;autosetup.database.defaultProvider.serverURL&quot;));</span>
+<span class="nc" id="L476">            JiveGlobals.setXMLProperty(&quot;database.defaultProvider.username&quot;, JiveGlobals.getXMLProperty(&quot;autosetup.database.defaultProvider.username&quot;));</span>
+<span class="nc" id="L477">            JiveGlobals.setXMLProperty(&quot;database.defaultProvider.password&quot;, JiveGlobals.getXMLProperty(&quot;autosetup.database.defaultProvider.password&quot;));</span>
+
+            int minConnections;
+            int maxConnections;
+            double connectionTimeout;
+
+            try {
+<span class="nc" id="L484">                minConnections = Integer.parseInt(</span>
+<span class="nc" id="L485">                    JiveGlobals.getXMLProperty(&quot;autosetup.database.defaultProvider.minConnections&quot;));</span>
+            }
+<span class="nc" id="L487">            catch (Exception e) {</span>
+<span class="nc" id="L488">                minConnections = 5;</span>
+<span class="nc" id="L489">            }</span>
+            try {
+<span class="nc" id="L491">                maxConnections = Integer.parseInt(</span>
+<span class="nc" id="L492">                    JiveGlobals.getXMLProperty(&quot;autosetup.database.defaultProvider.maxConnections&quot;));</span>
+            }
+<span class="nc" id="L494">            catch (Exception e) {</span>
+<span class="nc" id="L495">                maxConnections = 25;</span>
+<span class="nc" id="L496">            }</span>
+            try {
+<span class="nc" id="L498">                connectionTimeout = Double.parseDouble(</span>
+<span class="nc" id="L499">                    JiveGlobals.getXMLProperty(&quot;autosetup.database.defaultProvider.connectionTimeout&quot;));</span>
+            }
+<span class="nc" id="L501">            catch (Exception e) {</span>
+<span class="nc" id="L502">                connectionTimeout = 1.0;</span>
+<span class="nc" id="L503">            }</span>
+
+<span class="nc" id="L505">            JiveGlobals.setXMLProperty(&quot;database.defaultProvider.minConnections&quot;,</span>
+<span class="nc" id="L506">                Integer.toString(minConnections));</span>
+<span class="nc" id="L507">            JiveGlobals.setXMLProperty(&quot;database.defaultProvider.maxConnections&quot;,</span>
+<span class="nc" id="L508">                Integer.toString(maxConnections));</span>
+<span class="nc" id="L509">            JiveGlobals.setXMLProperty(&quot;database.defaultProvider.connectionTimeout&quot;,</span>
+<span class="nc" id="L510">                Double.toString(connectionTimeout));</span>
+        }
+
+        // mark setup as done, so that other things can be written to the DB
+<span class="nc" id="L514">        JiveGlobals.setXMLProperty(&quot;setup&quot;,&quot;true&quot;);</span>
+
+        // steps from index.jsp
+<span class="nc" id="L517">        String localeCode = JiveGlobals.getXMLProperty(&quot;autosetup.locale&quot;);</span>
+<span class="nc" id="L518">        logger.warn(&quot;Setting locale to&quot; + localeCode);</span>
+<span class="nc" id="L519">        JiveGlobals.setLocale(LocaleUtils.localeCodeToLocale(localeCode.trim()));</span>
+
+        // steps from setup-host-settings.jsp
+<span class="nc" id="L522">        JiveGlobals.setXMLProperty(XMPPServerInfo.XMPP_DOMAIN.getKey(), JiveGlobals.getXMLProperty(&quot;autosetup.&quot; + XMPPServerInfo.XMPP_DOMAIN.getKey()));</span>
+<span class="nc" id="L523">        JiveGlobals.setXMLProperty(&quot;fqdn&quot;, JiveGlobals.getXMLProperty(&quot;autosetup.xmpp.fqdn&quot;));</span>
+<span class="nc" id="L524">        JiveGlobals.migrateProperty(XMPPServerInfo.XMPP_DOMAIN.getKey());</span>
+
+<span class="nc" id="L526">        ConnectionSettings.Client.ENABLE_OLD_SSLPORT_PROPERTY.setValue(Boolean.valueOf(JiveGlobals.getXMLProperty(&quot;autosetup.&quot; + ConnectionSettings.Client.ENABLE_OLD_SSLPORT_PROPERTY.getKey(), &quot;true&quot;)));</span>
+<span class="nc" id="L527">        AnonymousSaslServer.ENABLED.setValue(Boolean.valueOf(JiveGlobals.getXMLProperty(&quot;autosetup.&quot; + AnonymousSaslServer.ENABLED.getKey(), &quot;false&quot;)));</span>
+
+
+        // steps from setup-profile-settings.jsp
+<span class="nc bnc" id="L531" title="All 2 branches missed.">        if (&quot;default&quot;.equals(JiveGlobals.getXMLProperty(&quot;autosetup.authprovider.mode&quot;, &quot;default&quot;))) {</span>
+<span class="nc" id="L532">            JiveGlobals.setXMLProperty(&quot;connectionProvider.className&quot;,</span>
+                &quot;org.jivesoftware.database.DefaultConnectionProvider&quot;);
+
+<span class="nc" id="L535">            JiveGlobals.setProperty(AuthFactory.AUTH_PROVIDER.getKey(), JiveGlobals.getXMLProperty(AuthFactory.AUTH_PROVIDER.getKey(),</span>
+<span class="nc" id="L536">                AuthFactory.AUTH_PROVIDER.getDefaultValue().getName()));</span>
+<span class="nc" id="L537">            JiveGlobals.setProperty(UserManager.USER_PROVIDER.getKey(), JiveGlobals.getXMLProperty(UserManager.USER_PROVIDER.getKey(),</span>
+<span class="nc" id="L538">                UserManager.USER_PROVIDER.getDefaultValue().getName()));</span>
+<span class="nc" id="L539">            JiveGlobals.setProperty(GroupManager.GROUP_PROVIDER.getKey(), JiveGlobals.getXMLProperty(GroupManager.GROUP_PROVIDER.getKey(),</span>
+<span class="nc" id="L540">                GroupManager.GROUP_PROVIDER.getDefaultValue().getName()));</span>
+<span class="nc" id="L541">            JiveGlobals.setProperty(VCardManager.VCARD_PROVIDER.getKey(), JiveGlobals.getXMLProperty(VCardManager.VCARD_PROVIDER.getKey(),</span>
+<span class="nc" id="L542">                VCardManager.VCARD_PROVIDER.getDefaultValue().getName()));</span>
+<span class="nc" id="L543">            JiveGlobals.setProperty(LockOutManager.LOCKOUT_PROVIDER.getKey(), JiveGlobals.getXMLProperty(LockOutManager.LOCKOUT_PROVIDER.getKey(),</span>
+<span class="nc" id="L544">                LockOutManager.LOCKOUT_PROVIDER.getDefaultValue().getName()));</span>
+<span class="nc" id="L545">            JiveGlobals.setProperty(SecurityAuditManager.AUDIT_PROVIDER.getKey(), JiveGlobals.getXMLProperty(SecurityAuditManager.AUDIT_PROVIDER.getKey(),</span>
+<span class="nc" id="L546">                SecurityAuditManager.AUDIT_PROVIDER.getDefaultValue().getName()));</span>
+<span class="nc" id="L547">            JiveGlobals.setProperty(AdminManager.ADMIN_PROVIDER.getKey(), JiveGlobals.getXMLProperty(AdminManager.ADMIN_PROVIDER.getKey(),</span>
+<span class="nc" id="L548">                AdminManager.ADMIN_PROVIDER.getDefaultValue().getName()));</span>
+
+            // make configurable?
+<span class="nc" id="L551">            JiveGlobals.setProperty(&quot;user.scramHashedPasswordOnly&quot;, &quot;true&quot;);</span>
+        }
+
+        // steps from setup-admin-settings.jsp
+        try {
+<span class="nc" id="L556">            User adminUser = UserManager.getInstance().getUser(&quot;admin&quot;);</span>
+<span class="nc" id="L557">            adminUser.setPassword(JiveGlobals.getXMLProperty(&quot;autosetup.admin.password&quot;));</span>
+<span class="nc" id="L558">            adminUser.setEmail(JiveGlobals.getXMLProperty(&quot;autosetup.admin.email&quot;));</span>
+<span class="nc" id="L559">            Date now = new Date();</span>
+<span class="nc" id="L560">            adminUser.setCreationDate(now);</span>
+<span class="nc" id="L561">            adminUser.setModificationDate(now);</span>
+<span class="nc" id="L562">        } catch (Exception e) {</span>
+<span class="nc" id="L563">            e.printStackTrace();</span>
+<span class="nc" id="L564">            logger.warn(&quot;There was an unexpected error encountered when &quot;</span>
+                + &quot;setting the new admin information. Please check your error &quot;
+                + &quot;logs and try to remedy the problem.&quot;);
+<span class="nc" id="L567">        }</span>
+
+        // finish setup
+<span class="nc" id="L570">        this.finalSetupSteps();</span>
+<span class="nc" id="L571">        setupMode = false;</span>
+<span class="nc" id="L572">    }</span>
+
+    private void finalSetupSteps() {
+<span class="nc bnc" id="L575" title="All 2 branches missed.">        for (String propName : JiveGlobals.getXMLPropertyNames()) {</span>
+<span class="nc bnc" id="L576" title="All 2 branches missed.">            if (!XML_ONLY_PROPERTIES.contains(propName)) {</span>
+<span class="nc bnc" id="L577" title="All 2 branches missed.">                if (JiveGlobals.getProperty(propName) == null) {</span>
+<span class="nc" id="L578">                    JiveGlobals.setProperty(propName, JiveGlobals.getXMLProperty(propName));</span>
+                }
+<span class="nc" id="L580">                JiveGlobals.setPropertyEncrypted(propName, JiveGlobals.isXMLPropertyEncrypted(propName));</span>
+            }
+<span class="nc" id="L582">        }</span>
+
+        // Check if keystore (that out-of-the-box is a fallback for all keystores) already has certificates for current domain.
+<span class="nc" id="L585">        CertificateStoreManager certificateStoreManager = null; // Will be a module after finishing setup.</span>
+        try {
+<span class="nc" id="L587">            certificateStoreManager = new CertificateStoreManager();</span>
+<span class="nc" id="L588">            certificateStoreManager.initialize( this );</span>
+<span class="nc" id="L589">            certificateStoreManager.start();</span>
+<span class="nc" id="L590">            final IdentityStore identityStore = certificateStoreManager.getIdentityStore( ConnectionType.SOCKET_C2S );</span>
+<span class="nc" id="L591">            identityStore.ensureDomainCertificate();</span>
+
+<span class="nc" id="L593">        } catch (Exception e) {</span>
+<span class="nc" id="L594">            logger.error(&quot;Error generating self-signed certificates&quot;, e);</span>
+        } finally {
+<span class="nc bnc" id="L596" title="All 6 branches missed.">            if (certificateStoreManager != null)</span>
+            {
+<span class="nc" id="L598">                certificateStoreManager.stop();</span>
+<span class="nc" id="L599">                certificateStoreManager.destroy();</span>
+            }
+<span class="nc" id="L601">        }</span>
+
+        // Initialize list of admins now (before we restart Jetty)
+<span class="nc" id="L604">        AdminManager.getInstance().getAdminAccounts();</span>
+<span class="nc" id="L605">    }</span>
+
+    /**
+     * Finish the setup process. Because this method is meant to be called from inside
+     * the Admin console plugin, it spawns its own thread to do the work so that the
+     * class loader is correct.
+     */
+    public void finishSetup() {
+<span class="nc bnc" id="L613" title="All 2 branches missed.">        if (!setupMode) {</span>
+<span class="nc" id="L614">            return;</span>
+        }
+
+<span class="nc" id="L617">        this.finalSetupSteps();</span>
+
+        // Make sure that setup finished correctly.
+<span class="nc bnc" id="L620" title="All 2 branches missed.">        if (&quot;true&quot;.equals(JiveGlobals.getXMLProperty(&quot;setup&quot;))) {</span>
+            // Iterate through all the provided XML properties and set the ones that haven't
+            // already been touched by setup prior to this method being called.
+
+<span class="nc" id="L624">            Thread finishSetup = new Thread() {</span>
+                @Override
+                public void run() {
+                    try {
+<span class="nc bnc" id="L628" title="All 2 branches missed.">                        if (isStandAlone()) {</span>
+                            // Always restart the HTTP server manager. This covers the case
+                            // of changing the ports, as well as generating self-signed certificates.
+                        
+                            // Wait a short period before shutting down the admin console.
+                            // Otherwise, the page that requested the setup finish won't
+                            // render properly!
+<span class="nc" id="L635">                            Thread.sleep(1000);</span>
+<span class="nc" id="L636">                            ((AdminConsolePlugin) pluginManager.getPlugin(&quot;admin&quot;)).restart();</span>
+                        }
+
+<span class="nc" id="L639">                        verifyDataSource();</span>
+                        // First load all the modules so that modules may access other modules while
+                        // being initialized
+<span class="nc" id="L642">                        loadModules();</span>
+                        // Initize all the modules
+<span class="nc" id="L644">                        initModules();</span>
+                        // Start all the modules
+<span class="nc" id="L646">                        startModules();</span>
+<span class="nc" id="L647">                        scanForSystemPropertyClasses();</span>
+                    }
+<span class="nc" id="L649">                    catch (Exception e) {</span>
+<span class="nc" id="L650">                        e.printStackTrace();</span>
+<span class="nc" id="L651">                        logger.error(e.getMessage(), e);</span>
+<span class="nc" id="L652">                        shutdownServer();</span>
+<span class="nc" id="L653">                    }</span>
+<span class="nc" id="L654">                }</span>
+            };
+            // Use the correct class loader.
+<span class="nc" id="L657">            finishSetup.setContextClassLoader(loader);</span>
+<span class="nc" id="L658">            finishSetup.start();</span>
+            // We can now safely indicate that setup has finished
+<span class="nc" id="L660">            setupMode = false;</span>
+        }
+<span class="nc" id="L662">    }</span>
+
+    public void start() {
+        try {
+<span class="nc" id="L666">            initialize();</span>
+
+            // Create PluginManager now (but don't start it) so that modules may use it
+<span class="nc" id="L669">            File pluginDir = new File(openfireHome, &quot;plugins&quot;);</span>
+<span class="nc" id="L670">            pluginManager = new PluginManager(pluginDir);</span>
+
+            // If the server has already been setup then we can start all the server's modules
+<span class="nc bnc" id="L673" title="All 2 branches missed.">            if (!setupMode) {</span>
+<span class="nc" id="L674">                verifyDataSource();</span>
+                // First load all the modules so that modules may access other modules while
+                // being initialized
+<span class="nc" id="L677">                loadModules();</span>
+                // Initize all the modules
+<span class="nc" id="L679">                initModules();</span>
+                // Start all the modules
+<span class="nc" id="L681">                startModules();</span>
+            }
+            // Initialize statistics
+<span class="nc" id="L684">            ServerTrafficCounter.initStatistics();</span>
+
+            // Load plugins (when in setup mode only the admin console will be loaded)
+<span class="nc" id="L687">            pluginManager.start();</span>
+
+            // Log that the server has been started
+<span class="nc" id="L690">            String startupBanner = LocaleUtils.getLocalizedString(&quot;short.title&quot;) + &quot; &quot; + xmppServerInfo.getVersion().getVersionString() +</span>
+<span class="nc" id="L691">                    &quot; [&quot; + JiveGlobals.formatDateTime(new Date()) + &quot;]&quot;;</span>
+<span class="nc" id="L692">            logger.info(startupBanner);</span>
+<span class="nc" id="L693">            System.out.println(startupBanner);</span>
+
+<span class="nc" id="L695">            started = true;</span>
+            
+            // Notify server listeners that the server has been started
+<span class="nc bnc" id="L698" title="All 2 branches missed.">            for (XMPPServerListener listener : listeners) {</span>
+                try {
+<span class="nc" id="L700">                    listener.serverStarted();</span>
+<span class="nc" id="L701">                } catch (Exception e) {</span>
+<span class="nc" id="L702">                    logger.warn(&quot;An exception occurred while dispatching a 'serverStarted' event!&quot;, e);</span>
+<span class="nc" id="L703">                }</span>
+<span class="nc" id="L704">            }</span>
+
+<span class="nc bnc" id="L706" title="All 2 branches missed.">            if (!setupMode) {</span>
+<span class="nc" id="L707">                scanForSystemPropertyClasses();</span>
+            }
+        }
+<span class="nc" id="L710">        catch (Exception e) {</span>
+<span class="nc" id="L711">            e.printStackTrace();</span>
+<span class="nc" id="L712">            logger.error(e.getMessage(), e);</span>
+<span class="nc" id="L713">            System.out.println(LocaleUtils.getLocalizedString(&quot;startup.error&quot;));</span>
+<span class="nc" id="L714">            shutdownServer();</span>
+<span class="nc" id="L715">        }</span>
+<span class="nc" id="L716">    }</span>
+
+    // A SystemProperty class will not appear in the System Properties screen until it is referenced. This method
+    // ensures that they are all referenced immediately.
+    // The following class cannot always be loaded as it references a class that's part of the Install4J launcher
+<span class="fc" id="L721">    private static final Set&lt;String&gt; CLASSES_TO_EXCLUDE = Collections.singleton(&quot;org.jivesoftware.openfire.launcher.Uninstaller&quot;);</span>
+
+    private void scanForSystemPropertyClasses() {
+
+        try {
+<span class="nc" id="L726">            final Set&lt;ClassPath.ClassInfo&gt; classesInPackage = ClassPath.from(getClass().getClassLoader()).getTopLevelClassesRecursive(&quot;org.jivesoftware.openfire&quot;);</span>
+<span class="nc bnc" id="L727" title="All 2 branches missed.">            for (final ClassPath.ClassInfo classInfo : classesInPackage) {</span>
+<span class="nc" id="L728">                final String className = classInfo.getName();</span>
+<span class="nc bnc" id="L729" title="All 2 branches missed.">                if (!CLASSES_TO_EXCLUDE.contains(className)) {</span>
+                    try {
+<span class="nc" id="L731">                        final Class&lt;?&gt; clazz = classInfo.load();</span>
+<span class="nc" id="L732">                        final Field[] fields = clazz.getDeclaredFields();</span>
+<span class="nc bnc" id="L733" title="All 2 branches missed.">                        for (final Field field : fields) {</span>
+<span class="nc bnc" id="L734" title="All 2 branches missed.">                            if (field.getType().equals(SystemProperty.class)) {</span>
+                                try {
+<span class="nc" id="L736">                                    field.setAccessible(true);</span>
+<span class="nc" id="L737">                                    logger.info(&quot;Accessing SystemProperty field {}#{}&quot;, className, field.getName());</span>
+<span class="nc" id="L738">                                    field.get(null);</span>
+<span class="nc" id="L739">                                } catch (final Throwable t) {</span>
+<span class="nc" id="L740">                                    logger.warn(&quot;Unable to access field {}#{}&quot;, className, field.getName(), t);</span>
+<span class="nc" id="L741">                                }</span>
+                            }
+                        }
+<span class="nc" id="L744">                    } catch (final Throwable t) {</span>
+<span class="nc" id="L745">                        logger.warn(&quot;Unable to load class {}&quot;, className, t);</span>
+<span class="nc" id="L746">                    }</span>
+                }
+<span class="nc" id="L748">            }</span>
+<span class="nc" id="L749">        } catch (final Throwable t) {</span>
+<span class="nc" id="L750">            logger.warn(&quot;Unable to scan classpath for SystemProperty classes&quot;, t);</span>
+<span class="nc" id="L751">        }</span>
+<span class="nc" id="L752">    }</span>
+
+    private void loadModules() {
+        // Load boot modules
+<span class="nc" id="L756">        loadModule(RoutingTableImpl.class.getName());</span>
+<span class="nc" id="L757">        loadModule(AuditManagerImpl.class.getName());</span>
+<span class="nc" id="L758">        loadModule(RosterManager.class.getName());</span>
+<span class="nc" id="L759">        loadModule(PrivateStorage.class.getName());</span>
+        // Load core modules
+<span class="nc" id="L761">        loadModule(PresenceManagerImpl.class.getName());</span>
+<span class="nc" id="L762">        loadModule(SessionManager.class.getName());</span>
+<span class="nc" id="L763">        loadModule(PacketRouterImpl.class.getName());</span>
+<span class="nc" id="L764">        loadModule(IQRouter.class.getName());</span>
+<span class="nc" id="L765">        loadModule(MessageRouter.class.getName());</span>
+<span class="nc" id="L766">        loadModule(PresenceRouter.class.getName());</span>
+<span class="nc" id="L767">        loadModule(MulticastRouter.class.getName());</span>
+<span class="nc" id="L768">        loadModule(PacketTransporterImpl.class.getName());</span>
+<span class="nc" id="L769">        loadModule(PacketDelivererImpl.class.getName());</span>
+<span class="nc" id="L770">        loadModule(TransportHandler.class.getName());</span>
+<span class="nc" id="L771">        loadModule(OfflineMessageStrategy.class.getName());</span>
+<span class="nc" id="L772">        loadModule(OfflineMessageStore.class.getName());</span>
+<span class="nc" id="L773">        loadModule(VCardManager.class.getName());</span>
+        // Load standard modules
+<span class="nc" id="L775">        loadModule(IQBindHandler.class.getName());</span>
+<span class="nc" id="L776">        loadModule(IQSessionEstablishmentHandler.class.getName());</span>
+<span class="nc" id="L777">        loadModule(IQPingHandler.class.getName());</span>
+<span class="nc" id="L778">        loadModule(IQBlockingHandler.class.getName());</span>
+<span class="nc" id="L779">        loadModule(IQPrivateHandler.class.getName());</span>
+<span class="nc" id="L780">        loadModule(IQRegisterHandler.class.getName());</span>
+<span class="nc" id="L781">        loadModule(IQRosterHandler.class.getName());</span>
+<span class="nc" id="L782">        loadModule(IQEntityTimeHandler.class.getName());</span>
+<span class="nc" id="L783">        loadModule(IQvCardHandler.class.getName());</span>
+<span class="nc" id="L784">        loadModule(IQVersionHandler.class.getName());</span>
+<span class="nc" id="L785">        loadModule(IQLastActivityHandler.class.getName());</span>
+<span class="nc" id="L786">        loadModule(PresenceSubscribeHandler.class.getName());</span>
+<span class="nc" id="L787">        loadModule(PresenceUpdateHandler.class.getName());</span>
+<span class="nc" id="L788">        loadModule(IQOfflineMessagesHandler.class.getName());</span>
+<span class="nc" id="L789">        loadModule(IQPEPHandler.class.getName());</span>
+<span class="nc" id="L790">        loadModule(IQPEPOwnerHandler.class.getName());</span>
+<span class="nc" id="L791">        loadModule(MulticastDNSService.class.getName());</span>
+<span class="nc" id="L792">        loadModule(IQSharedGroupHandler.class.getName());</span>
+<span class="nc" id="L793">        loadModule(AdHocCommandHandler.class.getName());</span>
+<span class="nc" id="L794">        loadModule(IQPrivacyHandler.class.getName());</span>
+<span class="nc" id="L795">        loadModule(DefaultFileTransferManager.class.getName());</span>
+<span class="nc" id="L796">        loadModule(FileTransferProxy.class.getName());</span>
+<span class="nc" id="L797">        loadModule(MediaProxyService.class.getName());</span>
+<span class="nc" id="L798">        loadModule(PubSubModule.class.getName());</span>
+<span class="nc" id="L799">        loadModule(IQDiscoInfoHandler.class.getName());</span>
+<span class="nc" id="L800">        loadModule(IQDiscoItemsHandler.class.getName());</span>
+<span class="nc" id="L801">        loadModule(UpdateManager.class.getName());</span>
+<span class="nc" id="L802">        loadModule(FlashCrossDomainHandler.class.getName());</span>
+<span class="nc" id="L803">        loadModule(InternalComponentManager.class.getName());</span>
+<span class="nc" id="L804">        loadModule(MultiUserChatManager.class.getName());</span>
+<span class="nc" id="L805">        loadModule(IQMessageCarbonsHandler.class.getName());</span>
+<span class="nc" id="L806">        loadModule(ArchiveManager.class.getName());</span>
+<span class="nc" id="L807">        loadModule(CertificateStoreManager.class.getName());</span>
+<span class="nc" id="L808">        loadModule(EntityCapabilitiesManager.class.getName());</span>
+<span class="nc" id="L809">        loadModule(SoftwareVersionManager.class.getName());</span>
+
+        // Load this module always last since we don't want to start listening for clients
+        // before the rest of the modules have been started
+<span class="nc" id="L813">        loadModule(ConnectionManagerImpl.class.getName());</span>
+<span class="nc" id="L814">        loadModule(ClusterMonitor.class.getName());</span>
+        // Keep a reference to the internal component manager
+<span class="nc" id="L816">        componentManager = getComponentManager();</span>
+<span class="nc" id="L817">    }</span>
+
+    /**
+     * Loads a module.
+     *
+     * @param module the name of the class that implements the Module interface.
+     */
+    private void loadModule(String module) {
+        try {
+<span class="nc" id="L826">            Class&lt;Module&gt; modClass = (Class&lt;Module&gt;) loader.loadClass(module);</span>
+<span class="nc" id="L827">            Module mod = modClass.newInstance();</span>
+<span class="nc" id="L828">            this.modules.put(modClass, mod);</span>
+        }
+<span class="nc" id="L830">        catch (Exception e) {</span>
+<span class="nc" id="L831">            e.printStackTrace();</span>
+<span class="nc" id="L832">            logger.error(LocaleUtils.getLocalizedString(&quot;admin.error&quot;), e);</span>
+<span class="nc" id="L833">        }</span>
+<span class="nc" id="L834">    }</span>
+
+    private void initModules() {
+<span class="nc bnc" id="L837" title="All 2 branches missed.">        for (Module module : modules.values()) {</span>
+            try {
+<span class="nc" id="L839">                module.initialize(this);</span>
+            }
+<span class="nc" id="L841">            catch (Exception e) {</span>
+<span class="nc" id="L842">                e.printStackTrace();</span>
+                // Remove the failed initialized module
+<span class="nc" id="L844">                this.modules.remove(module.getClass());</span>
+<span class="nc" id="L845">                module.stop();</span>
+<span class="nc" id="L846">                module.destroy();</span>
+<span class="nc" id="L847">                logger.error(LocaleUtils.getLocalizedString(&quot;admin.error&quot;), e);</span>
+<span class="nc" id="L848">            }</span>
+<span class="nc" id="L849">        }</span>
+
+        // Register modules with service discovery provides where applicable.
+<span class="nc bnc" id="L852" title="All 2 branches missed.">        for (Module module : modules.values() )</span>
+        {
+            // Service discovery info
+<span class="nc bnc" id="L855" title="All 2 branches missed.">            if (module instanceof ServerFeaturesProvider) {</span>
+<span class="nc" id="L856">                getIQDiscoInfoHandler().addServerFeaturesProvider( (ServerFeaturesProvider) module );</span>
+            }
+
+<span class="nc bnc" id="L859" title="All 2 branches missed.">            if (module instanceof ServerIdentitiesProvider) {</span>
+<span class="nc" id="L860">                getIQDiscoInfoHandler().addServerIdentitiesProvider( (ServerIdentitiesProvider) module );</span>
+            }
+
+<span class="nc bnc" id="L863" title="All 2 branches missed.">            if (module instanceof UserIdentitiesProvider) {</span>
+<span class="nc" id="L864">                getIQDiscoInfoHandler().addUserIdentitiesProvider( (UserIdentitiesProvider) module );</span>
+            }
+
+<span class="nc bnc" id="L867" title="All 2 branches missed.">            if (module instanceof UserFeaturesProvider ) {</span>
+<span class="nc" id="L868">                getIQDiscoInfoHandler().addUserFeaturesProvider( (UserFeaturesProvider) module );</span>
+            }
+
+            // Service discovery items
+<span class="nc bnc" id="L872" title="All 2 branches missed.">            if (module instanceof ServerItemsProvider) {</span>
+<span class="nc" id="L873">                getIQDiscoItemsHandler().addServerItemsProvider( (ServerItemsProvider) module );</span>
+            }
+
+<span class="nc bnc" id="L876" title="All 2 branches missed.">            if (module instanceof UserItemsProvider) {</span>
+<span class="nc" id="L877">                getIQDiscoItemsHandler().addUserItemsProvider( (UserItemsProvider) module);</span>
+            }
+<span class="nc" id="L879">        }</span>
+
+<span class="nc" id="L881">    }</span>
+
+    /**
+     * &lt;p&gt;Following the loading and initialization of all the modules
+     * this method is called to iterate through the known modules and
+     * start them.&lt;/p&gt;
+     */
+    private void startModules() {
+<span class="nc bnc" id="L889" title="All 2 branches missed.">        for (Module module : modules.values()) {</span>
+            try {
+<span class="nc" id="L891">                logger.debug( &quot;Starting module: &quot; + module.getName() );</span>
+<span class="nc" id="L892">                module.start();</span>
+            }
+<span class="nc" id="L894">            catch (Exception e) {</span>
+<span class="nc" id="L895">                logger.error( &quot;An exception occurred while starting module '{}'.&quot;, module.getName(), e );</span>
+<span class="nc" id="L896">            }</span>
+<span class="nc" id="L897">        }</span>
+<span class="nc" id="L898">    }</span>
+
+    /**
+     * Restarts the server and all it's modules only if the server is restartable. Otherwise do
+     * nothing.
+     */
+    public void restart() {
+<span class="nc bnc" id="L905" title="All 4 branches missed.">        if (isStandAlone() &amp;&amp; isRestartable()) {</span>
+            try {
+<span class="nc" id="L907">                Class&lt;?&gt; wrapperClass = Class.forName(WRAPPER_CLASSNAME);</span>
+<span class="nc" id="L908">                Method restartMethod = wrapperClass.getMethod(&quot;restart&quot;, (Class []) null);</span>
+<span class="nc" id="L909">                restartMethod.invoke(null, (Object []) null);</span>
+            }
+<span class="nc" id="L911">            catch (Exception e) {</span>
+<span class="nc" id="L912">                logger.error(&quot;Could not restart container&quot;, e);</span>
+<span class="nc" id="L913">            }</span>
+        }
+<span class="nc" id="L915">    }</span>
+
+    /**
+     * Restarts the HTTP server only when running in stand alone mode. The restart
+     * process will be done in another thread that will wait 1 second before doing
+     * the actual restart. The delay will give time to the page that requested the
+     * restart to fully render its content.
+     */
+    public void restartHTTPServer() {
+<span class="nc" id="L924">        Thread restartThread = new Thread() {</span>
+            @Override
+            public void run() {
+<span class="nc bnc" id="L927" title="All 2 branches missed.">                if (isStandAlone()) {</span>
+                    // Restart the HTTP server manager. This covers the case
+                    // of changing the ports, as well as generating self-signed certificates.
+
+                    // Wait a short period before shutting down the admin console.
+                    // Otherwise, this page won't render properly!
+                    try {
+<span class="nc" id="L934">                        Thread.sleep(1000);</span>
+<span class="nc" id="L935">                        ((AdminConsolePlugin) pluginManager.getPlugin(&quot;admin&quot;)).restart();</span>
+<span class="nc" id="L936">                    } catch (Exception e) {</span>
+<span class="nc" id="L937">                        e.printStackTrace();</span>
+<span class="nc" id="L938">                    }</span>
+                }
+<span class="nc" id="L940">            }</span>
+        };
+<span class="nc" id="L942">        restartThread.setContextClassLoader(loader);</span>
+<span class="nc" id="L943">        restartThread.start();</span>
+<span class="nc" id="L944">    }</span>
+
+    /**
+     * Stops the server only if running in standalone mode. Do nothing if the server is running
+     * inside of another server.
+     */
+    public void stop() {
+<span class="nc" id="L951">        logger.info(&quot;Initiating shutdown ...&quot;);</span>
+        // Only do a system exit if we're running standalone
+<span class="nc bnc" id="L953" title="All 2 branches missed.">        if (isStandAlone()) {</span>
+            // if we're in a wrapper, we have to tell the wrapper to shut us down
+<span class="nc bnc" id="L955" title="All 2 branches missed.">            if (isRestartable()) {</span>
+                try {
+<span class="nc" id="L957">                    Class&lt;?&gt; wrapperClass = Class.forName(WRAPPER_CLASSNAME);</span>
+<span class="nc" id="L958">                    Method stopMethod = wrapperClass.getMethod(&quot;stop&quot;, Integer.TYPE);</span>
+<span class="nc" id="L959">                    stopMethod.invoke(null, 0);</span>
+                }
+<span class="nc" id="L961">                catch (Exception e) {</span>
+<span class="nc" id="L962">                    logger.error(&quot;Could not stop container&quot;, e);</span>
+<span class="nc" id="L963">                }</span>
+            }
+            else {
+<span class="nc" id="L966">                shutdownServer();</span>
+<span class="nc" id="L967">                Thread shutdownThread = new ShutdownThread();</span>
+<span class="nc" id="L968">                shutdownThread.setDaemon(true);</span>
+<span class="nc" id="L969">                shutdownThread.start();</span>
+<span class="nc" id="L970">            }</span>
+        }
+        else {
+            // Close listening socket no matter what the condition is in order to be able
+            // to be restartable inside a container.
+<span class="nc" id="L975">            shutdownServer();</span>
+        }
+<span class="nc" id="L977">    }</span>
+
+    public boolean isSetupMode() {
+<span class="nc" id="L980">        return setupMode;</span>
+    }
+
+    public boolean isRestartable() {
+        boolean restartable;
+        try {
+<span class="nc bnc" id="L986" title="All 2 branches missed.">            restartable = Class.forName(WRAPPER_CLASSNAME) != null;</span>
+        }
+<span class="nc" id="L988">        catch (ClassNotFoundException e) {</span>
+<span class="nc" id="L989">            restartable = false;</span>
+<span class="nc" id="L990">        }</span>
+<span class="nc" id="L991">        return restartable;</span>
+    }
+
+    /**
+     * Returns if the server is running in standalone mode. We consider that it's running in
+     * standalone if the &quot;org.jivesoftware.openfire.starter.ServerStarter&quot; class is present in the
+     * system.
+     *
+     * @return true if the server is running in standalone mode.
+     */
+    public boolean isStandAlone() {
+        boolean standalone;
+        try {
+<span class="nc bnc" id="L1004" title="All 2 branches missed.">            standalone = Class.forName(STARTER_CLASSNAME) != null;</span>
+        }
+<span class="nc" id="L1006">        catch (ClassNotFoundException e) {</span>
+<span class="nc" id="L1007">            standalone = false;</span>
+<span class="nc" id="L1008">        }</span>
+<span class="nc" id="L1009">        return standalone;</span>
+    }
+
+    /**
+     * Verify that the database is accessible.
+     */
+    private void verifyDataSource() {
+<span class="nc" id="L1016">        Connection con = null;</span>
+<span class="nc" id="L1017">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L1018">        ResultSet rs = null;</span>
+        try {
+<span class="nc" id="L1020">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L1021">            pstmt = con.prepareStatement(&quot;SELECT count(*) FROM ofID&quot;);</span>
+<span class="nc" id="L1022">            rs = pstmt.executeQuery();</span>
+<span class="nc" id="L1023">            rs.next();</span>
+        }
+<span class="nc" id="L1025">        catch (Exception e) {</span>
+<span class="nc" id="L1026">            System.err.println(&quot;Database setup or configuration error: &quot; +</span>
+                    &quot;Please verify your database settings and check the &quot; +
+                    &quot;logs/error.log file for detailed error messages.&quot;);
+<span class="nc" id="L1029">            logger.error(&quot;Database could not be accessed&quot;, e);</span>
+<span class="nc" id="L1030">            throw new IllegalArgumentException(e);</span>
+        }
+        finally {
+<span class="nc" id="L1033">            DbConnectionManager.closeConnection(rs, pstmt, con);</span>
+<span class="nc" id="L1034">        }</span>
+<span class="nc" id="L1035">    }</span>
+
+    /**
+     * Verifies that the given home guess is a real Openfire home directory.
+     * We do the verification by checking for the Openfire config file in
+     * the config dir of jiveHome.
+     *
+     * @param homeGuess a guess at the path to the home directory.
+     * @param jiveConfigName the name of the config file to check.
+     * @return a file pointing to the home directory or null if the
+     *         home directory guess was wrong.
+     * @throws java.io.FileNotFoundException if there was a problem with the home
+     *                                       directory provided
+     */
+    private File verifyHome(String homeGuess, String jiveConfigName) throws FileNotFoundException {
+<span class="nc" id="L1050">        File openfireHome = new File(homeGuess);</span>
+<span class="nc" id="L1051">        File configFile = new File(openfireHome, jiveConfigName);</span>
+<span class="nc bnc" id="L1052" title="All 2 branches missed.">        if (!configFile.exists()) {</span>
+<span class="nc" id="L1053">            throw new FileNotFoundException();</span>
+        }
+        else {
+            try {
+<span class="nc" id="L1057">                return new File(openfireHome.getCanonicalPath());</span>
+            }
+<span class="nc" id="L1059">            catch (Exception ex) {</span>
+<span class="nc" id="L1060">                throw new FileNotFoundException();</span>
+            }
+        }
+    }
+
+    /**
+     * &lt;p&gt;Retrieve the jive home for the container.&lt;/p&gt;
+     *
+     * @throws FileNotFoundException If jiveHome could not be located
+     */
+    private void locateOpenfire() throws FileNotFoundException {
+<span class="nc" id="L1071">        String jiveConfigName = &quot;conf&quot; + File.separator + &quot;openfire.xml&quot;;</span>
+        // First, try to load it openfireHome as a system property.
+<span class="nc bnc" id="L1073" title="All 2 branches missed.">        if (openfireHome == null) {</span>
+<span class="nc" id="L1074">            String homeProperty = System.getProperty(&quot;openfireHome&quot;);</span>
+            try {
+<span class="nc bnc" id="L1076" title="All 2 branches missed.">                if (homeProperty != null) {</span>
+<span class="nc" id="L1077">                    openfireHome = verifyHome(homeProperty, jiveConfigName);</span>
+                }
+            }
+<span class="nc" id="L1080">            catch (FileNotFoundException fe) {</span>
+                // Ignore.
+<span class="nc" id="L1082">            }</span>
+        }
+
+        // If we still don't have home, let's assume this is standalone
+        // and just look for home in a standard sub-dir location and verify
+        // by looking for the config file
+<span class="nc bnc" id="L1088" title="All 2 branches missed.">        if (openfireHome == null) {</span>
+            try {
+<span class="nc" id="L1090">                openfireHome = verifyHome(&quot;..&quot;, jiveConfigName).getCanonicalFile();</span>
+<span class="nc" id="L1091">            } catch (IOException ie) {</span>
+                // Ignore.
+<span class="nc" id="L1093">            }</span>
+        }
+
+        // If home is still null, no outside process has set it and
+        // we have to attempt to load the value from openfire_init.xml,
+        // which must be in the classpath.
+<span class="nc bnc" id="L1099" title="All 2 branches missed.">        if (openfireHome == null) {</span>
+<span class="nc" id="L1100">            try (InputStream in = getClass().getResourceAsStream(&quot;/openfire_init.xml&quot;)) {</span>
+<span class="nc bnc" id="L1101" title="All 2 branches missed.">                if (in != null) {</span>
+<span class="nc" id="L1102">                    SAXReader reader = new SAXReader();</span>
+<span class="nc" id="L1103">                    Document doc = reader.read(in);</span>
+<span class="nc" id="L1104">                    String path = doc.getRootElement().getText();</span>
+                    try {
+<span class="nc bnc" id="L1106" title="All 2 branches missed.">                        if (path != null) {</span>
+<span class="nc" id="L1107">                            openfireHome = verifyHome(path, jiveConfigName);</span>
+                        }
+                    }
+<span class="nc" id="L1110">                    catch (FileNotFoundException fe) {</span>
+<span class="nc" id="L1111">                        fe.printStackTrace();</span>
+<span class="nc" id="L1112">                    }</span>
+                }
+<span class="nc bnc" id="L1114" title="All 8 branches missed.">            }</span>
+<span class="nc" id="L1115">            catch (Exception e) {</span>
+<span class="nc" id="L1116">                System.err.println(&quot;Error loading openfire_init.xml to find home.&quot;);</span>
+<span class="nc" id="L1117">                e.printStackTrace();</span>
+<span class="nc" id="L1118">            }</span>
+        }
+
+<span class="nc bnc" id="L1121" title="All 2 branches missed.">        if (openfireHome == null) {</span>
+<span class="nc" id="L1122">            System.err.println(&quot;Could not locate home&quot;);</span>
+<span class="nc" id="L1123">            throw new FileNotFoundException();</span>
+        }
+        else {
+            // Set the home directory for the config file
+<span class="nc" id="L1127">            JiveGlobals.setHomeDirectory(openfireHome.toString());</span>
+            // Set the name of the config file
+<span class="nc" id="L1129">            JiveGlobals.setConfigName(jiveConfigName);</span>
+        }
+<span class="nc" id="L1131">    }</span>
+
+    /**
+     * This timer task is used to monitor the System input stream
+     * for a &quot;terminate&quot; command from the launcher (or the console). 
+     * This allows for a graceful shutdown when Openfire is started 
+     * via the launcher, especially in Windows.
+     */
+<span class="nc" id="L1139">    private class Terminator extends TimerTask {</span>
+<span class="nc" id="L1140">        private BufferedReader stdin = new BufferedReader(new InputStreamReader(System.in));</span>
+        @Override
+        public void run() {
+            try { 
+<span class="nc bnc" id="L1144" title="All 2 branches missed.">                if (stdin.ready()) {</span>
+<span class="nc bnc" id="L1145" title="All 2 branches missed.">                    if (EXIT.equalsIgnoreCase(stdin.readLine())) {</span>
+<span class="nc" id="L1146">                        System.exit(0); // invokes shutdown hook(s)</span>
+                    }
+                }
+<span class="nc" id="L1149">            } catch (IOException ioe) {</span>
+<span class="nc" id="L1150">                logger.error(&quot;Error reading console input&quot;, ioe);</span>
+<span class="nc" id="L1151">            }</span>
+<span class="nc" id="L1152">        }</span>
+    }
+    
+    /**
+     * &lt;p&gt;A thread to ensure the server shuts down no matter what.&lt;/p&gt;
+     * &lt;p&gt;Spawned when stop() is called in standalone mode, we wait a few
+     * seconds then call system exit().&lt;/p&gt;
+     *
+     * @author Iain Shigeoka
+     */
+<span class="nc" id="L1162">    private class ShutdownHookThread extends Thread {</span>
+
+        /**
+         * &lt;p&gt;Logs the server shutdown.&lt;/p&gt;
+         */
+        @Override
+        public void run() {
+<span class="nc" id="L1169">            shutdownServer();</span>
+<span class="nc" id="L1170">            logger.info(&quot;Server halted&quot;);</span>
+<span class="nc" id="L1171">            System.err.println(&quot;Server halted&quot;);</span>
+<span class="nc" id="L1172">        }</span>
+    }
+
+    /**
+     * &lt;p&gt;A thread to ensure the server shuts down no matter what.&lt;/p&gt;
+     * &lt;p&gt;Spawned when stop() is called in standalone mode, we wait a few
+     * seconds then call system exit().&lt;/p&gt;
+     *
+     * @author Iain Shigeoka
+     */
+<span class="nc" id="L1182">    private class ShutdownThread extends Thread {</span>
+
+        /**
+         * &lt;p&gt;Shuts down the JVM after a 5 second delay.&lt;/p&gt;
+         */
+        @Override
+        public void run() {
+            try {
+<span class="nc" id="L1190">                Thread.sleep(5000);</span>
+                // No matter what, we make sure it's dead
+<span class="nc" id="L1192">                System.exit(0);</span>
+            }
+<span class="nc" id="L1194">            catch (InterruptedException e) {</span>
+                // Ignore.
+<span class="nc" id="L1196">            }</span>
+
+<span class="nc" id="L1198">        }</span>
+    }
+
+    /**
+     * Makes a best effort attempt to shutdown the server
+     */
+    private void shutdownServer() {
+<span class="nc" id="L1205">        shuttingDown = true;</span>
+<span class="nc" id="L1206">        ClusterManager.shutdown();</span>
+        // Notify server listeners that the server is about to be stopped
+<span class="nc bnc" id="L1208" title="All 2 branches missed.">        for (XMPPServerListener listener : listeners) {</span>
+            try {
+<span class="nc" id="L1210">                listener.serverStopping();</span>
+<span class="nc" id="L1211">            } catch (Exception ex) {</span>
+<span class="nc" id="L1212">                logger.error(&quot;Exception during listener shutdown&quot;, ex);</span>
+<span class="nc" id="L1213">            }</span>
+<span class="nc" id="L1214">        }</span>
+        // If we don't have modules then the server has already been shutdown
+<span class="nc bnc" id="L1216" title="All 2 branches missed.">        if (modules.isEmpty()) {</span>
+<span class="nc" id="L1217">            return;</span>
+        }
+<span class="nc" id="L1219">        logger.info(&quot;Shutting down &quot; + modules.size() + &quot; modules ...&quot;);</span>
+        // Get all modules and stop and destroy them
+<span class="nc bnc" id="L1221" title="All 2 branches missed.">        for (Module module : modules.values()) {</span>
+            try {
+<span class="nc" id="L1223">                module.stop();</span>
+<span class="nc" id="L1224">                module.destroy();</span>
+<span class="nc" id="L1225">            } catch (Exception ex) {</span>
+<span class="nc" id="L1226">                logger.error(&quot;Exception during module shutdown&quot;, ex);</span>
+<span class="nc" id="L1227">            }</span>
+<span class="nc" id="L1228">        }</span>
+        // Stop all plugins
+<span class="nc" id="L1230">        logger.info(&quot;Shutting down plugins ...&quot;);</span>
+<span class="nc bnc" id="L1231" title="All 2 branches missed.">        if (pluginManager != null) {</span>
+            try {
+<span class="nc" id="L1233">                pluginManager.shutdown();</span>
+<span class="nc" id="L1234">            } catch (Exception ex) {</span>
+<span class="nc" id="L1235">                logger.error(&quot;Exception during plugin shutdown&quot;, ex);</span>
+<span class="nc" id="L1236">            }</span>
+        }
+<span class="nc" id="L1238">        modules.clear();</span>
+        // Stop the Db connection manager.
+        try {	
+<span class="nc" id="L1241">            DbConnectionManager.destroyConnectionProvider();</span>
+<span class="nc" id="L1242">        } catch (Exception ex) {</span>
+<span class="nc" id="L1243">            logger.error(&quot;Exception during DB shutdown&quot;, ex);</span>
+<span class="nc" id="L1244">        }</span>
+
+        // Shutdown the task engine.
+<span class="nc" id="L1247">        TaskEngine.getInstance().shutdown();</span>
+
+        // hack to allow safe stopping
+<span class="nc" id="L1250">        logger.info(&quot;Openfire stopped&quot;);</span>
+<span class="nc" id="L1251">    }</span>
+    
+    /**
+     * Returns true if the server is being shutdown.
+     *
+     * @return true if the server is being shutdown.
+     */
+    public boolean isShuttingDown() {
+<span class="nc" id="L1259">        return shuttingDown;</span>
+    }
+
+    /**
+     * Returns the &lt;code&gt;ConnectionManager&lt;/code&gt; registered with this server. The
+     * &lt;code&gt;ConnectionManager&lt;/code&gt; was registered with the server as a module while starting up
+     * the server.
+     *
+     * @return the &lt;code&gt;ConnectionManager&lt;/code&gt; registered with this server.
+     */
+    public ConnectionManager getConnectionManager() {
+<span class="nc" id="L1270">        return (ConnectionManager) modules.get(ConnectionManagerImpl.class);</span>
+    }
+
+    /**
+     * Returns the &lt;code&gt;RoutingTable&lt;/code&gt; registered with this server. The
+     * &lt;code&gt;RoutingTable&lt;/code&gt; was registered with the server as a module while starting up
+     * the server.
+     *
+     * @return the &lt;code&gt;RoutingTable&lt;/code&gt; registered with this server.
+     */
+    public RoutingTable getRoutingTable() {
+<span class="nc" id="L1281">        return (RoutingTable) modules.get(RoutingTableImpl.class);</span>
+    }
+
+    /**
+     * Returns the &lt;code&gt;PacketDeliverer&lt;/code&gt; registered with this server. The
+     * &lt;code&gt;PacketDeliverer&lt;/code&gt; was registered with the server as a module while starting up
+     * the server.
+     *
+     * @return the &lt;code&gt;PacketDeliverer&lt;/code&gt; registered with this server.
+     */
+    public PacketDeliverer getPacketDeliverer() {
+<span class="nc" id="L1292">        return (PacketDeliverer) modules.get(PacketDelivererImpl.class);</span>
+    }
+
+    /**
+     * Returns the &lt;code&gt;RosterManager&lt;/code&gt; registered with this server. The
+     * &lt;code&gt;RosterManager&lt;/code&gt; was registered with the server as a module while starting up
+     * the server.
+     *
+     * @return the &lt;code&gt;RosterManager&lt;/code&gt; registered with this server.
+     */
+    public RosterManager getRosterManager() {
+<span class="nc" id="L1303">        return (RosterManager) modules.get(RosterManager.class);</span>
+    }
+
+    /**
+     * Returns the &lt;code&gt;PresenceManager&lt;/code&gt; registered with this server. The
+     * &lt;code&gt;PresenceManager&lt;/code&gt; was registered with the server as a module while starting up
+     * the server.
+     *
+     * @return the &lt;code&gt;PresenceManager&lt;/code&gt; registered with this server.
+     */
+    public PresenceManager getPresenceManager() {
+<span class="nc" id="L1314">        return (PresenceManager) modules.get(PresenceManagerImpl.class);</span>
+    }
+
+    /**
+     * Returns the &lt;code&gt;OfflineMessageStore&lt;/code&gt; registered with this server. The
+     * &lt;code&gt;OfflineMessageStore&lt;/code&gt; was registered with the server as a module while starting up
+     * the server.
+     *
+     * @return the &lt;code&gt;OfflineMessageStore&lt;/code&gt; registered with this server.
+     */
+    public OfflineMessageStore getOfflineMessageStore() {
+<span class="nc" id="L1325">        return (OfflineMessageStore) modules.get(OfflineMessageStore.class);</span>
+    }
+
+    /**
+     * Returns the &lt;code&gt;OfflineMessageStrategy&lt;/code&gt; registered with this server. The
+     * &lt;code&gt;OfflineMessageStrategy&lt;/code&gt; was registered with the server as a module while starting
+     * up the server.
+     *
+     * @return the &lt;code&gt;OfflineMessageStrategy&lt;/code&gt; registered with this server.
+     */
+    public OfflineMessageStrategy getOfflineMessageStrategy() {
+<span class="nc" id="L1336">        return (OfflineMessageStrategy) modules.get(OfflineMessageStrategy.class);</span>
+    }
+
+    /**
+     * Returns the &lt;code&gt;PacketRouter&lt;/code&gt; registered with this server. The
+     * &lt;code&gt;PacketRouter&lt;/code&gt; was registered with the server as a module while starting up
+     * the server.
+     *
+     * @return the &lt;code&gt;PacketRouter&lt;/code&gt; registered with this server.
+     */
+    public PacketRouter getPacketRouter() {
+<span class="nc" id="L1347">        return (PacketRouter) modules.get(PacketRouterImpl.class);</span>
+    }
+
+    /**
+     * Returns the &lt;code&gt;IQRegisterHandler&lt;/code&gt; registered with this server. The
+     * &lt;code&gt;IQRegisterHandler&lt;/code&gt; was registered with the server as a module while starting up
+     * the server.
+     *
+     * @return the &lt;code&gt;IQRegisterHandler&lt;/code&gt; registered with this server.
+     */
+    public IQRegisterHandler getIQRegisterHandler() {
+<span class="nc" id="L1358">        return (IQRegisterHandler) modules.get(IQRegisterHandler.class);</span>
+    }
+
+    /**
+     * Returns the &lt;code&gt;IQPEPHandler&lt;/code&gt; registered with this server. The
+     * &lt;code&gt;IQPEPHandler&lt;/code&gt; was registered with the server as a module while starting up
+     * the server.
+     *
+     * @return the &lt;code&gt;IQPEPHandler&lt;/code&gt; registered with this server.
+     */
+    public IQPEPHandler getIQPEPHandler() {
+<span class="nc" id="L1369">        return (IQPEPHandler) modules.get(IQPEPHandler.class);</span>
+    }
+
+    /**
+     * Returns the &lt;code&gt;PluginManager&lt;/code&gt; instance registered with this server.
+     *
+     * @return the PluginManager instance.
+     */
+    public PluginManager getPluginManager() {
+<span class="nc" id="L1378">        return pluginManager;</span>
+    }
+
+    /**
+     * Returns the &lt;code&gt;PubSubModule&lt;/code&gt; registered with this server. The
+     * &lt;code&gt;PubSubModule&lt;/code&gt; was registered with the server as a module while starting up
+     * the server.
+     *
+     * @return the &lt;code&gt;PubSubModule&lt;/code&gt; registered with this server.
+     */
+    public PubSubModule getPubSubModule() {
+<span class="nc" id="L1389">        return (PubSubModule) modules.get(PubSubModule.class);</span>
+    }
+
+    /**
+     * Returns the &lt;code&gt;ArchiveManager&lt;/code&gt; registered with this server. The
+     * &lt;code&gt;ArchiveManager&lt;/code&gt; was registered with the server as a module while starting up
+     * the server.
+     *
+     * @return the &lt;code&gt;ArchiveManager&lt;/code&gt; registered with this server.
+     */
+    public ArchiveManager getArchiveManager() {
+<span class="nc" id="L1400">        return (ArchiveManager) modules.get(ArchiveManager.class);</span>
+    }
+
+    /**
+     * Returns a list with all the modules registered with the server that inherit from IQHandler.
+     *
+     * @return a list with all the modules registered with the server that inherit from IQHandler.
+     */
+    public List&lt;IQHandler&gt; getIQHandlers() {
+<span class="nc" id="L1409">        List&lt;IQHandler&gt; answer = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L1410" title="All 2 branches missed.">        for (Module module : modules.values()) {</span>
+<span class="nc bnc" id="L1411" title="All 2 branches missed.">            if (module instanceof IQHandler) {</span>
+<span class="nc" id="L1412">                answer.add((IQHandler) module);</span>
+            }
+<span class="nc" id="L1414">        }</span>
+<span class="nc" id="L1415">        return answer;</span>
+    }
+
+    /**
+     * Returns the &lt;code&gt;SessionManager&lt;/code&gt; registered with this server. The
+     * &lt;code&gt;SessionManager&lt;/code&gt; was registered with the server as a module while starting up
+     * the server.
+     *
+     * @return the &lt;code&gt;SessionManager&lt;/code&gt; registered with this server.
+     */
+    public SessionManager getSessionManager() {
+<span class="nc" id="L1426">        return (SessionManager) modules.get(SessionManager.class);</span>
+    }
+
+    /**
+     * Returns the &lt;code&gt;TransportHandler&lt;/code&gt; registered with this server. The
+     * &lt;code&gt;TransportHandler&lt;/code&gt; was registered with the server as a module while starting up
+     * the server.
+     *
+     * @return the &lt;code&gt;TransportHandler&lt;/code&gt; registered with this server.
+     */
+    public TransportHandler getTransportHandler() {
+<span class="nc" id="L1437">        return (TransportHandler) modules.get(TransportHandler.class);</span>
+    }
+
+    /**
+     * Returns the &lt;code&gt;PresenceUpdateHandler&lt;/code&gt; registered with this server. The
+     * &lt;code&gt;PresenceUpdateHandler&lt;/code&gt; was registered with the server as a module while starting
+     * up the server.
+     *
+     * @return the &lt;code&gt;PresenceUpdateHandler&lt;/code&gt; registered with this server.
+     */
+    public PresenceUpdateHandler getPresenceUpdateHandler() {
+<span class="nc" id="L1448">        return (PresenceUpdateHandler) modules.get(PresenceUpdateHandler.class);</span>
+    }
+
+    /**
+     * Returns the &lt;code&gt;PresenceSubscribeHandler&lt;/code&gt; registered with this server. The
+     * &lt;code&gt;PresenceSubscribeHandler&lt;/code&gt; was registered with the server as a module while
+     * starting up the server.
+     *
+     * @return the &lt;code&gt;PresenceSubscribeHandler&lt;/code&gt; registered with this server.
+     */
+    public PresenceSubscribeHandler getPresenceSubscribeHandler() {
+<span class="nc" id="L1459">        return (PresenceSubscribeHandler) modules.get(PresenceSubscribeHandler.class);</span>
+    }
+
+    /**
+     * Returns the &lt;code&gt;IQRouter&lt;/code&gt; registered with this server. The
+     * &lt;code&gt;IQRouter&lt;/code&gt; was registered with the server as a module while starting up
+     * the server.
+     *
+     * @return the &lt;code&gt;IQRouter&lt;/code&gt; registered with this server.
+     */
+    public IQRouter getIQRouter() {
+<span class="nc" id="L1470">        return (IQRouter) modules.get(IQRouter.class);</span>
+    }
+
+    /**
+     * Returns the &lt;code&gt;MessageRouter&lt;/code&gt; registered with this server. The
+     * &lt;code&gt;MessageRouter&lt;/code&gt; was registered with the server as a module while starting up
+     * the server.
+     *
+     * @return the &lt;code&gt;MessageRouter&lt;/code&gt; registered with this server.
+     */
+    public MessageRouter getMessageRouter() {
+<span class="nc" id="L1481">        return (MessageRouter) modules.get(MessageRouter.class);</span>
+    }
+
+    /**
+     * Returns the &lt;code&gt;PresenceRouter&lt;/code&gt; registered with this server. The
+     * &lt;code&gt;PresenceRouter&lt;/code&gt; was registered with the server as a module while starting up
+     * the server.
+     *
+     * @return the &lt;code&gt;PresenceRouter&lt;/code&gt; registered with this server.
+     */
+    public PresenceRouter getPresenceRouter() {
+<span class="nc" id="L1492">        return (PresenceRouter) modules.get(PresenceRouter.class);</span>
+    }
+
+    /**
+     * Returns the &lt;code&gt;MulticastRouter&lt;/code&gt; registered with this server. The
+     * &lt;code&gt;MulticastRouter&lt;/code&gt; was registered with the server as a module while starting up
+     * the server.
+     *
+     * @return the &lt;code&gt;MulticastRouter&lt;/code&gt; registered with this server.
+     */
+    public MulticastRouter getMulticastRouter() {
+<span class="nc" id="L1503">        return (MulticastRouter) modules.get(MulticastRouter.class);</span>
+    }
+
+    /**
+     * Returns the &lt;code&gt;UserManager&lt;/code&gt; registered with this server. The
+     * &lt;code&gt;UserManager&lt;/code&gt; was registered with the server as a module while starting up
+     * the server.
+     *
+     * @return the &lt;code&gt;UserManager&lt;/code&gt; registered with this server.
+     */
+    public UserManager getUserManager() {
+<span class="nc" id="L1514">        return UserManager.getInstance();</span>
+    }
+
+    /**
+     * Returns the &lt;code&gt;LockOutManager&lt;/code&gt; registered with this server.  The
+     * &lt;code&gt;LockOutManager&lt;/code&gt; was registered with the server as a module while starting up
+     * the server.
+     *
+     * @return the &lt;code&gt;LockOutManager&lt;/code&gt; registered with this server.
+     */
+    public LockOutManager getLockOutManager() {
+<span class="nc" id="L1525">        return LockOutManager.getInstance();</span>
+    }
+
+    /**
+     * Returns the &lt;code&gt;UpdateManager&lt;/code&gt; registered with this server. The
+     * &lt;code&gt;UpdateManager&lt;/code&gt; was registered with the server as a module while starting up
+     * the server.
+     *
+     * @return the &lt;code&gt;UpdateManager&lt;/code&gt; registered with this server.
+     */
+    public UpdateManager getUpdateManager() {
+<span class="nc" id="L1536">        return (UpdateManager) modules.get(UpdateManager.class);</span>
+    }
+
+    /**
+     * Returns the &lt;code&gt;AuditManager&lt;/code&gt; registered with this server. The
+     * &lt;code&gt;AuditManager&lt;/code&gt; was registered with the server as a module while starting up
+     * the server.
+     *
+     * @return the &lt;code&gt;AuditManager&lt;/code&gt; registered with this server.
+     */
+    public AuditManager getAuditManager() {
+<span class="nc" id="L1547">        return (AuditManager) modules.get(AuditManagerImpl.class);</span>
+    }
+
+    /**
+     * Returns the &lt;code&gt;EntityCapabilitiesManager&lt;/code&gt; registered with this server. The
+     * &lt;code&gt;EntityCapabilitiesManager&lt;/code&gt; was registered with the server as a module while starting up
+     * the server.
+     *
+     * @return the &lt;code&gt;EntityCapabilitiesManager&lt;/code&gt; registered with this server.
+     */
+    public EntityCapabilitiesManager getEntityCapabilitiesManager() {
+<span class="nc" id="L1558">        return (EntityCapabilitiesManager) modules.get(EntityCapabilitiesManager.class);</span>
+    }
+
+    /**
+     * Returns a list with all the modules that provide &quot;discoverable&quot; features.
+     *
+     * @return a list with all the modules that provide &quot;discoverable&quot; features.
+     * @deprecated Use {@link IQDiscoInfoHandler} instead.
+     */
+    @Deprecated
+    public List&lt;ServerFeaturesProvider&gt; getServerFeaturesProviders() {
+<span class="nc" id="L1569">        List&lt;ServerFeaturesProvider&gt; answer = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L1570" title="All 2 branches missed.">        for (Module module : modules.values()) {</span>
+<span class="nc bnc" id="L1571" title="All 2 branches missed.">            if (module instanceof ServerFeaturesProvider) {</span>
+<span class="nc" id="L1572">                answer.add((ServerFeaturesProvider) module);</span>
+            }
+<span class="nc" id="L1574">        }</span>
+<span class="nc" id="L1575">        return answer;</span>
+    }
+
+    /**
+     * Returns a list with all the modules that provide &quot;discoverable&quot; identities.
+     *
+     * @return a list with all the modules that provide &quot;discoverable&quot; identities.
+     * @deprecated Use {@link IQDiscoInfoHandler} instead.
+     */
+    @Deprecated
+    public List&lt;ServerIdentitiesProvider&gt; getServerIdentitiesProviders() {
+<span class="nc" id="L1586">        List&lt;ServerIdentitiesProvider&gt; answer = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L1587" title="All 2 branches missed.">        for (Module module : modules.values()) {</span>
+<span class="nc bnc" id="L1588" title="All 2 branches missed.">            if (module instanceof ServerIdentitiesProvider) {</span>
+<span class="nc" id="L1589">                answer.add((ServerIdentitiesProvider) module);</span>
+            }
+<span class="nc" id="L1591">        }</span>
+<span class="nc" id="L1592">        return answer;</span>
+    }
+
+    /**
+     * Returns a list with all the modules that provide &quot;discoverable&quot; items associated with
+     * the server.
+     *
+     * @return a list with all the modules that provide &quot;discoverable&quot; items associated with
+     *         the server.
+     * @deprecated Use {@link IQDiscoItemsHandler} instead.
+     */
+    @Deprecated
+    public List&lt;ServerItemsProvider&gt; getServerItemsProviders() {
+<span class="nc" id="L1605">        List&lt;ServerItemsProvider&gt; answer = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L1606" title="All 2 branches missed.">        for (Module module : modules.values()) {</span>
+<span class="nc bnc" id="L1607" title="All 2 branches missed.">            if (module instanceof ServerItemsProvider) {</span>
+<span class="nc" id="L1608">                answer.add((ServerItemsProvider) module);</span>
+            }
+<span class="nc" id="L1610">        }</span>
+<span class="nc" id="L1611">        return answer;</span>
+    }
+
+    /**
+     * Returns a list with all the modules that provide &quot;discoverable&quot; user identities.
+     *
+     * @return a list with all the modules that provide &quot;discoverable&quot; user identities.
+     * @deprecated Use {@link IQDiscoInfoHandler} instead.
+     */
+    @Deprecated
+    public List&lt;UserIdentitiesProvider&gt; getUserIdentitiesProviders() {
+<span class="nc" id="L1622">        List&lt;UserIdentitiesProvider&gt; answer = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L1623" title="All 2 branches missed.">        for (Module module : modules.values()) {</span>
+<span class="nc bnc" id="L1624" title="All 2 branches missed.">            if (module instanceof UserIdentitiesProvider) {</span>
+<span class="nc" id="L1625">                answer.add((UserIdentitiesProvider) module);</span>
+            }
+<span class="nc" id="L1627">        }</span>
+<span class="nc" id="L1628">        return answer;</span>
+    }
+
+    /**
+     * Returns a list with all the modules that provide &quot;discoverable&quot; items associated with
+     * users.
+     *
+     * @return a list with all the modules that provide &quot;discoverable&quot; items associated with
+     *         users.
+     * @deprecated Use {@link IQDiscoInfoHandler} instead.
+     */
+    @Deprecated
+    public List&lt;UserItemsProvider&gt; getUserItemsProviders() {
+<span class="nc" id="L1641">        List&lt;UserItemsProvider&gt; answer = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L1642" title="All 2 branches missed.">        for (Module module : modules.values()) {</span>
+<span class="nc bnc" id="L1643" title="All 2 branches missed.">            if (module instanceof UserItemsProvider) {</span>
+<span class="nc" id="L1644">                answer.add((UserItemsProvider) module);</span>
+            }
+<span class="nc" id="L1646">        }</span>
+<span class="nc" id="L1647">        return answer;</span>
+    }
+
+    /**
+     * Returns the &lt;code&gt;IQDiscoInfoHandler&lt;/code&gt; registered with this server. The
+     * &lt;code&gt;IQDiscoInfoHandler&lt;/code&gt; was registered with the server as a module while starting up
+     * the server.
+     *
+     * @return the &lt;code&gt;IQDiscoInfoHandler&lt;/code&gt; registered with this server.
+     */
+    public IQDiscoInfoHandler getIQDiscoInfoHandler() {
+<span class="nc" id="L1658">        return (IQDiscoInfoHandler) modules.get(IQDiscoInfoHandler.class);</span>
+    }
+
+    /**
+     * Returns the &lt;code&gt;IQDiscoItemsHandler&lt;/code&gt; registered with this server. The
+     * &lt;code&gt;IQDiscoItemsHandler&lt;/code&gt; was registered with the server as a module while starting up
+     * the server.
+     *
+     * @return the &lt;code&gt;IQDiscoItemsHandler&lt;/code&gt; registered with this server.
+     */
+    public IQDiscoItemsHandler getIQDiscoItemsHandler() {
+<span class="nc" id="L1669">        return (IQDiscoItemsHandler) modules.get(IQDiscoItemsHandler.class);</span>
+    }
+
+    /**
+     * Returns the &lt;code&gt;PrivateStorage&lt;/code&gt; registered with this server. The
+     * &lt;code&gt;PrivateStorage&lt;/code&gt; was registered with the server as a module while starting up
+     * the server.
+     *
+     * @return the &lt;code&gt;PrivateStorage&lt;/code&gt; registered with this server.
+     */
+    public PrivateStorage getPrivateStorage() {
+<span class="nc" id="L1680">        return (PrivateStorage) modules.get(PrivateStorage.class);</span>
+    }
+
+    /**
+     * Returns the &lt;code&gt;MultiUserChatManager&lt;/code&gt; registered with this server. The
+     * &lt;code&gt;MultiUserChatManager&lt;/code&gt; was registered with the server as a module while starting up
+     * the server.
+     *
+     * @return the &lt;code&gt;MultiUserChatManager&lt;/code&gt; registered with this server.
+     */
+    public MultiUserChatManager getMultiUserChatManager() {
+<span class="nc" id="L1691">        return (MultiUserChatManager) modules.get(MultiUserChatManager.class);</span>
+    }
+
+    /**
+     * Returns the &lt;code&gt;AdHocCommandHandler&lt;/code&gt; registered with this server. The
+     * &lt;code&gt;AdHocCommandHandler&lt;/code&gt; was registered with the server as a module while starting up
+     * the server.
+     *
+     * @return the &lt;code&gt;AdHocCommandHandler&lt;/code&gt; registered with this server.
+     */
+    public AdHocCommandHandler getAdHocCommandHandler() {
+<span class="nc" id="L1702">        return (AdHocCommandHandler) modules.get(AdHocCommandHandler.class);</span>
+    }
+
+    /**
+     * Returns the &lt;code&gt;FileTransferProxy&lt;/code&gt; registered with this server. The
+     * &lt;code&gt;FileTransferProxy&lt;/code&gt; was registered with the server as a module while starting up
+     * the server.
+     *
+     * @return the &lt;code&gt;FileTransferProxy&lt;/code&gt; registered with this server.
+     */
+    public FileTransferProxy getFileTransferProxy() {
+<span class="nc" id="L1713">        return (FileTransferProxy) modules.get(FileTransferProxy.class);</span>
+    }
+
+    /**
+     * Returns the &lt;code&gt;FileTransferManager&lt;/code&gt; registered with this server. The
+     * &lt;code&gt;FileTransferManager&lt;/code&gt; was registered with the server as a module while starting up
+     * the server.
+     *
+     * @return the &lt;code&gt;FileTransferProxy&lt;/code&gt; registered with this server.
+     */
+    public FileTransferManager getFileTransferManager() {
+<span class="nc" id="L1724">        return (FileTransferManager) modules.get(DefaultFileTransferManager.class);</span>
+    }
+
+    /**
+     * Returns the &lt;code&gt;MediaProxyService&lt;/code&gt; registered with this server. The
+     * &lt;code&gt;MediaProxyService&lt;/code&gt; was registered with the server as a module while starting up
+     * the server.
+     *
+     * @return the &lt;code&gt;MediaProxyService&lt;/code&gt; registered with this server.
+     */
+    public MediaProxyService getMediaProxyService() {
+<span class="nc" id="L1735">        return (MediaProxyService) modules.get(MediaProxyService.class);</span>
+    }
+
+    /**
+     * Returns the &lt;code&gt;FlashCrossDomainHandler&lt;/code&gt; registered with this server. The
+     * &lt;code&gt;FlashCrossDomainHandler&lt;/code&gt; was registered with the server as a module while starting up
+     * the server.
+     *
+     * @return the &lt;code&gt;FlashCrossDomainHandler&lt;/code&gt; registered with this server.
+     */
+    public FlashCrossDomainHandler getFlashCrossDomainHandler() {
+<span class="nc" id="L1746">        return (FlashCrossDomainHandler) modules.get(FlashCrossDomainHandler.class);</span>
+    }
+
+    /**
+     * Returns the &lt;code&gt;VCardManager&lt;/code&gt; registered with this server. The
+     * &lt;code&gt;VCardManager&lt;/code&gt; was registered with the server as a module while starting up
+     * the server.
+     * @return the &lt;code&gt;VCardManager&lt;/code&gt; registered with this server.
+     */
+    public VCardManager getVCardManager() {
+<span class="nc" id="L1756">        return VCardManager.getInstance();</span>
+    }
+
+    /**
+     * Returns the &lt;code&gt;InternalComponentManager&lt;/code&gt; registered with this server. The
+     * &lt;code&gt;InternalComponentManager&lt;/code&gt; was registered with the server as a module while starting up
+     * the server.
+     *
+     * @return the &lt;code&gt;InternalComponentManager&lt;/code&gt; registered with this server.
+     */
+    private InternalComponentManager getComponentManager() {
+<span class="nc" id="L1767">        return (InternalComponentManager) modules.get(InternalComponentManager.class);</span>
+    }
+
+    /**
+     * Returns the &lt;code&gt;CertificateStoreManager&lt;/code&gt; registered with this server. The
+     * &lt;code&gt;CertificateStoreManager&lt;/code&gt; was registered with the server as a module while starting up
+     * the server.
+     *
+     * @return the &lt;code&gt;CertificateStoreManager&lt;/code&gt; registered with this server.
+     */
+    public CertificateStoreManager getCertificateStoreManager() {
+<span class="nc" id="L1778">        return (CertificateStoreManager) modules.get( CertificateStoreManager.class );</span>
+    }
+    /**
+     * Returns the locator to use to find sessions hosted in other cluster nodes. When not running
+     * in a cluster a {@code null} value is returned.
+     *
+     * @return the locator to use to find sessions hosted in other cluster nodes.
+     */
+    public RemoteSessionLocator getRemoteSessionLocator() {
+<span class="nc" id="L1787">        return remoteSessionLocator;</span>
+    }
+
+    /**
+     * Sets the locator to use to find sessions hosted in other cluster nodes. When not running
+     * in a cluster set a {@code null} value.
+     *
+     * @param remoteSessionLocator the locator to use to find sessions hosted in other cluster nodes.
+     */
+    public void setRemoteSessionLocator(RemoteSessionLocator remoteSessionLocator) {
+<span class="nc" id="L1797">        this.remoteSessionLocator = remoteSessionLocator;</span>
+<span class="nc" id="L1798">    }</span>
+
+    /**
+     * Returns whether or not the server has been started.
+     * 
+     * @return whether or not the server has been started.
+     */
+    public boolean isStarted() {
+<span class="nc" id="L1806">        return started;</span>
+    }
+
+    /**
+     * Asynchronously send a message to every administrator on the system.
+     *
+     * @param message The message to send
+     * @return the future result of sending the message.
+     */
+    public Future&lt;?&gt; sendMessageToAdmins(final String message) {
+<span class="nc" id="L1816">        return TaskEngine.getInstance().submit(() -&gt; {</span>
+<span class="nc" id="L1817">            final MessageRouter messageRouter = getMessageRouter();</span>
+<span class="nc" id="L1818">            final Collection&lt;JID&gt; admins = XMPPServer.getInstance().getAdmins();</span>
+<span class="nc" id="L1819">            final Message notification = new Message();</span>
+<span class="nc" id="L1820">            notification.setFrom(getServerInfo().getXMPPDomain());</span>
+<span class="nc" id="L1821">            notification.setBody(message);</span>
+<span class="nc" id="L1822">            admins.forEach(jid -&gt; {</span>
+<span class="nc" id="L1823">                logger.debug(&quot;Sending message to admin [jid={}, message={}]&quot;, jid, message);</span>
+<span class="nc" id="L1824">                notification.setTo(jid);</span>
+<span class="nc" id="L1825">                messageRouter.route(notification);</span>
+<span class="nc" id="L1826">            });</span>
+<span class="nc" id="L1827">        });</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

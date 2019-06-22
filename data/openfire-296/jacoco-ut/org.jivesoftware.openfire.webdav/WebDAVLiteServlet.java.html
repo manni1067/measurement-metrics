@@ -1,0 +1,366 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>WebDAVLiteServlet.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.webdav</a> &gt; <span class="el_source">WebDAVLiteServlet.java</span></div><h1>WebDAVLiteServlet.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2004-2009 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.webdav;
+
+import java.io.DataInputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.IOException;
+
+import javax.servlet.ServletConfig;
+import javax.servlet.ServletException;
+import javax.servlet.ServletInputStream;
+import javax.servlet.http.HttpServlet;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
+
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.auth.AuthFactory;
+import org.jivesoftware.util.Base64;
+import org.jivesoftware.util.JiveGlobals;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmpp.packet.JID;
+
+/*
+ * This is a work in progress and is checked in for future use.
+ */
+
+/**
+ * Implements a very light WebDAV-ish servlet for specific purposes.  It does not support WebDAV extensions
+ * to the HTTP protocol.  Instead, it supports the set of commands: GET, PUT, and DELETE.  This serves
+ * as a WebDAV like storage interface for MUC shared files.  It handles part of XEP-0129: WebDAV File Transfers,
+ * but not all of it.  We don't handle the PROPPATCH command, for example, as the user has no rights to set
+ * the permissions on MUC shared files.
+ *
+ * TODO: How to handle a remote account?  As posed in the WebDAV XEP, we should send a message and wait for response.
+ * TODO: How to handle SparkWeb?  Reasking for a username and password would suck.  Need some form of SSO.
+ *    Maybe the SSO could be some special token provided during sign-on that the client could store and use
+ *    for auth.
+ *
+ * @author Daniel Henninger
+ */
+<span class="nc" id="L58">public class WebDAVLiteServlet extends HttpServlet {</span>
+
+<span class="nc" id="L60">    private static final Logger Log = LoggerFactory.getLogger(WebDAVLiteServlet.class);</span>
+
+    // Storage directory under the Openfire install root
+<span class="nc" id="L63">    private static String WEBDAV_SUBDIR = &quot;mucFiles&quot;;</span>
+
+    /**
+     * Retrieves a File object referring to a file in a service and room.  Leaving file as null
+     * will get you the directory that would contain all of the files for a particular service and room.
+     *
+     * @param service Subdomain of the conference service we are forming a file path for.
+     * @param room Conference room we are forming a file path for.
+     * @param file Optional (can be null) filename for a path to a specific file (otherwise, directory).
+     * @return The File reference constructed for the service, room, and file combination.
+     */
+    private File getFileReference(String service, String room, String file) {
+<span class="nc bnc" id="L75" title="All 2 branches missed.">        return new File(JiveGlobals.getHomeDirectory(), WEBDAV_SUBDIR+File.separator+service+File.separator+room+(file != null ? File.separator+file : &quot;&quot;));</span>
+    }
+    
+    /**
+     * Verifies that the user is authenticated via some mechanism such as Basic Auth.  If the
+     * authentication fails, this method will alter the HTTP response to include a request for
+     * auth and send the unauthorized response back to the client.
+     *
+     * TODO: Handle some form of special token auth, perhaps provided a room connection?
+     * TODO: If it's not a local account, we should try message auth access?  XEP-0070?
+     * TODO: Should we support digest auth as well?
+     *
+     * @param request Object representing the HTTP request.
+     * @param response Object representing the HTTP response.
+     * @return True or false if the user is authenticated.
+     * @throws ServletException If there was a servlet related exception.
+     * @throws IOException If there was an IO error while setting the error.
+     */
+    private Boolean isAuthenticated(HttpServletRequest request, HttpServletResponse response)
+            throws ServletException, IOException {
+<span class="nc" id="L95">        String auth = request.getHeader(&quot;Authorization&quot;);</span>
+        JID jid;
+        try {
+<span class="nc bnc" id="L98" title="All 4 branches missed.">            if (auth == null || !request.getAuthType().equals(HttpServletRequest.BASIC_AUTH)) {</span>
+<span class="nc" id="L99">                throw new Exception(&quot;No authorization or improper authorization provided.&quot;);</span>
+            }
+<span class="nc" id="L101">            auth = auth.substring(auth.indexOf(&quot; &quot;));</span>
+<span class="nc" id="L102">            String decoded = new String(Base64.decode(auth));</span>
+<span class="nc" id="L103">            int i = decoded.indexOf(&quot;:&quot;);</span>
+<span class="nc" id="L104">            String username = decoded.substring(0,i);</span>
+<span class="nc bnc" id="L105" title="All 2 branches missed.">            if (!username.contains(&quot;@&quot;)) {</span>
+<span class="nc" id="L106">                throw new Exception(&quot;Not a valid JID.&quot;);</span>
+            }
+<span class="nc" id="L108">            jid = new JID(username);</span>
+<span class="nc bnc" id="L109" title="All 2 branches missed.">            if (XMPPServer.getInstance().isLocal(jid)) {</span>
+<span class="nc" id="L110">                String password = decoded.substring(i+1, decoded.length());</span>
+<span class="nc bnc" id="L111" title="All 2 branches missed.">                if (AuthFactory.authenticate(username, password) == null) {</span>
+<span class="nc" id="L112">                    throw new Exception(&quot;Authentication failed.&quot;);</span>
+                }
+<span class="nc" id="L114">            }</span>
+            else {
+                // TODO: Authenticate a remote user, probably via message auth.
+<span class="nc" id="L117">                throw new Exception(&quot;Not a local account.&quot;);</span>
+            }
+<span class="nc" id="L119">            return true;</span>
+        }
+<span class="nc" id="L121">        catch (Exception e) {</span>
+            /*
+             * This covers all possible authentication issues.  Eg:
+             * - not enough of auth info passed in
+             * - failed auth
+             */
+<span class="nc" id="L127">            response.setHeader(&quot;WWW-Authenticate&quot;, &quot;Basic realm=\&quot;Openfire WebDAV\&quot;&quot;);</span>
+<span class="nc" id="L128">            response.sendError(HttpServletResponse.SC_UNAUTHORIZED);</span>
+<span class="nc" id="L129">            return false;</span>
+        }
+    }
+
+    /**
+     * Verifies that the authenticated user is a member of a conference service and room, or else
+     * they are not entitled to view any of the files in the room.
+     *
+     * @param request Object representing the HTTP request.
+     * @param response Object representing the HTTP response.
+     * @param service Subdomain of the conference service they are trying to access files for.
+     * @param room Room in the conference service they are trying to access files for.
+     * @return True or false if the user is authenticated.
+     * @throws ServletException If there was a servlet related exception.
+     * @throws IOException If there was an IO error while setting the error.
+     */
+    private Boolean isAuthorized(HttpServletRequest request, HttpServletResponse response,
+                                 String service, String room) throws ServletException, IOException {
+<span class="nc" id="L147">        String auth = request.getHeader(&quot;Authorization&quot;);</span>
+        try {
+<span class="nc bnc" id="L149" title="All 4 branches missed.">            if (auth == null || !request.getAuthType().equals(HttpServletRequest.BASIC_AUTH)) {</span>
+<span class="nc" id="L150">                throw new Exception(&quot;No authorization or improper authorization provided.&quot;);</span>
+            }
+<span class="nc" id="L152">            auth = auth.substring(auth.indexOf(&quot; &quot;));</span>
+<span class="nc" id="L153">            String decoded = new String(Base64.decode(auth));</span>
+<span class="nc" id="L154">            int i = decoded.indexOf(&quot;:&quot;);</span>
+<span class="nc" id="L155">            String username = decoded.substring(0,i);</span>
+<span class="nc bnc" id="L156" title="All 2 branches missed.">            if (!username.contains(&quot;@&quot;)) {</span>
+<span class="nc" id="L157">                throw new Exception(&quot;Not a valid JID.&quot;);</span>
+            }
+<span class="nc" id="L159">            final JID bareJID = new JID(username).asBareJID();</span>
+<span class="nc" id="L160">            XMPPServer.getInstance().getMultiUserChatManager().getMultiUserChatService(service).getChatRoom(room).getOccupantsByBareJID(bareJID);</span>
+<span class="nc" id="L161">            return true;</span>
+        }
+<span class="nc" id="L163">        catch (Exception e) {</span>
+            /*
+             * This covers all possible authorization issues.  Eg:
+             * - accessing a room that doesn't exist
+             * - accessing a room that user isn't a member of
+             */
+<span class="nc" id="L169">            response.setHeader(&quot;WWW-Authenticate&quot;, &quot;Basic realm=\&quot;Openfire WebDAV\&quot;&quot;);</span>
+<span class="nc" id="L170">            response.sendError(HttpServletResponse.SC_FORBIDDEN);</span>
+<span class="nc" id="L171">            return false;</span>
+        }
+    }
+
+    /**
+     * Initialize the WebDAV servlet, auto-creating it's file root if it doesn't exist.
+     *
+     * @param servletConfig Configuration settings of the servlet from web.xml.
+     * @throws ServletException If there was an exception setting up the servlet.
+     */
+    @Override
+    public void init(ServletConfig servletConfig) throws ServletException {
+<span class="nc" id="L183">        super.init(servletConfig);</span>
+<span class="nc" id="L184">        File webdavDir = new File(JiveGlobals.getHomeDirectory(), WEBDAV_SUBDIR);</span>
+<span class="nc bnc" id="L185" title="All 2 branches missed.">        if (!webdavDir.exists()) {</span>
+<span class="nc" id="L186">            webdavDir.mkdirs();</span>
+        }
+<span class="nc" id="L188">    }</span>
+
+    /**
+     * Handles a GET request for files or for a file listing.
+     *
+     * @param request Object representing the HTTP request.
+     * @param response Object representing the HTTP response.
+     * @throws ServletException If there was a servlet related exception.
+     * @throws IOException If there was an IO error while setting the error.
+     */
+    @Override
+    protected void doGet(HttpServletRequest request,
+                         HttpServletResponse response) throws
+                ServletException, IOException {
+        // Verify authentication
+<span class="nc bnc" id="L203" title="All 2 branches missed.">        if (!isAuthenticated(request, response)) return;</span>
+
+<span class="nc" id="L205">        String path = request.getPathInfo();</span>
+<span class="nc" id="L206">        Log.debug(&quot;WebDAVLiteServlet: GET with path = &quot;+path);</span>
+<span class="nc bnc" id="L207" title="All 4 branches missed.">        if (path == null || !path.startsWith(&quot;/rooms/&quot;)) {</span>
+<span class="nc" id="L208">            response.sendError(HttpServletResponse.SC_NOT_FOUND);</span>
+<span class="nc" id="L209">            return;</span>
+        }
+<span class="nc" id="L211">        String[] pathPcs = path.split(&quot;/&quot;);</span>
+<span class="nc bnc" id="L212" title="All 4 branches missed.">        if (pathPcs.length &lt; 4 || pathPcs.length &gt; 5) {</span>
+<span class="nc" id="L213">            response.sendError(HttpServletResponse.SC_NOT_FOUND);</span>
+<span class="nc" id="L214">            return;</span>
+        }
+<span class="nc" id="L216">        String service = pathPcs[2];</span>
+<span class="nc" id="L217">        String room = pathPcs[3];</span>
+
+        // Verify authorization
+<span class="nc bnc" id="L220" title="All 2 branches missed.">        if (!isAuthorized(request, response, service, room)) return;</span>
+        
+<span class="nc bnc" id="L222" title="All 2 branches missed.">        if (pathPcs.length == 5) {</span>
+            // File retrieval
+<span class="nc" id="L224">            String filename = pathPcs[4];</span>
+<span class="nc" id="L225">            File file = getFileReference(service, room, filename);</span>
+<span class="nc" id="L226">            Log.debug(&quot;WebDAVListServlet: File path = &quot;+file.getAbsolutePath());</span>
+<span class="nc" id="L227">            Log.debug(&quot;WebDAVListServlet: Service = &quot;+service+&quot;, room = &quot;+room+&quot;, file = &quot;+filename);</span>
+<span class="nc bnc" id="L228" title="All 2 branches missed.">            if (file.exists()) {</span>
+<span class="nc" id="L229">                response.setStatus(HttpServletResponse.SC_OK);</span>
+<span class="nc" id="L230">                response.setContentType(&quot;application/octet-stream&quot;);</span>
+<span class="nc" id="L231">                response.setContentLength((int)file.length());</span>
+<span class="nc" id="L232">                FileInputStream fileStream = new FileInputStream(file);</span>
+<span class="nc" id="L233">                byte[] byteArray = new byte[(int)file.length()];</span>
+<span class="nc" id="L234">                new DataInputStream(fileStream).readFully(byteArray);</span>
+<span class="nc" id="L235">                fileStream.close();</span>
+<span class="nc" id="L236">                response.getOutputStream().write(byteArray);</span>
+<span class="nc" id="L237">            }</span>
+            else {
+<span class="nc" id="L239">                response.sendError(HttpServletResponse.SC_NOT_FOUND);</span>
+            }
+<span class="nc" id="L241">        }</span>
+        else {
+            // File listing
+<span class="nc" id="L244">            response.setStatus(HttpServletResponse.SC_OK);</span>
+<span class="nc" id="L245">            response.setContentType(&quot;text/plain&quot;);</span>
+<span class="nc" id="L246">            response.setCharacterEncoding(&quot;UTF-8&quot;);</span>
+<span class="nc" id="L247">            String content = &quot;Files available for &quot;+room+&quot;@&quot;+service+&quot;:\n&quot;;</span>
+<span class="nc" id="L248">            File fileDir = getFileReference(service, room, null);</span>
+<span class="nc" id="L249">            Log.debug(&quot;WebDAVListServlet: File path = &quot;+fileDir.getAbsolutePath());</span>
+<span class="nc bnc" id="L250" title="All 2 branches missed.">            if (fileDir.exists()) {</span>
+<span class="nc" id="L251">                File[] files = fileDir.listFiles();</span>
+<span class="nc bnc" id="L252" title="All 2 branches missed.">                for (File file : files) {</span>
+<span class="nc" id="L253">                    content += file.getName()+&quot;\n&quot;;</span>
+                }
+            }
+<span class="nc" id="L256">            response.getOutputStream().write(content.getBytes());</span>
+<span class="nc" id="L257">            Log.debug(&quot;WebDAVListServlet: Service = &quot;+service+&quot;, room = &quot;+room);</span>
+        }
+<span class="nc" id="L259">    }</span>
+
+    /**
+     * Handles a PUT request for uploading files.
+     *
+     * @param request Object representing the HTTP request.
+     * @param response Object representing the HTTP response.
+     * @throws ServletException If there was a servlet related exception.
+     * @throws IOException If there was an IO error while setting the error.
+     */
+    @Override
+    protected void doPut(HttpServletRequest request,
+                         HttpServletResponse response) throws
+                ServletException, IOException {
+        // Verify authentication
+<span class="nc bnc" id="L274" title="All 2 branches missed.">        if (!isAuthenticated(request, response)) return;</span>
+
+<span class="nc" id="L276">        String path = request.getPathInfo();</span>
+<span class="nc" id="L277">        Log.debug(&quot;WebDAVLiteServlet: PUT with path = &quot;+path);</span>
+<span class="nc bnc" id="L278" title="All 2 branches missed.">        if (request.getContentLength() &lt;= 0) {</span>
+<span class="nc" id="L279">            response.sendError(HttpServletResponse.SC_BAD_REQUEST);</span>
+<span class="nc" id="L280">            return;</span>
+        }
+<span class="nc bnc" id="L282" title="All 4 branches missed.">        if (path == null || !path.startsWith(&quot;/rooms/&quot;)) {</span>
+<span class="nc" id="L283">            response.sendError(HttpServletResponse.SC_BAD_REQUEST);</span>
+<span class="nc" id="L284">            return;</span>
+        }
+<span class="nc" id="L286">        String[] pathPcs = path.split(&quot;/&quot;);</span>
+<span class="nc bnc" id="L287" title="All 2 branches missed.">        if (pathPcs.length != 5) {</span>
+<span class="nc" id="L288">            response.sendError(HttpServletResponse.SC_BAD_REQUEST);</span>
+<span class="nc" id="L289">            return;</span>
+        }
+<span class="nc" id="L291">        String service = pathPcs[2];</span>
+<span class="nc" id="L292">        String room = pathPcs[3];</span>
+<span class="nc" id="L293">        String filename = pathPcs[4];</span>
+
+        // Verify authorization
+<span class="nc bnc" id="L296" title="All 2 branches missed.">        if (!isAuthorized(request, response, service, room)) return;</span>
+
+<span class="nc" id="L298">        Log.debug(&quot;WebDAVListServlet: Service = &quot;+service+&quot;, room = &quot;+room+&quot;, file = &quot;+filename);</span>
+<span class="nc" id="L299">        File file = getFileReference(service, room, filename);</span>
+<span class="nc" id="L300">        Boolean overwriteFile = file.exists();</span>
+<span class="nc" id="L301">        FileOutputStream fileStream = new FileOutputStream(file, false);</span>
+<span class="nc" id="L302">        ServletInputStream inputStream = request.getInputStream();</span>
+<span class="nc" id="L303">        byte[] byteArray = new byte[request.getContentLength()];</span>
+<span class="nc" id="L304">        int bytesRead = 0;</span>
+<span class="nc bnc" id="L305" title="All 2 branches missed.">        while (bytesRead != -1) {</span>
+<span class="nc" id="L306">            bytesRead = inputStream.read(byteArray, bytesRead, request.getContentLength());   </span>
+        }
+<span class="nc" id="L308">        fileStream.write(byteArray);</span>
+<span class="nc" id="L309">        fileStream.close();</span>
+<span class="nc" id="L310">        inputStream.close();</span>
+<span class="nc bnc" id="L311" title="All 2 branches missed.">        if (overwriteFile) {</span>
+<span class="nc" id="L312">            response.setStatus(HttpServletResponse.SC_NO_CONTENT);</span>
+<span class="nc" id="L313">            response.setHeader(&quot;Location&quot;, request.getRequestURI());</span>
+        }
+        else {
+<span class="nc" id="L316">            response.setStatus(HttpServletResponse.SC_CREATED);</span>
+<span class="nc" id="L317">            response.setHeader(&quot;Location&quot;, request.getRequestURI());</span>
+        }
+<span class="nc" id="L319">    }</span>
+
+    /**
+     * Handles a DELETE request for deleting files.
+     *
+     * @param request Object representing the HTTP request.
+     * @param response Object representing the HTTP response.
+     * @throws ServletException If there was a servlet related exception.
+     * @throws IOException If there was an IO error while setting the error.
+     */
+    @Override
+    protected void doDelete(HttpServletRequest request,
+                         HttpServletResponse response) throws
+                ServletException, IOException {
+        // Verify authentication
+<span class="nc bnc" id="L334" title="All 2 branches missed.">        if (!isAuthenticated(request, response)) return;</span>
+        
+<span class="nc" id="L336">        String path = request.getPathInfo();</span>
+<span class="nc" id="L337">        Log.debug(&quot;WebDAVLiteServlet: DELETE with path = &quot;+path);</span>
+<span class="nc bnc" id="L338" title="All 4 branches missed.">        if (path == null || !path.startsWith(&quot;/rooms/&quot;)) {</span>
+<span class="nc" id="L339">            response.sendError(HttpServletResponse.SC_NOT_FOUND);</span>
+<span class="nc" id="L340">            return;</span>
+        }
+<span class="nc" id="L342">        String[] pathPcs = path.split(&quot;/&quot;);</span>
+<span class="nc bnc" id="L343" title="All 2 branches missed.">        if (pathPcs.length != 5) {</span>
+<span class="nc" id="L344">            response.sendError(HttpServletResponse.SC_NOT_FOUND);</span>
+<span class="nc" id="L345">            return;</span>
+        }
+<span class="nc" id="L347">        String service = pathPcs[2];</span>
+<span class="nc" id="L348">        String room = pathPcs[3];</span>
+<span class="nc" id="L349">        String filename = pathPcs[4];</span>
+
+        // Verify authorization
+<span class="nc bnc" id="L352" title="All 2 branches missed.">        if (!isAuthorized(request, response, service, room)) return;</span>
+
+<span class="nc" id="L354">        Log.debug(&quot;WebDAVListServlet: Service = &quot;+service+&quot;, room = &quot;+room+&quot;, file = &quot;+filename);</span>
+<span class="nc" id="L355">        File file = getFileReference(service, room, filename);</span>
+<span class="nc bnc" id="L356" title="All 2 branches missed.">        if (file.exists()) {</span>
+<span class="nc" id="L357">            file.delete();</span>
+<span class="nc" id="L358">            response.setStatus(HttpServletResponse.SC_NO_CONTENT);</span>
+        }
+        else {
+<span class="nc" id="L361">            response.setStatus(HttpServletResponse.SC_NOT_FOUND);</span>
+        }
+<span class="nc" id="L363">    }</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

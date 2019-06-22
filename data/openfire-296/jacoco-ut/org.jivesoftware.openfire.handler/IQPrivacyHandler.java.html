@@ -1,0 +1,440 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>IQPrivacyHandler.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.handler</a> &gt; <span class="el_source">IQPrivacyHandler.java</span></div><h1>IQPrivacyHandler.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.handler;
+
+import org.dom4j.Element;
+import org.jivesoftware.openfire.IQHandlerInfo;
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.auth.UnauthorizedException;
+import org.jivesoftware.openfire.disco.ServerFeaturesProvider;
+import org.jivesoftware.openfire.event.UserEventListener;
+import org.jivesoftware.openfire.privacy.PrivacyList;
+import org.jivesoftware.openfire.privacy.PrivacyListManager;
+import org.jivesoftware.openfire.privacy.PrivacyListProvider;
+import org.jivesoftware.openfire.session.ClientSession;
+import org.jivesoftware.openfire.user.User;
+import org.jivesoftware.openfire.user.UserManager;
+import org.xmpp.packet.IQ;
+import org.xmpp.packet.JID;
+import org.xmpp.packet.PacketError;
+
+import java.util.Collections;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+
+/**
+ * IQPrivacyHandler is responsible for handling privacy lists.
+ *
+ * @author Gaston Dombiak
+ */
+public class IQPrivacyHandler extends IQHandler
+        implements ServerFeaturesProvider, UserEventListener {
+
+    private IQHandlerInfo info;
+<span class="nc" id="L49">    private PrivacyListManager manager = PrivacyListManager.getInstance();</span>
+<span class="nc" id="L50">    private PrivacyListProvider provider = PrivacyListProvider.getInstance();</span>
+
+    public IQPrivacyHandler() {
+<span class="nc" id="L53">        super(&quot;Blocking Communication Handler&quot;);</span>
+<span class="nc" id="L54">        info = new IQHandlerInfo(&quot;query&quot;, &quot;jabber:iq:privacy&quot;);</span>
+<span class="nc" id="L55">    }</span>
+
+    @Override
+    public IQ handleIQ(IQ packet) throws UnauthorizedException {
+<span class="nc" id="L59">        IQ.Type type = packet.getType();</span>
+<span class="nc" id="L60">        JID from = packet.getFrom();</span>
+<span class="nc bnc" id="L61" title="All 4 branches missed.">        if (from.getNode() == null || !UserManager.getInstance().isRegisteredUser(from.getNode())) {</span>
+            // Service is unavailable for anonymous users
+<span class="nc" id="L63">            IQ result = IQ.createResultIQ(packet);</span>
+<span class="nc" id="L64">            result.setChildElement(packet.getChildElement().createCopy());</span>
+<span class="nc" id="L65">            result.setError(PacketError.Condition.service_unavailable);</span>
+<span class="nc" id="L66">            return result;</span>
+        }
+<span class="nc" id="L68">        IQ result = null;</span>
+<span class="nc bnc" id="L69" title="All 2 branches missed.">        if (type.equals(IQ.Type.get)) {</span>
+            // User wants to retrieve a privacy list or the list of privacy list
+<span class="nc" id="L71">            Element child = packet.getChildElement();</span>
+<span class="nc" id="L72">            List elements = child.elements();</span>
+<span class="nc bnc" id="L73" title="All 2 branches missed.">            if (elements.isEmpty()) {</span>
+                // User requested names of privacy lists
+<span class="nc" id="L75">                result = getPrivacyListsNames(packet, from);</span>
+            }
+            else {
+                // User requested a privacy list
+<span class="nc" id="L79">                result = getPrivacyList(packet, from);</span>
+            }
+<span class="nc" id="L81">        }</span>
+<span class="nc bnc" id="L82" title="All 2 branches missed.">        else if (type.equals(IQ.Type.set)) {</span>
+<span class="nc" id="L83">            Element child = packet.getChildElement();</span>
+<span class="nc" id="L84">            Element activeList = child.element(&quot;active&quot;);</span>
+<span class="nc" id="L85">            Element defaultList = child.element(&quot;default&quot;);</span>
+<span class="nc bnc" id="L86" title="All 2 branches missed.">            if (activeList != null) {</span>
+                // Active list handling
+<span class="nc" id="L88">                String listName = activeList.attributeValue(&quot;name&quot;);</span>
+<span class="nc bnc" id="L89" title="All 2 branches missed.">                if (listName != null) {</span>
+                    // User wants to set or change the active list currently being applied by
+                    // the server to this session
+<span class="nc" id="L92">                    result = setActiveList(packet, from, listName);</span>
+                }
+                else {
+                    // User wants to decline the use of any active list for this session
+<span class="nc" id="L96">                    result = declineActiveList(packet, from);</span>
+
+                }
+<span class="nc" id="L99">            }</span>
+<span class="nc bnc" id="L100" title="All 2 branches missed.">            else if (defaultList != null) {</span>
+                // Default list handling
+<span class="nc" id="L102">                String listName = defaultList.attributeValue(&quot;name&quot;);</span>
+<span class="nc bnc" id="L103" title="All 2 branches missed.">                if (listName != null) {</span>
+                    // User wants to set or change its default list (i.e. which applies
+                    // to the user as a whole, not only the sending resource)
+<span class="nc" id="L106">                    result = setDefaultList(packet, from, listName);</span>
+                }
+                else {
+                    // User wants to decline the use of a default list
+<span class="nc" id="L110">                    result = declineDefaultList(packet, from);</span>
+                }
+<span class="nc" id="L112">            }</span>
+            else {
+                // Privacy list handling (create/edit/delete)
+<span class="nc" id="L115">                Element list = child.element(&quot;list&quot;);</span>
+<span class="nc" id="L116">                String listName = list.attributeValue(&quot;name&quot;);</span>
+<span class="nc" id="L117">                List items = list.elements();</span>
+<span class="nc bnc" id="L118" title="All 2 branches missed.">                if (!items.isEmpty()) {</span>
+                    // User wants to create or edit a privacy list
+<span class="nc" id="L120">                    result = updateOrCreateList(packet, from, list);</span>
+                }
+                else {
+                    // User wants to delete a privacy list
+<span class="nc" id="L124">                    result = deleteList(packet, from, listName);</span>
+
+                }
+            }
+        }
+<span class="nc" id="L129">        return result;</span>
+    }
+
+    /**
+     * Returns the IQ packet containing the active and default lists and the lists
+     * defined by the user.
+     *
+     * @param packet IQ packet requesting the lists.
+     * @param from sender of the IQ packet.
+     * @return the IQ packet containing the active and default lists and the lists
+     *         defined by the user.
+     */
+    private IQ getPrivacyListsNames(IQ packet, JID from) {
+<span class="nc" id="L142">        IQ result = IQ.createResultIQ(packet);</span>
+<span class="nc" id="L143">        Element childElement = packet.getChildElement().createCopy();</span>
+<span class="nc" id="L144">        result.setChildElement(childElement);</span>
+<span class="nc" id="L145">        Map&lt;String, Boolean&gt; privacyLists = provider.getPrivacyLists(from.getNode());</span>
+        // Add the default list
+<span class="nc bnc" id="L147" title="All 2 branches missed.">        for (String listName : privacyLists.keySet()) {</span>
+<span class="nc bnc" id="L148" title="All 2 branches missed.">            if (privacyLists.get(listName)) {</span>
+<span class="nc" id="L149">                childElement.addElement(&quot;default&quot;).addAttribute(&quot;name&quot;, listName);</span>
+            }
+<span class="nc" id="L151">        }</span>
+        // Add the active list (only if there is an active list for the session)
+<span class="nc" id="L153">        ClientSession session = sessionManager.getSession(from);</span>
+<span class="nc bnc" id="L154" title="All 4 branches missed.">        if  (session != null &amp;&amp; session.getActiveList() != null) {</span>
+<span class="nc" id="L155">            childElement.addElement(&quot;active&quot;)</span>
+<span class="nc" id="L156">                    .addAttribute(&quot;name&quot;, session.getActiveList().getName());</span>
+        }
+
+        // Add a list element for each privacy list
+<span class="nc bnc" id="L160" title="All 2 branches missed.">        for (String listName : privacyLists.keySet()) {</span>
+<span class="nc" id="L161">            childElement.addElement(&quot;list&quot;).addAttribute(&quot;name&quot;, listName);</span>
+<span class="nc" id="L162">        }</span>
+<span class="nc" id="L163">        return result;</span>
+    }
+
+    /**
+     * Returns the IQ packet containing the details of the specified list. If no list
+     * was found or the IQ request contains more than one specified list then an error will
+     * be returned.
+     *
+     * @param packet IQ packet requesting a given list.
+     * @param from sender of the IQ packet.
+     * @return the IQ packet containing the details of the specified list.
+     */
+    private IQ getPrivacyList(IQ packet, JID from) {
+<span class="nc" id="L176">        IQ result = IQ.createResultIQ(packet);</span>
+<span class="nc" id="L177">        Element childElement = packet.getChildElement().createCopy();</span>
+<span class="nc" id="L178">        result.setChildElement(childElement);</span>
+
+        // Check that only one list was requested
+<span class="nc" id="L181">        List&lt;Element&gt; lists = childElement.elements(&quot;list&quot;);</span>
+<span class="nc bnc" id="L182" title="All 2 branches missed.">        if (lists.size() &gt; 1) {</span>
+<span class="nc" id="L183">            result.setError(PacketError.Condition.bad_request);</span>
+        }
+        else {
+<span class="nc" id="L186">            String listName = lists.get(0).attributeValue(&quot;name&quot;);</span>
+<span class="nc" id="L187">            PrivacyList list = null;</span>
+<span class="nc bnc" id="L188" title="All 2 branches missed.">            if (listName != null) {</span>
+                // A list name was specified so get it
+<span class="nc" id="L190">                list = manager.getPrivacyList(from.getNode(), listName);</span>
+            }
+<span class="nc bnc" id="L192" title="All 2 branches missed.">            if (list != null) {</span>
+                // Add the privacy list to the result
+<span class="nc" id="L194">                childElement = result.setChildElement(&quot;query&quot;, &quot;jabber:iq:privacy&quot;);</span>
+<span class="nc" id="L195">                childElement.add(list.asElement());</span>
+            }
+            else {
+                // List not found
+<span class="nc" id="L199">                result.setError(PacketError.Condition.item_not_found);</span>
+            }
+        }
+<span class="nc" id="L202">        return result;</span>
+    }
+
+    /**
+     * User has specified a new active list that should be used for the current session.
+     *
+     * @param packet IQ packet setting new active list for the current session.
+     * @param from sender of the IQ packet.
+     * @param listName name of the new active list for the current session.
+     * @return acknowledge of success.
+     */
+    private IQ setActiveList(IQ packet, JID from, String listName) {
+<span class="nc" id="L214">        IQ result = IQ.createResultIQ(packet);</span>
+<span class="nc" id="L215">        Element childElement = packet.getChildElement().createCopy();</span>
+<span class="nc" id="L216">        result.setChildElement(childElement);</span>
+
+        // Get the list
+<span class="nc" id="L219">        PrivacyList list = manager.getPrivacyList(from.getNode(), listName);</span>
+<span class="nc bnc" id="L220" title="All 2 branches missed.">        if (list != null) {</span>
+            // Get the user session
+<span class="nc" id="L222">            ClientSession session = sessionManager.getSession(from);</span>
+<span class="nc bnc" id="L223" title="All 2 branches missed.">            if (session != null) {</span>
+                // Set the new active list for this session
+<span class="nc" id="L225">                session.setActiveList(list);</span>
+            }
+<span class="nc" id="L227">        }</span>
+        else {
+            // List not found
+<span class="nc" id="L230">            result.setError(PacketError.Condition.item_not_found);</span>
+        }
+<span class="nc" id="L232">        return result;</span>
+    }
+
+    /**
+     * User has requested that no active list should be used for the current session. Return
+     * acknowledge of success.
+     *
+     * @param packet IQ packet declining active list for the current session.
+     * @param from sender of the IQ packet.
+     * @return acknowledge of success.
+     */
+    private IQ declineActiveList(IQ packet, JID from) {
+        // Get the user session
+<span class="nc" id="L245">        ClientSession session = sessionManager.getSession(from);</span>
+        // Set that there is no active list for this session
+<span class="nc" id="L247">        session.setActiveList(null);</span>
+        // Return acknowledge of success
+<span class="nc" id="L249">        return IQ.createResultIQ(packet);</span>
+    }
+
+    /**
+     * User has specified a new default list that should be used for all session.
+     *
+     * @param packet IQ packet setting new default list for all sessions.
+     * @param from sender of the IQ packet.
+     * @param listName name of the new default list for all sessions.
+     * @return acknowledge of success.
+     */
+    private IQ setDefaultList(IQ packet, JID from, String listName) {
+<span class="nc" id="L261">        IQ result = IQ.createResultIQ(packet);</span>
+<span class="nc" id="L262">        Element childElement = packet.getChildElement().createCopy();</span>
+<span class="nc" id="L263">        result.setChildElement(childElement);</span>
+
+<span class="nc bnc" id="L265" title="All 2 branches missed.">        if (sessionManager.getSessionCount(from.getNode()) &gt; 1) {</span>
+            // Current default list is being used by more than one session
+<span class="nc" id="L267">            result.setError(PacketError.Condition.conflict);</span>
+        }
+        else {
+            // Get the list
+<span class="nc" id="L271">            PrivacyList list = manager.getPrivacyList(from.getNode(), listName);</span>
+<span class="nc bnc" id="L272" title="All 2 branches missed.">            if (list != null) {</span>
+                // Get the user session
+<span class="nc" id="L274">                ClientSession session = sessionManager.getSession(from);</span>
+<span class="nc" id="L275">                PrivacyList oldDefaultList = session.getDefaultList();</span>
+<span class="nc" id="L276">                manager.changeDefaultList(from.getNode(), list, oldDefaultList);</span>
+                // Set the new default list for this session (the only existing session)
+<span class="nc" id="L278">                session.setDefaultList(list);</span>
+<span class="nc" id="L279">            }</span>
+            else {
+                // List not found
+<span class="nc" id="L282">                result.setError(PacketError.Condition.item_not_found);</span>
+            }
+        }
+<span class="nc" id="L285">        return result;</span>
+    }
+
+    /**
+     * User has specified that there is no default list that should be used for this user.
+     *
+     * @param packet IQ packet declining default list for all sessions.
+     * @param from sender of the IQ packet.
+     * @return acknowledge of success.
+     */
+    private IQ declineDefaultList(IQ packet, JID from) {
+<span class="nc" id="L296">        IQ result = IQ.createResultIQ(packet);</span>
+<span class="nc" id="L297">        Element childElement = packet.getChildElement().createCopy();</span>
+<span class="nc" id="L298">        result.setChildElement(childElement);</span>
+
+<span class="nc bnc" id="L300" title="All 2 branches missed.">        if (sessionManager.getSessionCount(from.getNode()) &gt; 1) {</span>
+            // Current default list is being used by more than one session
+<span class="nc" id="L302">            result.setError(PacketError.Condition.conflict);</span>
+        }
+        else {
+            // Get the user session
+<span class="nc" id="L306">            ClientSession session = sessionManager.getSession(from);</span>
+            // Check if a default list was already defined
+<span class="nc bnc" id="L308" title="All 2 branches missed.">            if (session.getDefaultList() != null) {</span>
+                // Set the existing default list as non-default
+<span class="nc" id="L310">                session.getDefaultList().setDefaultList(false);</span>
+                // Update the database with the new list state
+<span class="nc" id="L312">                provider.updatePrivacyList(from.getNode(), session.getDefaultList());</span>
+<span class="nc" id="L313">                session.setDefaultList(null);</span>
+            }
+        }
+<span class="nc" id="L316">        return result;</span>
+    }
+
+    /**
+     * Updates an existing privacy list or creates a new one with the specified items list. The
+     * new list will not become the active or default list by default. The user will have to
+     * send another packet to set the new list as active or default.&lt;p&gt;
+     *
+     * Once the list was updated or created a &quot;privacy list push&quot; will be sent to all
+     * connected resources of the user.
+     *
+     * @param packet IQ packet updating or creating a new privacy list.
+     * @param from sender of the IQ packet.
+     * @param listElement the element containing the list and its items.
+     * @return acknowledge of success.
+     */
+    private IQ updateOrCreateList(IQ packet, JID from, Element listElement) {
+<span class="nc" id="L333">        IQ result = IQ.createResultIQ(packet);</span>
+<span class="nc" id="L334">        Element childElement = packet.getChildElement().createCopy();</span>
+<span class="nc" id="L335">        result.setChildElement(childElement);</span>
+
+<span class="nc" id="L337">        String listName = listElement.attributeValue(&quot;name&quot;);</span>
+<span class="nc" id="L338">        PrivacyList list = manager.getPrivacyList(from.getNode(), listName);</span>
+<span class="nc bnc" id="L339" title="All 2 branches missed.">        if (list == null) {</span>
+<span class="nc" id="L340">            list = manager.createPrivacyList(from.getNode(), listName, listElement);</span>
+        }
+        else {
+            // Update existing list
+<span class="nc" id="L344">            list.updateList(listElement);</span>
+<span class="nc" id="L345">            provider.updatePrivacyList(from.getNode(), list);</span>
+            // Make sure that existing user sessions that are using the updated list are poining
+            // to the updated instance. This may happen since PrivacyListManager uses a Cache that
+            // may expire so it's possible to have many instances representing the same privacy
+            // list. Therefore, if a list is modified then we need to make sure that all
+            // instances are replaced with the updated instance. An OR Mapping Tool would have
+            // avoided this issue since identity is ensured.
+<span class="nc bnc" id="L352" title="All 2 branches missed.">            for (ClientSession session : sessionManager.getSessions(from.getNode())) {</span>
+<span class="nc bnc" id="L353" title="All 2 branches missed.">                if (list.equals(session.getDefaultList())) {</span>
+<span class="nc" id="L354">                    session.setDefaultList(list);</span>
+                }
+<span class="nc bnc" id="L356" title="All 2 branches missed.">                if (list.equals(session.getActiveList())) {</span>
+<span class="nc" id="L357">                    session.setActiveList(list);</span>
+                }
+<span class="nc" id="L359">            }</span>
+        }
+        // Send a &quot;privacy list push&quot; to all connected resources
+<span class="nc" id="L362">        IQ pushPacket = new IQ(IQ.Type.set);</span>
+<span class="nc" id="L363">        Element child = pushPacket.setChildElement(&quot;query&quot;, &quot;jabber:iq:privacy&quot;);</span>
+<span class="nc" id="L364">        child.addElement(&quot;list&quot;).addAttribute(&quot;name&quot;, list.getName());</span>
+<span class="nc" id="L365">        sessionManager.userBroadcast(from.getNode(), pushPacket);</span>
+
+<span class="nc" id="L367">        return result;</span>
+    }
+
+    private IQ deleteList(IQ packet, JID from, String listName) {
+        ClientSession currentSession;
+<span class="nc" id="L372">        IQ result = IQ.createResultIQ(packet);</span>
+<span class="nc" id="L373">        Element childElement = packet.getChildElement().createCopy();</span>
+<span class="nc" id="L374">        result.setChildElement(childElement);</span>
+        // Get the list to delete
+<span class="nc" id="L376">        PrivacyList list = manager.getPrivacyList(from.getNode(), listName);</span>
+
+<span class="nc bnc" id="L378" title="All 2 branches missed.">        if (list == null) {</span>
+            // List to delete was not found
+<span class="nc" id="L380">            result.setError(PacketError.Condition.item_not_found);</span>
+<span class="nc" id="L381">            return result;</span>
+        }
+        else {
+<span class="nc" id="L384">            currentSession = sessionManager.getSession(from);</span>
+            // Check if the list is being used by another session
+<span class="nc bnc" id="L386" title="All 2 branches missed.">            for (ClientSession session : sessionManager.getSessions(from.getNode())) {</span>
+<span class="nc bnc" id="L387" title="All 2 branches missed.">                if (currentSession == session) {</span>
+                    // Ignore the active session for this checking
+<span class="nc" id="L389">                    continue;</span>
+                }
+<span class="nc bnc" id="L391" title="All 4 branches missed.">                if (list.equals(session.getDefaultList()) || list.equals(session.getActiveList())) {</span>
+                    // List to delete is being used by another session so return a conflict error
+<span class="nc" id="L393">                    result.setError(PacketError.Condition.conflict);</span>
+<span class="nc" id="L394">                    return result;</span>
+                }
+<span class="nc" id="L396">            }</span>
+        }
+        // Remove the list from the active session (if it was being used)
+<span class="nc bnc" id="L399" title="All 2 branches missed.">        if (list.equals(currentSession.getDefaultList())) {</span>
+<span class="nc" id="L400">            currentSession.setDefaultList(null);</span>
+        }
+<span class="nc bnc" id="L402" title="All 2 branches missed.">        if (list.equals(currentSession.getActiveList())) {</span>
+<span class="nc" id="L403">            currentSession.setActiveList(null);</span>
+        }
+<span class="nc" id="L405">        manager.deletePrivacyList(from.getNode(), listName);</span>
+<span class="nc" id="L406">        return result;</span>
+    }
+
+    @Override
+    public IQHandlerInfo getInfo() {
+<span class="nc" id="L411">        return info;</span>
+    }
+
+    @Override
+    public Iterator&lt;String&gt; getFeatures() {
+<span class="nc" id="L416">        return Collections.singleton(&quot;jabber:iq:privacy&quot;).iterator();</span>
+    }
+
+    @Override
+    public void userCreated(User user, Map params) {
+        //Do nothing
+<span class="nc" id="L422">    }</span>
+
+    @Override
+    public void userDeleting(User user, Map params) {
+        // Delete privacy lists owned by the user being deleted
+<span class="nc" id="L427">        manager.deletePrivacyLists(user.getUsername());</span>
+<span class="nc" id="L428">    }</span>
+
+    @Override
+    public void userModified(User user, Map params) {
+        //Do nothing
+<span class="nc" id="L433">    }</span>
+
+    @Override
+    public void initialize(XMPPServer server) {
+<span class="nc" id="L437">        super.initialize(server);</span>
+<span class="nc" id="L438">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

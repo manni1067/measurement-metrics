@@ -1,0 +1,174 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>UserEventDispatcher.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.event</a> &gt; <span class="el_source">UserEventDispatcher.java</span></div><h1>UserEventDispatcher.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2004-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.event;
+
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.CopyOnWriteArrayList;
+
+import org.jivesoftware.openfire.user.User;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Dispatches user events. Each event has a {@link EventType type}
+ * and optional parameters, as follows:
+ *
+ * &lt;table border=&quot;1&quot;&gt;
+ * &lt;caption&gt;The params per event type&lt;/caption&gt;
+ * &lt;tr&gt;&lt;th&gt;Event Type&lt;/th&gt;&lt;th&gt;Extra Params&lt;/th&gt;&lt;/tr&gt;
+ * &lt;tr&gt;&lt;td&gt;{@link EventType#user_created user_created}&lt;/td&gt;&lt;td&gt;&lt;i&gt;None&lt;/i&gt;&lt;/td&gt;&lt;/tr&gt;
+ * &lt;tr&gt;&lt;td&gt;{@link EventType#user_deleting user_deleting}&lt;/td&gt;&lt;td&gt;&lt;i&gt;None&lt;/i&gt;&lt;/td&gt;&lt;/tr&gt;
+ * &lt;tr valign=&quot;top&quot;&gt;&lt;td&gt;{@link EventType#user_modified user_modified}&lt;/td&gt;&lt;td&gt;
+ * &lt;table&gt;
+ * &lt;caption&gt;The params for a user modified event&lt;/caption&gt;
+ *      &lt;tr&gt;&lt;td&gt;&lt;b&gt;Reason&lt;/b&gt;&lt;/td&gt;&lt;td&gt;&lt;b&gt;Key&lt;/b&gt;&lt;/td&gt;&lt;td&gt;&lt;b&gt;Value&lt;/b&gt;&lt;/td&gt;&lt;/tr&gt;
+ *      &lt;tr&gt;&lt;td colspan=&quot;3&quot;&gt;Name modified&lt;/td&gt;&lt;/tr&gt;
+ *      &lt;tr&gt;&lt;td&gt;&amp;nbsp;&lt;/td&gt;&lt;td&gt;type&lt;/td&gt;&lt;td&gt;nameModified&lt;/td&gt;&lt;/tr&gt;
+ *      &lt;tr&gt;&lt;td&gt;&amp;nbsp;&lt;/td&gt;&lt;td&gt;originalValue&lt;/td&gt;&lt;td&gt;&lt;i&gt;(Name before it was modified)&lt;/i&gt;&lt;/td&gt;&lt;/tr&gt;
+ *
+ *      &lt;tr&gt;&lt;td colspan=&quot;3&quot;&gt;&lt;hr&gt;&lt;/td&gt;&lt;/tr&gt;
+ *      &lt;tr&gt;&lt;td colspan=&quot;3&quot;&gt;Email modified&lt;/td&gt;&lt;/tr&gt;
+ *      &lt;tr&gt;&lt;td&gt;&amp;nbsp;&lt;/td&gt;&lt;td&gt;type&lt;/td&gt;&lt;td&gt;emailModified&lt;/td&gt;&lt;/tr&gt;
+ *      &lt;tr&gt;&lt;td&gt;&amp;nbsp;&lt;/td&gt;&lt;td&gt;originalValue&lt;/td&gt;&lt;td&gt;&lt;i&gt;(Email before it was
+ * modified)&lt;/i&gt;&lt;/td&gt;&lt;/tr&gt;
+ *      &lt;tr&gt;&lt;td colspan=&quot;3&quot;&gt;&lt;hr&gt;&lt;/td&gt;&lt;/tr&gt;
+ *
+ *      &lt;tr&gt;&lt;td colspan=&quot;3&quot;&gt;Password modified&lt;/td&gt;&lt;/tr&gt;
+ *      &lt;tr&gt;&lt;td&gt;&amp;nbsp;&lt;/td&gt;&lt;td&gt;type&lt;/td&gt;&lt;td&gt;passwordModified&lt;/td&gt;&lt;/tr&gt;
+ *      &lt;tr&gt;&lt;td colspan=&quot;3&quot;&gt;&lt;hr&gt;&lt;/td&gt;&lt;/tr&gt;
+ *
+ *      &lt;tr&gt;&lt;td colspan=&quot;3&quot;&gt;Creation date modified&lt;/td&gt;&lt;/tr&gt;
+ *      &lt;tr&gt;&lt;td&gt;&amp;nbsp;&lt;/td&gt;&lt;td&gt;type&lt;/td&gt;&lt;td&gt;creationDateModified&lt;/td&gt;&lt;/tr&gt;
+ *      &lt;tr&gt;&lt;td&gt;&amp;nbsp;&lt;/td&gt;&lt;td&gt;originalValue&lt;/td&gt;&lt;td&gt;&lt;i&gt;(Creation date before it was
+ * modified)&lt;/i&gt;&lt;/td&gt;&lt;/tr&gt;
+ *      &lt;tr&gt;&lt;td colspan=&quot;3&quot;&gt;&lt;hr&gt;&lt;/td&gt;&lt;/tr&gt;
+ *
+ *      &lt;tr&gt;&lt;td colspan=&quot;3&quot;&gt;Modification date modified&lt;/td&gt;&lt;/tr&gt;
+ *      &lt;tr&gt;&lt;td&gt;&amp;nbsp;&lt;/td&gt;&lt;td&gt;type&lt;/td&gt;&lt;td&gt;modificationDateModified&lt;/td&gt;&lt;/tr&gt;
+ *      &lt;tr&gt;&lt;td&gt;&amp;nbsp;&lt;/td&gt;&lt;td&gt;originalValue&lt;/td&gt;&lt;td&gt;&lt;i&gt;(Modification date before it was
+ * modified)&lt;/i&gt;&lt;/td&gt;&lt;/tr&gt;
+ *      &lt;tr&gt;&lt;td colspan=&quot;3&quot;&gt;&lt;hr&gt;&lt;/td&gt;&lt;/tr&gt;
+ *
+ *      &lt;tr&gt;&lt;td colspan=&quot;3&quot;&gt;Property modified&lt;/td&gt;&lt;/tr&gt;
+ *      &lt;tr&gt;&lt;td&gt;&amp;nbsp;&lt;/td&gt;&lt;td&gt;type&lt;/td&gt;&lt;td&gt;propertyModified&lt;/td&gt;&lt;/tr&gt;
+ *      &lt;tr&gt;&lt;td&gt;&amp;nbsp;&lt;/td&gt;&lt;td&gt;propertyKey&lt;/td&gt;&lt;td&gt;&lt;i&gt;(Name of the property)&lt;/i&gt;&lt;/td&gt;
+ * &lt;/tr&gt;
+ *      &lt;tr&gt;&lt;td&gt;&amp;nbsp;&lt;/td&gt;&lt;td&gt;originalValue&lt;/td&gt;&lt;td&gt;&lt;i&gt;(Property value before it was
+ * modified)&lt;/i&gt;&lt;/td&gt;&lt;/tr&gt;
+ *      &lt;tr&gt;&lt;td colspan=&quot;3&quot;&gt;&lt;hr&gt;&lt;/td&gt;&lt;/tr&gt;
+ *      &lt;tr&gt;&lt;td colspan=&quot;3&quot;&gt;Property added&lt;/td&gt;&lt;/tr&gt;
+ *      &lt;tr&gt;&lt;td&gt;&amp;nbsp;&lt;/td&gt;&lt;td&gt;type&lt;/td&gt;&lt;td&gt;propertyAdded&lt;/td&gt;&lt;/tr&gt;
+ *      &lt;tr&gt;&lt;td&gt;&amp;nbsp;&lt;/td&gt;&lt;td&gt;propertyKey&lt;/td&gt;&lt;td&gt;&lt;i&gt;(Name of the new property)&lt;/i&gt;&lt;/td&gt;
+ * &lt;/tr&gt;
+ *      &lt;tr&gt;&lt;td colspan=&quot;3&quot;&gt;&lt;hr&gt;&lt;/td&gt;&lt;/tr&gt;
+ *      &lt;tr&gt;&lt;td colspan=&quot;3&quot;&gt;Property deleted&lt;/td&gt;&lt;/tr&gt;
+ *      &lt;tr&gt;&lt;td&gt;&amp;nbsp;&lt;/td&gt;&lt;td&gt;type&lt;/td&gt;&lt;td&gt;propertyDeleted&lt;/td&gt;&lt;/tr&gt;
+ *      &lt;tr&gt;&lt;td&gt;&amp;nbsp;&lt;/td&gt;&lt;td&gt;propertyKey&lt;/td&gt;&lt;td&gt;&lt;i&gt;(Name of the property deleted)&lt;/i&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;&lt;/tr&gt;
+ * &lt;/table&gt;
+ *
+ * @author Matt Tucker
+ */
+public class UserEventDispatcher {
+
+<span class="fc" id="L88">    private static final Logger Log = LoggerFactory.getLogger(UserEventDispatcher.class);</span>
+
+<span class="fc" id="L90">    private static List&lt;UserEventListener&gt; listeners =</span>
+            new CopyOnWriteArrayList&lt;&gt;();
+
+<span class="nc" id="L93">    private UserEventDispatcher() {</span>
+        // Not instantiable.
+<span class="nc" id="L95">    }</span>
+
+    /**
+     * Registers a listener to receive events.
+     *
+     * @param listener the listener.
+     */
+    public static void addListener(UserEventListener listener) {
+<span class="pc bpc" id="L103" title="1 of 2 branches missed.">        if (listener == null) {</span>
+<span class="nc" id="L104">            throw new NullPointerException();</span>
+        }
+<span class="fc" id="L106">        listeners.add(listener);</span>
+<span class="fc" id="L107">    }</span>
+
+    /**
+     * Unregisters a listener to receive events.
+     *
+     * @param listener the listener.
+     */
+    public static void removeListener(UserEventListener listener) {
+<span class="nc" id="L115">        listeners.remove(listener);</span>
+<span class="nc" id="L116">    }</span>
+
+    /**
+     * Dispatches an event to all listeners.
+     *
+     * @param user the user.
+     * @param eventType the event type.
+     * @param params event parameters.
+     */
+    public static void dispatchEvent(User user, EventType eventType, Map&lt;String,Object&gt; params) {
+<span class="fc bfc" id="L126" title="All 2 branches covered.">        for (UserEventListener listener : listeners) {</span>
+            try {
+<span class="pc bpc" id="L128" title="3 of 4 branches missed.">                switch (eventType) {</span>
+                    case user_created: {
+<span class="fc" id="L130">                        listener.userCreated(user, params);</span>
+<span class="fc" id="L131">                        break;</span>
+                    }
+                    case user_deleting: {
+<span class="nc" id="L134">                        listener.userDeleting(user, params);</span>
+<span class="nc" id="L135">                        break;</span>
+                    }
+                    case user_modified: {
+<span class="nc" id="L138">                        listener.userModified(user, params);</span>
+<span class="nc" id="L139">                        break;</span>
+                    }
+                    default:
+                        break;
+                }
+            }
+<span class="nc" id="L145">            catch (Exception e) {</span>
+<span class="nc" id="L146">                Log.error(e.getMessage(), e);</span>
+<span class="fc" id="L147">            }</span>
+<span class="fc" id="L148">        }</span>
+<span class="fc" id="L149">    }</span>
+
+    /**
+     * Represents valid event types.
+     */
+<span class="pc" id="L154">    public enum EventType {</span>
+
+        /**
+         * A new user was created.
+         */
+<span class="fc" id="L159">        user_created,</span>
+
+        /**
+         * A user is about to be deleted. Note that this event is fired before
+         * a user is actually deleted. This allows for referential cleanup
+         * before the user is gone.
+         */
+<span class="fc" id="L166">        user_deleting,</span>
+
+        /**
+         * The name, email, password, or extended property of a user was changed.
+         */
+<span class="fc" id="L171">        user_modified,</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

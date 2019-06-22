@@ -1,0 +1,386 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>ClientTrustManager.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.net</a> &gt; <span class="el_source">ClientTrustManager.java</span></div><h1>ClientTrustManager.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2004-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.net;
+
+import java.io.BufferedInputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileNotFoundException;
+import java.io.IOException;
+import java.security.GeneralSecurityException;
+import java.security.InvalidAlgorithmParameterException;
+import java.security.KeyStore;
+import java.security.KeyStoreException;
+import java.security.NoSuchAlgorithmException;
+import java.security.Principal;
+import java.security.PublicKey;
+import java.security.cert.CRLException;
+import java.security.cert.CertPath;
+import java.security.cert.CertPathBuilder;
+import java.security.cert.CertPathBuilderException;
+import java.security.cert.CertPathBuilderResult;
+import java.security.cert.CertPathValidator;
+import java.security.cert.CertPathValidatorException;
+import java.security.cert.CertStore;
+import java.security.cert.CertificateException;
+import java.security.cert.CertificateFactory;
+import java.security.cert.CollectionCertStoreParameters;
+import java.security.cert.PKIXBuilderParameters;
+import java.security.cert.PKIXCertPathValidatorResult;
+import java.security.cert.X509CRL;
+import java.security.cert.X509CertSelector;
+import java.security.cert.X509Certificate;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Date;
+import java.util.Enumeration;
+import java.util.List;
+
+import javax.net.ssl.X509TrustManager;
+
+import org.jivesoftware.util.CertificateManager;
+import org.jivesoftware.util.JiveGlobals;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * ClientTrustManager is a Trust Manager that is only used for c2s connections. This TrustManager
+ * is used both when a client connects to this server. It is possible to indicate if self-signed
+ * certificates are going to be accepted. In case of accepting a self-signed certificate a warning
+ * is logged. Future version of the server might include a small workflow so admins can review 
+ * self-signed certificates or certificates of unknown issuers and manually accept them.
+ *
+ * @author Gaston Dombiak
+ * @author Jay Kline
+ */
+public class ClientTrustManager implements X509TrustManager {
+
+<span class="nc" id="L72">    private static final Logger Log = LoggerFactory.getLogger(ClientTrustManager.class);</span>
+
+    /**
+     * KeyStore that holds the trusted CA
+     */
+    private KeyStore trustStore;
+
+    /**
+     * Holds the CRL's to validate certs
+     */
+<span class="nc" id="L82">    private CertStore crlStore = null;</span>
+    
+    /**
+     * Holds the actual CRL's
+     */
+<span class="nc" id="L87">    private Collection&lt;X509CRL&gt; crls = null;</span>
+
+    /**
+     * Last time the CRL file was updated 
+     */
+<span class="nc" id="L92">    private long crlLastUpdated = 0;</span>
+    
+    /**
+     * Should CRL checking be done
+     */
+<span class="nc" id="L97">    private boolean useCRLs = false;</span>
+    
+    
+    public ClientTrustManager(KeyStore trustTrust) {
+<span class="nc" id="L101">        super();</span>
+<span class="nc" id="L102">        this.trustStore = trustTrust;</span>
+
+        //Note: A reference of the Collection is used in the CertStore, so we can add CRL's 
+        // after creating the CertStore.
+<span class="nc" id="L106">        crls = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L107">        CollectionCertStoreParameters params = new CollectionCertStoreParameters(crls);</span>
+        
+        try {
+<span class="nc" id="L110">            crlStore = CertStore.getInstance(&quot;Collection&quot;, params);</span>
+        }
+<span class="nc" id="L112">        catch (InvalidAlgorithmParameterException | NoSuchAlgorithmException ex) {</span>
+<span class="nc" id="L113">            Log.warn(&quot;ClientTrustManager: &quot;,ex);</span>
+<span class="nc" id="L114">        }</span>
+
+<span class="nc" id="L116">        loadCRL();</span>
+       
+<span class="nc" id="L118">    }</span>
+    
+    private void loadCRL() {
+<span class="nc" id="L121">        File crlFile = new File(JiveGlobals.getProperty(&quot;xmpp.client.certificate.crl&quot;,</span>
+                &quot;resources&quot; + File.separator + &quot;security&quot; + File.separator + &quot;crl.pem&quot;));
+        
+        
+<span class="nc bnc" id="L125" title="All 2 branches missed.">        if (!crlFile.isFile()) {</span>
+<span class="nc" id="L126">            Log.debug(&quot;ClientTrustmanager: crl file not found &quot;+crlFile.toString());</span>
+<span class="nc" id="L127">            useCRLs = false;</span>
+<span class="nc" id="L128">            return;</span>
+        }
+        
+        
+<span class="nc" id="L132">        long modified = crlFile.lastModified();</span>
+<span class="nc bnc" id="L133" title="All 2 branches missed.">        if (modified &gt; crlLastUpdated) {</span>
+<span class="nc" id="L134">            crlLastUpdated = modified;</span>
+<span class="nc" id="L135">            Log.debug(&quot;ClientTrustManager: Updating CRLs&quot;);</span>
+<span class="nc" id="L136">            useCRLs = false;</span>
+            try {
+<span class="nc" id="L138">                CertificateFactory cf = CertificateFactory.getInstance(&quot;X.509&quot;);</span>
+
+                X509CRL crl;
+
+<span class="nc" id="L142">                FileInputStream crlStream = new FileInputStream(crlFile);</span>
+<span class="nc" id="L143">                BufferedInputStream crlBuffer = new BufferedInputStream(crlStream);</span>
+                
+<span class="nc" id="L145">                crls.clear(); //remove existing CRLs</span>
+<span class="nc bnc" id="L146" title="All 2 branches missed.">                while (crlBuffer.available() &gt; 0) {</span>
+<span class="nc" id="L147">                    crl = (X509CRL)cf.generateCRL(crlBuffer);</span>
+<span class="nc" id="L148">                    Log.debug(&quot;ClientTrustManager: adding CRL for &quot;+crl.getIssuerDN());</span>
+<span class="nc" id="L149">                    crls.add(crl);</span>
+                }
+<span class="nc" id="L151">                useCRLs = true;</span>
+            }
+<span class="nc" id="L153">            catch(FileNotFoundException e) {</span>
+                // Its ok if the file wasnt found- maybe we dont have any CRL's
+<span class="nc" id="L155">                Log.debug(&quot;ClientTrustManager: CRL file not found: &quot;+crlFile.toString());</span>
+            }
+<span class="nc" id="L157">            catch(IOException e) {</span>
+                //Thrown bot the input streams
+<span class="nc" id="L159">                Log.error(&quot;ClientTrustManager: IOException while parsing CRLs&quot;, e);</span>
+            }
+<span class="nc" id="L161">            catch(CertificateException e) {</span>
+                //Thrown by CertificateFactory.getInstance(...)
+<span class="nc" id="L163">                Log.error(&quot;ClientTrustManager: &quot;,e);</span>
+            }
+<span class="nc" id="L165">            catch(CRLException e) {</span>
+<span class="nc" id="L166">                Log.error(&quot;ClientTrustManager: CRLException while parsing CRLs&quot;, e);</span>
+<span class="nc" id="L167">            }</span>
+        }
+<span class="nc" id="L169">    }</span>
+
+    @Override
+    public void checkClientTrusted(X509Certificate[] x509Certificates, String string)
+            throws CertificateException {
+<span class="nc" id="L174">        Log.debug(&quot;ClientTrustManager: checkClientTrusted(x509Certificates,&quot;+string+&quot;) called&quot;);</span>
+
+<span class="nc" id="L176">        loadCRL();</span>
+<span class="nc" id="L177">        ArrayList&lt;X509Certificate&gt; certs = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L178" title="All 2 branches missed.">        for(int i = 0; i &lt; x509Certificates.length ; i++) {</span>
+<span class="nc" id="L179">            certs.add(x509Certificates[i]);</span>
+        }
+
+
+<span class="nc" id="L183">        boolean verify = JiveGlobals.getBooleanProperty(&quot;xmpp.client.certificate.verify&quot;, true);</span>
+<span class="nc bnc" id="L184" title="All 2 branches missed.">        if (verify) {</span>
+<span class="nc" id="L185">            int nSize = x509Certificates.length;</span>
+
+<span class="nc" id="L187">            List&lt;String&gt; peerIdentities = CertificateManager.getClientIdentities(x509Certificates[0]);</span>
+
+<span class="nc bnc" id="L189" title="All 2 branches missed.">            if (JiveGlobals.getBooleanProperty(&quot;xmpp.client.certificate.verify.chain&quot;, true)) {</span>
+                // Working down the chain, for every certificate in the chain,
+                // verify that the subject of the certificate is the issuer of the
+                // next certificate in the chain.
+<span class="nc" id="L193">                Principal principalLast = null;</span>
+<span class="nc bnc" id="L194" title="All 2 branches missed.">                for (int i = nSize -1; i &gt;= 0 ; i--) {</span>
+<span class="nc" id="L195">                    X509Certificate x509certificate = x509Certificates[i];</span>
+<span class="nc" id="L196">                    Principal principalIssuer = x509certificate.getIssuerDN();</span>
+<span class="nc" id="L197">                    Principal principalSubject = x509certificate.getSubjectDN();</span>
+<span class="nc bnc" id="L198" title="All 2 branches missed.">                    if (principalLast != null) {</span>
+<span class="nc bnc" id="L199" title="All 2 branches missed.">                        if (principalIssuer.equals(principalLast)) {</span>
+                            try {
+<span class="nc" id="L201">                                PublicKey publickey =</span>
+<span class="nc" id="L202">                                        x509Certificates[i + 1].getPublicKey();</span>
+<span class="nc" id="L203">                                x509Certificates[i].verify(publickey);</span>
+                            }
+<span class="nc" id="L205">                            catch (GeneralSecurityException generalsecurityexception) {</span>
+<span class="nc" id="L206">                                throw new CertificateException(</span>
+                                        &quot;signature verification failed of &quot; + peerIdentities);
+<span class="nc" id="L208">                            }</span>
+                        }
+                        else {
+<span class="nc" id="L211">                            throw new CertificateException(</span>
+                                    &quot;subject/issuer verification failed of &quot; + peerIdentities);
+                        }
+                    }
+<span class="nc" id="L215">                    principalLast = principalSubject;</span>
+                }
+            }
+
+<span class="nc bnc" id="L219" title="All 2 branches missed.">            if (JiveGlobals.getBooleanProperty(&quot;xmpp.client.certificate.verify.root&quot;, true)) {</span>
+                // Verify that the the last certificate in the chain was issued
+                // by a third-party that the client trusts, or is trusted itself
+<span class="nc" id="L222">                boolean trusted = false;</span>
+                try {
+<span class="nc" id="L224">                    Enumeration&lt;String&gt; aliases = trustStore.aliases();</span>
+<span class="nc bnc" id="L225" title="All 2 branches missed.">                    while(aliases.hasMoreElements()) {</span>
+<span class="nc" id="L226">                        String alias = aliases.nextElement();</span>
+<span class="nc" id="L227">                        X509Certificate tCert = (X509Certificate) trustStore.getCertificate(alias);</span>
+<span class="nc bnc" id="L228" title="All 2 branches missed.">                        if(x509Certificates[nSize - 1].equals(tCert)) {</span>
+                            try {
+<span class="nc" id="L230">                                PublicKey publickey = tCert.getPublicKey();</span>
+<span class="nc" id="L231">                                x509Certificates[nSize -1].verify(publickey);</span>
+                            }
+<span class="nc" id="L233">                            catch (GeneralSecurityException generalsecurityexception) {</span>
+<span class="nc" id="L234">                                throw new CertificateException(</span>
+                                        &quot;signature verification failed of &quot; + peerIdentities);
+<span class="nc" id="L236">                            }</span>
+<span class="nc" id="L237">                            trusted = true;</span>
+<span class="nc" id="L238">                            break;</span>
+                        } else {
+<span class="nc bnc" id="L240" title="All 2 branches missed.">                            if(x509Certificates[nSize - 1].getIssuerDN().equals(tCert.getSubjectDN())) {</span>
+                                try {
+<span class="nc" id="L242">                                    PublicKey publickey = tCert.getPublicKey();</span>
+<span class="nc" id="L243">                                    x509Certificates[nSize -1].verify(publickey);</span>
+                                }
+<span class="nc" id="L245">                                catch (GeneralSecurityException generalsecurityexception) {</span>
+<span class="nc" id="L246">                                    throw new CertificateException(</span>
+                                            &quot;signature verification failed of &quot; + peerIdentities);
+<span class="nc" id="L248">                                }</span>
+<span class="nc" id="L249">                                trusted = true;</span>
+<span class="nc" id="L250">                                break;</span>
+                            }
+                        }
+<span class="nc" id="L253">                    }</span>
+                }
+<span class="nc" id="L255">                catch (KeyStoreException e) {</span>
+<span class="nc" id="L256">                    Log.error(e.getMessage(), e);</span>
+<span class="nc" id="L257">                }</span>
+<span class="nc bnc" id="L258" title="All 2 branches missed.">                if (!trusted) {</span>
+                    //Log.debug(&quot;certificate not trusted of &quot;+peerIdentities);
+<span class="nc" id="L260">                    throw new CertificateException(&quot;root certificate not trusted of &quot; + peerIdentities);</span>
+                }
+            }
+
+<span class="nc bnc" id="L264" title="All 2 branches missed.">            if (JiveGlobals.getBooleanProperty(&quot;xmpp.client.certificate.verify.validity&quot;, true)) {</span>
+                // For every certificate in the chain, verify that the certificate
+                // is valid at the current time.
+<span class="nc" id="L267">                Date date = new Date();</span>
+<span class="nc bnc" id="L268" title="All 2 branches missed.">                for (int i = 0; i &lt; nSize; i++) {</span>
+                    try {
+<span class="nc" id="L270">                        x509Certificates[i].checkValidity(date);</span>
+                    }
+<span class="nc" id="L272">                    catch (GeneralSecurityException generalsecurityexception) {</span>
+<span class="nc" id="L273">                        throw new CertificateException(&quot;invalid date of &quot; + peerIdentities);</span>
+<span class="nc" id="L274">                    }</span>
+                }
+            }
+
+
+            //Verify certificate path
+            try {
+<span class="nc" id="L281">                CertPathValidator cpv = CertPathValidator.getInstance(&quot;PKIX&quot;);</span>
+<span class="nc" id="L282">                CertPathBuilder cpb = CertPathBuilder.getInstance(&quot;PKIX&quot;);</span>
+<span class="nc" id="L283">                X509CertSelector certSelector = new X509CertSelector();</span>
+<span class="nc" id="L284">                certSelector.setCertificate(x509Certificates[0]);</span>
+<span class="nc" id="L285">                PKIXBuilderParameters params = new PKIXBuilderParameters(trustStore,certSelector);</span>
+<span class="nc bnc" id="L286" title="All 2 branches missed.">                if(useCRLs) {</span>
+<span class="nc" id="L287">                    params.addCertStore(crlStore);</span>
+                } else {
+<span class="nc" id="L289">                    Log.debug(&quot;ClientTrustManager: no CRL's found, so setRevocationEnabled(false)&quot;);</span>
+<span class="nc" id="L290">                    params.setRevocationEnabled(false);</span>
+                }
+
+<span class="nc" id="L293">                CertPathBuilderResult cpbr = cpb.build(params);</span>
+<span class="nc" id="L294">                CertPath cp = cpbr.getCertPath();</span>
+<span class="nc bnc" id="L295" title="All 2 branches missed.">                if(JiveGlobals.getBooleanProperty(&quot;ocsp.enable&quot;,false)) {</span>
+<span class="nc" id="L296">                    Log.debug(&quot;ClientTrustManager: OCSP requested&quot;);</span>
+<span class="nc" id="L297">                    OCSPChecker ocspChecker = new OCSPChecker(cp,params);</span>
+<span class="nc" id="L298">                    params.addCertPathChecker(ocspChecker);</span>
+                }
+<span class="nc" id="L300">                PKIXCertPathValidatorResult cpvResult = (PKIXCertPathValidatorResult) cpv.validate(cp, params);</span>
+<span class="nc" id="L301">                X509Certificate trustedCert = cpvResult.getTrustAnchor().getTrustedCert();</span>
+<span class="nc bnc" id="L302" title="All 2 branches missed.">                if(trustedCert == null) {</span>
+<span class="nc" id="L303">                    throw new CertificateException(&quot;certificate path failed: Trusted CA is NULL&quot;);</span>
+                } else {
+<span class="nc" id="L305">                    Log.debug(&quot;ClientTrustManager: Trusted CA: &quot;+trustedCert.getSubjectDN());</span>
+                }
+            }
+<span class="nc" id="L308">            catch(CertPathBuilderException | CertPathValidatorException e) {</span>
+<span class="nc" id="L309">                Log.debug(&quot;ClientTrustManager:&quot;,e);</span>
+<span class="nc" id="L310">                throw new CertificateException(&quot;certificate path failed: &quot;+e.getMessage());</span>
+<span class="nc" id="L311">            } catch(Exception e) {</span>
+<span class="nc" id="L312">                Log.debug(&quot;ClientTrustManager:&quot;,e);</span>
+<span class="nc" id="L313">                throw new CertificateException(&quot;unexpected error: &quot;+e.getMessage());</span>
+<span class="nc" id="L314">            }</span>
+            
+        }
+<span class="nc" id="L317">    }</span>
+
+    /**
+     * Given the partial or complete certificate chain provided by the peer, build a certificate
+     * path to a trusted root and return if it can be validated and is trusted for server SSL
+     * authentication based on the authentication type. The authentication type is the key
+     * exchange algorithm portion of the cipher suites represented as a String, such as &quot;RSA&quot;,
+     * &quot;DHE_DSS&quot;. Note: for some exportable cipher suites, the key exchange algorithm is
+     * determined at run time during the handshake. For instance, for
+     * TLS_RSA_EXPORT_WITH_RC4_40_MD5, the authType should be RSA_EXPORT when an ephemeral
+     * RSA key is used for the key exchange, and RSA when the key from the server certificate
+     * is used. Checking is case-sensitive.&lt;p&gt;
+     *
+     * By default certificates are going to be verified. This includes verifying the certificate
+     * chain, the root certificate and the certificates validity. However, it is possible to
+     * disable certificates validation as a whole or each specific validation.
+     *
+     * @param x509Certificates an ordered array of peer X.509 certificates with the peer's own
+     *        certificate listed first and followed by any certificate authorities.
+     * @param string the key exchange algorithm used.
+     * @throws CertificateException if the certificate chain is not trusted by this TrustManager.
+     */
+    @Override
+    public void checkServerTrusted(X509Certificate[] x509Certificates, String string)
+            throws CertificateException {
+
+<span class="nc" id="L343">        Log.debug(&quot;ClientTrustManager: checkServerTrusted(...) called&quot;);</span>
+
+<span class="nc" id="L345">    }</span>
+
+    @Override
+    public X509Certificate[] getAcceptedIssuers() {
+<span class="nc bnc" id="L349" title="All 2 branches missed.">        if (JiveGlobals.getBooleanProperty(&quot;xmpp.client.certificate.accept-selfsigned&quot;, false)) {</span>
+            // Answer an empty list since we accept any issuer
+<span class="nc" id="L351">            return new X509Certificate[0];</span>
+        }
+        else {
+<span class="nc" id="L354">            X509Certificate[] X509Certs = null;</span>
+            try {
+                // See how many certificates are in the keystore.
+<span class="nc" id="L357">                int numberOfEntry = trustStore.size();</span>
+                // If there are any certificates in the keystore.
+<span class="nc bnc" id="L359" title="All 2 branches missed.">                if (numberOfEntry &gt; 0) {</span>
+                    // Create an array of X509Certificates
+<span class="nc" id="L361">                    X509Certs = new X509Certificate[numberOfEntry];</span>
+
+                    // Get all of the certificate alias out of the keystore.
+<span class="nc" id="L364">                    Enumeration aliases = trustStore.aliases();</span>
+
+                    // Retrieve all of the certificates out of the keystore
+                    // via the alias name.
+<span class="nc" id="L368">                    int i = 0;</span>
+<span class="nc bnc" id="L369" title="All 2 branches missed.">                    while (aliases.hasMoreElements()) {</span>
+<span class="nc" id="L370">                        X509Certs[i] =</span>
+                                (X509Certificate) trustStore.
+<span class="nc" id="L372">                                        getCertificate((String) aliases.nextElement());</span>
+<span class="nc" id="L373">                        i++;</span>
+                    }
+
+                }
+            }
+<span class="nc" id="L378">            catch (Exception e) {</span>
+<span class="nc" id="L379">                Log.error(e.getMessage(), e);</span>
+<span class="nc" id="L380">                X509Certs = null;</span>
+<span class="nc" id="L381">            }</span>
+<span class="nc" id="L382">            return X509Certs;</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

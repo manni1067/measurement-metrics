@@ -1,0 +1,330 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>LocalMUCRole.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.muc.spi</a> &gt; <span class="el_source">LocalMUCRole.java</span></div><h1>LocalMUCRole.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.muc.spi;
+
+import org.dom4j.DocumentHelper;
+import org.dom4j.Element;
+import org.dom4j.QName;
+import org.jivesoftware.openfire.PacketRouter;
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.cluster.NodeID;
+import org.jivesoftware.openfire.muc.MUCRole;
+import org.jivesoftware.openfire.muc.MUCRoom;
+import org.jivesoftware.openfire.muc.MultiUserChatService;
+import org.jivesoftware.openfire.muc.NotAllowedException;
+import org.jivesoftware.util.ElementUtil;
+import org.xmpp.packet.JID;
+import org.xmpp.packet.Packet;
+import org.xmpp.packet.Presence;
+
+/**
+ * Implementation of a local room occupant.
+ * 
+ * @author Gaston Dombiak
+ */
+public class LocalMUCRole implements MUCRole {
+
+    /**
+     * The room this role is valid in.
+     */
+    private LocalMUCRoom room;
+
+    /**
+     * The user of the role.
+     */
+    private LocalMUCUser user;
+
+    /**
+     * The user's nickname in the room.
+     */
+    private String nick;
+
+    /**
+     * The user's presence in the room.
+     */
+    private Presence presence;
+
+    /**
+     * The chatserver that hosts this role.
+     */
+    private MultiUserChatService server;
+
+    /**
+     * The role.
+     */
+    private MUCRole.Role role;
+
+    /**
+     * The affiliation.
+     */
+    private MUCRole.Affiliation affiliation;
+
+    /**
+     * Flag that indicates if the room occupant is in the room only to send messages or also
+     * to receive room messages. True means that the room occupant is deaf.
+     */
+<span class="nc" id="L80">    private boolean voiceOnly = false;</span>
+
+    /**
+     * The router used to send packets from this role.
+     */
+    private PacketRouter router;
+
+    /**
+     * The address of the person masquerading in this role.
+     */
+    private JID rJID;
+
+    /**
+     * A fragment containing the x-extension for non-anonymous rooms.
+     */
+    private Element extendedInformation;
+
+    /**
+     * Create a new role.
+     * 
+     * @param chatserver the server hosting the role.
+     * @param chatroom the room the role is valid in.
+     * @param nickname the nickname of the user in the role.
+     * @param role the role of the user in the room.
+     * @param affiliation the affiliation of the user in the room.
+     * @param chatuser the user on the chat server.
+     * @param presence the presence sent by the user to join the room.
+     * @param packetRouter the packet router for sending messages from this role.
+     */
+    public LocalMUCRole(MultiUserChatService chatserver, LocalMUCRoom chatroom, String nickname,
+            MUCRole.Role role, MUCRole.Affiliation affiliation, LocalMUCUser chatuser, Presence presence,
+            PacketRouter packetRouter)
+<span class="nc" id="L112">    {</span>
+<span class="nc" id="L113">        this.room = chatroom;</span>
+<span class="nc" id="L114">        this.nick = nickname;</span>
+<span class="nc" id="L115">        this.user = chatuser;</span>
+<span class="nc" id="L116">        this.server = chatserver;</span>
+<span class="nc" id="L117">        this.router = packetRouter;</span>
+<span class="nc" id="L118">        this.role = role;</span>
+<span class="nc" id="L119">        this.affiliation = affiliation;</span>
+
+<span class="nc" id="L121">        extendedInformation =</span>
+<span class="nc" id="L122">                DocumentHelper.createElement(QName.get(&quot;x&quot;, &quot;http://jabber.org/protocol/muc#user&quot;));</span>
+<span class="nc" id="L123">        calculateExtendedInformation();</span>
+<span class="nc" id="L124">        rJID = new JID(room.getName(), server.getServiceDomain(), nick);</span>
+<span class="nc" id="L125">        setPresence(presence);</span>
+        // Check if new occupant wants to be a deaf occupant
+<span class="nc" id="L127">        Element element = presence.getElement()</span>
+<span class="nc" id="L128">                .element(QName.get(&quot;x&quot;, &quot;http://jivesoftware.org/protocol/muc&quot;));</span>
+<span class="nc bnc" id="L129" title="All 2 branches missed.">        if (element != null) {</span>
+<span class="nc bnc" id="L130" title="All 2 branches missed.">            voiceOnly = element.element(&quot;deaf-occupant&quot;) != null;</span>
+        }
+        // Add the new role to the list of roles
+<span class="nc" id="L133">        user.addRole(room.getName(), this);</span>
+<span class="nc" id="L134">    }</span>
+
+    @Override
+    public Presence getPresence() {
+<span class="nc" id="L138">        return presence;</span>
+    }
+
+    @Override
+    public void setPresence(Presence newPresence) {
+        // Try to remove the element whose namespace is &quot;http://jabber.org/protocol/muc&quot; since we
+        // don't need to include that element in future presence broadcasts
+<span class="nc" id="L145">        Element element = newPresence.getElement().element(QName.get(&quot;x&quot;, &quot;http://jabber.org/protocol/muc&quot;));</span>
+<span class="nc bnc" id="L146" title="All 2 branches missed.">        if (element != null) {</span>
+<span class="nc" id="L147">            newPresence.getElement().remove(element);</span>
+        }
+<span class="nc" id="L149">        this.presence = newPresence;</span>
+<span class="nc" id="L150">        this.presence.setFrom(getRoleAddress());</span>
+<span class="nc" id="L151">        updatePresence();</span>
+<span class="nc" id="L152">    }</span>
+
+    @Override
+    public void setRole(MUCRole.Role newRole) throws NotAllowedException {
+        // Don't allow to change the role to an owner or admin unless the new role is moderator
+<span class="nc bnc" id="L157" title="All 4 branches missed.">        if (MUCRole.Affiliation.owner == affiliation || MUCRole.Affiliation.admin == affiliation) {</span>
+<span class="nc bnc" id="L158" title="All 2 branches missed.">            if (MUCRole.Role.moderator != newRole) {</span>
+<span class="nc" id="L159">                throw new NotAllowedException();</span>
+            }
+        }
+        // A moderator cannot be kicked from a room unless there has also been an affiliation change
+<span class="nc bnc" id="L163" title="All 6 branches missed.">        if (MUCRole.Role.moderator == role &amp;&amp; MUCRole.Role.none == newRole &amp;&amp; MUCRole.Affiliation.none != affiliation) {</span>
+<span class="nc" id="L164">            throw new NotAllowedException();</span>
+        }
+        // TODO A moderator MUST NOT be able to revoke voice from a user whose affiliation is at or
+        // TODO above the moderator's level.
+
+<span class="nc" id="L169">        role = newRole;</span>
+<span class="nc bnc" id="L170" title="All 2 branches missed.">        if (MUCRole.Role.none == role) {</span>
+<span class="nc" id="L171">            presence.setType(Presence.Type.unavailable);</span>
+<span class="nc" id="L172">            presence.setStatus(null);</span>
+        }
+<span class="nc" id="L174">        calculateExtendedInformation();</span>
+<span class="nc" id="L175">    }</span>
+
+    @Override
+    public MUCRole.Role getRole() {
+<span class="nc" id="L179">        return role;</span>
+    }
+
+    @Override
+    public void setAffiliation(MUCRole.Affiliation newAffiliation) throws NotAllowedException {
+        // Don't allow to ban an owner or an admin
+<span class="nc bnc" id="L185" title="All 4 branches missed.">        if (MUCRole.Affiliation.owner == affiliation || MUCRole.Affiliation.admin== affiliation) {</span>
+<span class="nc bnc" id="L186" title="All 2 branches missed.">            if (MUCRole.Affiliation.outcast == newAffiliation) {</span>
+<span class="nc" id="L187">                throw new NotAllowedException();</span>
+            }
+        }
+<span class="nc" id="L190">        affiliation = newAffiliation;</span>
+        // TODO The fragment is being calculated twice (1. setting the role &amp; 2. setting the aff)
+<span class="nc" id="L192">        calculateExtendedInformation();</span>
+<span class="nc" id="L193">    }</span>
+
+    @Override
+    public MUCRole.Affiliation getAffiliation() {
+<span class="nc" id="L197">        return affiliation;</span>
+    }
+
+    @Override
+    public String getNickname() {
+<span class="nc" id="L202">        return nick;</span>
+    }
+
+    @Override
+    public void changeNickname(String nickname) {
+<span class="nc" id="L207">        this.nick = nickname;</span>
+<span class="nc" id="L208">        setRoleAddress(new JID(room.getName(), server.getServiceDomain(), nick));</span>
+<span class="nc" id="L209">    }</span>
+
+    @Override
+    public void destroy() {
+        // Notify the user that he/she is no longer in the room
+<span class="nc" id="L214">        user.removeRole(room.getName());</span>
+<span class="nc" id="L215">    }</span>
+
+    @Override
+    public MUCRoom getChatRoom() {
+<span class="nc" id="L219">        return room;</span>
+    }
+
+    @Override
+    public JID getRoleAddress() {
+<span class="nc" id="L224">        return rJID;</span>
+    }
+
+    @Override
+    public JID getUserAddress() {
+<span class="nc" id="L229">        return user.getAddress();</span>
+    }
+
+    @Override
+    public boolean isLocal() {
+<span class="nc" id="L234">        return true;</span>
+    }
+
+    @Override
+    public NodeID getNodeID() {
+<span class="nc" id="L239">        return XMPPServer.getInstance().getNodeID();</span>
+    }
+
+    private void setRoleAddress(JID jid) {
+<span class="nc" id="L243">        rJID = jid;</span>
+        // Set the new sender of the user presence in the room
+<span class="nc" id="L245">        presence.setFrom(jid);</span>
+<span class="nc" id="L246">    }</span>
+
+    @Override
+    public boolean isVoiceOnly() {
+<span class="nc" id="L250">        return voiceOnly;</span>
+    }
+
+    @Override
+    public void send(Packet packet) {
+<span class="nc bnc" id="L255" title="All 2 branches missed.">        if (packet == null) {</span>
+<span class="nc" id="L256">            return;</span>
+        }
+<span class="nc" id="L258">        packet.setTo(user.getAddress());</span>
+
+<span class="nc" id="L260">        router.route(packet);</span>
+<span class="nc" id="L261">    }</span>
+
+    /**
+     * Calculates and sets the extended presence information to add to the presence.
+     * The information to add contains the user's jid, affiliation and role.
+     */
+    private void calculateExtendedInformation() {
+<span class="nc" id="L268">        ElementUtil.setProperty(extendedInformation, &quot;x.item:jid&quot;, user.getAddress().toString());</span>
+<span class="nc" id="L269">        ElementUtil.setProperty(extendedInformation, &quot;x.item:affiliation&quot;, affiliation.toString());</span>
+<span class="nc" id="L270">        ElementUtil.setProperty(extendedInformation, &quot;x.item:role&quot;, role.toString());</span>
+<span class="nc" id="L271">        updatePresence();</span>
+<span class="nc" id="L272">    }</span>
+
+    private void updatePresence() {
+<span class="nc bnc" id="L275" title="All 4 branches missed.">        if (extendedInformation != null &amp;&amp; presence != null) {</span>
+            // Remove any previous extendedInformation, then re-add it.
+<span class="nc" id="L277">            Element mucUser = presence.getElement().element(QName.get(&quot;x&quot;, &quot;http://jabber.org/protocol/muc#user&quot;));</span>
+<span class="nc bnc" id="L278" title="All 2 branches missed.">            if (mucUser != null) {</span>
+                // Remove any previous extendedInformation, then re-add it.
+<span class="nc" id="L280">                presence.getElement().remove(mucUser);</span>
+            }
+<span class="nc" id="L282">            Element exi = extendedInformation.createCopy();</span>
+<span class="nc" id="L283">            presence.getElement().add(exi);</span>
+        }
+<span class="nc" id="L285">    }</span>
+
+    @Override
+    public int hashCode() {
+<span class="nc" id="L289">        final int prime = 31;</span>
+<span class="nc" id="L290">        int result = 1;</span>
+<span class="nc bnc" id="L291" title="All 2 branches missed.">        result = prime * result + ((nick == null) ? 0 : nick.hashCode());</span>
+<span class="nc bnc" id="L292" title="All 2 branches missed.">        result = prime * result + ((rJID == null) ? 0 : rJID.hashCode());</span>
+<span class="nc bnc" id="L293" title="All 2 branches missed.">        result = prime * result + ((room == null) ? 0 : room.hashCode());</span>
+<span class="nc bnc" id="L294" title="All 2 branches missed.">        result = prime * result + ((user == null) ? 0 : user.hashCode());</span>
+<span class="nc" id="L295">        return result;</span>
+    }
+
+    @Override
+    public boolean equals(Object obj) {
+<span class="nc bnc" id="L300" title="All 2 branches missed.">        if (this == obj)</span>
+<span class="nc" id="L301">            return true;</span>
+<span class="nc bnc" id="L302" title="All 2 branches missed.">        if (obj == null)</span>
+<span class="nc" id="L303">            return false;</span>
+<span class="nc bnc" id="L304" title="All 2 branches missed.">        if (getClass() != obj.getClass())</span>
+<span class="nc" id="L305">            return false;</span>
+<span class="nc" id="L306">        LocalMUCRole other = (LocalMUCRole) obj;</span>
+<span class="nc bnc" id="L307" title="All 2 branches missed.">        if (nick == null) {</span>
+<span class="nc bnc" id="L308" title="All 2 branches missed.">            if (other.nick != null)</span>
+<span class="nc" id="L309">                return false;</span>
+<span class="nc bnc" id="L310" title="All 2 branches missed.">        } else if (!nick.equals(other.nick))</span>
+<span class="nc" id="L311">            return false;</span>
+<span class="nc bnc" id="L312" title="All 2 branches missed.">        if (rJID == null) {</span>
+<span class="nc bnc" id="L313" title="All 2 branches missed.">            if (other.rJID != null)</span>
+<span class="nc" id="L314">                return false;</span>
+<span class="nc bnc" id="L315" title="All 2 branches missed.">        } else if (!rJID.equals(other.rJID))</span>
+<span class="nc" id="L316">            return false;</span>
+<span class="nc bnc" id="L317" title="All 2 branches missed.">        if (room == null) {</span>
+<span class="nc bnc" id="L318" title="All 2 branches missed.">            if (other.room != null)</span>
+<span class="nc" id="L319">                return false;</span>
+<span class="nc bnc" id="L320" title="All 2 branches missed.">        } else if (!room.equals(other.room))</span>
+<span class="nc" id="L321">            return false;</span>
+<span class="nc bnc" id="L322" title="All 2 branches missed.">        if (user == null) {</span>
+<span class="nc bnc" id="L323" title="All 2 branches missed.">            if (other.user != null)</span>
+<span class="nc" id="L324">                return false;</span>
+<span class="nc bnc" id="L325" title="All 2 branches missed.">        } else if (!user.equals(other.user))</span>
+<span class="nc" id="L326">            return false;</span>
+<span class="nc" id="L327">        return true;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

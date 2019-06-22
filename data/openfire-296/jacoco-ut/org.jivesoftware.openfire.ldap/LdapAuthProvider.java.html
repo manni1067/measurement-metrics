@@ -1,0 +1,177 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>LdapAuthProvider.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.ldap</a> &gt; <span class="el_source">LdapAuthProvider.java</span></div><h1>LdapAuthProvider.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2004-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.ldap;
+
+import javax.naming.CommunicationException;
+
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.auth.AuthProvider;
+import org.jivesoftware.openfire.auth.UnauthorizedException;
+import org.jivesoftware.openfire.user.UserNotFoundException;
+import org.jivesoftware.util.JiveGlobals;
+import org.jivesoftware.util.StringUtils;
+import org.jivesoftware.util.cache.Cache;
+import org.jivesoftware.util.cache.CacheFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmpp.packet.JID;
+
+/**
+ * Implementation of auth provider interface for LDAP authentication service plug-in.
+ * Only plaintext authentication is currently supported.&lt;p&gt;
+ *
+ * Optionally, an authentication cache can be enabled. When enabled, a hashed version
+ * of the user's password is cached for a variable length of time (2 hours by default).
+ * This can decrease load on the directory and preserve some level of service even
+ * when the directory becomes unavailable for a period of time.&lt;ul&gt;
+ *
+ *  &lt;li&gt;{@code ldap.authCache.enabled} -- true to enable the auth cache.&lt;/li&gt;
+ *  &lt;li&gt;{@code ldap.authCache.size} -- size in bytes of the auth cache. If property is
+ *      not set, the default value is 524288 (512 K).&lt;/li&gt;
+ *  &lt;li&gt;{@code ldap.authCache.maxLifetime} -- maximum amount of time a hashed password
+ *      can be cached in milleseconds. If property is not set, the default value is
+ *      7200000 (2 hours).&lt;/li&gt;
+ * &lt;/ul&gt;
+ *
+ * @author Matt Tucker
+ */
+public class LdapAuthProvider implements AuthProvider {
+
+<span class="fc" id="L54">    private static final Logger Log = LoggerFactory.getLogger(LdapAuthProvider.class);</span>
+
+    private LdapManager manager;
+<span class="nc" id="L57">    private Cache&lt;String, String&gt; authCache = null;</span>
+
+<span class="nc" id="L59">    public LdapAuthProvider() {</span>
+        // Convert XML based provider setup to Database based
+<span class="nc" id="L61">        JiveGlobals.migrateProperty(&quot;ldap.authCache.enabled&quot;);</span>
+
+<span class="nc" id="L63">        manager = LdapManager.getInstance();</span>
+<span class="nc bnc" id="L64" title="All 2 branches missed.">        if (JiveGlobals.getBooleanProperty(&quot;ldap.authCache.enabled&quot;, false)) {</span>
+<span class="nc" id="L65">            String cacheName = &quot;LDAP Authentication&quot;;</span>
+<span class="nc" id="L66">            authCache = CacheFactory.createCache(cacheName);</span>
+        }
+<span class="nc" id="L68">    }</span>
+
+    @Override
+    public void authenticate(String username, String password) throws UnauthorizedException {
+<span class="nc bnc" id="L72" title="All 6 branches missed.">        if (username == null || password == null || &quot;&quot;.equals(password.trim())) {</span>
+<span class="nc" id="L73">            throw new UnauthorizedException();</span>
+        }
+
+<span class="nc bnc" id="L76" title="All 2 branches missed.">        if (username.contains(&quot;@&quot;)) {</span>
+            // Check that the specified domain matches the server's domain
+<span class="nc" id="L78">            int index = username.indexOf(&quot;@&quot;);</span>
+<span class="nc" id="L79">            String domain = username.substring(index + 1);</span>
+<span class="nc bnc" id="L80" title="All 2 branches missed.">            if (domain.equals(XMPPServer.getInstance().getServerInfo().getXMPPDomain())) {</span>
+<span class="nc" id="L81">                username = username.substring(0, index);</span>
+            } else {
+                // Unknown domain. Return authentication failed.
+<span class="nc" id="L84">                throw new UnauthorizedException();</span>
+            }
+        }
+
+        // Un-escape username.
+<span class="nc" id="L89">        username = JID.unescapeNode(username);</span>
+
+        // If cache is enabled, see if the auth is in cache.
+<span class="nc bnc" id="L92" title="All 4 branches missed.">        if (authCache != null &amp;&amp; authCache.containsKey(username)) {</span>
+<span class="nc" id="L93">            String hash = authCache.get(username);</span>
+<span class="nc bnc" id="L94" title="All 2 branches missed.">            if (StringUtils.hash(password).equals(hash)) {</span>
+<span class="nc" id="L95">                return;</span>
+            }
+        }
+
+        String userDN;
+        try {
+            // The username by itself won't help us much with LDAP since we
+            // need a fully qualified dn. We could make the assumption that
+            // the baseDN would always be the location of user profiles. For
+            // example if the baseDN was set to &quot;ou=People, o=jivesoftare, o=com&quot;
+            // then we would be able to directly load users from that node
+            // of the LDAP tree. However, it's a poor assumption that only a
+            // flat structure will be used. Therefore, we search all sub-trees
+            // of the baseDN for the username (assuming the user has not disabled
+            // sub-tree searching). So, if the baseDN is set to
+            // &quot;o=jivesoftware, o=com&quot; then a search will include the &quot;People&quot;
+            // node as well all the others under the base.
+<span class="nc" id="L112">            userDN = manager.findUserDN(username);</span>
+
+            // See if the user authenticates.
+<span class="nc bnc" id="L115" title="All 2 branches missed.">            if (!manager.checkAuthentication(userDN, password)) {</span>
+<span class="nc" id="L116">                throw new UnauthorizedException(&quot;Username and password don't match&quot;);</span>
+            }
+        }
+<span class="nc" id="L119">        catch (CommunicationException e) {</span>
+            // Log error here since it will be wrapped with an UnauthorizedException that
+            // is never logged
+<span class="nc" id="L122">            Log.error(&quot;Error connecting to LDAP server&quot;, e);</span>
+<span class="nc" id="L123">            throw new UnauthorizedException(e);</span>
+        }
+<span class="nc" id="L125">        catch (Exception e) {</span>
+<span class="nc" id="L126">            throw new UnauthorizedException(e);</span>
+<span class="nc" id="L127">        }</span>
+
+        // If cache is enabled, add the item to cache.
+<span class="nc bnc" id="L130" title="All 2 branches missed.">        if (authCache != null) {</span>
+<span class="nc" id="L131">            authCache.put(username, StringUtils.hash(password));</span>
+        }
+<span class="nc" id="L133">    }</span>
+
+    @Override
+    public String getPassword(String username) throws UserNotFoundException,
+            UnsupportedOperationException
+    {
+<span class="nc" id="L139">        throw new UnsupportedOperationException();</span>
+    }
+
+    @Override
+    public void setPassword(String username, String password) throws UserNotFoundException {
+<span class="nc" id="L144">        throw new UnsupportedOperationException();</span>
+    }
+
+    @Override
+    public boolean supportsPasswordRetrieval() {
+<span class="nc" id="L149">        return false;</span>
+    }
+
+    @Override
+    public boolean isScramSupported() {
+<span class="nc" id="L154">        return false;</span>
+    }
+
+    @Override
+    public String getSalt(String username) throws UnsupportedOperationException, UserNotFoundException {
+<span class="nc" id="L159">        throw new UnsupportedOperationException();</span>
+    }
+
+    @Override
+    public int getIterations(String username) throws UnsupportedOperationException, UserNotFoundException {
+<span class="nc" id="L164">        throw new UnsupportedOperationException();</span>
+    }
+
+    @Override
+    public String getServerKey(String username) throws UnsupportedOperationException, UserNotFoundException {
+<span class="nc" id="L169">        throw new UnsupportedOperationException();</span>
+    }
+
+    @Override
+    public String getStoredKey(String username) throws UnsupportedOperationException, UserNotFoundException {
+<span class="nc" id="L174">        throw new UnsupportedOperationException();</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

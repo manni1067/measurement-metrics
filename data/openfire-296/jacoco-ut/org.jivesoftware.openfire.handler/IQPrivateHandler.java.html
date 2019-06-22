@@ -1,0 +1,123 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>IQPrivateHandler.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.handler</a> &gt; <span class="el_source">IQPrivateHandler.java</span></div><h1>IQPrivateHandler.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2004-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.handler;
+
+import org.dom4j.Element;
+import org.jivesoftware.openfire.IQHandlerInfo;
+import org.jivesoftware.openfire.PacketException;
+import org.jivesoftware.openfire.PrivateStorage;
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.auth.UnauthorizedException;
+import org.jivesoftware.openfire.disco.ServerFeaturesProvider;
+import org.xmpp.packet.IQ;
+import org.xmpp.packet.PacketError;
+
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.Iterator;
+
+/**
+ * Implements the TYPE_IQ jabber:iq:private protocol. Clients
+ * use this protocol to store and retrieve arbitrary application
+ * configuration information. Using the server for setting storage
+ * allows client configurations to follow users where ever they go.
+ * &lt;p&gt;
+ * A 'get' query retrieves any stored data.
+ * A 'set' query stores new data.
+ * &lt;/p&gt;
+ * &lt;p&gt;
+ * Currently an empty implementation to allow usage with normal
+ * clients. Future implementation needed.
+ * &lt;/p&gt;
+ * &lt;h2&gt;Assumptions&lt;/h2&gt;
+ * This handler assumes that the request is addressed to the server.
+ * An appropriate TYPE_IQ tag matcher should be placed in front of this
+ * one to route TYPE_IQ requests not addressed to the server to
+ * another channel (probably for direct delivery to the recipient).
+ * &lt;h2&gt;Warning&lt;/h2&gt;
+ * There should be a way of determining whether a session has
+ * authorization to access this feature. I'm not sure it is a good
+ * idea to do authorization in each handler. It would be nice if
+ * the framework could assert authorization policies across channels.
+ *
+ * @author Iain Shigeoka
+ */
+public class IQPrivateHandler extends IQHandler implements ServerFeaturesProvider {
+
+    private IQHandlerInfo info;
+<span class="nc" id="L62">    private PrivateStorage privateStorage = null;</span>
+
+    public IQPrivateHandler() {
+<span class="nc" id="L65">        super(&quot;XMPP Private Storage Handler&quot;);</span>
+<span class="nc" id="L66">        info = new IQHandlerInfo(&quot;query&quot;, &quot;jabber:iq:private&quot;);</span>
+<span class="nc" id="L67">    }</span>
+
+    @Override
+    public IQ handleIQ(IQ packet) throws UnauthorizedException, PacketException {
+        IQ replyPacket;
+<span class="nc" id="L72">        Element child = packet.getChildElement();</span>
+<span class="nc" id="L73">        Element dataElement = (Element) child.elementIterator().next();</span>
+
+<span class="nc bnc" id="L75" title="All 2 branches missed.">        if (dataElement != null) {</span>
+<span class="nc bnc" id="L76" title="All 2 branches missed.">            if (IQ.Type.get.equals(packet.getType())) {</span>
+<span class="nc" id="L77">                replyPacket = IQ.createResultIQ(packet);</span>
+<span class="nc" id="L78">                Element dataStored = privateStorage.get(packet.getFrom().getNode(), dataElement);</span>
+<span class="nc" id="L79">                dataStored.setParent(null);</span>
+
+<span class="nc" id="L81">                child.remove(dataElement);</span>
+<span class="nc" id="L82">                child.setParent(null);</span>
+<span class="nc" id="L83">                replyPacket.setChildElement(child);</span>
+<span class="nc" id="L84">                child.add(dataStored);</span>
+<span class="nc" id="L85">            }</span>
+            else {
+<span class="nc" id="L87">                replyPacket = IQ.createResultIQ(packet);</span>
+                
+<span class="nc bnc" id="L89" title="All 2 branches missed.">                if (privateStorage.isEnabled()) {</span>
+<span class="nc" id="L90">                    privateStorage.add(packet.getFrom().getNode(), dataElement);</span>
+                } else {
+<span class="nc" id="L92">                    replyPacket.setChildElement(packet.getChildElement().createCopy());</span>
+<span class="nc" id="L93">                    replyPacket.setError(PacketError.Condition.service_unavailable);</span>
+                }
+            }
+        }
+        else {
+<span class="nc" id="L98">            replyPacket = IQ.createResultIQ(packet);</span>
+<span class="nc" id="L99">            replyPacket.setChildElement(&quot;query&quot;, &quot;jabber:iq:private&quot;);</span>
+        }
+<span class="nc" id="L101">        return replyPacket;</span>
+    }
+
+    @Override
+    public void initialize(XMPPServer server) {
+<span class="nc" id="L106">        super.initialize(server);</span>
+<span class="nc" id="L107">        privateStorage = server.getPrivateStorage();</span>
+<span class="nc" id="L108">    }</span>
+
+    @Override
+    public IQHandlerInfo getInfo() {
+<span class="nc" id="L112">        return info;</span>
+    }
+
+    @Override
+    public Iterator&lt;String&gt; getFeatures() {
+<span class="nc" id="L117">        return Arrays.asList(</span>
+            &quot;jabber:iq:private&quot;,
+            &quot;urn:xmpp:bookmarks-conversion:0&quot;
+<span class="nc" id="L120">        ).iterator();</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

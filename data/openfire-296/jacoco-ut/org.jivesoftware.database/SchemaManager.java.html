@@ -1,0 +1,430 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>SchemaManager.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.database</a> &gt; <span class="el_source">SchemaManager.java</span></div><h1>SchemaManager.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.database;
+
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileNotFoundException;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Statement;
+import java.util.Arrays;
+
+import org.jivesoftware.database.bugfix.OF1515;
+import org.jivesoftware.database.bugfix.OF33;
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.container.Plugin;
+import org.jivesoftware.openfire.container.PluginManager;
+import org.jivesoftware.openfire.container.PluginMetadataHelper;
+import org.jivesoftware.util.JiveGlobals;
+import org.jivesoftware.util.LocaleUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Manages database schemas for Openfire and Openfire plugins. The manager uses the
+ * ofVersion database table to figure out which database schema is currently installed
+ * and then attempts to automatically apply database schema changes as necessary.&lt;p&gt;
+ *
+ * Running database schemas automatically requires appropriate database permissions.
+ * Without those permissions, the automatic installation/upgrade process will fail
+ * and users will be prompted to apply database changes manually.
+ *
+ * @see DbConnectionManager#getSchemaManager()
+ *
+ * @author Matt Tucker
+ */
+<span class="fc" id="L57">public class SchemaManager {</span>
+
+<span class="fc" id="L59">    private static final Logger Log = LoggerFactory.getLogger(SchemaManager.class);</span>
+
+    private static final String CHECK_VERSION_OLD =
+            &quot;SELECT minorVersion FROM jiveVersion&quot;;
+    private static final String CHECK_VERSION =
+            &quot;SELECT version FROM ofVersion WHERE name=?&quot;;
+    private static final String CHECK_VERSION_JIVE =
+            &quot;SELECT version FROM jiveVersion WHERE name=?&quot;;
+
+    /**
+     * Current Openfire database schema version.
+     */
+    private static final int DATABASE_VERSION = 29;
+
+    /**
+     * Checks the Openfire database schema to ensure that it's installed and up to date.
+     * If the schema isn't present or up to date, an automatic update will be attempted.
+     *
+     * @param con a connection to the database.
+     * @return true if database schema checked out fine, or was automatically installed
+     *      or updated successfully.
+     */
+    public boolean checkOpenfireSchema(Connection con) {
+        // Change 'wildfire' to 'openfire' in ofVersion table (update to new name)
+<span class="nc" id="L83">        updateToOpenfire(con);</span>
+        try {
+<span class="nc" id="L85">            return checkSchema(con, &quot;openfire&quot;, DATABASE_VERSION,</span>
+<span class="nc" id="L86">                    new ResourceLoader() {</span>
+                        @Override
+                        public InputStream loadResource(String resourceName) {
+<span class="nc" id="L89">                            File file = new File(JiveGlobals.getHomeDirectory() + File.separator +</span>
+                                    &quot;resources&quot; + File.separator + &quot;database&quot;, resourceName);
+                            try {
+<span class="nc" id="L92">                                return new FileInputStream(file);</span>
+                            }
+<span class="nc" id="L94">                            catch (FileNotFoundException e) {</span>
+<span class="nc" id="L95">                                return null;</span>
+                            }
+                        }
+                    });
+        }
+<span class="nc" id="L100">        catch (Exception e) {</span>
+<span class="nc" id="L101">            Log.error(LocaleUtils.getLocalizedString(&quot;upgrade.database.failure&quot;), e);</span>
+<span class="nc" id="L102">            System.out.println(LocaleUtils.getLocalizedString(&quot;upgrade.database.failure&quot;));</span>
+        }
+<span class="nc" id="L104">        return false;</span>
+    }
+
+    /**
+     * Checks the plugin's database schema (if one is required) to ensure that it's
+     * installed and up to date. If the schema isn't present or up to date, an automatic
+     * update will be attempted.
+     *
+     * @param plugin the plugin.
+     * @return true if database schema checked out fine, or was automatically installed
+     *      or updated successfully, or if it isn't needed. False will only be returned
+     *      if there is an error.
+     */
+    public boolean checkPluginSchema(final Plugin plugin) {
+<span class="nc" id="L118">        final PluginManager pluginManager = XMPPServer.getInstance().getPluginManager();</span>
+<span class="nc" id="L119">        String schemaKey = PluginMetadataHelper.getDatabaseKey(plugin);</span>
+<span class="nc" id="L120">        int schemaVersion = PluginMetadataHelper.getDatabaseVersion(plugin);</span>
+        // If the schema key or database version aren't defined, then the plugin doesn't
+        // need database tables.
+<span class="nc bnc" id="L123" title="All 4 branches missed.">        if (schemaKey == null || schemaVersion == -1) {</span>
+<span class="nc" id="L124">            return true;</span>
+        }
+<span class="nc" id="L126">        Connection con = null;</span>
+        try {
+<span class="nc" id="L128">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L129">            return checkSchema(con, schemaKey, schemaVersion, new ResourceLoader() {</span>
+                @Override
+                public InputStream loadResource(String resourceName) {
+<span class="nc" id="L132">                    File file = new File(pluginManager.getPluginPath(plugin) +</span>
+                            File.separator + &quot;database&quot;, resourceName);
+                    try {
+<span class="nc" id="L135">                        return new FileInputStream(file);</span>
+                    }
+<span class="nc" id="L137">                    catch (FileNotFoundException e) {</span>
+<span class="nc" id="L138">                        return null;</span>
+                    }
+                }
+            });
+        }
+<span class="nc" id="L143">        catch (Exception e) {</span>
+<span class="nc" id="L144">            Log.error(LocaleUtils.getLocalizedString(&quot;upgrade.database.failure&quot;), e);</span>
+<span class="nc" id="L145">            System.out.println(LocaleUtils.getLocalizedString(&quot;upgrade.database.failure&quot;));</span>
+        }
+        finally {
+<span class="nc" id="L148">            DbConnectionManager.closeConnection(con);</span>
+<span class="nc" id="L149">        }</span>
+<span class="nc" id="L150">        return false;</span>
+    }
+
+    /**
+     * Checks to see if the database needs to be upgraded. This method should be
+     * called once every time the application starts up.
+     *
+     * @param con the database connection to use to check the schema with.
+     * @param schemaKey the database schema key (name).
+     * @param requiredVersion the version that the schema should be at.
+     * @param resourceLoader a resource loader that knows how to load schema files.
+     * @throws Exception if an error occured.
+     * @return True if the schema update was successful.
+     */
+    private boolean checkSchema(Connection con, String schemaKey, int requiredVersion,
+            ResourceLoader resourceLoader) throws Exception
+    {
+<span class="nc" id="L167">        int currentVersion = -1;</span>
+<span class="nc" id="L168">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L169">        ResultSet rs = null;</span>
+        try {
+<span class="nc" id="L171">            pstmt = con.prepareStatement(CHECK_VERSION);</span>
+<span class="nc" id="L172">            pstmt.setString(1, schemaKey);</span>
+<span class="nc" id="L173">            rs = pstmt.executeQuery();</span>
+<span class="nc bnc" id="L174" title="All 2 branches missed.">            if (rs.next()) {</span>
+<span class="nc" id="L175">                currentVersion = rs.getInt(1);</span>
+            }
+        }
+<span class="nc" id="L178">        catch (SQLException sqle) {</span>
+            // The database schema must not be installed.
+<span class="nc" id="L180">            Log.debug(&quot;SchemaManager: Error verifying &quot;+schemaKey+&quot; version, probably ignorable.&quot;, sqle);</span>
+<span class="nc" id="L181">            DbConnectionManager.closeStatement(rs, pstmt);</span>
+<span class="nc bnc" id="L182" title="All 2 branches missed.">            if (schemaKey.equals(&quot;openfire&quot;)) {</span>
+                try {
+                    // Releases of Openfire before 3.6.0 stored the version in a jiveVersion table.
+<span class="nc" id="L185">                    pstmt = con.prepareStatement(CHECK_VERSION_JIVE);</span>
+<span class="nc" id="L186">                    pstmt.setString(1, schemaKey);</span>
+<span class="nc" id="L187">                    rs = pstmt.executeQuery();</span>
+<span class="nc bnc" id="L188" title="All 2 branches missed.">                    if (rs.next()) {</span>
+<span class="nc" id="L189">                        currentVersion = rs.getInt(1);</span>
+                    }
+                }
+<span class="nc" id="L192">                catch (SQLException sqlea) {</span>
+                    // The database schema must not be installed.
+<span class="nc" id="L194">                    Log.debug(&quot;SchemaManager: Error verifying &quot;+schemaKey+&quot; version, probably ignorable.&quot;, sqlea);</span>
+<span class="nc" id="L195">                    DbConnectionManager.closeStatement(rs, pstmt);</span>
+
+                    // Releases of Openfire before 2.6.0 stored a major and minor version
+                    // number so the normal check for version can fail. Check for the
+                    // version using the old format in that case.
+                    try {
+
+<span class="nc" id="L202">                        pstmt = con.prepareStatement(CHECK_VERSION_OLD);</span>
+<span class="nc" id="L203">                        rs = pstmt.executeQuery();</span>
+<span class="nc bnc" id="L204" title="All 2 branches missed.">                        if (rs.next()) {</span>
+<span class="nc" id="L205">                            currentVersion = rs.getInt(1);</span>
+                        }
+                    }
+<span class="nc" id="L208">                    catch (SQLException sqle2) {</span>
+                        // The database schema must not be installed.
+<span class="nc" id="L210">                        Log.debug(&quot;SchemaManager: Error verifying &quot;+schemaKey+&quot; version, probably ignorable&quot;, sqle2);</span>
+<span class="nc" id="L211">                    }</span>
+<span class="nc" id="L212">                }</span>
+            }
+        }
+        finally {
+<span class="nc" id="L216">            DbConnectionManager.closeStatement(rs, pstmt);</span>
+<span class="nc" id="L217">        }</span>
+        // If already up to date, return.
+<span class="nc bnc" id="L219" title="All 2 branches missed.">        if (currentVersion &gt;= requiredVersion) {</span>
+<span class="nc" id="L220">            return true;</span>
+        }
+        // If the database schema isn't installed at all, we need to install it.
+<span class="nc bnc" id="L223" title="All 2 branches missed.">        else if (currentVersion == -1) {</span>
+<span class="nc" id="L224">            Log.info(LocaleUtils.getLocalizedString(&quot;upgrade.database.missing_schema&quot;,</span>
+<span class="nc" id="L225">                    Arrays.asList(schemaKey)));</span>
+<span class="nc" id="L226">            System.out.println(LocaleUtils.getLocalizedString(&quot;upgrade.database.missing_schema&quot;,</span>
+<span class="nc" id="L227">                    Arrays.asList(schemaKey)));</span>
+            // Resource will be like &quot;/database/openfire_hsqldb.sql&quot;
+<span class="nc" id="L229">            String resourceName = schemaKey + &quot;_&quot; +</span>
+<span class="nc" id="L230">                    DbConnectionManager.getDatabaseType() + &quot;.sql&quot;;</span>
+
+<span class="nc" id="L232">            try (InputStream resource = resourceLoader.loadResource(resourceName)) {</span>
+<span class="nc bnc" id="L233" title="All 2 branches missed.">                if (resource == null) {</span>
+<span class="nc" id="L234">                    return false;</span>
+                }
+                // For plugins, we will automatically convert jiveVersion to ofVersion
+<span class="nc bnc" id="L237" title="All 4 branches missed.">                executeSQLScript(con, resource, !schemaKey.equals(&quot;openfire&quot;) &amp;&amp; !schemaKey.equals(&quot;wildfire&quot;));</span>
+<span class="nc bnc" id="L238" title="All 12 branches missed.">            }</span>
+<span class="nc" id="L239">            catch (Exception e) {</span>
+<span class="nc" id="L240">                Log.error(e.getMessage(), e);</span>
+<span class="nc" id="L241">                return false;</span>
+<span class="nc" id="L242">            }</span>
+<span class="nc" id="L243">            Log.info(LocaleUtils.getLocalizedString(&quot;upgrade.database.success&quot;));</span>
+<span class="nc" id="L244">            System.out.println(LocaleUtils.getLocalizedString(&quot;upgrade.database.success&quot;));</span>
+<span class="nc" id="L245">            return true;</span>
+        }
+        // Must have a version of the schema that needs to be upgraded.
+        else {
+            // The database is an old version that needs to be upgraded.
+<span class="nc" id="L250">            Log.info(LocaleUtils.getLocalizedString(&quot;upgrade.database.old_schema&quot;,</span>
+<span class="nc" id="L251">                    Arrays.asList(currentVersion, schemaKey, requiredVersion)));</span>
+<span class="nc" id="L252">            System.out.println(LocaleUtils.getLocalizedString(&quot;upgrade.database.old_schema&quot;,</span>
+<span class="nc" id="L253">                    Arrays.asList(currentVersion, schemaKey, requiredVersion)));</span>
+            // If the database type is unknown, we don't know how to upgrade it.
+<span class="nc bnc" id="L255" title="All 2 branches missed.">            if (DbConnectionManager.getDatabaseType() == DbConnectionManager.DatabaseType.unknown) {</span>
+<span class="nc" id="L256">                Log.info(LocaleUtils.getLocalizedString(&quot;upgrade.database.unknown_db&quot;));</span>
+<span class="nc" id="L257">                System.out.println(LocaleUtils.getLocalizedString(&quot;upgrade.database.unknown_db&quot;));</span>
+<span class="nc" id="L258">                return false;</span>
+            }
+            // Upgrade scripts for interbase are not maintained.
+<span class="nc bnc" id="L261" title="All 2 branches missed.">            else if (DbConnectionManager.getDatabaseType() == DbConnectionManager.DatabaseType.interbase) {</span>
+<span class="nc" id="L262">                Log.info(LocaleUtils.getLocalizedString(&quot;upgrade.database.interbase_db&quot;));</span>
+<span class="nc" id="L263">                System.out.println(LocaleUtils.getLocalizedString(&quot;upgrade.database.interbase_db&quot;));</span>
+<span class="nc" id="L264">                return false;</span>
+            }
+
+            // Run all upgrade scripts until we're up to the latest schema.
+<span class="nc bnc" id="L268" title="All 2 branches missed.">            for (int i = currentVersion + 1; i &lt;= requiredVersion; i++) {</span>
+<span class="nc" id="L269">                try (InputStream resource = getUpgradeResource(resourceLoader, i, schemaKey)) {</span>
+                    // apply the 'database-patches-done-in-java'
+                    try {
+<span class="nc bnc" id="L272" title="All 4 branches missed.">                        if (i == 21 &amp;&amp; schemaKey.equals(&quot;openfire&quot;)) {</span>
+<span class="nc" id="L273">                            OF33.executeFix(con);</span>
+                        }
+<span class="nc bnc" id="L275" title="All 4 branches missed.">                        if (i == 28 &amp;&amp; schemaKey.equals(&quot;openfire&quot;)) {</span>
+<span class="nc" id="L276">                            OF1515.executeFix();</span>
+                        }
+<span class="nc" id="L278">                    } catch (Exception e) {</span>
+<span class="nc" id="L279">                        Log.error(e.getMessage(), e);</span>
+<span class="nc" id="L280">                        return false;</span>
+<span class="nc" id="L281">                    }</span>
+<span class="nc bnc" id="L282" title="All 2 branches missed.">                    if (resource == null) {</span>
+                        continue;
+                    }
+<span class="nc bnc" id="L285" title="All 4 branches missed.">                    executeSQLScript(con, resource, !schemaKey.equals(&quot;openfire&quot;) &amp;&amp; !schemaKey.equals(&quot;wildfire&quot;));</span>
+<span class="nc bnc" id="L286" title="All 16 branches missed.">                } catch (Exception e) {</span>
+<span class="nc" id="L287">                    Log.error(e.getMessage(), e);</span>
+<span class="nc" id="L288">                    return false;</span>
+<span class="nc" id="L289">                }</span>
+            }
+<span class="nc" id="L291">            Log.info(LocaleUtils.getLocalizedString(&quot;upgrade.database.success&quot;));</span>
+<span class="nc" id="L292">            System.out.println(LocaleUtils.getLocalizedString(&quot;upgrade.database.success&quot;));</span>
+<span class="nc" id="L293">            return true;</span>
+        }
+    }
+
+    private InputStream getUpgradeResource(ResourceLoader resourceLoader, int upgradeVersion,
+            String schemaKey)
+    {
+<span class="nc" id="L300">        InputStream resource = null;</span>
+<span class="nc bnc" id="L301" title="All 2 branches missed.">        if (&quot;openfire&quot;.equals(schemaKey)) {</span>
+            // Resource will be like &quot;/database/upgrade/6/openfire_hsqldb.sql&quot;
+<span class="nc" id="L303">            String path = JiveGlobals.getHomeDirectory() + File.separator + &quot;resources&quot; +</span>
+                    File.separator + &quot;database&quot; + File.separator + &quot;upgrade&quot; + File.separator +
+                    upgradeVersion;
+<span class="nc" id="L306">            String filename = schemaKey + &quot;_&quot; + DbConnectionManager.getDatabaseType() + &quot;.sql&quot;;</span>
+<span class="nc" id="L307">            File file = new File(path, filename);</span>
+            try {
+<span class="nc" id="L309">                resource = new FileInputStream(file);</span>
+            }
+<span class="nc" id="L311">            catch (FileNotFoundException e) {</span>
+                // If the resource is null, the specific upgrade number is not available.
+<span class="nc" id="L313">            }</span>
+<span class="nc" id="L314">        }</span>
+        else {
+<span class="nc" id="L316">            String resourceName = &quot;upgrade/&quot; + upgradeVersion + &quot;/&quot; + schemaKey + &quot;_&quot; +</span>
+<span class="nc" id="L317">                    DbConnectionManager.getDatabaseType() + &quot;.sql&quot;;</span>
+<span class="nc" id="L318">            resource = resourceLoader.loadResource(resourceName);</span>
+        }
+<span class="nc" id="L320">        return resource;</span>
+    }
+
+    private void updateToOpenfire(Connection con){
+<span class="nc" id="L324">        PreparedStatement pstmt = null;</span>
+        try {
+<span class="nc" id="L326">            pstmt = con.prepareStatement(&quot;UPDATE jiveVersion SET name='openfire' WHERE name='wildfire'&quot;);</span>
+<span class="nc" id="L327">            pstmt.executeUpdate();</span>
+        }
+<span class="nc" id="L329">        catch (Exception ex) {</span>
+//            Log.warn(&quot;Error when trying to update to new name&quot;, ex);
+            // This is &quot;scary&quot; to see in the logs and causes more confusion than it's worth at this point.
+            // So silently move on.
+        }
+        finally {
+<span class="nc" id="L335">            DbConnectionManager.closeStatement(pstmt);</span>
+<span class="nc" id="L336">        }</span>
+<span class="nc" id="L337">    }</span>
+
+    /**
+     * Executes a SQL script.
+     *
+     * @param con database connection.
+     * @param resource an input stream for the script to execute.
+     * @param autoreplace automatically replace jiveVersion with ofVersion
+     * @throws IOException if an IOException occurs.
+     * @throws SQLException if an SQLException occurs.
+     */
+    private static void executeSQLScript(Connection con, InputStream resource, Boolean autoreplace) throws IOException,
+            SQLException
+    {
+<span class="nc" id="L351">        try (BufferedReader in = new BufferedReader(new InputStreamReader(resource))) {</span>
+<span class="nc" id="L352">            boolean done = false;</span>
+<span class="nc bnc" id="L353" title="All 2 branches missed.">            while (!done) {</span>
+<span class="nc" id="L354">                StringBuilder command = new StringBuilder();</span>
+                while (true) {
+<span class="nc" id="L356">                    String line = in.readLine();</span>
+<span class="nc bnc" id="L357" title="All 2 branches missed.">                    if (line == null) {</span>
+<span class="nc" id="L358">                        done = true;</span>
+<span class="nc" id="L359">                        break;</span>
+                    }
+                    // Ignore comments and blank lines.
+<span class="nc bnc" id="L362" title="All 2 branches missed.">                    if (isSQLCommandPart(line)) {</span>
+<span class="nc" id="L363">                        command.append(' ').append(line);</span>
+                    }
+<span class="nc bnc" id="L365" title="All 2 branches missed.">                    if (line.trim().endsWith(&quot;;&quot;)) {</span>
+<span class="nc" id="L366">                        break;</span>
+                    }
+<span class="nc" id="L368">                }</span>
+                // Send command to database.
+<span class="nc bnc" id="L370" title="All 4 branches missed.">                if (!done &amp;&amp; !command.toString().equals(&quot;&quot;)) {</span>
+                    // Remove last semicolon when using Oracle or DB2 to prevent &quot;invalid character error&quot;
+<span class="nc bnc" id="L372" title="All 2 branches missed.">                    if (DbConnectionManager.getDatabaseType() == DbConnectionManager.DatabaseType.oracle ||</span>
+<span class="nc bnc" id="L373" title="All 2 branches missed.">                            DbConnectionManager.getDatabaseType() == DbConnectionManager.DatabaseType.db2) {</span>
+<span class="nc" id="L374">                        command.deleteCharAt(command.length() - 1);</span>
+                    }
+                    /*
+                     * PreparedStatements are not useful at this Point, because no parameters are set. They also prevent the 
+                     * creation of trigger in orcale, so use simple statements
+                     * (see http://docs.oracle.com/cd/E11882_01/java.112/e16548/oraint.htm#CHDIIDBE)
+                     */
+<span class="nc" id="L381">                    Statement stmt = null;</span>
+                    try {
+<span class="nc" id="L383">                        String cmdString = command.toString();</span>
+<span class="nc bnc" id="L384" title="All 2 branches missed.">                        if (autoreplace)  {</span>
+<span class="nc" id="L385">                            cmdString = cmdString.replaceAll(&quot;jiveVersion&quot;, &quot;ofVersion&quot;);</span>
+                        }
+<span class="nc" id="L387">                        stmt = con.createStatement();</span>
+<span class="nc" id="L388">                        stmt.execute(cmdString);</span>
+                    }
+<span class="nc" id="L390">                    catch (SQLException e) {</span>
+                        // Lets show what failed
+<span class="nc" id="L392">                        Log.error(&quot;SchemaManager: Failed to execute SQL:\n&quot;+command.toString());</span>
+<span class="nc" id="L393">                        throw e;</span>
+                    }
+                    finally {
+<span class="nc" id="L396">                        DbConnectionManager.closeStatement(stmt);</span>
+<span class="nc" id="L397">                    }</span>
+                }
+<span class="nc" id="L399">            }</span>
+<span class="nc bnc" id="L400" title="All 8 branches missed.">        }</span>
+<span class="nc" id="L401">    }</span>
+
+<span class="nc" id="L403">    private static abstract class ResourceLoader {</span>
+
+        public abstract InputStream loadResource(String resourceName);
+
+    }
+
+    /**
+     * Returns true if a line from a SQL schema is a valid command part.
+     *
+     * @param line the line of the schema.
+     * @return true if a valid command part.
+     */
+    private static boolean isSQLCommandPart(String line) {
+<span class="nc" id="L416">        line = line.trim();</span>
+<span class="nc bnc" id="L417" title="All 2 branches missed.">        if (line.equals(&quot;&quot;)) {</span>
+<span class="nc" id="L418">            return false;</span>
+        }
+        // Check to see if the line is a comment. Valid comment types:
+        //   &quot;//&quot; is HSQLDB
+        //   &quot;--&quot; is DB2 and Postgres
+        //   &quot;#&quot; is MySQL
+        //   &quot;REM&quot; is Oracle
+        //   &quot;/*&quot; is SQLServer
+<span class="nc bnc" id="L426" title="All 6 branches missed.">        return !(line.startsWith(&quot;//&quot;) || line.startsWith(&quot;--&quot;) || line.startsWith(&quot;#&quot;) ||</span>
+<span class="nc bnc" id="L427" title="All 6 branches missed.">                line.startsWith(&quot;REM&quot;) || line.startsWith(&quot;/*&quot;) || line.startsWith(&quot;*&quot;));</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

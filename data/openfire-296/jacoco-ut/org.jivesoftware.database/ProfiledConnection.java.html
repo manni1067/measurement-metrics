@@ -1,0 +1,1130 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>ProfiledConnection.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.database</a> &gt; <span class="el_source">ProfiledConnection.java</span></div><h1>ProfiledConnection.java</h1><pre class="source lang-java linenums">/**
+ * $RCSfile$
+ * $Revision: 1113 $
+ * $Date: 2005-03-10 09:53:39 -0800 (Thu, 10 Mar 2005) $
+ *
+ * Copyright (C) 2004 Jive Software. All rights reserved.
+ *
+ * This software is published under the terms of the GNU Public License (GPL),
+ * a copy of which is included in this distribution.
+ */
+
+package org.jivesoftware.database;
+
+import java.sql.*;
+import java.util.Hashtable;
+import java.util.Map;
+
+/**
+ * Wraps a Connection object and collects statistics about the database queries
+ * that are performed.
+ * &lt;p&gt;
+ * Statistics of the profiled Connections can be obtained from the static
+ * methods of this class. Instances of this class are the actual wrappers that
+ * perform profiling.
+ *
+ * @author Jive Software
+ */
+public class ProfiledConnection extends AbstractConnection {
+
+<span class="nc" id="L30">    public static enum Type {</span>
+
+        /**
+         * Constant for SELECT database queries.
+         */
+<span class="nc" id="L35">        select,</span>
+
+        /**
+         * Constant for UPDATE database queries.
+         */
+<span class="nc" id="L40">        update,</span>
+
+        /**
+         * Constant for INSERT database queries.
+         */
+<span class="nc" id="L45">        insert,</span>
+
+        /**
+         * Constant for DELETE database queries.
+         */
+<span class="nc" id="L50">        delete</span>
+
+    }
+
+<span class="nc" id="L54">    private static long startInsertTime = 0;</span>
+<span class="nc" id="L55">    private static long startUpdateTime = 0;</span>
+<span class="nc" id="L56">    private static long startSelectTime = 0;</span>
+<span class="nc" id="L57">    private static long startDeleteTime = 0;</span>
+
+<span class="nc" id="L59">    private static long endInsertTime = 0;</span>
+<span class="nc" id="L60">    private static long endUpdateTime = 0;</span>
+<span class="nc" id="L61">    private static long endSelectTime = 0;</span>
+<span class="nc" id="L62">    private static long endDeleteTime = 0;</span>
+
+<span class="nc" id="L64">    private static long insertCount = 0;</span>
+<span class="nc" id="L65">    private static long updateCount = 0;</span>
+<span class="nc" id="L66">    private static long selectCount = 0;</span>
+<span class="nc" id="L67">    private static long deleteCount = 0;</span>
+
+<span class="nc" id="L69">    private static long totalInsertTime = 0;</span>
+<span class="nc" id="L70">    private static long totalUpdateTime = 0;</span>
+<span class="nc" id="L71">    private static long totalSelectTime = 0;</span>
+<span class="nc" id="L72">    private static long totalDeleteTime = 0;</span>
+
+<span class="nc" id="L74">    private static Map&lt;String, ProfiledConnectionEntry&gt; insertQueries =</span>
+            new Hashtable&lt;String, ProfiledConnectionEntry&gt;();
+<span class="nc" id="L76">    private static Map&lt;String, ProfiledConnectionEntry&gt; updateQueries =</span>
+            new Hashtable&lt;String, ProfiledConnectionEntry&gt;();
+<span class="nc" id="L78">    private static Map&lt;String, ProfiledConnectionEntry&gt; selectQueries =</span>
+            new Hashtable&lt;String, ProfiledConnectionEntry&gt;();
+<span class="nc" id="L80">    private static Map&lt;String, ProfiledConnectionEntry&gt; deleteQueries =</span>
+            new Hashtable&lt;String, ProfiledConnectionEntry&gt;();
+
+    /**
+     * Start profiling.
+     */
+    public static void start() {
+<span class="nc" id="L87">        long now = System.currentTimeMillis();</span>
+<span class="nc" id="L88">        startInsertTime = startUpdateTime = startSelectTime = startDeleteTime = now;</span>
+<span class="nc" id="L89">    }</span>
+
+    /**
+     * Stop profiling.
+     */
+    public static void stop() {
+<span class="nc" id="L95">        endInsertTime = endUpdateTime = endSelectTime = endDeleteTime = 0;</span>
+<span class="nc" id="L96">    }</span>
+
+    /**
+     * Returns the total number database queries of a particular type performed.
+     * Valid types are ProfiledConnection.SELECT, ProfiledConnection.UPDATE,
+     * ProfiledConnection.INSERT, and ProfiledConnection.DELETE.
+     *
+     * @param type the type of query to get the count for.
+     * @return the number queries of type {@code type} performed.
+     */
+    public static long getQueryCount(Type type) {
+<span class="nc bnc" id="L107" title="All 5 branches missed.">        switch (type) {</span>
+            case select:
+<span class="nc" id="L109">                return selectCount;</span>
+            case update:
+<span class="nc" id="L111">                return updateCount;</span>
+            case insert:
+<span class="nc" id="L113">                return insertCount;</span>
+            case delete:
+<span class="nc" id="L115">                return deleteCount;</span>
+            default:
+<span class="nc" id="L117">                throw new IllegalArgumentException(&quot;Invalid type&quot;);</span>
+        }
+    }
+
+    /**
+     * Adds a query.
+     *
+     * @param type the type of the query.
+     * @param sql the insert sql string.
+     * @param time the length of time the query took in milliseconds
+     */
+    public static void addQuery(Type type, String sql, long time) {
+        // Do nothing if we didn't receive a sql statement
+<span class="nc bnc" id="L130" title="All 4 branches missed.">        if (sql == null || sql.equals(&quot;&quot;)) {</span>
+<span class="nc" id="L131">            return;</span>
+        }
+
+        // clean up sql to insert spaces after every ','
+<span class="nc" id="L135">        sql = reformatQuery(sql);</span>
+
+        // remove values from query
+<span class="nc" id="L138">        sql = removeQueryValues(sql);</span>
+
+        ProfiledConnectionEntry entry;
+<span class="nc bnc" id="L141" title="All 5 branches missed.">        switch (type) {</span>
+            case select:
+<span class="nc" id="L143">                selectCount++;</span>
+<span class="nc" id="L144">                totalSelectTime += time;</span>
+<span class="nc" id="L145">                entry = selectQueries.get(sql);</span>
+<span class="nc bnc" id="L146" title="All 2 branches missed.">                if (entry == null) {</span>
+<span class="nc" id="L147">                    entry = new ProfiledConnectionEntry(sql);</span>
+<span class="nc" id="L148">                    selectQueries.put(sql, entry);</span>
+                }
+                break;
+            case update:
+<span class="nc" id="L152">                updateCount++;</span>
+<span class="nc" id="L153">                totalUpdateTime += time;</span>
+<span class="nc" id="L154">                entry = updateQueries.get(sql);</span>
+<span class="nc bnc" id="L155" title="All 2 branches missed.">                if (entry == null) {</span>
+<span class="nc" id="L156">                    entry = new ProfiledConnectionEntry(sql);</span>
+<span class="nc" id="L157">                    updateQueries.put(sql, entry);</span>
+                }
+                break;
+            case insert:
+<span class="nc" id="L161">                insertCount++;</span>
+<span class="nc" id="L162">                totalInsertTime += time;</span>
+<span class="nc" id="L163">                entry = insertQueries.get(sql);</span>
+<span class="nc bnc" id="L164" title="All 2 branches missed.">                if (entry == null) {</span>
+<span class="nc" id="L165">                    entry = new ProfiledConnectionEntry(sql);</span>
+<span class="nc" id="L166">                    insertQueries.put(sql, entry);</span>
+                }
+                break;
+            case delete:
+<span class="nc" id="L170">                deleteCount++;</span>
+<span class="nc" id="L171">                totalDeleteTime += time;</span>
+<span class="nc" id="L172">                entry = deleteQueries.get(sql);</span>
+<span class="nc bnc" id="L173" title="All 2 branches missed.">                if (entry == null) {</span>
+<span class="nc" id="L174">                    entry = new ProfiledConnectionEntry(sql);</span>
+<span class="nc" id="L175">                    deleteQueries.put(sql, entry);</span>
+                }
+                break;
+            default:
+<span class="nc" id="L179">                throw new IllegalArgumentException(&quot;Invalid type&quot;);</span>
+        }
+
+<span class="nc" id="L182">        entry.count++;</span>
+<span class="nc" id="L183">        entry.totalTime += time;</span>
+<span class="nc" id="L184">    }</span>
+
+    /**
+     * Returns the average number of queries of a certain type that have been
+     * performed per second since profiling started. If profiling has been
+     * stopped, that moment in time is used for the calculation. Otherwise,
+     * the current moment in time is used.
+     *
+     * @param type the type of database query to check.
+     * @return the average number of queries of a certain typed performed per
+     *         second.
+     */
+    public static double getQueriesPerSecond(Type type) {
+        long count, start, end;
+
+<span class="nc bnc" id="L199" title="All 5 branches missed.">        switch (type) {</span>
+            case select:
+<span class="nc" id="L201">                count = selectCount;</span>
+<span class="nc" id="L202">                start = startSelectTime;</span>
+<span class="nc" id="L203">                end = endSelectTime;</span>
+<span class="nc" id="L204">                break;</span>
+            case update:
+<span class="nc" id="L206">                count = updateCount;</span>
+<span class="nc" id="L207">                start = startUpdateTime;</span>
+<span class="nc" id="L208">                end = endUpdateTime;</span>
+<span class="nc" id="L209">                break;</span>
+            case insert:
+<span class="nc" id="L211">                count = insertCount;</span>
+<span class="nc" id="L212">                start = startInsertTime;</span>
+<span class="nc" id="L213">                end = endInsertTime;</span>
+<span class="nc" id="L214">                break;</span>
+            case delete:
+<span class="nc" id="L216">                count = deleteCount;</span>
+<span class="nc" id="L217">                start = startDeleteTime;</span>
+<span class="nc" id="L218">                end = endDeleteTime;</span>
+<span class="nc" id="L219">                break;</span>
+            default:
+<span class="nc" id="L221">                throw new IllegalArgumentException(&quot;Invalid type&quot;);</span>
+        }
+        // if no queries yet, return 0;
+<span class="nc bnc" id="L224" title="All 2 branches missed.">        if (count == 0) {</span>
+<span class="nc" id="L225">            return 0;</span>
+        }
+        // If the profiling hasn't been stopped yet, we want to give
+        // profiling values up to the current time instead.
+<span class="nc bnc" id="L229" title="All 2 branches missed.">        if (end == 0) {</span>
+<span class="nc" id="L230">            end = System.currentTimeMillis();</span>
+        }
+        // Compute the number of seconds
+<span class="nc" id="L233">        double time = (end - start) / 1000.0;</span>
+        // Finally, return the average.
+<span class="nc" id="L235">        return count / time;</span>
+    }
+
+    /**
+     * Returns the average amount of time spent executing the specified type
+     * of query.
+     *
+     * @param type the type of query.
+     * @return a double representing the average time spent executing the type
+     *         of query.
+     */
+    public static double getAverageQueryTime(Type type) {
+        long time, count;
+
+<span class="nc bnc" id="L249" title="All 5 branches missed.">        switch (type) {</span>
+            case select:
+<span class="nc" id="L251">                count = selectCount;</span>
+<span class="nc" id="L252">                time = totalSelectTime;</span>
+<span class="nc" id="L253">                break;</span>
+            case update:
+<span class="nc" id="L255">                count = updateCount;</span>
+<span class="nc" id="L256">                time = totalUpdateTime;</span>
+<span class="nc" id="L257">                break;</span>
+            case insert:
+<span class="nc" id="L259">                count = insertCount;</span>
+<span class="nc" id="L260">                time = totalInsertTime;</span>
+<span class="nc" id="L261">                break;</span>
+            case delete:
+<span class="nc" id="L263">                count = deleteCount;</span>
+<span class="nc" id="L264">                time = totalDeleteTime;</span>
+<span class="nc" id="L265">                break;</span>
+            default:
+<span class="nc" id="L267">                throw new IllegalArgumentException(&quot;Invalid type&quot;);</span>
+        }
+
+<span class="nc bnc" id="L270" title="All 2 branches missed.">        if (count != 0) {</span>
+<span class="nc" id="L271">            return time / (double)count;</span>
+        }
+        else {
+<span class="nc" id="L274">            return 0.0;</span>
+        }
+    }
+
+    /**
+     * Returns the total amount of time in milliseconds spent doing a particular
+     * type of query. Note that this isn't necessarily representative of actual real
+     * time since db queries often occur in parallel.
+     *
+     * @param type the type of query to check.
+     * @return the number of milliseconds spent executing the specified type of
+     *         query.
+     */
+    public static long getTotalQueryTime(Type type) {
+<span class="nc bnc" id="L288" title="All 5 branches missed.">        switch (type) {</span>
+            case select:
+<span class="nc" id="L290">                return totalSelectTime;</span>
+            case update:
+<span class="nc" id="L292">                return totalUpdateTime;</span>
+            case insert:
+<span class="nc" id="L294">                return totalInsertTime;</span>
+            case delete:
+<span class="nc" id="L296">                return totalDeleteTime;</span>
+            default:
+<span class="nc" id="L298">                throw new IllegalArgumentException(&quot;Invalid type&quot;);</span>
+        }
+    }
+
+    /**
+     * Returns an array of sorted queries (as ProfiledConnectionEntry objects) by type
+     *
+     * @param type       the type of query to check
+     * @param sortByTime sort the resulting list by Time if true,
+     *                   otherwise sort by count if false (default)
+     * @return an array of ProfiledConnectionEntry objects
+     */
+    public static ProfiledConnectionEntry[] getSortedQueries(Type type, boolean sortByTime) {
+        Map&lt;String, ProfiledConnectionEntry&gt; queries;
+
+<span class="nc bnc" id="L313" title="All 5 branches missed.">        switch (type) {</span>
+            case select:
+<span class="nc" id="L315">                queries = selectQueries;</span>
+<span class="nc" id="L316">                break;</span>
+            case update:
+<span class="nc" id="L318">                queries = updateQueries;</span>
+<span class="nc" id="L319">                break;</span>
+            case insert:
+<span class="nc" id="L321">                queries = insertQueries;</span>
+<span class="nc" id="L322">                break;</span>
+            case delete:
+<span class="nc" id="L324">                queries = deleteQueries;</span>
+<span class="nc" id="L325">                break;</span>
+            default:
+<span class="nc" id="L327">                throw new IllegalArgumentException(&quot;Invalid type&quot;);</span>
+        }
+
+        // No queries, return null
+<span class="nc bnc" id="L331" title="All 2 branches missed.">        if (queries.isEmpty()) {</span>
+<span class="nc" id="L332">            return null;</span>
+        }
+
+<span class="nc" id="L335">        ProfiledConnectionEntry [] result = queries.values().toArray(</span>
+<span class="nc" id="L336">                new ProfiledConnectionEntry[queries.size()]);</span>
+
+<span class="nc" id="L338">        quickSort(result, sortByTime, 0, result.length - 1);</span>
+<span class="nc" id="L339">        return result;</span>
+    }
+
+
+    /**
+     * Reset all statistics.
+     */
+    public static void resetStatistics() {
+<span class="nc" id="L347">        startInsertTime = startUpdateTime = startSelectTime = startDeleteTime = 0;</span>
+<span class="nc" id="L348">        endInsertTime = endUpdateTime = endSelectTime = endDeleteTime = 0;</span>
+<span class="nc" id="L349">        insertCount = updateCount = selectCount = deleteCount = 0;</span>
+<span class="nc" id="L350">        totalInsertTime = totalUpdateTime = totalSelectTime = totalDeleteTime = 0;</span>
+
+<span class="nc" id="L352">        insertQueries.clear();</span>
+<span class="nc" id="L353">        updateQueries.clear();</span>
+<span class="nc" id="L354">        selectQueries.clear();</span>
+<span class="nc" id="L355">        deleteQueries.clear();</span>
+<span class="nc" id="L356">    }</span>
+
+    /**
+     * @param entries    entries
+     * @param sortByTime sort by time if true, otherwise sort by count
+     * @param first      first index to sort on. Normally 0
+     * @param last       last index to sort on. Normally length -1
+     */
+    private static void quickSort(ProfiledConnectionEntry[] entries, boolean sortByTime, int first, int last) {
+
+        // do nothing if array contains fewer than two elements
+<span class="nc bnc" id="L367" title="All 4 branches missed.">        if (first &gt;= last || entries.length &lt; 2) {</span>
+<span class="nc" id="L368">            return;</span>
+        }
+
+<span class="nc" id="L371">        swap(entries, first, (first + last) / 2);</span>
+
+<span class="nc" id="L373">        int index = first;</span>
+<span class="nc bnc" id="L374" title="All 2 branches missed.">        for (int i = first + 1; i &lt;= last; i++) {</span>
+<span class="nc bnc" id="L375" title="All 4 branches missed.">            if (sortByTime &amp;&amp; ((entries[first].totalTime / entries[first].count) &lt; (entries[i].totalTime / entries[i].count))) {</span>
+<span class="nc" id="L376">                swap(entries, ++index, i);</span>
+            }
+<span class="nc bnc" id="L378" title="All 4 branches missed.">            else if (!sortByTime &amp;&amp; entries[first].count &lt; entries[i].count) {</span>
+<span class="nc" id="L379">                swap(entries, ++index, i);</span>
+            }
+        }
+<span class="nc" id="L382">        swap(entries, first, index);</span>
+<span class="nc" id="L383">        quickSort(entries, sortByTime, first, index - 1);</span>
+<span class="nc" id="L384">        quickSort(entries, sortByTime, index + 1, last);</span>
+<span class="nc" id="L385">    }</span>
+
+    private static void swap(Object[] list, int i, int j) {
+<span class="nc" id="L388">        Object tmp = list[i];</span>
+<span class="nc" id="L389">        list[i] = list[j];</span>
+<span class="nc" id="L390">        list[j] = tmp;</span>
+<span class="nc" id="L391">    }</span>
+
+    private static String removeQueryValues(String _sql) {
+<span class="nc" id="L394">        int length = _sql.length();</span>
+
+<span class="nc bnc" id="L396" title="All 2 branches missed.">        if (_sql.indexOf(&quot;=&quot;) == -1) {</span>
+<span class="nc" id="L397">            return _sql;</span>
+        }
+
+<span class="nc" id="L400">        StringBuilder sql = new StringBuilder(_sql);</span>
+<span class="nc" id="L401">        boolean inValue = false;</span>
+<span class="nc" id="L402">        boolean afterEquals = false;</span>
+<span class="nc" id="L403">        boolean hasQuotes = false;</span>
+<span class="nc" id="L404">        int startValue = -1;</span>
+<span class="nc" id="L405">        int endValue = -1;</span>
+<span class="nc" id="L406">        int charRemoved = 0;</span>
+
+<span class="nc bnc" id="L408" title="All 2 branches missed.">        for (int x = 0; x &lt; length; x++) {</span>
+<span class="nc" id="L409">            char c = _sql.charAt(x);</span>
+
+<span class="nc bnc" id="L411" title="All 16 branches missed.">            switch (c) {</span>
+                case '=':
+                {
+<span class="nc bnc" id="L414" title="All 2 branches missed.">                    if (!afterEquals) {</span>
+<span class="nc" id="L415">                        afterEquals = true;</span>
+                    }
+                    break;
+                }
+                case ' ':
+                {
+<span class="nc bnc" id="L421" title="All 4 branches missed.">                    if (!hasQuotes &amp;&amp; inValue) {</span>
+<span class="nc" id="L422">                        endValue = x;</span>
+<span class="nc" id="L423">                        inValue = false;</span>
+<span class="nc" id="L424">                        hasQuotes = false;</span>
+<span class="nc" id="L425">                        afterEquals = false;</span>
+                    }
+                    break;
+                }
+                case '\'':
+                {
+<span class="nc bnc" id="L431" title="All 4 branches missed.">                    if (afterEquals &amp;&amp; !inValue) {</span>
+<span class="nc" id="L432">                        startValue = x;</span>
+<span class="nc" id="L433">                        inValue = true;</span>
+<span class="nc" id="L434">                        hasQuotes = true;</span>
+                    }
+<span class="nc bnc" id="L436" title="All 6 branches missed.">                    else if (afterEquals &amp;&amp; inValue &amp;&amp; hasQuotes) {</span>
+<span class="nc" id="L437">                        endValue = x + 1;</span>
+<span class="nc" id="L438">                        inValue = false;</span>
+<span class="nc" id="L439">                        hasQuotes = false;</span>
+<span class="nc" id="L440">                        afterEquals = false;</span>
+                    }
+                    break;
+                }
+                case '-':
+                {
+<span class="nc bnc" id="L446" title="All 4 branches missed.">                    if (afterEquals &amp;&amp; !inValue) {</span>
+<span class="nc" id="L447">                        startValue = x;</span>
+<span class="nc" id="L448">                        inValue = true;</span>
+
+                    }
+                    break;
+                }
+                case '+':
+                {
+<span class="nc bnc" id="L455" title="All 4 branches missed.">                    if (afterEquals &amp;&amp; !inValue) {</span>
+<span class="nc" id="L456">                        startValue = x;</span>
+<span class="nc" id="L457">                        inValue = true;</span>
+                    }
+                    break;
+                }
+                case '0':
+                {
+<span class="nc bnc" id="L463" title="All 4 branches missed.">                    if (afterEquals &amp;&amp; !inValue) {</span>
+<span class="nc" id="L464">                        startValue = x;</span>
+<span class="nc" id="L465">                        inValue = true;</span>
+                    }
+                    break;
+                }
+                case '1':
+                {
+<span class="nc bnc" id="L471" title="All 4 branches missed.">                    if (afterEquals &amp;&amp; !inValue) {</span>
+<span class="nc" id="L472">                        startValue = x;</span>
+<span class="nc" id="L473">                        inValue = true;</span>
+                    }
+                    break;
+                }
+                case '2':
+                {
+<span class="nc bnc" id="L479" title="All 4 branches missed.">                    if (afterEquals &amp;&amp; !inValue) {</span>
+<span class="nc" id="L480">                        startValue = x;</span>
+<span class="nc" id="L481">                        inValue = true;</span>
+                    }
+                    break;
+                }
+                case '3':
+                {
+<span class="nc bnc" id="L487" title="All 4 branches missed.">                    if (afterEquals &amp;&amp; !inValue) {</span>
+<span class="nc" id="L488">                        startValue = x;</span>
+<span class="nc" id="L489">                        inValue = true;</span>
+                    }
+                    break;
+                }
+                case '4':
+                {
+<span class="nc bnc" id="L495" title="All 4 branches missed.">                    if (afterEquals &amp;&amp; !inValue) {</span>
+<span class="nc" id="L496">                        startValue = x;</span>
+<span class="nc" id="L497">                        inValue = true;</span>
+                    }
+                    break;
+                }
+                case '5':
+                {
+<span class="nc bnc" id="L503" title="All 4 branches missed.">                    if (afterEquals &amp;&amp; !inValue) {</span>
+<span class="nc" id="L504">                        startValue = x;</span>
+<span class="nc" id="L505">                        inValue = true;</span>
+                    }
+                    break;
+                }
+                case '6':
+                {
+<span class="nc bnc" id="L511" title="All 4 branches missed.">                    if (afterEquals &amp;&amp; !inValue) {</span>
+<span class="nc" id="L512">                        startValue = x;</span>
+<span class="nc" id="L513">                        inValue = true;</span>
+                    }
+                    break;
+                }
+                case '7':
+                {
+<span class="nc bnc" id="L519" title="All 4 branches missed.">                    if (afterEquals &amp;&amp; !inValue) {</span>
+<span class="nc" id="L520">                        startValue = x;</span>
+<span class="nc" id="L521">                        inValue = true;</span>
+                    }
+                    break;
+                }
+                case '8':
+                {
+<span class="nc bnc" id="L527" title="All 4 branches missed.">                    if (afterEquals &amp;&amp; !inValue) {</span>
+<span class="nc" id="L528">                        startValue = x;</span>
+<span class="nc" id="L529">                        inValue = true;</span>
+                    }
+                    break;
+                }
+                case '9':
+                {
+<span class="nc bnc" id="L535" title="All 4 branches missed.">                    if (afterEquals &amp;&amp; !inValue) {</span>
+<span class="nc" id="L536">                        startValue = x;</span>
+<span class="nc" id="L537">                        inValue = true;</span>
+                    }
+                    break;
+                }
+                default:
+                {
+<span class="nc bnc" id="L543" title="All 4 branches missed.">                    if (afterEquals &amp;&amp; !inValue) {</span>
+<span class="nc" id="L544">                        afterEquals = false;</span>
+                    }
+                }
+            }
+
+<span class="nc bnc" id="L549" title="All 4 branches missed.">            if (x == length - 1 &amp;&amp; afterEquals) {</span>
+<span class="nc" id="L550">                endValue = x + 1;</span>
+            }
+
+<span class="nc bnc" id="L553" title="All 4 branches missed.">            if (startValue != -1 &amp;&amp; endValue != -1) {</span>
+<span class="nc" id="L554">                sql.replace(startValue - charRemoved, endValue - charRemoved, &quot;?&quot;);</span>
+
+<span class="nc" id="L556">                charRemoved += endValue - startValue - 1;</span>
+<span class="nc" id="L557">                startValue = -1;</span>
+<span class="nc" id="L558">                endValue = -1;</span>
+            }
+        }
+
+<span class="nc" id="L562">        return sql.toString();</span>
+    }
+
+    private static String reformatQuery(String _sql) {
+<span class="nc" id="L566">        int length = _sql.length();</span>
+<span class="nc" id="L567">        int charAdded = 0;</span>
+<span class="nc" id="L568">        StringBuilder sql = new StringBuilder(_sql);</span>
+
+<span class="nc bnc" id="L570" title="All 2 branches missed.">        for (int x = 0; x &lt; length; x++) {</span>
+<span class="nc" id="L571">            char c = _sql.charAt(x);</span>
+
+<span class="nc bnc" id="L573" title="All 6 branches missed.">            if (c == ',' &amp;&amp; x &lt; length - 1 &amp;&amp; _sql.charAt(x + 1) != ' ') {</span>
+<span class="nc" id="L574">                sql.replace(x + charAdded, x + 1 + charAdded, &quot;, &quot;);</span>
+<span class="nc" id="L575">                charAdded++;</span>
+            }
+        }
+
+<span class="nc" id="L579">        return sql.toString();</span>
+    }
+
+    //--------------------- Connection Wrapping Code ---------------------//
+
+
+    /**
+     * Creates a new ProfiledConnection that wraps the specified connection.
+     *
+     * @param connection the Connection to wrap and collect stats for.
+     */
+    public ProfiledConnection(Connection connection) {
+<span class="nc" id="L591">        super(connection);</span>
+<span class="nc" id="L592">    }</span>
+
+    public void close() throws SQLException {
+        // Close underlying connection.
+<span class="nc bnc" id="L596" title="All 2 branches missed.">        if (connection != null) {</span>
+<span class="nc" id="L597">            connection.close();</span>
+        }
+<span class="nc" id="L599">    }</span>
+
+    public Statement createStatement() throws SQLException {
+        // Returned a TimedStatement so that we can do db timings.
+<span class="nc" id="L603">        return new TimedStatement(connection.createStatement());</span>
+    }
+
+    public PreparedStatement prepareStatement(String sql) throws SQLException {
+        // Returned a TimedPreparedStatement so that we can do db timings.
+<span class="nc" id="L608">        return new TimedPreparedStatement(connection.prepareStatement(sql), sql);</span>
+    }
+
+    public Statement createStatement(int resultSetType, int resultSetConcurrency)
+            throws SQLException {
+<span class="nc" id="L613">        return new TimedStatement(connection.createStatement(resultSetType,</span>
+                resultSetConcurrency));
+    }
+
+    public PreparedStatement prepareStatement(String sql, int resultSetType,
+                                              int resultSetConcurrency) throws SQLException {
+<span class="nc" id="L619">        return new TimedPreparedStatement(connection.prepareStatement(sql, resultSetType, resultSetConcurrency), sql);</span>
+    }
+
+    public CallableStatement prepareCall(String sql) throws SQLException {
+<span class="nc" id="L623">        return new TimedCallableStatement(connection.prepareCall(sql), sql);</span>
+    }
+
+    public CallableStatement prepareCall(String sql, int i, int i1) throws SQLException {
+<span class="nc" id="L627">        return new TimedCallableStatement(connection.prepareCall(sql, i, i1), sql);</span>
+    }
+
+    /**
+     * An implementation of the Statement interface that wraps an underlying
+     * Statement object and performs timings of the database queries. The class
+     * does not handle batch queries but should generally work otherwise.
+     */
+    class TimedStatement extends StatementWrapper {
+
+        private Statement stmt;
+
+        /**
+         * Creates a new TimedStatement that wraps {@code stmt}.
+         *
+         * @param stmt the statement.
+         */
+<span class="nc" id="L644">        public TimedStatement(Statement stmt) {</span>
+<span class="nc" id="L645">            super(stmt);</span>
+<span class="nc" id="L646">            this.stmt = stmt;</span>
+<span class="nc" id="L647">        }</span>
+
+        public boolean execute(String sql) throws SQLException {
+
+<span class="nc" id="L651">            long t1 = System.currentTimeMillis();</span>
+<span class="nc" id="L652">            boolean result = stmt.execute(sql);</span>
+<span class="nc" id="L653">            long t2 = System.currentTimeMillis();</span>
+
+            // determine the type of query
+<span class="nc" id="L656">            String sqlL = sql.toLowerCase().trim();</span>
+
+<span class="nc bnc" id="L658" title="All 2 branches missed.">            if (sqlL.startsWith(&quot;insert&quot;)) {</span>
+<span class="nc" id="L659">                addQuery(Type.insert, sql, t2 - t1);</span>
+            }
+<span class="nc bnc" id="L661" title="All 2 branches missed.">            else if (sqlL.startsWith(&quot;update&quot;)) {</span>
+<span class="nc" id="L662">                addQuery(Type.update, sql, t2 - t1);</span>
+            }
+<span class="nc bnc" id="L664" title="All 2 branches missed.">            else if (sqlL.startsWith(&quot;delete&quot;)) {</span>
+<span class="nc" id="L665">                addQuery(Type.delete, sql, t2 - t1);</span>
+            }
+            else {
+<span class="nc" id="L668">                addQuery(Type.select, sql, t2 - t1);</span>
+            }
+<span class="nc" id="L670">            return result;</span>
+        }
+
+        public ResultSet executeQuery(String sql) throws SQLException {
+<span class="nc" id="L674">            long t1 = System.currentTimeMillis();</span>
+<span class="nc" id="L675">            ResultSet result = stmt.executeQuery(sql);</span>
+<span class="nc" id="L676">            long t2 = System.currentTimeMillis();</span>
+
+            // determine the type of query
+<span class="nc" id="L679">            String sqlL = sql.toLowerCase().trim();</span>
+
+<span class="nc bnc" id="L681" title="All 2 branches missed.">            if (sqlL.startsWith(&quot;insert&quot;)) {</span>
+<span class="nc" id="L682">                addQuery(Type.insert, sql, t2 - t1);</span>
+            }
+<span class="nc bnc" id="L684" title="All 2 branches missed.">            else if (sqlL.startsWith(&quot;update&quot;)) {</span>
+<span class="nc" id="L685">                addQuery(Type.update, sql, t2 - t1);</span>
+            }
+<span class="nc bnc" id="L687" title="All 2 branches missed.">            else if (sqlL.startsWith(&quot;delete&quot;)) {</span>
+<span class="nc" id="L688">                addQuery(Type.delete, sql, t2 - t1);</span>
+            }
+            else {
+<span class="nc" id="L691">                addQuery(Type.select, sql, t2 - t1);</span>
+            }
+<span class="nc" id="L693">            return result;</span>
+        }
+
+        public int executeUpdate(String sql) throws SQLException {
+<span class="nc" id="L697">            long t1 = System.currentTimeMillis();</span>
+<span class="nc" id="L698">            int result = stmt.executeUpdate(sql);</span>
+<span class="nc" id="L699">            long t2 = System.currentTimeMillis();</span>
+
+            // determine the type of query
+<span class="nc" id="L702">            String sqlL = sql.toLowerCase().trim();</span>
+
+<span class="nc bnc" id="L704" title="All 2 branches missed.">            if (sqlL.startsWith(&quot;insert&quot;)) {</span>
+<span class="nc" id="L705">                addQuery(Type.insert, sql, t2 - t1);</span>
+            }
+<span class="nc bnc" id="L707" title="All 2 branches missed.">            else if (sqlL.startsWith(&quot;update&quot;)) {</span>
+<span class="nc" id="L708">                addQuery(Type.update, sql, t2 - t1);</span>
+            }
+<span class="nc bnc" id="L710" title="All 2 branches missed.">            else if (sqlL.startsWith(&quot;delete&quot;)) {</span>
+<span class="nc" id="L711">                addQuery(Type.delete, sql, t2 - t1);</span>
+            }
+            else {
+<span class="nc" id="L714">                addQuery(Type.select, sql, t2 - t1);</span>
+            }
+<span class="nc" id="L716">            return result;</span>
+        }
+    }
+
+    /**
+     * An implementation of the PreparedStatement interface that wraps an
+     * underlying PreparedStatement object and performs timings of the database
+     * queries.
+     */
+    class TimedPreparedStatement extends PreparedStatementWrapper {
+
+        private String sql;
+<span class="nc" id="L728">        private Type type = Type.select;</span>
+
+<span class="nc" id="L730">        public TimedPreparedStatement(PreparedStatement pstmt, String sql) {</span>
+<span class="nc" id="L731">            super(pstmt);</span>
+<span class="nc" id="L732">            this.sql = sql;</span>
+
+            // determine the type of query
+<span class="nc" id="L735">            String sqlL = sql.toLowerCase().trim();</span>
+
+<span class="nc bnc" id="L737" title="All 2 branches missed.">            if (sqlL.startsWith(&quot;insert&quot;)) {</span>
+<span class="nc" id="L738">                type = Type.insert;</span>
+            }
+<span class="nc bnc" id="L740" title="All 2 branches missed.">            else if (sqlL.startsWith(&quot;update&quot;)) {</span>
+<span class="nc" id="L741">                type = Type.update;</span>
+            }
+<span class="nc bnc" id="L743" title="All 2 branches missed.">            else if (sqlL.startsWith(&quot;delete&quot;)) {</span>
+<span class="nc" id="L744">                type = Type.delete;</span>
+            }
+            else {
+<span class="nc" id="L747">                type = Type.select;</span>
+            }
+<span class="nc" id="L749">        }</span>
+
+        public boolean execute() throws SQLException {
+            // Perform timing of this method.
+<span class="nc" id="L753">            long t1 = System.currentTimeMillis();</span>
+<span class="nc" id="L754">            boolean result = pstmt.execute();</span>
+<span class="nc" id="L755">            long t2 = System.currentTimeMillis();</span>
+
+<span class="nc bnc" id="L757" title="All 5 branches missed.">            switch (type) {</span>
+                case select:
+<span class="nc" id="L759">                    addQuery(Type.select, sql, t2 - t1);</span>
+<span class="nc" id="L760">                    break;</span>
+                case update:
+<span class="nc" id="L762">                    addQuery(Type.update, sql, t2 - t1);</span>
+<span class="nc" id="L763">                    break;</span>
+                case insert:
+<span class="nc" id="L765">                    addQuery(Type.insert, sql, t2 - t1);</span>
+<span class="nc" id="L766">                    break;</span>
+                case delete:
+<span class="nc" id="L768">                    addQuery(Type.delete, sql, t2 - t1);</span>
+                    break;
+            }
+<span class="nc" id="L771">            return result;</span>
+        }
+
+        /*
+         * This is one of the methods that we wish to time
+         */
+        public ResultSet executeQuery() throws SQLException {
+
+<span class="nc" id="L779">            long t1 = System.currentTimeMillis();</span>
+<span class="nc" id="L780">            ResultSet result = pstmt.executeQuery();</span>
+<span class="nc" id="L781">            long t2 = System.currentTimeMillis();</span>
+
+<span class="nc bnc" id="L783" title="All 5 branches missed.">            switch (type) {</span>
+                case select:
+<span class="nc" id="L785">                    addQuery(Type.select, sql, t2 - t1);</span>
+<span class="nc" id="L786">                    break;</span>
+                case update:
+<span class="nc" id="L788">                    addQuery(Type.update, sql, t2 - t1);</span>
+<span class="nc" id="L789">                    break;</span>
+                case insert:
+<span class="nc" id="L791">                    addQuery(Type.insert, sql, t2 - t1);</span>
+<span class="nc" id="L792">                    break;</span>
+                case delete:
+<span class="nc" id="L794">                    addQuery(Type.delete, sql, t2 - t1);</span>
+                    break;
+            }
+<span class="nc" id="L797">            return result;</span>
+        }
+
+        /*
+         * This is one of the methods that we wish to time
+         */
+        public int executeUpdate() throws SQLException {
+
+<span class="nc" id="L805">            long t1 = System.currentTimeMillis();</span>
+<span class="nc" id="L806">            int result = pstmt.executeUpdate();</span>
+<span class="nc" id="L807">            long t2 = System.currentTimeMillis();</span>
+
+<span class="nc bnc" id="L809" title="All 5 branches missed.">            switch (type) {</span>
+                case select:
+<span class="nc" id="L811">                    addQuery(Type.select, sql, t2 - t1);</span>
+<span class="nc" id="L812">                    break;</span>
+                case update:
+<span class="nc" id="L814">                    addQuery(Type.update, sql, t2 - t1);</span>
+<span class="nc" id="L815">                    break;</span>
+                case insert:
+<span class="nc" id="L817">                    addQuery(Type.insert, sql, t2 - t1);</span>
+<span class="nc" id="L818">                    break;</span>
+                case delete:
+<span class="nc" id="L820">                    addQuery(Type.delete, sql, t2 - t1);</span>
+                    break;
+            }
+<span class="nc" id="L823">            return result;</span>
+        }
+
+        // The following methods are from the Statement class - the
+        // SuperInterface of PreparedStatement
+        // without these this class won't compile
+
+        public boolean execute(String _sql) throws SQLException {
+
+<span class="nc" id="L832">            long t1 = System.currentTimeMillis();</span>
+<span class="nc" id="L833">            boolean result = pstmt.execute(_sql);</span>
+<span class="nc" id="L834">            long t2 = System.currentTimeMillis();</span>
+
+            // determine the type of query
+<span class="nc" id="L837">            String sqlL = _sql.toLowerCase().trim();</span>
+
+<span class="nc bnc" id="L839" title="All 2 branches missed.">            if (sqlL.startsWith(&quot;insert&quot;)) {</span>
+<span class="nc" id="L840">                addQuery(Type.insert, _sql, t2 - t1);</span>
+            }
+<span class="nc bnc" id="L842" title="All 2 branches missed.">            else if (sqlL.startsWith(&quot;update&quot;)) {</span>
+<span class="nc" id="L843">                addQuery(Type.update, _sql, t2 - t1);</span>
+            }
+<span class="nc bnc" id="L845" title="All 2 branches missed.">            else if (sqlL.startsWith(&quot;delete&quot;)) {</span>
+<span class="nc" id="L846">                addQuery(Type.delete, _sql, t2 - t1);</span>
+            }
+            else {
+<span class="nc" id="L849">                addQuery(Type.select, _sql, t2 - t1);</span>
+            }
+<span class="nc" id="L851">            return result;</span>
+        }
+
+        public int[] executeBatch() throws SQLException {
+
+<span class="nc" id="L856">            long t1 = System.currentTimeMillis();</span>
+<span class="nc" id="L857">            int[] result = pstmt.executeBatch();</span>
+<span class="nc" id="L858">            long t2 = System.currentTimeMillis();</span>
+
+<span class="nc bnc" id="L860" title="All 5 branches missed.">            switch (type) {</span>
+                case select:
+<span class="nc" id="L862">                    addQuery(Type.select, sql, t2 - t1);</span>
+<span class="nc" id="L863">                    break;</span>
+                case update:
+<span class="nc" id="L865">                    addQuery(Type.update, sql, t2 - t1);</span>
+<span class="nc" id="L866">                    break;</span>
+                case insert:
+<span class="nc" id="L868">                    addQuery(Type.insert, sql, t2 - t1);</span>
+<span class="nc" id="L869">                    break;</span>
+                case delete:
+<span class="nc" id="L871">                    addQuery(Type.delete, sql, t2 - t1);</span>
+                    break;
+            }
+<span class="nc" id="L874">            return result;</span>
+        }
+
+        public ResultSet executeQuery(String _sql) throws SQLException {
+<span class="nc" id="L878">            long t1 = System.currentTimeMillis();</span>
+<span class="nc" id="L879">            ResultSet result = pstmt.executeQuery(_sql);</span>
+<span class="nc" id="L880">            long t2 = System.currentTimeMillis();</span>
+
+            // determine the type of query
+<span class="nc" id="L883">            String sqlL = _sql.toLowerCase().trim();</span>
+
+<span class="nc bnc" id="L885" title="All 2 branches missed.">            if (sqlL.startsWith(&quot;insert&quot;)) {</span>
+<span class="nc" id="L886">                addQuery(Type.insert, _sql, t2 - t1);</span>
+            }
+<span class="nc bnc" id="L888" title="All 2 branches missed.">            else if (sqlL.startsWith(&quot;update&quot;)) {</span>
+<span class="nc" id="L889">                addQuery(Type.update, _sql, t2 - t1);</span>
+            }
+<span class="nc bnc" id="L891" title="All 2 branches missed.">            else if (sqlL.startsWith(&quot;delete&quot;)) {</span>
+<span class="nc" id="L892">                addQuery(Type.delete, _sql, t2 - t1);</span>
+            }
+            else {
+<span class="nc" id="L895">                addQuery(Type.select, _sql, t2 - t1);</span>
+            }
+<span class="nc" id="L897">            return result;</span>
+        }
+
+        public int executeUpdate(String _sql) throws SQLException {
+
+<span class="nc" id="L902">            long t1 = System.currentTimeMillis();</span>
+<span class="nc" id="L903">            int result = pstmt.executeUpdate(_sql);</span>
+<span class="nc" id="L904">            long t2 = System.currentTimeMillis();</span>
+
+            // determine the type of query
+<span class="nc" id="L907">            String sqlL = _sql.toLowerCase().trim();</span>
+
+<span class="nc bnc" id="L909" title="All 2 branches missed.">            if (sqlL.startsWith(&quot;insert&quot;)) {</span>
+<span class="nc" id="L910">                addQuery(Type.insert, _sql, t2 - t1);</span>
+            }
+<span class="nc bnc" id="L912" title="All 2 branches missed.">            else if (sqlL.startsWith(&quot;update&quot;)) {</span>
+<span class="nc" id="L913">                addQuery(Type.update, _sql, t2 - t1);</span>
+            }
+<span class="nc bnc" id="L915" title="All 2 branches missed.">            else if (sqlL.startsWith(&quot;delete&quot;)) {</span>
+<span class="nc" id="L916">                addQuery(Type.delete, _sql, t2 - t1);</span>
+            }
+            else {
+<span class="nc" id="L919">                addQuery(Type.select, _sql, t2 - t1);</span>
+            }
+<span class="nc" id="L921">            return result;</span>
+        }
+    }
+
+    /**
+     * An implementation of the CallableStatement interface that wraps an
+     * underlying CallableStatement object and performs timings of the database
+     * queries.
+     */
+    class TimedCallableStatement extends CallableStatementWrapper {
+
+        private String sql;
+<span class="nc" id="L933">        private Type type = Type.select;</span>
+
+<span class="nc" id="L935">        public TimedCallableStatement(CallableStatement cstmt, String sql) {</span>
+<span class="nc" id="L936">            super(cstmt);</span>
+<span class="nc" id="L937">            this.sql = sql;</span>
+
+            // determine the type of query
+<span class="nc" id="L940">            String sqlL = sql.toLowerCase().trim();</span>
+
+<span class="nc bnc" id="L942" title="All 2 branches missed.">            if (sqlL.startsWith(&quot;insert&quot;)) {</span>
+<span class="nc" id="L943">                type = Type.insert;</span>
+            }
+<span class="nc bnc" id="L945" title="All 2 branches missed.">            else if (sqlL.startsWith(&quot;update&quot;)) {</span>
+<span class="nc" id="L946">                type = Type.update;</span>
+            }
+<span class="nc bnc" id="L948" title="All 2 branches missed.">            else if (sqlL.startsWith(&quot;delete&quot;)) {</span>
+<span class="nc" id="L949">                type = Type.delete;</span>
+            }
+            else {
+<span class="nc" id="L952">                type = Type.select;</span>
+            }
+<span class="nc" id="L954">        }</span>
+
+        public boolean execute() throws SQLException {
+            // Perform timing of this method.
+<span class="nc" id="L958">            long t1 = System.currentTimeMillis();</span>
+<span class="nc" id="L959">            boolean result = cstmt.execute();</span>
+<span class="nc" id="L960">            long t2 = System.currentTimeMillis();</span>
+
+<span class="nc bnc" id="L962" title="All 5 branches missed.">            switch (type) {</span>
+                case select:
+<span class="nc" id="L964">                    addQuery(Type.select, sql, t2 - t1);</span>
+<span class="nc" id="L965">                    break;</span>
+                case update:
+<span class="nc" id="L967">                    addQuery(Type.update, sql, t2 - t1);</span>
+<span class="nc" id="L968">                    break;</span>
+                case insert:
+<span class="nc" id="L970">                    addQuery(Type.insert, sql, t2 - t1);</span>
+<span class="nc" id="L971">                    break;</span>
+                case delete:
+<span class="nc" id="L973">                    addQuery(Type.delete, sql, t2 - t1);</span>
+                    break;
+            }
+<span class="nc" id="L976">            return result;</span>
+        }
+
+        /*
+         * This is one of the methods that we wish to time
+         */
+        public ResultSet executeQuery() throws SQLException {
+
+<span class="nc" id="L984">            long t1 = System.currentTimeMillis();</span>
+<span class="nc" id="L985">            ResultSet result = cstmt.executeQuery();</span>
+<span class="nc" id="L986">            long t2 = System.currentTimeMillis();</span>
+
+<span class="nc bnc" id="L988" title="All 5 branches missed.">            switch (type) {</span>
+                case select:
+<span class="nc" id="L990">                    addQuery(Type.select, sql, t2 - t1);</span>
+<span class="nc" id="L991">                    break;</span>
+                case update:
+<span class="nc" id="L993">                    addQuery(Type.update, sql, t2 - t1);</span>
+<span class="nc" id="L994">                    break;</span>
+                case insert:
+<span class="nc" id="L996">                    addQuery(Type.insert, sql, t2 - t1);</span>
+<span class="nc" id="L997">                    break;</span>
+                case delete:
+<span class="nc" id="L999">                    addQuery(Type.delete, sql, t2 - t1);</span>
+                    break;
+            }
+<span class="nc" id="L1002">            return result;</span>
+        }
+
+        /*
+         * This is one of the methods that we wish to time
+         */
+        public int executeUpdate() throws SQLException {
+
+<span class="nc" id="L1010">            long t1 = System.currentTimeMillis();</span>
+<span class="nc" id="L1011">            int result = cstmt.executeUpdate();</span>
+<span class="nc" id="L1012">            long t2 = System.currentTimeMillis();</span>
+
+<span class="nc bnc" id="L1014" title="All 5 branches missed.">            switch (type) {</span>
+                case select:
+<span class="nc" id="L1016">                    addQuery(Type.select, sql, t2 - t1);</span>
+<span class="nc" id="L1017">                    break;</span>
+                case update:
+<span class="nc" id="L1019">                    addQuery(Type.update, sql, t2 - t1);</span>
+<span class="nc" id="L1020">                    break;</span>
+                case insert:
+<span class="nc" id="L1022">                    addQuery(Type.insert, sql, t2 - t1);</span>
+<span class="nc" id="L1023">                    break;</span>
+                case delete:
+<span class="nc" id="L1025">                    addQuery(Type.delete, sql, t2 - t1);</span>
+                    break;
+            }
+<span class="nc" id="L1028">            return result;</span>
+        }
+
+        // The following methods are from the Statement class - the
+        // SuperInterface of PreparedStatement
+        // without these this class won't compile
+
+        public boolean execute(String _sql) throws SQLException {
+
+<span class="nc" id="L1037">            long t1 = System.currentTimeMillis();</span>
+<span class="nc" id="L1038">            boolean result = cstmt.execute(_sql);</span>
+<span class="nc" id="L1039">            long t2 = System.currentTimeMillis();</span>
+
+            // determine the type of query
+<span class="nc" id="L1042">            String sqlL = _sql.toLowerCase().trim();</span>
+
+<span class="nc bnc" id="L1044" title="All 2 branches missed.">            if (sqlL.startsWith(&quot;insert&quot;)) {</span>
+<span class="nc" id="L1045">                addQuery(Type.insert, _sql, t2 - t1);</span>
+            }
+<span class="nc bnc" id="L1047" title="All 2 branches missed.">            else if (sqlL.startsWith(&quot;update&quot;)) {</span>
+<span class="nc" id="L1048">                addQuery(Type.update, _sql, t2 - t1);</span>
+            }
+<span class="nc bnc" id="L1050" title="All 2 branches missed.">            else if (sqlL.startsWith(&quot;delete&quot;)) {</span>
+<span class="nc" id="L1051">                addQuery(Type.delete, _sql, t2 - t1);</span>
+            }
+            else {
+<span class="nc" id="L1054">                addQuery(Type.select, _sql, t2 - t1);</span>
+            }
+<span class="nc" id="L1056">            return result;</span>
+        }
+
+        public int[] executeBatch() throws SQLException {
+
+<span class="nc" id="L1061">            long t1 = System.currentTimeMillis();</span>
+<span class="nc" id="L1062">            int[] result = cstmt.executeBatch();</span>
+<span class="nc" id="L1063">            long t2 = System.currentTimeMillis();</span>
+
+<span class="nc bnc" id="L1065" title="All 5 branches missed.">            switch (type) {</span>
+                case select:
+<span class="nc" id="L1067">                    addQuery(Type.select, sql, t2 - t1);</span>
+<span class="nc" id="L1068">                    break;</span>
+                case update:
+<span class="nc" id="L1070">                    addQuery(Type.update, sql, t2 - t1);</span>
+<span class="nc" id="L1071">                    break;</span>
+                case insert:
+<span class="nc" id="L1073">                    addQuery(Type.insert, sql, t2 - t1);</span>
+<span class="nc" id="L1074">                    break;</span>
+                case delete:
+<span class="nc" id="L1076">                    addQuery(Type.delete, sql, t2 - t1);</span>
+                    break;
+            }
+<span class="nc" id="L1079">            return result;</span>
+        }
+
+        public ResultSet executeQuery(String _sql) throws SQLException {
+<span class="nc" id="L1083">            long t1 = System.currentTimeMillis();</span>
+<span class="nc" id="L1084">            ResultSet result = cstmt.executeQuery(_sql);</span>
+<span class="nc" id="L1085">            long t2 = System.currentTimeMillis();</span>
+
+            // determine the type of query
+<span class="nc" id="L1088">            String sqlL = _sql.toLowerCase().trim();</span>
+
+<span class="nc bnc" id="L1090" title="All 2 branches missed.">            if (sqlL.startsWith(&quot;insert&quot;)) {</span>
+<span class="nc" id="L1091">                addQuery(Type.insert, _sql, t2 - t1);</span>
+            }
+<span class="nc bnc" id="L1093" title="All 2 branches missed.">            else if (sqlL.startsWith(&quot;update&quot;)) {</span>
+<span class="nc" id="L1094">                addQuery(Type.update, _sql, t2 - t1);</span>
+            }
+<span class="nc bnc" id="L1096" title="All 2 branches missed.">            else if (sqlL.startsWith(&quot;delete&quot;)) {</span>
+<span class="nc" id="L1097">                addQuery(Type.delete, _sql, t2 - t1);</span>
+            }
+            else {
+<span class="nc" id="L1100">                addQuery(Type.select, _sql, t2 - t1);</span>
+            }
+<span class="nc" id="L1102">            return result;</span>
+        }
+
+        public int executeUpdate(String _sql) throws SQLException {
+
+<span class="nc" id="L1107">            long t1 = System.currentTimeMillis();</span>
+<span class="nc" id="L1108">            int result = cstmt.executeUpdate(_sql);</span>
+<span class="nc" id="L1109">            long t2 = System.currentTimeMillis();</span>
+
+            // determine the type of query
+<span class="nc" id="L1112">            String sqlL = _sql.toLowerCase().trim();</span>
+
+<span class="nc bnc" id="L1114" title="All 2 branches missed.">            if (sqlL.startsWith(&quot;insert&quot;)) {</span>
+<span class="nc" id="L1115">                addQuery(Type.insert, _sql, t2 - t1);</span>
+            }
+<span class="nc bnc" id="L1117" title="All 2 branches missed.">            else if (sqlL.startsWith(&quot;update&quot;)) {</span>
+<span class="nc" id="L1118">                addQuery(Type.update, _sql, t2 - t1);</span>
+            }
+<span class="nc bnc" id="L1120" title="All 2 branches missed.">            else if (sqlL.startsWith(&quot;delete&quot;)) {</span>
+<span class="nc" id="L1121">                addQuery(Type.delete, _sql, t2 - t1);</span>
+            }
+            else {
+<span class="nc" id="L1124">                addQuery(Type.select, _sql, t2 - t1);</span>
+            }
+<span class="nc" id="L1126">            return result;</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

@@ -1,0 +1,117 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>StanzaIDUtil.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.stanzaid</a> &gt; <span class="el_source">StanzaIDUtil.java</span></div><h1>StanzaIDUtil.java</h1><pre class="source lang-java linenums">package org.jivesoftware.openfire.stanzaid;
+
+import org.dom4j.Element;
+import org.dom4j.QName;
+import org.jivesoftware.util.JiveGlobals;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmpp.packet.*;
+
+import java.util.Iterator;
+import java.util.UUID;
+
+/**
+ * Utility methods that implement XEP-0359: Unique and Stable Stanza IDs.
+ *
+ * @see &lt;a href=&quot;https://xmpp.org/extensions/xep-0359.html&quot;&gt;XEP-0359&lt;/a&gt;
+ * @author Guus der Kinderen, guus.der.kinderen@gmail.com
+ */
+<span class="nc" id="L19">public class StanzaIDUtil</span>
+{
+<span class="fc" id="L21">    private static final Logger Log = LoggerFactory.getLogger( StanzaIDUtil.class );</span>
+
+    /**
+     * Modifies the stanza that's passed as a packet by adding a Stanza ID.
+     *
+     * @param packet The inbound packet (cannot be null).
+     * @param self The ID of the 'local' entity that will generate the stanza ID (cannot be null).
+     * @return the updated packet
+     * @see &lt;a href=&quot;https://xmpp.org/extensions/xep-0359.html&quot;&gt;XEP-0359&lt;/a&gt;
+     */
+    public static Packet ensureUniqueAndStableStanzaID( final Packet packet, final JID self )
+    {
+<span class="pc bpc" id="L33" title="1 of 2 branches missed.">        if ( !JiveGlobals.getBooleanProperty( &quot;xmpp.sid.enabled&quot;, true ) )</span>
+        {
+<span class="nc" id="L35">            return packet;</span>
+        }
+
+<span class="pc bpc" id="L38" title="3 of 4 branches missed.">        if ( packet instanceof IQ &amp;&amp; !JiveGlobals.getBooleanProperty( &quot;xmpp.sid.iq.enabled&quot;, false ) )</span>
+        {
+<span class="nc" id="L40">            return packet;</span>
+        }
+
+<span class="pc bpc" id="L43" title="2 of 4 branches missed.">        if ( packet instanceof Message &amp;&amp; !JiveGlobals.getBooleanProperty( &quot;xmpp.sid.message.enabled&quot;, true ) )</span>
+        {
+<span class="nc" id="L45">            return packet;</span>
+        }
+
+<span class="pc bpc" id="L48" title="3 of 4 branches missed.">        if ( packet instanceof Presence &amp;&amp; !JiveGlobals.getBooleanProperty( &quot;xmpp.sid.presence.enabled&quot;, false ) )</span>
+        {
+<span class="nc" id="L50">            return packet;</span>
+        }
+
+        final Element parentElement;
+<span class="pc bpc" id="L54" title="1 of 2 branches missed.">        if ( packet instanceof IQ ) {</span>
+<span class="nc" id="L55">            parentElement = ((IQ) packet).getChildElement();</span>
+        } else {
+<span class="fc" id="L57">            parentElement = packet.getElement();</span>
+        }
+
+        // The packet likely is an IQ result or error, which can, but are not required to have a child element.
+        // To have a consistent behavior for these, we'll not add a stanza-ID here.
+<span class="pc bpc" id="L62" title="1 of 2 branches missed.">        if ( parentElement == null )</span>
+        {
+<span class="nc" id="L64">            Log.debug( &quot;Unable to find appropriate element. Not adding stanza-id to packet: {}&quot;, packet );</span>
+<span class="nc" id="L65">            return packet;</span>
+        }
+
+        // Stanza ID generating entities, which encounter a &lt;stanza-id/&gt; element where the 'by' attribute matches the 'by'
+        // attribute they would otherwise set, MUST delete that element even if they are not adding their own stanza ID.
+<span class="fc" id="L70">        final Iterator&lt;Element&gt; existingElementIterator = parentElement.elementIterator( QName.get( &quot;stanza-id&quot;, &quot;urn:xmpp:sid:0&quot; ) );</span>
+<span class="fc bfc" id="L71" title="All 2 branches covered.">        while (existingElementIterator.hasNext()) {</span>
+<span class="fc" id="L72">            final Element element = existingElementIterator.next();</span>
+
+<span class="fc bfc" id="L74" title="All 2 branches covered.">            if (self.toString().equals( element.attributeValue( &quot;by&quot; ) ) ) {</span>
+<span class="fc" id="L75">                Log.warn( &quot;Removing a 'stanza-id' element from an inbound stanza, as its 'by' attribute value matches the value that we would set. Offending stanza: {}&quot;, packet );</span>
+<span class="fc" id="L76">                existingElementIterator.remove();</span>
+            }
+<span class="fc" id="L78">        }</span>
+
+<span class="fc" id="L80">        final String id = generateUniqueAndStableStanzaID( packet );</span>
+
+<span class="fc" id="L82">        final Element stanzaIdElement = parentElement.addElement( QName.get( &quot;stanza-id&quot;, &quot;urn:xmpp:sid:0&quot; ) );</span>
+<span class="fc" id="L83">        stanzaIdElement.addAttribute( &quot;id&quot;, id );</span>
+<span class="fc" id="L84">        stanzaIdElement.addAttribute( &quot;by&quot;, self.toString() );</span>
+
+<span class="fc" id="L86">        return packet;</span>
+    }
+
+    /**
+     * Returns a value that is an appropriate unique and stable stanza ID in
+     * context of XEP-0359: it's either the origin-id value, or a UUID.
+     *
+     * @param packet The stanza for what to return the ID (cannot be null).
+     * @return The ID (never null or empty string).
+     */
+    public static String generateUniqueAndStableStanzaID( final Packet packet )
+    {
+<span class="fc" id="L98">        String result = null;</span>
+
+<span class="fc" id="L100">        final Iterator&lt;Element&gt; existingElementIterator = packet.getElement().elementIterator( QName.get( &quot;origin-id&quot;, &quot;urn:xmpp:sid:0&quot; ) );</span>
+<span class="pc bpc" id="L101" title="3 of 6 branches missed.">        while (existingElementIterator.hasNext() &amp;&amp; (result == null || result.isEmpty() ) )</span>
+        {
+<span class="fc" id="L103">            final Element element = existingElementIterator.next();</span>
+<span class="fc" id="L104">            result = element.attributeValue( &quot;id&quot; );</span>
+<span class="fc" id="L105">        }</span>
+
+<span class="pc bpc" id="L107" title="1 of 4 branches missed.">        if ( result == null || result.isEmpty() ) {</span>
+<span class="fc" id="L108">            result = UUID.randomUUID().toString();</span>
+<span class="fc" id="L109">            Log.debug( &quot;Using newly generated value '{}' for stanza that has id '{}'.&quot;, result, packet.getID() );</span>
+        } else {
+<span class="fc" id="L111">            Log.debug( &quot;Using origin-id provided value '{}' for stanza that has id '{}'.&quot;, result, packet.getID() );</span>
+        }
+
+<span class="fc" id="L114">        return result;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

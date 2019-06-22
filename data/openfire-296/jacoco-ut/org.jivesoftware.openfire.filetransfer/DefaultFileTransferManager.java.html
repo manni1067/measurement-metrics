@@ -1,0 +1,249 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>DefaultFileTransferManager.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.filetransfer</a> &gt; <span class="el_source">DefaultFileTransferManager.java</span></div><h1>DefaultFileTransferManager.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 1999-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.jivesoftware.openfire.filetransfer;
+
+import org.dom4j.Element;
+import org.jivesoftware.openfire.auth.UnauthorizedException;
+import org.jivesoftware.openfire.container.BasicModule;
+import org.jivesoftware.openfire.filetransfer.proxy.ProxyConnectionManager;
+import org.jivesoftware.openfire.filetransfer.proxy.ProxyTransfer;
+import org.jivesoftware.openfire.interceptor.InterceptorManager;
+import org.jivesoftware.openfire.interceptor.PacketInterceptor;
+import org.jivesoftware.openfire.interceptor.PacketRejectedException;
+import org.jivesoftware.openfire.session.Session;
+import org.jivesoftware.util.JiveGlobals;
+import org.jivesoftware.util.cache.Cache;
+import org.jivesoftware.util.cache.CacheFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmpp.packet.IQ;
+import org.xmpp.packet.JID;
+import org.xmpp.packet.Packet;
+
+import java.util.ArrayList;
+import java.util.List;
+
+/**
+ * Provides several utility methods for file transfer manager implementaions to utilize.
+ *
+ * @author Alexander Wenckus
+ */
+public class DefaultFileTransferManager extends BasicModule implements FileTransferManager {
+
+<span class="nc" id="L46">    private static final Logger Log = LoggerFactory.getLogger( DefaultFileTransferManager.class );</span>
+
+    private static final String CACHE_NAME = &quot;File Transfer Cache&quot;;
+
+    private final Cache&lt;String, FileTransfer&gt; fileTransferMap;
+
+<span class="nc" id="L52">    private final List&lt;FileTransferEventListener&gt; eventListeners = new ArrayList&lt;&gt;();</span>
+
+    /**
+     * Default constructor creates the cache.
+     */
+    public DefaultFileTransferManager() {
+<span class="nc" id="L58">        super(&quot;File Transfer Manager&quot;);</span>
+<span class="nc" id="L59">        fileTransferMap = CacheFactory.createCache(CACHE_NAME);</span>
+<span class="nc" id="L60">        InterceptorManager.getInstance().addInterceptor(new MetaFileTransferInterceptor());</span>
+<span class="nc" id="L61">    }</span>
+
+    /**
+     * Returns true if the proxy transfer should be matched to an existing file transfer
+     * in the system.
+     *
+     * @return Returns true if the proxy transfer should be matched to an existing file
+     * transfer in the system.
+     */
+    public boolean isMatchProxyTransfer() {
+<span class="nc" id="L71">        return JiveGlobals.getBooleanProperty(&quot;xmpp.proxy.transfer.required&quot;, true);</span>
+    }
+
+    protected void cacheFileTransfer(String key, FileTransfer transfer) {
+<span class="nc" id="L75">        fileTransferMap.put(key, transfer);</span>
+<span class="nc" id="L76">    }</span>
+
+    protected FileTransfer retrieveFileTransfer(String key) {
+<span class="nc" id="L79">        return fileTransferMap.get(key);</span>
+    }
+
+    protected static Element getChildElement(Element element, String namespace) {
+        //noinspection unchecked
+<span class="nc" id="L84">        List&lt;Element&gt; elements = element.elements();</span>
+<span class="nc bnc" id="L85" title="All 2 branches missed.">        if (elements.isEmpty()) {</span>
+<span class="nc" id="L86">            return null;</span>
+        }
+<span class="nc bnc" id="L88" title="All 2 branches missed.">        for (Element childElement : elements) {</span>
+<span class="nc" id="L89">            String childNamespace = childElement.getNamespaceURI();</span>
+<span class="nc bnc" id="L90" title="All 2 branches missed.">            if (namespace.equals(childNamespace)) {</span>
+<span class="nc" id="L91">                return childElement;</span>
+            }
+<span class="nc" id="L93">        }</span>
+
+<span class="nc" id="L95">        return null;</span>
+    }
+
+    @Override
+    public boolean acceptIncomingFileTransferRequest(FileTransfer transfer)
+            throws FileTransferRejectedException
+    {
+<span class="nc bnc" id="L102" title="All 2 branches missed.">        if(transfer != null) {</span>
+<span class="nc" id="L103">            fireFileTransferStart( transfer.getSessionID(), false );</span>
+<span class="nc" id="L104">            String streamID = transfer.getSessionID();</span>
+<span class="nc" id="L105">            JID from = new JID(transfer.getInitiator());</span>
+<span class="nc" id="L106">            JID to = new JID(transfer.getTarget());</span>
+<span class="nc" id="L107">            cacheFileTransfer(ProxyConnectionManager.createDigest(streamID, from, to), transfer);</span>
+<span class="nc" id="L108">            return true;</span>
+        }
+<span class="nc" id="L110">        return false;</span>
+    }
+
+    @Override
+    public void registerProxyTransfer(String transferDigest, ProxyTransfer proxyTransfer)
+            throws UnauthorizedException
+    {
+<span class="nc" id="L117">        FileTransfer transfer = retrieveFileTransfer(transferDigest);</span>
+<span class="nc bnc" id="L118" title="All 4 branches missed.">        if (isMatchProxyTransfer() &amp;&amp; transfer == null) {</span>
+<span class="nc" id="L119">            throw new UnauthorizedException(&quot;Unable to match proxy transfer with a file transfer&quot;);</span>
+        }
+<span class="nc bnc" id="L121" title="All 2 branches missed.">        else if (transfer == null) {</span>
+<span class="nc" id="L122">            return;</span>
+        }
+
+<span class="nc" id="L125">        transfer.setProgress(proxyTransfer);</span>
+<span class="nc" id="L126">        cacheFileTransfer(transferDigest, transfer);</span>
+<span class="nc" id="L127">    }</span>
+
+    private FileTransfer createFileTransfer(JID from,
+                                            JID to, Element siElement) {
+<span class="nc" id="L131">        String streamID = siElement.attributeValue(&quot;id&quot;);</span>
+<span class="nc" id="L132">        String mimeType = siElement.attributeValue(&quot;mime-type&quot;);</span>
+        // Check profile, the only type we deal with currently is file transfer
+<span class="nc" id="L134">        Element fileTransferElement = getChildElement(siElement, NAMESPACE_SI_FILETRANSFER);</span>
+        // Not valid form, reject
+<span class="nc bnc" id="L136" title="All 2 branches missed.">        if (fileTransferElement == null) {</span>
+<span class="nc" id="L137">            return null;</span>
+        }
+<span class="nc" id="L139">        String fileName = fileTransferElement.attributeValue(&quot;name&quot;);</span>
+<span class="nc" id="L140">        String sizeString = fileTransferElement.attributeValue(&quot;size&quot;);</span>
+<span class="nc bnc" id="L141" title="All 4 branches missed.">        if (fileName == null || sizeString == null) {</span>
+<span class="nc" id="L142">            return null;</span>
+        }
+
+        long size;
+        try {
+<span class="nc" id="L147">            size = Long.parseLong(sizeString);</span>
+        }
+<span class="nc" id="L149">        catch (Exception ex) {</span>
+<span class="nc" id="L150">            return null;</span>
+<span class="nc" id="L151">        }</span>
+
+<span class="nc" id="L153">        return new FileTransfer(from.toString(), to.toString(), streamID, fileName, size, mimeType);</span>
+    }
+
+    @Override
+    public void addListener( FileTransferEventListener eventListener )
+    {
+<span class="nc" id="L159">        eventListeners.add( eventListener );</span>
+<span class="nc" id="L160">    }</span>
+
+    @Override
+    public void removeListener( FileTransferEventListener eventListener )
+    {
+<span class="nc" id="L165">        eventListeners.remove( eventListener );</span>
+<span class="nc" id="L166">    }</span>
+
+    @Override
+    public void fireFileTransferStart( String sid, boolean isReady ) throws FileTransferRejectedException
+    {
+<span class="nc" id="L171">        final FileTransfer transfer = fileTransferMap.get( sid );</span>
+<span class="nc bnc" id="L172" title="All 2 branches missed.">        for ( FileTransferEventListener listener : eventListeners )</span>
+        {
+            try
+            {
+<span class="nc" id="L176">                listener.fileTransferStart( transfer, isReady );</span>
+            }
+<span class="nc" id="L178">            catch ( FileTransferRejectedException ex )</span>
+            {
+<span class="nc" id="L180">                Log.debug( &quot;Listener '{}' rejected file transfer '{}'.&quot;, listener, transfer );</span>
+<span class="nc" id="L181">                throw ex;</span>
+            }
+<span class="nc" id="L183">            catch ( Exception ex )</span>
+            {
+<span class="nc" id="L185">                Log.warn( &quot;Listener '{}' threw exception when being informed of file transfer complete for transfer '{}'.&quot;, listener, transfer, ex );</span>
+<span class="nc" id="L186">            }</span>
+<span class="nc" id="L187">        }</span>
+<span class="nc" id="L188">    }</span>
+
+    @Override
+    public void fireFileTransferCompleted( String sid, boolean wasSuccessful )
+    {
+<span class="nc" id="L193">        final FileTransfer transfer = fileTransferMap.get( sid );</span>
+<span class="nc bnc" id="L194" title="All 2 branches missed.">        for ( FileTransferEventListener listener : eventListeners )</span>
+        {
+            try
+            {
+<span class="nc" id="L198">                listener.fileTransferComplete( transfer, wasSuccessful );</span>
+            }
+<span class="nc" id="L200">            catch ( Exception ex )</span>
+            {
+<span class="nc" id="L202">                Log.warn( &quot;Listener '{}' threw exception when being informed of file transfer complete for transfer '{}'.&quot;, listener, transfer, ex );</span>
+<span class="nc" id="L203">            }</span>
+<span class="nc" id="L204">        }</span>
+<span class="nc" id="L205">    }</span>
+
+    /**
+     * Interceptor to grab and validate file transfer meta information.
+     */
+<span class="nc" id="L210">    private class MetaFileTransferInterceptor implements PacketInterceptor {</span>
+        @Override
+        public void interceptPacket(Packet packet, Session session, boolean incoming,
+                                    boolean processed)
+                throws PacketRejectedException
+        {
+            // We only want packets received by the server
+<span class="nc bnc" id="L217" title="All 6 branches missed.">            if (!processed &amp;&amp; incoming &amp;&amp; packet instanceof IQ) {</span>
+<span class="nc" id="L218">                IQ iq = (IQ) packet;</span>
+<span class="nc" id="L219">                Element childElement = iq.getChildElement();</span>
+<span class="nc bnc" id="L220" title="All 2 branches missed.">                if(childElement == null) {</span>
+<span class="nc" id="L221">                    return;</span>
+                }
+
+<span class="nc" id="L224">                String namespace = childElement.getNamespaceURI();</span>
+<span class="nc" id="L225">                String profile = childElement.attributeValue(&quot;profile&quot;);</span>
+                // Check that the SI is about file transfer and try creating a file transfer
+<span class="nc bnc" id="L227" title="All 4 branches missed.">                if (NAMESPACE_SI.equals(namespace) &amp;&amp; NAMESPACE_SI_FILETRANSFER.equals(profile)) {</span>
+                    // If this is a set, check the feature offer
+<span class="nc bnc" id="L229" title="All 2 branches missed.">                    if (iq.getType().equals(IQ.Type.set)) {</span>
+<span class="nc" id="L230">                        JID from = iq.getFrom();</span>
+<span class="nc" id="L231">                        JID to = iq.getTo();</span>
+
+<span class="nc" id="L233">                        FileTransfer transfer = createFileTransfer(from, to, childElement);</span>
+
+                        try {
+<span class="nc bnc" id="L236" title="All 4 branches missed.">                            if (transfer == null || !acceptIncomingFileTransferRequest(transfer)) {</span>
+<span class="nc" id="L237">                                throw new PacketRejectedException();</span>
+                            }
+                        }
+<span class="nc" id="L240">                        catch (FileTransferRejectedException e) {</span>
+<span class="nc" id="L241">                            throw new PacketRejectedException(e);</span>
+<span class="nc" id="L242">                        }</span>
+                    }
+                }
+            }
+<span class="nc" id="L246">        }</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

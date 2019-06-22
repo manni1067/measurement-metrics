@@ -1,0 +1,134 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>GetAdminConsoleInfoTask.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.container</a> &gt; <span class="el_source">GetAdminConsoleInfoTask.java</span></div><h1>GetAdminConsoleInfoTask.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2004-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.container;
+
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.util.cache.ClusterTask;
+import org.jivesoftware.util.cache.ExternalizableUtil;
+
+import java.io.IOException;
+import java.io.ObjectInput;
+import java.io.ObjectOutput;
+import java.net.*;
+import java.util.Collections;
+import java.util.Enumeration;
+
+/**
+ * Task that will return the bind interface and ports being used by the admin
+ * console of the node where the task will be executed. When the admin console
+ * is binded to all network interfaces this task will try to find a valid IP
+ * address that will work for the remote node.&lt;p&gt;
+ *
+ * A {@code null} bindInterface in the result of this task means that the task
+ * failed to find a valid IP address where the admin console is listening.
+ *
+ * @author Gaston Dombiak
+ */
+<span class="nc" id="L41">public class GetAdminConsoleInfoTask implements ClusterTask&lt;GetAdminConsoleInfoTask&gt; {</span>
+    private String bindInterface;
+    private int adminPort;
+    private int adminSecurePort;
+    private String adminSecret;
+
+
+    @Override
+    public GetAdminConsoleInfoTask getResult() {
+<span class="nc" id="L50">        return this;</span>
+    }
+
+    @Override
+    public void run() {
+<span class="nc" id="L55">        PluginManager pluginManager = XMPPServer.getInstance().getPluginManager();</span>
+<span class="nc" id="L56">        AdminConsolePlugin adminConsolePlugin = ((AdminConsolePlugin) pluginManager.getPlugin(&quot;admin&quot;));</span>
+
+<span class="nc" id="L58">        bindInterface = adminConsolePlugin.getBindInterface();</span>
+<span class="nc" id="L59">        adminPort = adminConsolePlugin.getAdminUnsecurePort();</span>
+<span class="nc" id="L60">        adminSecurePort = adminConsolePlugin.getAdminSecurePort();</span>
+<span class="nc" id="L61">        adminSecret = AdminConsolePlugin.secret;</span>
+
+<span class="nc bnc" id="L63" title="All 2 branches missed.">        if (bindInterface == null) {</span>
+<span class="nc" id="L64">            Enumeration&lt;NetworkInterface&gt; nets = null;</span>
+            try {
+<span class="nc" id="L66">                nets = NetworkInterface.getNetworkInterfaces();</span>
+<span class="nc" id="L67">            } catch (SocketException e) {</span>
+                // We failed to discover a valid IP address where the admin console is running
+<span class="nc" id="L69">                return;</span>
+<span class="nc" id="L70">            }</span>
+<span class="nc bnc" id="L71" title="All 2 branches missed.">            for (NetworkInterface netInterface : Collections.list(nets)) {</span>
+<span class="nc" id="L72">                boolean found = false;</span>
+<span class="nc" id="L73">                Enumeration&lt;InetAddress&gt; addresses = netInterface.getInetAddresses();</span>
+<span class="nc bnc" id="L74" title="All 2 branches missed.">                for (InetAddress address : Collections.list(addresses)) {</span>
+<span class="nc bnc" id="L75" title="All 4 branches missed.">                    if (&quot;127.0.0.1&quot;.equals(address.getHostAddress()) || &quot;0:0:0:0:0:0:0:1&quot;.equals(address.getHostAddress())) {</span>
+<span class="nc" id="L76">                        continue;</span>
+                    }
+<span class="nc" id="L78">                    Socket socket = new Socket();</span>
+<span class="nc bnc" id="L79" title="All 2 branches missed.">                    InetSocketAddress remoteAddress = new InetSocketAddress(address, adminPort &gt; 0 ? adminPort : adminSecurePort);</span>
+                    try {
+<span class="nc" id="L81">                        socket.connect(remoteAddress);</span>
+<span class="nc" id="L82">                        bindInterface = address.getHostAddress();</span>
+<span class="nc" id="L83">                        found = true;</span>
+<span class="nc" id="L84">                        break;</span>
+<span class="nc" id="L85">                    } catch (IOException e) {</span>
+                        // Ignore this address. Let's hope there is more addresses to validate
+                    }
+<span class="nc" id="L88">                }</span>
+<span class="nc bnc" id="L89" title="All 2 branches missed.">                if (found) {</span>
+<span class="nc" id="L90">                    break;</span>
+                }
+<span class="nc" id="L92">            }</span>
+        }
+<span class="nc" id="L94">    }</span>
+
+    public String getBindInterface() {
+<span class="nc" id="L97">        return bindInterface;</span>
+    }
+
+    public int getAdminPort() {
+<span class="nc" id="L101">        return adminPort;</span>
+    }
+
+    public int getAdminSecurePort() {
+<span class="nc" id="L105">        return adminSecurePort;</span>
+    }
+
+    public String getAdminSecret() {
+<span class="nc" id="L109">        return adminSecret;</span>
+    }
+
+    @Override
+    public void writeExternal(ObjectOutput out) throws IOException {
+<span class="nc" id="L114">        ExternalizableUtil.getInstance().writeInt(out, adminPort);</span>
+<span class="nc" id="L115">        ExternalizableUtil.getInstance().writeInt(out, adminSecurePort);</span>
+<span class="nc bnc" id="L116" title="All 2 branches missed.">        ExternalizableUtil.getInstance().writeBoolean(out, bindInterface != null);</span>
+<span class="nc bnc" id="L117" title="All 2 branches missed.">        if (bindInterface != null) {</span>
+<span class="nc" id="L118">            ExternalizableUtil.getInstance().writeSafeUTF(out, bindInterface);</span>
+        }
+<span class="nc" id="L120">        ExternalizableUtil.getInstance().writeSafeUTF(out, adminSecret);</span>
+<span class="nc" id="L121">    }</span>
+
+    @Override
+    public void readExternal(ObjectInput in) throws IOException, ClassNotFoundException {
+<span class="nc" id="L125">        adminPort = ExternalizableUtil.getInstance().readInt(in);</span>
+<span class="nc" id="L126">        adminSecurePort = ExternalizableUtil.getInstance().readInt(in);</span>
+<span class="nc bnc" id="L127" title="All 2 branches missed.">        if (ExternalizableUtil.getInstance().readBoolean(in)) {</span>
+<span class="nc" id="L128">            bindInterface = ExternalizableUtil.getInstance().readSafeUTF(in);</span>
+        }
+<span class="nc" id="L130">        adminSecret = ExternalizableUtil.getInstance().readSafeUTF(in);</span>
+<span class="nc" id="L131">    }</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

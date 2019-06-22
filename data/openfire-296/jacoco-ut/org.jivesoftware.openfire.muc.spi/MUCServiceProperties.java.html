@@ -1,0 +1,354 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>MUCServiceProperties.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.muc.spi</a> &gt; <span class="el_source">MUCServiceProperties.java</span></div><h1>MUCServiceProperties.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2004-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.muc.spi;
+
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+
+import org.jivesoftware.database.DbConnectionManager;
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.muc.cluster.MUCServicePropertyClusterEventTask;
+import org.jivesoftware.util.cache.CacheFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Retrieves and stores MUC service properties. Properties are stored in the database.
+ *
+ * @author Daniel Henninger
+ */
+public class MUCServiceProperties implements Map&lt;String, String&gt; {
+
+<span class="nc" id="L45">    private static final Logger Log = LoggerFactory.getLogger(MUCServiceProperties.class);</span>
+
+    private static final String LOAD_PROPERTIES = &quot;SELECT name, propValue FROM ofMucServiceProp WHERE serviceID=?&quot;;
+    private static final String INSERT_PROPERTY = &quot;INSERT INTO ofMucServiceProp(serviceID, name, propValue) VALUES(?,?,?)&quot;;
+    private static final String UPDATE_PROPERTY = &quot;UPDATE ofMucServiceProp SET propValue=? WHERE serviceID=? AND name=?&quot;;
+    private static final String DELETE_PROPERTY = &quot;DELETE FROM ofMucServiceProp WHERE serviceID=? AND name=?&quot;;
+
+    private String subdomain;
+    private Long serviceID;
+    private Map&lt;String, String&gt; properties;
+
+<span class="nc" id="L56">    public MUCServiceProperties(String subdomain) {</span>
+<span class="nc" id="L57">        this.subdomain = subdomain;</span>
+<span class="nc bnc" id="L58" title="All 2 branches missed.">        if (properties == null) {</span>
+<span class="nc" id="L59">            properties = new ConcurrentHashMap&lt;&gt;();</span>
+        }
+        else {
+<span class="nc" id="L62">            properties.clear();</span>
+        }
+
+<span class="nc" id="L65">        serviceID = XMPPServer.getInstance().getMultiUserChatManager().getMultiUserChatServiceID(subdomain);</span>
+<span class="nc bnc" id="L66" title="All 2 branches missed.">        if (serviceID == null) {</span>
+<span class="nc" id="L67">            Log.debug(&quot;MUCServiceProperties: Unable to find service ID for subdomain &quot;+subdomain);</span>
+        }
+        else {
+<span class="nc" id="L70">            loadProperties();</span>
+        }
+<span class="nc" id="L72">    }</span>
+
+    @Override
+    public int size() {
+<span class="nc" id="L76">        return properties.size();</span>
+    }
+
+    @Override
+    public void clear() {
+<span class="nc" id="L81">        throw new UnsupportedOperationException();</span>
+    }
+
+    @Override
+    public boolean isEmpty() {
+<span class="nc" id="L86">        return properties.isEmpty();</span>
+    }
+
+    @Override
+    public boolean containsKey(Object key) {
+<span class="nc" id="L91">        return properties.containsKey(key);</span>
+    }
+
+    @Override
+    public boolean containsValue(Object value) {
+<span class="nc" id="L96">        return properties.containsValue(value);</span>
+    }
+
+    @Override
+    public Collection&lt;String&gt; values() {
+<span class="nc" id="L101">        return Collections.unmodifiableCollection(properties.values());</span>
+    }
+
+    @Override
+    public void putAll(Map&lt;? extends String, ? extends String&gt; t) {
+<span class="nc bnc" id="L106" title="All 2 branches missed.">        for (Map.Entry&lt;? extends String, ? extends String&gt; entry : t.entrySet() ) {</span>
+<span class="nc" id="L107">            put(entry.getKey(), entry.getValue());</span>
+<span class="nc" id="L108">        }</span>
+<span class="nc" id="L109">    }</span>
+
+    @Override
+    public Set&lt;Map.Entry&lt;String, String&gt;&gt; entrySet() {
+<span class="nc" id="L113">        return Collections.unmodifiableSet(properties.entrySet());</span>
+    }
+
+    @Override
+    public Set&lt;String&gt; keySet() {
+<span class="nc" id="L118">        return Collections.unmodifiableSet(properties.keySet());</span>
+    }
+
+    @Override
+    public String get(Object key) {
+<span class="nc" id="L123">        return properties.get(key);</span>
+    }
+
+    /**
+     * Return all children property names of a parent property as a Collection
+     * of String objects. For example, given the properties {@code X.Y.A},
+     * {@code X.Y.B}, and {@code X.Y.C}, then the child properties of
+     * {@code X.Y} are {@code X.Y.A}, {@code X.Y.B}, and {@code X.Y.C}. The method
+     * is not recursive; ie, it does not return children of children.
+     *
+     * @param parentKey the name of the parent property.
+     * @return all child property names for the given parent.
+     */
+    public Collection&lt;String&gt; getChildrenNames(String parentKey) {
+<span class="nc" id="L137">        Collection&lt;String&gt; results = new HashSet&lt;&gt;();</span>
+<span class="nc bnc" id="L138" title="All 2 branches missed.">        for (String key : properties.keySet()) {</span>
+<span class="nc bnc" id="L139" title="All 2 branches missed.">            if (key.startsWith(parentKey + &quot;.&quot;)) {</span>
+<span class="nc bnc" id="L140" title="All 2 branches missed.">                if (key.equals(parentKey)) {</span>
+<span class="nc" id="L141">                    continue;</span>
+                }
+<span class="nc" id="L143">                int dotIndex = key.indexOf(&quot;.&quot;, parentKey.length()+1);</span>
+<span class="nc bnc" id="L144" title="All 2 branches missed.">                if (dotIndex &lt; 1) {</span>
+<span class="nc bnc" id="L145" title="All 2 branches missed.">                    if (!results.contains(key)) {</span>
+<span class="nc" id="L146">                        results.add(key);</span>
+                    }
+                }
+                else {
+<span class="nc" id="L150">                    String name = parentKey + key.substring(parentKey.length(), dotIndex);</span>
+<span class="nc" id="L151">                    results.add(name);</span>
+                }
+            }
+<span class="nc" id="L154">        }</span>
+<span class="nc" id="L155">        return results;</span>
+    }
+
+    /**
+     * Returns all property names as a Collection of String values.
+     *
+     * @return all property names.
+     */
+    public Collection&lt;String&gt; getPropertyNames() {
+<span class="nc" id="L164">        return properties.keySet();</span>
+    }
+
+    @Override
+    public String remove(Object key) {
+        String value;
+<span class="nc" id="L170">        synchronized (this) {</span>
+<span class="nc" id="L171">            value = properties.remove(key);</span>
+            // Also remove any children.
+<span class="nc" id="L173">            Collection&lt;String&gt; propNames = getPropertyNames();</span>
+<span class="nc bnc" id="L174" title="All 2 branches missed.">            for (String name : propNames) {</span>
+<span class="nc bnc" id="L175" title="All 2 branches missed.">                if (name.startsWith((String)key)) {</span>
+<span class="nc" id="L176">                    properties.remove(name);</span>
+                }
+<span class="nc" id="L178">            }</span>
+<span class="nc" id="L179">            deleteProperty((String)key);</span>
+<span class="nc" id="L180">        }</span>
+
+        // Generate event.
+<span class="nc" id="L183">        Map&lt;String, Object&gt; params = Collections.emptyMap();</span>
+<span class="nc" id="L184">        MUCServicePropertyEventDispatcher.dispatchEvent(subdomain, (String)key, MUCServicePropertyEventDispatcher.EventType.property_deleted, params);</span>
+
+        // Send update to other cluster members.
+<span class="nc" id="L187">        CacheFactory.doClusterTask(MUCServicePropertyClusterEventTask.createDeleteTask(subdomain, (String) key));</span>
+
+<span class="nc" id="L189">        return value;</span>
+    }
+
+    void localRemove(String key) {
+<span class="nc" id="L193">        properties.remove(key);</span>
+        // Also remove any children.
+<span class="nc" id="L195">        Collection&lt;String&gt; propNames = getPropertyNames();</span>
+<span class="nc bnc" id="L196" title="All 2 branches missed.">        for (String name : propNames) {</span>
+<span class="nc bnc" id="L197" title="All 2 branches missed.">            if (name.startsWith(key)) {</span>
+<span class="nc" id="L198">                properties.remove(name);</span>
+            }
+<span class="nc" id="L200">        }</span>
+
+        // Generate event.
+<span class="nc" id="L203">        Map&lt;String, Object&gt; params = Collections.emptyMap();</span>
+<span class="nc" id="L204">        MUCServicePropertyEventDispatcher.dispatchEvent(subdomain, key, MUCServicePropertyEventDispatcher.EventType.property_deleted, params);</span>
+<span class="nc" id="L205">    }</span>
+
+    @Override
+    public String put(String key, String value) {
+<span class="nc bnc" id="L209" title="All 4 branches missed.">        if (key == null || value == null) {</span>
+<span class="nc" id="L210">            throw new NullPointerException(&quot;Key or value cannot be null. Key=&quot; +</span>
+                    key + &quot;, value=&quot; + value);
+        }
+<span class="nc bnc" id="L213" title="All 2 branches missed.">        if (key.endsWith(&quot;.&quot;)) {</span>
+<span class="nc" id="L214">            key = key.substring(0, key.length()-1);</span>
+        }
+<span class="nc" id="L216">        key = key.trim();</span>
+        String result;
+<span class="nc" id="L218">        synchronized (this) {</span>
+<span class="nc bnc" id="L219" title="All 2 branches missed.">            if (properties.containsKey(key)) {</span>
+<span class="nc bnc" id="L220" title="All 2 branches missed.">                if (!properties.get(key).equals(value)) {</span>
+<span class="nc" id="L221">                    updateProperty(key, value);</span>
+                }
+            }
+            else {
+<span class="nc" id="L225">                insertProperty(key, value);</span>
+            }
+
+<span class="nc" id="L228">            result = properties.put(key, value);</span>
+<span class="nc" id="L229">        }</span>
+
+        // Generate event.
+<span class="nc" id="L232">        Map&lt;String, Object&gt; params = new HashMap&lt;&gt;();</span>
+<span class="nc" id="L233">        params.put(&quot;value&quot;, value);</span>
+<span class="nc" id="L234">        MUCServicePropertyEventDispatcher.dispatchEvent(subdomain, key, MUCServicePropertyEventDispatcher.EventType.property_set, params);</span>
+
+        // Send update to other cluster members.
+<span class="nc" id="L237">        CacheFactory.doClusterTask(MUCServicePropertyClusterEventTask.createPutTask(subdomain, key, value));</span>
+
+<span class="nc" id="L239">        return result;</span>
+    }
+
+    void localPut(String key, String value) {
+<span class="nc" id="L243">        properties.put(key, value);</span>
+
+        // Generate event.
+<span class="nc" id="L246">        Map&lt;String, Object&gt; params = new HashMap&lt;&gt;();</span>
+<span class="nc" id="L247">        params.put(&quot;value&quot;, value);</span>
+<span class="nc" id="L248">        MUCServicePropertyEventDispatcher.dispatchEvent(subdomain, key, MUCServicePropertyEventDispatcher.EventType.property_set, params);</span>
+<span class="nc" id="L249">    }</span>
+
+    public String getProperty(String name, String defaultValue) {
+<span class="nc" id="L252">        String value = properties.get(name);</span>
+<span class="nc bnc" id="L253" title="All 2 branches missed.">        if (value != null) {</span>
+<span class="nc" id="L254">            return value;</span>
+        }
+        else {
+<span class="nc" id="L257">            return defaultValue;</span>
+        }
+    }
+
+    public boolean getBooleanProperty(String name) {
+<span class="nc" id="L262">        return Boolean.valueOf(get(name));</span>
+    }
+
+    public boolean getBooleanProperty(String name, boolean defaultValue) {
+<span class="nc" id="L266">        String value = get(name);</span>
+<span class="nc bnc" id="L267" title="All 2 branches missed.">        if (value != null) {</span>
+<span class="nc" id="L268">            return Boolean.valueOf(value);</span>
+        }
+        else {
+<span class="nc" id="L271">            return defaultValue;</span>
+        }
+    }
+
+    private void insertProperty(String name, String value) {
+<span class="nc" id="L276">        Connection con = null;</span>
+<span class="nc" id="L277">        PreparedStatement pstmt = null;</span>
+        try {
+<span class="nc" id="L279">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L280">            pstmt = con.prepareStatement(INSERT_PROPERTY);</span>
+<span class="nc" id="L281">            pstmt.setLong(1, serviceID);</span>
+<span class="nc" id="L282">            pstmt.setString(2, name);</span>
+<span class="nc" id="L283">            pstmt.setString(3, value);</span>
+<span class="nc" id="L284">            pstmt.executeUpdate();</span>
+        }
+<span class="nc" id="L286">        catch (SQLException e) {</span>
+<span class="nc" id="L287">            Log.error(e.getMessage(), e);</span>
+        }
+        finally {
+<span class="nc" id="L290">            DbConnectionManager.closeConnection(pstmt, con);</span>
+<span class="nc" id="L291">        }</span>
+<span class="nc" id="L292">    }</span>
+
+    private void updateProperty(String name, String value) {
+<span class="nc" id="L295">        Connection con = null;</span>
+<span class="nc" id="L296">        PreparedStatement pstmt = null;</span>
+        try {
+<span class="nc" id="L298">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L299">            pstmt = con.prepareStatement(UPDATE_PROPERTY);</span>
+<span class="nc" id="L300">            pstmt.setString(1, value);</span>
+<span class="nc" id="L301">            pstmt.setLong(2, serviceID);</span>
+<span class="nc" id="L302">            pstmt.setString(3, name);</span>
+<span class="nc" id="L303">            pstmt.executeUpdate();</span>
+        }
+<span class="nc" id="L305">        catch (SQLException e) {</span>
+<span class="nc" id="L306">            Log.error(e.getMessage(), e);</span>
+        }
+        finally {
+<span class="nc" id="L309">            DbConnectionManager.closeConnection(pstmt, con);</span>
+<span class="nc" id="L310">        }</span>
+<span class="nc" id="L311">    }</span>
+
+    private void deleteProperty(String name) {
+<span class="nc" id="L314">        Connection con = null;</span>
+<span class="nc" id="L315">        PreparedStatement pstmt = null;</span>
+        try {
+<span class="nc" id="L317">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L318">            pstmt = con.prepareStatement(DELETE_PROPERTY);</span>
+<span class="nc" id="L319">            pstmt.setLong(1, serviceID);</span>
+<span class="nc" id="L320">            pstmt.setString(2, name);</span>
+<span class="nc" id="L321">            pstmt.executeUpdate();</span>
+        }
+<span class="nc" id="L323">        catch (SQLException e) {</span>
+<span class="nc" id="L324">            Log.error(e.getMessage(), e);</span>
+        }
+        finally {
+<span class="nc" id="L327">            DbConnectionManager.closeConnection(pstmt, con);</span>
+<span class="nc" id="L328">        }</span>
+<span class="nc" id="L329">    }</span>
+
+    private void loadProperties() {
+<span class="nc" id="L332">        Connection con = null;</span>
+<span class="nc" id="L333">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L334">        ResultSet rs = null;</span>
+        try {
+<span class="nc" id="L336">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L337">            pstmt = con.prepareStatement(LOAD_PROPERTIES);</span>
+<span class="nc" id="L338">            pstmt.setLong(1, serviceID);</span>
+<span class="nc" id="L339">            rs = pstmt.executeQuery();</span>
+<span class="nc bnc" id="L340" title="All 2 branches missed.">            while (rs.next()) {</span>
+<span class="nc" id="L341">                String name = rs.getString(1);</span>
+<span class="nc" id="L342">                String value = rs.getString(2);</span>
+<span class="nc" id="L343">                properties.put(name, value);</span>
+<span class="nc" id="L344">            }</span>
+        }
+<span class="nc" id="L346">        catch (Exception e) {</span>
+<span class="nc" id="L347">            Log.error(e.getMessage(), e);</span>
+        }
+        finally {
+<span class="nc" id="L350">            DbConnectionManager.closeConnection(rs, pstmt, con);</span>
+<span class="nc" id="L351">        }</span>
+<span class="nc" id="L352">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

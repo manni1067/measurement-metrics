@@ -1,0 +1,432 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>MINAStatCollector.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.mina.management</a> &gt; <span class="el_source">MINAStatCollector.java</span></div><h1>MINAStatCollector.java</h1><pre class="source lang-java linenums">package org.apache.mina.management;
+
+import static org.jivesoftware.openfire.spi.ConnectionManagerImpl.EXECUTOR_FILTER_NAME;
+
+import org.apache.mina.core.service.IoService;
+import org.apache.mina.core.service.IoServiceListener;
+import org.apache.mina.core.session.IdleStatus;
+import org.apache.mina.core.session.IoSession;
+import org.apache.mina.filter.executor.ExecutorFilter;
+import org.apache.mina.filter.executor.OrderedThreadPoolExecutor;
+
+import java.util.Map;
+import java.util.Queue;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.Executor;
+import java.util.concurrent.atomic.AtomicLong;
+
+/**
+ * Collects statistics of an {@link IoService}. It's polling all the sessions of a given
+ * IoService. It's attaching a {@link IoSessionStat} object to all the sessions polled
+ * and filling the throughput values.
+ *
+ * Usage :
+ * &lt;pre&gt;
+ * IoService service = ...
+ * MINAStatCollector collector = new MINAStatCollector( service );
+ * collector.start();
+ * &lt;/pre&gt;
+ *
+ * By default the {@link org.apache.mina.management.MINAStatCollector} is polling the sessions every 5 seconds. You can
+ * give a different polling time using a second constructor.&lt;p&gt;
+ *
+ * Note: This class is a spin-off from StatCollector present in
+ * https://svn.apache.org/repos/asf/mina/branches/1.1/core/src/main/java/org/apache/mina/management.
+ *
+ * @author The Apache Directory Project (mina-dev@directory.apache.org)
+ */
+public class MINAStatCollector {
+    /**
+     * The session attribute key for {@link IoSessionStat}.
+     */
+<span class="nc" id="L42">    public static final String KEY = MINAStatCollector.class.getName() + &quot;.stat&quot;;</span>
+
+
+    /**
+     * @noinspection StaticNonFinalField
+     */
+<span class="nc" id="L48">    private static volatile int nextId = 0;</span>
+<span class="nc" id="L49">    private final int id = nextId ++;</span>
+
+    private final IoService service;
+    private Worker worker;
+<span class="nc" id="L53">    private int pollingInterval = 5000;</span>
+    private Queue&lt;IoSession&gt; polledSessions;
+
+    // resume of session stats, for simplifying acces to the statistics
+<span class="nc" id="L57">    private AtomicLong totalProcessedSessions = new AtomicLong();</span>
+<span class="nc" id="L58">    private AtomicLong totalMsgWritten = new AtomicLong();</span>
+<span class="nc" id="L59">    private AtomicLong totalMsgRead = new AtomicLong();</span>
+<span class="nc" id="L60">    private AtomicLong totalBytesWritten = new AtomicLong();</span>
+<span class="nc" id="L61">    private AtomicLong totalBytesRead = new AtomicLong();</span>
+<span class="nc" id="L62">    private AtomicLong totalScheduledWrites = new AtomicLong();</span>
+<span class="nc" id="L63">    private AtomicLong totalQueuedEvents = new AtomicLong();</span>
+
+<span class="nc" id="L65">    private final IoServiceListener serviceListener = new IoServiceListener()</span>
+<span class="nc" id="L66">    {</span>
+
+        @Override
+        public void sessionCreated(final IoSession session )
+        {
+<span class="nc" id="L71">            addSession( session );</span>
+<span class="nc" id="L72">        }</span>
+
+        @Override
+        public void sessionDestroyed(final IoSession session )
+        {
+<span class="nc" id="L77">            removeSession( session );</span>
+<span class="nc" id="L78">        }</span>
+
+        @Override
+        public void serviceActivated(final IoService service) {
+<span class="nc" id="L82">        }</span>
+
+        @Override
+        public void serviceIdle(final IoService service, final IdleStatus idleStatus) {
+<span class="nc" id="L86">        }</span>
+
+        @Override
+        public void serviceDeactivated(final IoService service) {
+<span class="nc" id="L90">        }</span>
+
+        @Override
+        public void sessionClosed(final IoSession ioSession) {
+<span class="nc" id="L94">        }</span>
+    };
+
+    /**
+     * Create a stat collector for the given service with a default polling time of 5 seconds.
+     * @param service the IoService to inspect
+     */
+    public MINAStatCollector( IoService service )
+    {
+<span class="nc" id="L103">        this( service,5000 );</span>
+<span class="nc" id="L104">    }</span>
+
+    /**
+     * create a stat collector for the given given service
+     * @param service the IoService to inspect
+     * @param pollingInterval milliseconds
+     */
+    public MINAStatCollector( IoService service, int pollingInterval )
+<span class="nc" id="L112">    {</span>
+<span class="nc" id="L113">        this.service = service;</span>
+<span class="nc" id="L114">        this.pollingInterval = pollingInterval;</span>
+<span class="nc" id="L115">    }</span>
+
+    /**
+     * Start collecting stats for the {@link IoSession} of the service.
+     * New sessions or destroyed will be automaticly added or removed.
+     */
+    public void start()
+    {
+<span class="nc" id="L123">        synchronized (this)</span>
+        {
+<span class="nc bnc" id="L125" title="All 4 branches missed.">            if ( worker != null &amp;&amp; worker.isAlive() )</span>
+<span class="nc" id="L126">                throw new RuntimeException( &quot;Stat collecting already started&quot; );</span>
+
+            // add all current sessions
+
+<span class="nc" id="L130">            polledSessions = new ConcurrentLinkedQueue&lt;&gt;();</span>
+
+<span class="nc" id="L132">            Map&lt;Long, IoSession&gt; sessions = service.getManagedSessions();</span>
+<span class="nc bnc" id="L133" title="All 2 branches missed.">            if (sessions != null) {</span>
+<span class="nc bnc" id="L134" title="All 2 branches missed.">                for (IoSession ioSession : sessions.values()) {</span>
+<span class="nc" id="L135">                    addSession(ioSession);</span>
+<span class="nc" id="L136">                }</span>
+            }
+
+            // listen for new ones
+<span class="nc" id="L140">            service.addListener( serviceListener );</span>
+
+            // start polling
+<span class="nc" id="L143">            worker = new Worker();</span>
+<span class="nc" id="L144">            worker.start();</span>
+
+<span class="nc" id="L146">        }</span>
+
+<span class="nc" id="L148">    }</span>
+
+    /**
+     * Stop collecting stats. all the {@link IoSessionStat} object will be removed of the
+     * polled session attachements.
+     */
+    public void stop()
+    {
+<span class="nc" id="L156">        synchronized (this)</span>
+        {
+<span class="nc" id="L158">            service.removeListener( serviceListener );</span>
+
+            // stop worker
+<span class="nc" id="L161">            worker.stop = true;</span>
+<span class="nc" id="L162">            worker.interrupt();</span>
+<span class="nc bnc" id="L163" title="All 2 branches missed.">            while( worker.isAlive() )</span>
+            {
+                try
+                {
+<span class="nc" id="L167">                    worker.join();</span>
+                }
+<span class="nc" id="L169">                catch( InterruptedException e )</span>
+                {
+                    //ignore since this is shutdown time
+<span class="nc" id="L172">                }</span>
+            }
+
+<span class="nc bnc" id="L175" title="All 2 branches missed.">            for (IoSession session : polledSessions) {</span>
+<span class="nc" id="L176">                session.removeAttribute(KEY);</span>
+<span class="nc" id="L177">            }</span>
+<span class="nc" id="L178">            polledSessions.clear();</span>
+<span class="nc" id="L179">        }</span>
+<span class="nc" id="L180">    }</span>
+
+    /**
+     * is the stat collector started and polling the {@link IoSession} of the {@link IoService}
+     * @return true if started
+     */
+    public boolean isRunning()
+    {
+<span class="nc" id="L188">        synchronized (this)</span>
+        {
+<span class="nc bnc" id="L190" title="All 4 branches missed.">            return worker != null &amp;&amp; worker.stop != true;</span>
+<span class="nc" id="L191">        }</span>
+    }
+
+    private void addSession( IoSession session )
+    {
+<span class="nc" id="L196">        IoSessionStat sessionStats = new IoSessionStat();</span>
+<span class="nc" id="L197">        sessionStats.lastPollingTime = System.currentTimeMillis();</span>
+<span class="nc" id="L198">        session.setAttribute( KEY, sessionStats );</span>
+<span class="nc" id="L199">        totalProcessedSessions.incrementAndGet();</span>
+<span class="nc" id="L200">        polledSessions.add( session );</span>
+<span class="nc" id="L201">    }</span>
+
+    private void removeSession( IoSession session )
+    {
+        // remove the session from the list of polled sessions
+<span class="nc" id="L206">        polledSessions.remove( session );</span>
+
+        // add the bytes processed between last polling and session closing
+        // prevent non seen byte with non-connected protocols like HTTP and datagrams
+<span class="nc" id="L210">        IoSessionStat sessStat = ( IoSessionStat ) session.removeAttribute( KEY );</span>
+
+<span class="nc bnc" id="L212" title="All 2 branches missed.">        if (sessStat != null) {</span>
+<span class="nc" id="L213">            totalMsgWritten.addAndGet(session.getWrittenMessages() - sessStat.lastMessageWrite);</span>
+<span class="nc" id="L214">            totalMsgRead.addAndGet(session.getReadMessages() - sessStat.lastMessageRead);</span>
+<span class="nc" id="L215">            totalBytesWritten.addAndGet(session.getWrittenBytes() - sessStat.lastByteWrite);</span>
+<span class="nc" id="L216">            totalBytesRead.addAndGet(session.getReadBytes() - sessStat.lastByteRead);</span>
+        }
+<span class="nc" id="L218">    }</span>
+
+
+    /**
+     * total number of sessions processed by the stat collector
+     * @return number of sessions
+     */
+    public long getTotalProcessedSessions()
+    {
+<span class="nc" id="L227">        return totalProcessedSessions.longValue();</span>
+    }
+
+    public long getBytesRead()
+    {
+<span class="nc" id="L232">        return totalBytesRead.get();</span>
+    }
+
+    public long getBytesWritten()
+    {
+<span class="nc" id="L237">        return totalBytesWritten.get();</span>
+    }
+
+    public long getMsgRead()
+    {
+<span class="nc" id="L242">        return totalMsgRead.get();</span>
+    }
+
+    public long getMsgWritten()
+    {
+<span class="nc" id="L247">        return totalMsgWritten.get();</span>
+    }
+
+    public long getScheduledWrites() {
+<span class="nc" id="L251">        return totalScheduledWrites.get();</span>
+    }
+
+    public long getQueuedEvents() {
+<span class="nc" id="L255">        return totalQueuedEvents.get();</span>
+    }
+
+    public long getSessionCount()
+    {
+<span class="nc" id="L260">        return polledSessions.size();</span>
+    }
+
+    private class Worker extends Thread
+    {
+
+<span class="nc" id="L266">        boolean stop = false;</span>
+
+        private Worker()
+<span class="nc" id="L269">        {</span>
+<span class="nc" id="L270">            super( &quot;StatCollectorWorker-&quot;+id );</span>
+<span class="nc" id="L271">        }</span>
+
+        /*
+         * (non-Javadoc)
+         * 
+         * @see java.lang.Thread#run()
+         */
+        @Override 
+        public void run()
+        {
+<span class="nc bnc" id="L281" title="All 2 branches missed.">            while ( !stop )</span>
+            {
+                // wait polling time
+                try
+                {
+<span class="nc" id="L286">                    Thread.sleep( pollingInterval );</span>
+                }
+<span class="nc" id="L288">                catch ( InterruptedException e )</span>
+                {
+<span class="nc" id="L290">                }</span>
+
+<span class="nc" id="L292">                long tmpMsgWritten = 0l;</span>
+<span class="nc" id="L293">                long tmpMsgRead = 0l;</span>
+<span class="nc" id="L294">                long tmpBytesWritten = 0l;</span>
+<span class="nc" id="L295">                long tmpBytesRead = 0l;</span>
+<span class="nc" id="L296">                long tmpScheduledWrites = 0l;</span>
+<span class="nc" id="L297">                long tmpQueuevedEvents = 0l;</span>
+
+<span class="nc bnc" id="L299" title="All 2 branches missed.">                for (IoSession session : polledSessions)</span>
+                {
+                    // upadating individual session statistics
+<span class="nc" id="L302">                    IoSessionStat sessStat = ( IoSessionStat ) session.getAttribute( KEY );</span>
+
+<span class="nc" id="L304">                    long currentTimestamp = System.currentTimeMillis();</span>
+                    // Calculate delta
+<span class="nc" id="L306">                    float pollDelta = (currentTimestamp - sessStat.lastPollingTime) / 1000f;</span>
+                    // Store last polling time of this session
+<span class="nc" id="L308">                    sessStat.lastPollingTime = currentTimestamp;</span>
+
+<span class="nc" id="L310">                    long readBytes = session.getReadBytes();</span>
+<span class="nc" id="L311">                    long writtenBytes = session.getWrittenBytes();</span>
+<span class="nc" id="L312">                    long readMessages = session.getReadMessages();</span>
+<span class="nc" id="L313">                    long writtenMessages = session.getWrittenMessages();</span>
+<span class="nc" id="L314">                    sessStat.byteReadThroughput = (readBytes - sessStat.lastByteRead) / pollDelta;</span>
+<span class="nc" id="L315">                    sessStat.byteWrittenThroughput = (writtenBytes - sessStat.lastByteWrite) / pollDelta;</span>
+<span class="nc" id="L316">                    sessStat.messageReadThroughput = (readMessages - sessStat.lastMessageRead) / pollDelta;</span>
+<span class="nc" id="L317">                    sessStat.messageWrittenThroughput = (writtenMessages - sessStat.lastMessageWrite) / pollDelta;</span>
+
+<span class="nc" id="L319">                    tmpMsgWritten += (writtenMessages - sessStat.lastMessageWrite);</span>
+<span class="nc" id="L320">                    tmpMsgRead += (readMessages - sessStat.lastMessageRead);</span>
+<span class="nc" id="L321">                    tmpBytesWritten += (writtenBytes - sessStat.lastByteWrite);</span>
+<span class="nc" id="L322">                    tmpBytesRead += (readBytes - sessStat.lastByteRead);</span>
+<span class="nc" id="L323">                    tmpScheduledWrites += session.getScheduledWriteMessages();</span>
+
+<span class="nc" id="L325">                    ExecutorFilter executorFilter =</span>
+<span class="nc" id="L326">                            (ExecutorFilter) session.getFilterChain().get(EXECUTOR_FILTER_NAME);</span>
+<span class="nc bnc" id="L327" title="All 2 branches missed.">                    if (executorFilter != null) {</span>
+<span class="nc" id="L328">                        Executor executor =  executorFilter.getExecutor();</span>
+<span class="nc bnc" id="L329" title="All 2 branches missed.">                        if (executor instanceof OrderedThreadPoolExecutor) {</span>
+<span class="nc" id="L330">                            tmpQueuevedEvents += ((OrderedThreadPoolExecutor) executor).getActiveCount();</span>
+                        }
+                    }
+
+<span class="nc" id="L334">                    sessStat.lastByteRead = readBytes;</span>
+<span class="nc" id="L335">                    sessStat.lastByteWrite = writtenBytes;</span>
+<span class="nc" id="L336">                    sessStat.lastMessageRead = readMessages;</span>
+<span class="nc" id="L337">                    sessStat.lastMessageWrite = writtenMessages;</span>
+
+<span class="nc" id="L339">                }</span>
+
+<span class="nc" id="L341">                totalMsgWritten.addAndGet(tmpMsgWritten);</span>
+<span class="nc" id="L342">                totalMsgRead.addAndGet(tmpMsgRead);</span>
+<span class="nc" id="L343">                totalBytesWritten.addAndGet(tmpBytesWritten);</span>
+<span class="nc" id="L344">                totalBytesRead.addAndGet(tmpBytesRead);</span>
+<span class="nc" id="L345">                totalScheduledWrites.set(tmpScheduledWrites);</span>
+<span class="nc" id="L346">                totalQueuedEvents.set(tmpQueuevedEvents);</span>
+<span class="nc" id="L347">            }</span>
+<span class="nc" id="L348">        }</span>
+    }
+    
+<span class="nc" id="L351">    public class IoSessionStat {</span>
+<span class="nc" id="L352">        long lastByteRead = -1;</span>
+
+<span class="nc" id="L354">        long lastByteWrite = -1;</span>
+
+<span class="nc" id="L356">        long lastMessageRead = -1;</span>
+
+<span class="nc" id="L358">        long lastMessageWrite = -1;</span>
+
+<span class="nc" id="L360">        float byteWrittenThroughput = 0;</span>
+
+<span class="nc" id="L362">        float byteReadThroughput = 0;</span>
+
+<span class="nc" id="L364">        float messageWrittenThroughput = 0;</span>
+
+<span class="nc" id="L366">        float messageReadThroughput = 0;</span>
+
+        //  last time the session was polled
+<span class="nc" id="L369">        long lastPollingTime = System.currentTimeMillis();</span>
+
+        /**
+         * Bytes read per second  
+         * @return bytes per second
+         */
+        public float getByteReadThroughput() {
+<span class="nc" id="L376">            return byteReadThroughput;</span>
+        }
+
+        /**
+         * Bytes written per second  
+         * @return bytes per second
+         */
+        public float getByteWrittenThroughput() {
+<span class="nc" id="L384">            return byteWrittenThroughput;</span>
+        }
+
+        /**
+         * Messages read per second  
+         * @return messages per second
+         */
+        public float getMessageReadThroughput() {
+<span class="nc" id="L392">            return messageReadThroughput;</span>
+        }
+
+        /**
+         * Messages written per second  
+         * @return messages per second
+         */
+        public float getMessageWrittenThroughput() {
+<span class="nc" id="L400">            return messageWrittenThroughput;</span>
+        }
+
+        /**
+         * used for the StatCollector, last polling value 
+         */
+        long getLastByteRead() {
+<span class="nc" id="L407">            return lastByteRead;</span>
+        }
+
+        /**
+         * used for the StatCollector, last polling value 
+         */
+        long getLastByteWrite() {
+<span class="nc" id="L414">            return lastByteWrite;</span>
+        }
+
+        /**
+         * used for the StatCollector, last polling value 
+         */
+        long getLastMessageRead() {
+<span class="nc" id="L421">            return lastMessageRead;</span>
+        }
+
+        /**
+         * used for the StatCollector, last polling value 
+         */
+        long getLastMessageWrite() {
+<span class="nc" id="L428">            return lastMessageWrite;</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

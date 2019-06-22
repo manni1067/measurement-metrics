@@ -1,0 +1,430 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>LocalComponentSession.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.session</a> &gt; <span class="el_source">LocalComponentSession.java</span></div><h1>LocalComponentSession.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.jivesoftware.openfire.session;
+
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+
+import org.jivesoftware.openfire.Connection;
+import org.jivesoftware.openfire.PacketException;
+import org.jivesoftware.openfire.SessionManager;
+import org.jivesoftware.openfire.StreamID;
+import org.jivesoftware.openfire.auth.AuthFactory;
+import org.jivesoftware.openfire.component.ExternalComponentManager;
+import org.jivesoftware.openfire.component.InternalComponentManager;
+import org.jivesoftware.util.LocaleUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmlpull.v1.XmlPullParser;
+import org.xmlpull.v1.XmlPullParserException;
+import org.xmpp.component.ComponentException;
+import org.xmpp.component.ComponentManager;
+import org.xmpp.packet.IQ;
+import org.xmpp.packet.JID;
+import org.xmpp.packet.Packet;
+import org.xmpp.packet.StreamError;
+
+/**
+ * Represents a session between the server and a component.
+ *
+ * @author Gaston Dombiak
+ */
+// TODO implement TLS and observe org.jivesoftware.openfire.session.ConnectionSettings.Component.TLS_POLICY
+public class LocalComponentSession extends LocalSession implements ComponentSession {
+
+<span class="nc" id="L52">    private static final Logger Log = LoggerFactory.getLogger(LocalComponentSession.class);</span>
+
+    private LocalExternalComponent component;
+    /**
+     * When using XEP-114 (the old spec) components will include in the TO attribute
+     * of the intial stream header the domain they would like to have. The requested
+     * domain is used only after the authentication was successful so we need keep track
+     * of this information until the handshake is done.  
+     */
+    private String defaultSubdomain;
+
+    /**
+     * Returns a newly created session between the server and a component. The session will be
+     * created and returned only if all the checkings were correct.&lt;p&gt;
+     *
+     * A domain will be binded for the new connecting component. This method is following
+     * the JEP-114 where the domain to bind is sent in the TO attribute of the stream header.
+     *
+     * @param serverName the name of the server where the session is connecting to.
+     * @param xpp     the parser that is reading the provided XML through the connection.
+     * @param connection the connection with the component.
+     * @return a newly created session between the server and a component.
+     * @throws XmlPullParserException if there was an XML error while creating the session.
+     */
+    public static LocalComponentSession createSession(String serverName, XmlPullParser xpp, Connection connection)
+            throws XmlPullParserException {
+<span class="nc" id="L78">        String domain = xpp.getAttributeValue(&quot;&quot;, &quot;to&quot;);</span>
+<span class="nc bnc" id="L79" title="All 2 branches missed.">        Boolean allowMultiple = xpp.getAttributeValue(&quot;&quot;, &quot;allowMultiple&quot;) != null;</span>
+
+<span class="nc" id="L81">        Log.debug(&quot;LocalComponentSession: [ExComp] Starting registration of new external component for domain: &quot; +</span>
+                domain);
+
+        // Default answer header in case of an error
+<span class="nc" id="L85">        StringBuilder sb = new StringBuilder();</span>
+<span class="nc" id="L86">        sb.append(&quot;&lt;?xml version='1.0' encoding='&quot;);</span>
+<span class="nc" id="L87">        sb.append(CHARSET);</span>
+<span class="nc" id="L88">        sb.append(&quot;'?&gt;&quot;);</span>
+<span class="nc" id="L89">        sb.append(&quot;&lt;stream:stream &quot;);</span>
+<span class="nc" id="L90">        sb.append(&quot;xmlns:stream=\&quot;http://etherx.jabber.org/streams\&quot; &quot;);</span>
+<span class="nc" id="L91">        sb.append(&quot;xmlns=\&quot;jabber:component:accept\&quot; from=\&quot;&quot;);</span>
+<span class="nc" id="L92">        sb.append(domain);</span>
+<span class="nc" id="L93">        sb.append(&quot;\&quot;&gt;&quot;);</span>
+
+        // Check that a domain was provided in the stream header
+<span class="nc bnc" id="L96" title="All 2 branches missed.">        if (domain == null) {</span>
+<span class="nc" id="L97">            Log.debug(&quot;LocalComponentSession: [ExComp] Domain not specified in stanza: &quot; + xpp.getText());</span>
+            // Include the bad-format in the response
+<span class="nc" id="L99">            StreamError error = new StreamError(StreamError.Condition.bad_format);</span>
+<span class="nc" id="L100">            sb.append(error.toXML());</span>
+<span class="nc" id="L101">            connection.deliverRawText(sb.toString());</span>
+            // Close the underlying connection
+<span class="nc" id="L103">            connection.close();</span>
+<span class="nc" id="L104">            return null;</span>
+        }
+
+        // Get the requested subdomain
+<span class="nc" id="L108">        String subdomain = domain;</span>
+<span class="nc" id="L109">        int index = domain.indexOf(serverName);</span>
+<span class="nc bnc" id="L110" title="All 2 branches missed.">        if (index &gt; -1) {</span>
+<span class="nc" id="L111">            subdomain = domain.substring(0, index -1);</span>
+        }
+<span class="nc" id="L113">        domain = subdomain + &quot;.&quot; + serverName;</span>
+<span class="nc" id="L114">        JID componentJID = new JID(domain);</span>
+        // Check that an external component for the specified subdomain may connect to this server
+<span class="nc bnc" id="L116" title="All 2 branches missed.">        if (!ExternalComponentManager.canAccess(subdomain)) {</span>
+<span class="nc" id="L117">            Log.debug(</span>
+                    &quot;LocalComponentSession: [ExComp] Component is not allowed to connect with subdomain: &quot; + subdomain);
+<span class="nc" id="L119">            StreamError error = new StreamError(StreamError.Condition.host_unknown);</span>
+<span class="nc" id="L120">            sb.append(error.toXML());</span>
+<span class="nc" id="L121">            connection.deliverRawText(sb.toString());</span>
+            // Close the underlying connection
+<span class="nc" id="L123">            connection.close();</span>
+<span class="nc" id="L124">            return null;</span>
+        }
+        // Check that a secret key was configured in the server
+<span class="nc" id="L127">        String secretKey = ExternalComponentManager.getSecretForComponent(subdomain);</span>
+<span class="nc bnc" id="L128" title="All 2 branches missed.">        if (secretKey == null) {</span>
+<span class="nc" id="L129">            Log.debug(&quot;LocalComponentSession: [ExComp] A shared secret for the component was not found.&quot;);</span>
+            // Include the internal-server-error in the response
+<span class="nc" id="L131">            StreamError error = new StreamError(StreamError.Condition.internal_server_error);</span>
+<span class="nc" id="L132">            sb.append(error.toXML());</span>
+<span class="nc" id="L133">            connection.deliverRawText(sb.toString());</span>
+            // Close the underlying connection
+<span class="nc" id="L135">            connection.close();</span>
+<span class="nc" id="L136">            return null;</span>
+        }
+        // Check that the requested subdomain is not already in use
+<span class="nc bnc" id="L139" title="All 4 branches missed.">        if (!allowMultiple &amp;&amp; InternalComponentManager.getInstance().hasComponent(componentJID)) {</span>
+<span class="nc" id="L140">            Log.debug(&quot;LocalComponentSession: [ExComp] Another component is already using domain: &quot; + domain);</span>
+            // Domain already occupied so return a conflict error and close the connection
+            // Include the conflict error in the response
+<span class="nc" id="L143">            StreamError error = new StreamError(StreamError.Condition.conflict);</span>
+<span class="nc" id="L144">            sb.append(error.toXML());</span>
+<span class="nc" id="L145">            connection.deliverRawText(sb.toString());</span>
+            // Close the underlying connection
+<span class="nc" id="L147">            connection.close();</span>
+<span class="nc" id="L148">            return null;</span>
+        }
+
+        // Create a ComponentSession for the external component
+<span class="nc" id="L152">        LocalComponentSession session = SessionManager.getInstance().createComponentSession(componentJID, connection);</span>
+<span class="nc" id="L153">        connection.registerCloseListener( handback -&gt; SessionManager.getInstance().removeComponentSession( (LocalComponentSession) handback ), session );</span>
+
+<span class="nc" id="L155">        session.component = new LocalExternalComponent(session, connection);</span>
+
+        try {
+<span class="nc" id="L158">            Log.debug(&quot;LocalComponentSession: [ExComp] Send stream header with ID: &quot; + session.getStreamID() +</span>
+                    &quot; for component with domain: &quot; +
+                    domain);
+            // Build the start packet response
+<span class="nc" id="L162">            sb = new StringBuilder();</span>
+<span class="nc" id="L163">            sb.append(&quot;&lt;?xml version='1.0' encoding='&quot;);</span>
+<span class="nc" id="L164">            sb.append(CHARSET);</span>
+<span class="nc" id="L165">            sb.append(&quot;'?&gt;&quot;);</span>
+<span class="nc" id="L166">            sb.append(&quot;&lt;stream:stream &quot;);</span>
+<span class="nc" id="L167">            sb.append(&quot;xmlns:stream=\&quot;http://etherx.jabber.org/streams\&quot; &quot;);</span>
+<span class="nc" id="L168">            sb.append(&quot;xmlns=\&quot;jabber:component:accept\&quot; from=\&quot;&quot;);</span>
+<span class="nc" id="L169">            sb.append(domain);</span>
+<span class="nc" id="L170">            sb.append(&quot;\&quot; id=\&quot;&quot;);</span>
+<span class="nc" id="L171">            sb.append(session.getStreamID().toString());</span>
+<span class="nc" id="L172">            sb.append(&quot;\&quot;&gt;&quot;);</span>
+<span class="nc" id="L173">            connection.deliverRawText(sb.toString());</span>
+
+            // Return session although session has not been authentication yet. Until
+            // it is authenticated traffic will be rejected except for authentication
+            // requests
+<span class="nc" id="L178">            session.defaultSubdomain = subdomain;</span>
+<span class="nc" id="L179">            return session;</span>
+        }
+<span class="nc" id="L181">        catch (Exception e) {</span>
+<span class="nc" id="L182">            Log.error(&quot;An error occured while creating a ComponentSession&quot;, e);</span>
+            // Close the underlying connection
+<span class="nc" id="L184">            connection.close();</span>
+<span class="nc" id="L185">            return null;</span>
+        }
+    }
+
+    public LocalComponentSession(String serverName, Connection conn, StreamID id) {
+<span class="nc" id="L190">        super(serverName, conn, id, Locale.getDefault());</span>
+<span class="nc" id="L191">    }</span>
+
+    @Override
+    public String getAvailableStreamFeatures() {
+        // Nothing special to add
+<span class="nc" id="L196">        return null;</span>
+    }
+
+    @Override
+    boolean canProcess(Packet packet) {
+<span class="nc" id="L201">        return true;</span>
+    }
+
+    @Override
+    void deliver(Packet packet) throws PacketException {
+<span class="nc" id="L206">        component.deliver(packet);</span>
+<span class="nc" id="L207">    }</span>
+
+    @Override
+    public ExternalComponent getExternalComponent() {
+<span class="nc" id="L211">        return component;</span>
+    }
+
+    /**
+     * Authenticate the external component using a digest method. The digest includes the
+     * stream ID and the secret key of the main domain of the external component. A component
+     * needs to authenticate just once but it may bind several domains.
+     *
+     * @param digest the digest sent in the handshake.
+     * @return true if the authentication was successful.
+     */
+    public boolean authenticate(String digest) {
+        // Perform authentication. Wait for the handshake (with the secret key)
+<span class="nc" id="L224">        String secretKey = ExternalComponentManager.getSecretForComponent(defaultSubdomain);</span>
+<span class="nc" id="L225">        String anticipatedDigest = AuthFactory.createDigest(getStreamID().getID(), secretKey);</span>
+        // Check that the provided handshake (secret key + sessionID) is correct
+<span class="nc bnc" id="L227" title="All 2 branches missed.">        if (!anticipatedDigest.equalsIgnoreCase(digest)) {</span>
+<span class="nc" id="L228">            Log.debug(&quot;LocalComponentSession: [ExComp] Incorrect handshake for component with domain: &quot; +</span>
+                    defaultSubdomain);
+            //  The credentials supplied by the initiator are not valid (answer an error
+            // and close the connection)
+<span class="nc" id="L232">            conn.deliverRawText(new StreamError(StreamError.Condition.not_authorized).toXML());</span>
+            // Close the underlying connection
+<span class="nc" id="L234">            conn.close();</span>
+<span class="nc" id="L235">            return false;</span>
+        }
+        else {
+            // Component has authenticated fine
+<span class="nc" id="L239">            setStatus(STATUS_AUTHENTICATED);</span>
+            // Send empty handshake element to acknowledge success
+<span class="nc" id="L241">            conn.deliverRawText(&quot;&lt;handshake&gt;&lt;/handshake&gt;&quot;);</span>
+            // Bind the domain to this component
+<span class="nc" id="L243">            ExternalComponent component = getExternalComponent();</span>
+            try {
+<span class="nc" id="L245">                InternalComponentManager.getInstance().addComponent(defaultSubdomain, component);</span>
+<span class="nc" id="L246">                conn.registerCloseListener( handback -&gt; InternalComponentManager.getInstance().removeComponent( defaultSubdomain, (ExternalComponent) handback ), component );</span>
+<span class="nc" id="L247">                Log.debug(</span>
+                        &quot;LocalComponentSession: [ExComp] External component was registered SUCCESSFULLY with domain: &quot; +
+                                defaultSubdomain);
+<span class="nc" id="L250">                return true;</span>
+            }
+<span class="nc" id="L252">            catch (ComponentException e) {</span>
+<span class="nc" id="L253">                Log.debug(&quot;LocalComponentSession: [ExComp] Another component is already using domain: &quot; +</span>
+                        defaultSubdomain);
+                //  The credentials supplied by the initiator are not valid (answer an error
+                // and close the connection)
+<span class="nc" id="L257">                conn.deliverRawText(new StreamError(StreamError.Condition.conflict).toXML());</span>
+                // Close the underlying connection
+<span class="nc" id="L259">                conn.close();</span>
+<span class="nc" id="L260">                return false;</span>
+            }
+        }
+    }
+
+    /**
+     * The ExternalComponent acts as a proxy of the remote connected component. Any Packet that is
+     * sent to this component will be delivered to the real component on the other side of the
+     * connection.&lt;p&gt;
+     *
+     * An ExternalComponent will be added as a route in the RoutingTable for each connected
+     * external component. This implies that when the server receives a packet whose domain matches
+     * the external component services address then a route to the external component will be used
+     * and the packet will be forwarded to the component on the other side of the connection.
+     *
+     * @author Gaston Dombiak
+     */
+    public static class LocalExternalComponent implements ComponentSession.ExternalComponent {
+        /**
+         * Keeps track of the IQ (get/set) packets that were sent from a given component's connection. This
+         * information will be used to ensure that the IQ reply will be sent to the same component's connection.
+         */
+<span class="nc" id="L282">        private static final Map&lt;String, LocalExternalComponent&gt; iqs = new HashMap&lt;&gt;();</span>
+
+        private LocalComponentSession session;
+        private Connection connection;
+<span class="nc" id="L286">        private String name = &quot;&quot;;</span>
+<span class="nc" id="L287">        private String type = &quot;&quot;;</span>
+<span class="nc" id="L288">        private String category = &quot;&quot;;</span>
+        /**
+         * List of subdomains that were binded for this component. The list will include
+         * the initial subdomain.
+         */
+<span class="nc" id="L293">        private List&lt;String&gt; subdomains = new ArrayList&lt;&gt;();</span>
+
+
+<span class="nc" id="L296">        public LocalExternalComponent(LocalComponentSession session, Connection connection) {</span>
+<span class="nc" id="L297">            this.session = session;</span>
+<span class="nc" id="L298">            this.connection = connection;</span>
+<span class="nc" id="L299">        }</span>
+
+        @Override
+        public void processPacket(Packet packet) {
+<span class="nc bnc" id="L303" title="All 2 branches missed.">            if (packet instanceof IQ) {</span>
+<span class="nc" id="L304">                IQ iq = (IQ) packet;</span>
+<span class="nc bnc" id="L305" title="All 4 branches missed.">                if (iq.getType() == IQ.Type.result || iq.getType() == IQ.Type.error) {</span>
+                    // Check if this IQ reply belongs to a specific component and route
+                    // reply to that specific component (if it exists)
+                    LocalExternalComponent targetComponent;
+<span class="nc" id="L309">                    synchronized (iqs) {</span>
+<span class="nc" id="L310">                        targetComponent = iqs.remove(packet.getID());</span>
+<span class="nc" id="L311">                    }</span>
+<span class="nc bnc" id="L312" title="All 2 branches missed.">                    if (targetComponent != null) {</span>
+<span class="nc" id="L313">                        targetComponent.processPacket(packet);</span>
+<span class="nc" id="L314">                        return;</span>
+                    }
+                }
+            }
+            // Ask the session to process the outgoing packet. This will
+            // give us the chance to apply PacketInterceptors
+<span class="nc" id="L320">            session.process(packet);</span>
+<span class="nc" id="L321">        }</span>
+
+        /**
+         * Delivers the packet to the external component.
+         *
+         * @param packet the packet to deliver.
+         */
+        void deliver(Packet packet) {
+<span class="nc bnc" id="L329" title="All 4 branches missed.">            if (connection != null &amp;&amp; !connection.isClosed()) {</span>
+                try {
+<span class="nc" id="L331">                    connection.deliver(packet);</span>
+                }
+<span class="nc" id="L333">                catch (Exception e) {</span>
+<span class="nc" id="L334">                    Log.error(LocaleUtils.getLocalizedString(&quot;admin.error&quot;), e);</span>
+<span class="nc" id="L335">                    connection.close();</span>
+<span class="nc" id="L336">                }</span>
+            }
+<span class="nc" id="L338">        }</span>
+
+        @Override
+        public String getName() {
+<span class="nc" id="L342">            return name;</span>
+        }
+
+        @Override
+        public String getDescription() {
+<span class="nc" id="L347">            return category + &quot; - &quot; + type;</span>
+        }
+
+        @Override
+        public void setName(String name) {
+<span class="nc" id="L352">            this.name = name;</span>
+<span class="nc" id="L353">        }</span>
+
+        @Override
+        public String getType() {
+<span class="nc" id="L357">            return type;</span>
+        }
+
+        @Override
+        public void setType(String type) {
+<span class="nc" id="L362">            this.type = type;</span>
+<span class="nc" id="L363">        }</span>
+
+        @Override
+        public String getCategory() {
+<span class="nc" id="L367">            return category;</span>
+        }
+
+        @Override
+        public void setCategory(String category) {
+<span class="nc" id="L372">            this.category = category;</span>
+<span class="nc" id="L373">        }</span>
+
+        @Override
+        public String getInitialSubdomain() {
+<span class="nc bnc" id="L377" title="All 2 branches missed.">            if (subdomains.isEmpty()) {</span>
+<span class="nc" id="L378">                return null;</span>
+            }
+<span class="nc" id="L380">            return subdomains.get(0);</span>
+        }
+
+        private void addSubdomain(String subdomain) {
+<span class="nc" id="L384">            subdomains.add(subdomain);</span>
+<span class="nc" id="L385">        }</span>
+
+        @Override
+        public Collection&lt;String&gt; getSubdomains() {
+<span class="nc" id="L389">            return subdomains;</span>
+        }
+
+        @Override
+        public void initialize(JID jid, ComponentManager componentManager) {
+<span class="nc" id="L394">            addSubdomain(jid.toString());</span>
+<span class="nc" id="L395">        }</span>
+
+        @Override
+        public void start() {
+<span class="nc" id="L399">        }</span>
+
+        @Override
+        public void shutdown() {
+            // Remove tracking of IQ packets sent from this component
+<span class="nc" id="L404">            synchronized (iqs) {</span>
+<span class="nc" id="L405">                List&lt;String&gt; toRemove = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L406" title="All 2 branches missed.">                for (Map.Entry&lt;String,LocalExternalComponent&gt; entry : iqs.entrySet()) {</span>
+<span class="nc bnc" id="L407" title="All 2 branches missed.">                    if (entry.getValue() == this) {</span>
+<span class="nc" id="L408">                        toRemove.add(entry.getKey());</span>
+                    }
+<span class="nc" id="L410">                }</span>
+                // Remove keys pointing to component being removed
+<span class="nc bnc" id="L412" title="All 2 branches missed.">                for (String key : toRemove) {</span>
+<span class="nc" id="L413">                    iqs.remove(key);</span>
+<span class="nc" id="L414">                }</span>
+<span class="nc" id="L415">            }</span>
+<span class="nc" id="L416">        }</span>
+
+        @Override
+        public String toString() {
+<span class="nc" id="L420">            return super.toString() + &quot; - subdomains: &quot; + subdomains;</span>
+        }
+
+        public void track(IQ iq) {
+<span class="nc" id="L424">            synchronized (iqs) {</span>
+<span class="nc" id="L425">                iqs.put(iq.getID(), this);</span>
+<span class="nc" id="L426">            }</span>
+<span class="nc" id="L427">        }</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

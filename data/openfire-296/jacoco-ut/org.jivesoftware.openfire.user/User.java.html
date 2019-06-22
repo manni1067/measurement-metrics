@@ -1,0 +1,559 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>User.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.user</a> &gt; <span class="el_source">User.java</span></div><h1>User.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2004-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.user;
+
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.auth.AuthFactory;
+import org.jivesoftware.openfire.auth.ConnectionException;
+import org.jivesoftware.openfire.auth.InternalUnauthenticatedException;
+import org.jivesoftware.openfire.event.UserEventDispatcher;
+import org.jivesoftware.openfire.roster.Roster;
+import org.jivesoftware.util.StringUtils;
+import org.jivesoftware.util.cache.CacheSizes;
+import org.jivesoftware.util.cache.Cacheable;
+import org.jivesoftware.util.cache.CannotCalculateSizeException;
+import org.jivesoftware.util.cache.ExternalizableUtil;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmpp.resultsetmanagement.Result;
+
+import java.io.Externalizable;
+import java.io.IOException;
+import java.io.ObjectInput;
+import java.io.ObjectOutput;
+import java.util.*;
+
+/**
+ * Encapsulates information about a user.
+ *
+ * New users are created using {@link UserManager#createUser(String, String, String, String)}.
+ *
+ * The currently-installed {@link UserProvider} is used for setting all other user data and some operations may not be
+ * supported depending on the capabilities of the {@link UserProvider}.
+ *
+ * All user properties are loaded on demand from the currently-installed
+ * {@link org.jivesoftware.openfire.user.property.UserPropertyProvider}.
+ *
+ * @author Matt Tucker
+ */
+public class User implements Cacheable, Externalizable, Result {
+
+<span class="fc" id="L55">    private static final Logger Log = LoggerFactory.getLogger(User.class);</span>
+
+    // The name of the name visible property
+    private static final String NAME_VISIBLE_PROPERTY = &quot;name.visible&quot;;
+    // The name of the email visible property
+    private static final String EMAIL_VISIBLE_PROPERTY = &quot;email.visible&quot;;
+
+    private String username;
+    private String salt;
+    private String storedKey;
+    private String serverKey;
+    private int iterations;
+    private String name;
+    private String email;
+    private Date creationDate;
+    private Date modificationDate;
+
+<span class="nc" id="L72">    private Map&lt;String,String&gt; properties = null;</span>
+
+    /**
+     * Returns the value of the specified property for the given username. This method is
+     * an optimization to avoid loading a user to get a specific property.
+     *
+     * @param username the username of the user to get a specific property value.
+     * @param propertyName the name of the property to return its value.
+     * @return the value of the specified property for the given username.
+     * @throws UserNotFoundException Depending on the installed user provider (some will return null instead).
+     */
+    public static String getPropertyValue(String username, String propertyName) throws UserNotFoundException {
+<span class="nc" id="L84">        return UserManager.getUserPropertyProvider().loadProperty( username, propertyName );</span>
+    }
+
+    /**
+     * Constructor added for Externalizable. Do not use this constructor.
+     */
+<span class="nc" id="L90">    public User() {</span>
+<span class="nc" id="L91">    }</span>
+
+    /**
+     * Constructs a new user. Normally, all arguments can be {@code null} except the username.
+     * However, a UserProvider -may- require a name or email address.  In those cases, the
+     * isNameRequired or isEmailRequired UserProvider tests indicate whether {@code null} is allowed.
+     * Typically, User objects should not be constructed by end-users of the API.
+     * Instead, user objects should be retrieved using {@link UserManager#getUser(String)}.
+     *
+     * @param username the username.
+     * @param name the name.
+     * @param email the email address.
+     * @param creationDate the date the user was created.
+     * @param modificationDate the date the user was last modified.
+     */
+    public User(String username, String name, String email, Date creationDate,
+            Date modificationDate)
+<span class="nc" id="L108">    {</span>
+<span class="nc bnc" id="L109" title="All 2 branches missed.">        if (username == null) {</span>
+<span class="nc" id="L110">            throw new NullPointerException(&quot;Username cannot be null&quot;);</span>
+        }
+<span class="nc" id="L112">        this.username = username;</span>
+<span class="nc bnc" id="L113" title="All 6 branches missed.">        if (UserManager.getUserProvider().isNameRequired() &amp;&amp; (name == null || &quot;&quot;.equals(name.trim()))) {</span>
+<span class="nc" id="L114">            throw new IllegalArgumentException(&quot;Invalid or empty name specified with provider that requires name&quot;);</span>
+        }
+<span class="nc" id="L116">        this.name = name;</span>
+<span class="nc bnc" id="L117" title="All 6 branches missed.">        if (UserManager.getUserProvider().isEmailRequired() &amp;&amp; (email == null || &quot;&quot;.equals(email.trim()))) {</span>
+<span class="nc" id="L118">            throw new IllegalArgumentException(&quot;Empty email address specified with provider that requires email address. User: &quot;</span>
+                                                + username + &quot; Email: &quot; + email);
+        }
+<span class="nc" id="L121">        this.email = email;</span>
+<span class="nc" id="L122">        this.creationDate = creationDate;</span>
+<span class="nc" id="L123">        this.modificationDate = modificationDate;</span>
+<span class="nc" id="L124">    }</span>
+
+    /**
+     * Returns this user's username.
+     *
+     * @return the username..
+     */
+    public String getUsername() {
+<span class="nc" id="L132">        return username;</span>
+    }
+
+    /**
+     * Sets a new password for this user.
+     *
+     * @param password the new password for the user.
+     * @throws UnsupportedOperationException exception
+     */
+    public void setPassword(String password) throws UnsupportedOperationException {
+<span class="nc bnc" id="L142" title="All 2 branches missed.">        if (UserManager.getUserProvider().isReadOnly()) {</span>
+<span class="nc" id="L143">            throw new UnsupportedOperationException(&quot;User provider is read-only.&quot;);</span>
+        }
+
+        try {
+<span class="nc" id="L147">            AuthFactory.setPassword(username, password);</span>
+
+            // Fire event.
+<span class="nc" id="L150">            Map&lt;String,Object&gt; params = new HashMap&lt;&gt;();</span>
+<span class="nc" id="L151">            params.put(&quot;type&quot;, &quot;passwordModified&quot;);</span>
+<span class="nc" id="L152">            UserEventDispatcher.dispatchEvent(this, UserEventDispatcher.EventType.user_modified,</span>
+                    params);
+        }
+<span class="nc" id="L155">        catch (UserNotFoundException | ConnectionException | InternalUnauthenticatedException e) {</span>
+<span class="nc" id="L156">            Log.error(e.getMessage(), e);</span>
+<span class="nc" id="L157">        }</span>
+<span class="nc" id="L158">    }</span>
+
+    public String getStoredKey() {
+<span class="nc" id="L161">        return storedKey;</span>
+    }
+
+    public void setStoredKey(String storedKey) {
+<span class="nc" id="L165">        this.storedKey = storedKey;</span>
+<span class="nc" id="L166">    }</span>
+
+    public String getServerKey() {
+<span class="nc" id="L169">        return serverKey;</span>
+    }
+
+    public void setServerKey(String serverKey) {
+<span class="nc" id="L173">        this.serverKey = serverKey;</span>
+<span class="nc" id="L174">    }</span>
+
+    public String getSalt() {
+<span class="nc" id="L177">        return salt;</span>
+    }
+
+    public void setSalt(String salt) {
+<span class="nc" id="L181">        this.salt = salt;</span>
+<span class="nc" id="L182">    }</span>
+
+    public int getIterations() {
+<span class="nc" id="L185">        return iterations;</span>
+    }
+
+    public void setIterations(int iterations) {
+<span class="nc" id="L189">        this.iterations = iterations;</span>
+<span class="nc" id="L190">    }</span>
+
+    public String getName() {
+<span class="nc bnc" id="L193" title="All 2 branches missed.">        return name == null ? &quot;&quot; : name;</span>
+    }
+
+    public void setName(String name) {
+<span class="nc bnc" id="L197" title="All 2 branches missed.">        if (UserManager.getUserProvider().isReadOnly()) {</span>
+<span class="nc" id="L198">            throw new UnsupportedOperationException(&quot;User provider is read-only.&quot;);</span>
+        }
+
+<span class="nc bnc" id="L201" title="All 4 branches missed.">        if (name != null &amp;&amp; name.matches(&quot;\\s*&quot;)) {</span>
+<span class="nc" id="L202">            name = null;</span>
+        }
+
+<span class="nc bnc" id="L205" title="All 4 branches missed.">        if (name == null &amp;&amp; UserManager.getUserProvider().isNameRequired()) {</span>
+<span class="nc" id="L206">            throw new IllegalArgumentException(&quot;User provider requires name.&quot;);</span>
+        }
+
+        try {
+<span class="nc" id="L210">            String originalName = this.name;</span>
+<span class="nc" id="L211">            UserManager.getUserProvider().setName(username, name);</span>
+<span class="nc" id="L212">            this.name = name;</span>
+
+            // Fire event.
+<span class="nc" id="L215">            Map&lt;String,Object&gt; params = new HashMap&lt;&gt;();</span>
+<span class="nc" id="L216">            params.put(&quot;type&quot;, &quot;nameModified&quot;);</span>
+<span class="nc" id="L217">            params.put(&quot;originalValue&quot;, originalName);</span>
+<span class="nc" id="L218">            UserEventDispatcher.dispatchEvent(this, UserEventDispatcher.EventType.user_modified,</span>
+                    params);
+        }
+<span class="nc" id="L221">        catch (UserNotFoundException unfe) {</span>
+<span class="nc" id="L222">            Log.error(unfe.getMessage(), unfe);</span>
+<span class="nc" id="L223">        }</span>
+<span class="nc" id="L224">    }</span>
+
+    /**
+     * Returns true if name is visible to everyone or not.
+     *
+     * @return true if name is visible to everyone, false if not.
+     */
+    public boolean isNameVisible() {
+<span class="nc bnc" id="L232" title="All 4 branches missed.">        return !getProperties().containsKey(NAME_VISIBLE_PROPERTY) || Boolean.valueOf(getProperties().get(NAME_VISIBLE_PROPERTY));</span>
+    }
+
+    /**
+     * Sets if name is visible to everyone or not.
+     *
+     * @param visible true if name is visible, false if not.
+     */
+    public void setNameVisible(boolean visible) {
+<span class="nc" id="L241">        getProperties().put(NAME_VISIBLE_PROPERTY, String.valueOf(visible));</span>
+<span class="nc" id="L242">    }</span>
+
+    /**
+     * Returns the email address of the user or {@code null} if none is defined.
+     *
+     * @return the email address of the user or null if none is defined.
+     */
+    public String getEmail() {
+<span class="nc" id="L250">        return email;</span>
+    }
+
+    public void setEmail(String email) {
+<span class="nc bnc" id="L254" title="All 2 branches missed.">        if (UserManager.getUserProvider().isReadOnly()) {</span>
+<span class="nc" id="L255">            throw new UnsupportedOperationException(&quot;User provider is read-only.&quot;);</span>
+        }
+
+<span class="nc bnc" id="L258" title="All 4 branches missed.">        if (email != null &amp;&amp; email.matches(&quot;\\s*&quot;)) {</span>
+<span class="nc" id="L259">            email = null;</span>
+        }
+
+<span class="nc bnc" id="L262" title="All 4 branches missed.">        if (UserManager.getUserProvider().isEmailRequired() &amp;&amp; !StringUtils.isValidEmailAddress(email)) {</span>
+<span class="nc" id="L263">            throw new IllegalArgumentException(&quot;User provider requires email address.&quot;);</span>
+        }
+
+        try {
+<span class="nc" id="L267">            String originalEmail= this.email;</span>
+<span class="nc" id="L268">            UserManager.getUserProvider().setEmail(username, email);</span>
+<span class="nc" id="L269">            this.email = email;</span>
+            // Fire event.
+<span class="nc" id="L271">            Map&lt;String,Object&gt; params = new HashMap&lt;&gt;();</span>
+<span class="nc" id="L272">            params.put(&quot;type&quot;, &quot;emailModified&quot;);</span>
+<span class="nc" id="L273">            params.put(&quot;originalValue&quot;, originalEmail);</span>
+<span class="nc" id="L274">            UserEventDispatcher.dispatchEvent(this, UserEventDispatcher.EventType.user_modified,</span>
+                    params);
+        }
+<span class="nc" id="L277">        catch (UserNotFoundException unfe) {</span>
+<span class="nc" id="L278">            Log.error(unfe.getMessage(), unfe);</span>
+<span class="nc" id="L279">        }</span>
+<span class="nc" id="L280">    }</span>
+
+    /**
+     * Returns true if email is visible to everyone or not.
+     *
+     * @return true if email is visible to everyone, false if not.
+     */
+    public boolean isEmailVisible() {
+<span class="nc bnc" id="L288" title="All 4 branches missed.">        return !getProperties().containsKey(EMAIL_VISIBLE_PROPERTY) || Boolean.valueOf(getProperties().get(EMAIL_VISIBLE_PROPERTY));</span>
+    }
+
+    /**
+     * Sets if the email is visible to everyone or not.
+     *
+     * @param visible true if the email is visible, false if not.
+     */
+    public void setEmailVisible(boolean visible) {
+<span class="nc" id="L297">        getProperties().put(EMAIL_VISIBLE_PROPERTY, String.valueOf(visible));</span>
+<span class="nc" id="L298">    }</span>
+
+    public Date getCreationDate() {
+<span class="nc" id="L301">        return creationDate;</span>
+    }
+
+    public void setCreationDate(Date creationDate) {
+<span class="nc bnc" id="L305" title="All 2 branches missed.">        if (UserManager.getUserProvider().isReadOnly()) {</span>
+<span class="nc" id="L306">            throw new UnsupportedOperationException(&quot;User provider is read-only.&quot;);</span>
+        }
+
+        try {
+<span class="nc" id="L310">            Date originalCreationDate = this.creationDate;</span>
+<span class="nc" id="L311">            UserManager.getUserProvider().setCreationDate(username, creationDate);</span>
+<span class="nc" id="L312">            this.creationDate = creationDate;</span>
+
+            // Fire event.
+<span class="nc" id="L315">            Map&lt;String,Object&gt; params = new HashMap&lt;&gt;();</span>
+<span class="nc" id="L316">            params.put(&quot;type&quot;, &quot;creationDateModified&quot;);</span>
+<span class="nc" id="L317">            params.put(&quot;originalValue&quot;, originalCreationDate);</span>
+<span class="nc" id="L318">            UserEventDispatcher.dispatchEvent(this, UserEventDispatcher.EventType.user_modified,</span>
+                    params);
+        }
+<span class="nc" id="L321">        catch (UserNotFoundException unfe) {</span>
+<span class="nc" id="L322">            Log.error(unfe.getMessage(), unfe);</span>
+<span class="nc" id="L323">        }</span>
+<span class="nc" id="L324">    }</span>
+
+    public Date getModificationDate() {
+<span class="nc" id="L327">        return modificationDate;</span>
+    }
+
+    public void setModificationDate(Date modificationDate) {
+<span class="nc bnc" id="L331" title="All 2 branches missed.">        if (UserManager.getUserProvider().isReadOnly()) {</span>
+<span class="nc" id="L332">            throw new UnsupportedOperationException(&quot;User provider is read-only.&quot;);</span>
+        }
+
+        try {
+<span class="nc" id="L336">            Date originalModificationDate = this.modificationDate;</span>
+<span class="nc" id="L337">            UserManager.getUserProvider().setCreationDate(username, modificationDate);</span>
+<span class="nc" id="L338">            this.modificationDate = modificationDate;</span>
+
+            // Fire event.
+<span class="nc" id="L341">            Map&lt;String,Object&gt; params = new HashMap&lt;&gt;();</span>
+<span class="nc" id="L342">            params.put(&quot;type&quot;, &quot;nameModified&quot;);</span>
+<span class="nc" id="L343">            params.put(&quot;originalValue&quot;, originalModificationDate);</span>
+<span class="nc" id="L344">            UserEventDispatcher.dispatchEvent(this, UserEventDispatcher.EventType.user_modified,</span>
+                    params);
+        }
+<span class="nc" id="L347">        catch (UserNotFoundException unfe) {</span>
+<span class="nc" id="L348">            Log.error(unfe.getMessage(), unfe);</span>
+<span class="nc" id="L349">        }</span>
+<span class="nc" id="L350">    }</span>
+
+    /**
+     * Returns all extended properties of the user. Users have an arbitrary
+     * number of extended properties. The returned collection can be modified
+     * to add new properties or remove existing ones.
+     *
+     * @return the extended properties.
+     */
+    public Map&lt;String,String&gt; getProperties() {
+<span class="nc" id="L360">        synchronized (this) {</span>
+<span class="nc bnc" id="L361" title="All 2 branches missed.">            if (properties == null) {</span>
+                try {
+<span class="nc" id="L363">                    properties = UserManager.getUserPropertyProvider().loadProperties( username );</span>
+<span class="nc" id="L364">                } catch (UserNotFoundException e ) {</span>
+<span class="nc" id="L365">                    Log.error( &quot;Unable to retrieve properties for user &quot; + username, e );</span>
+<span class="nc" id="L366">                }</span>
+            }
+<span class="nc" id="L368">        }</span>
+        // Return a wrapper that will intercept add and remove commands.
+<span class="nc" id="L370">        return new PropertiesMap();</span>
+    }
+
+    /**
+     * Returns the user's roster. A roster is a list of users that the user wishes to know
+     * if they are online. Rosters are similar to buddy groups in popular IM clients.
+     *
+     * @return the user's roster.
+     */
+    public Roster getRoster() {
+        try {
+<span class="nc" id="L381">            return XMPPServer.getInstance().getRosterManager().getRoster(username);</span>
+        }
+<span class="nc" id="L383">        catch (UserNotFoundException unfe) {</span>
+<span class="nc" id="L384">            Log.error(unfe.getMessage(), unfe);</span>
+<span class="nc" id="L385">            return null;</span>
+        }
+    }
+
+    @Override
+    public int getCachedSize()
+            throws CannotCalculateSizeException {
+        // Approximate the size of the object in bytes by calculating the size
+        // of each field.
+<span class="nc" id="L394">        int size = 0;</span>
+<span class="nc" id="L395">        size += CacheSizes.sizeOfObject();              // overhead of object</span>
+<span class="nc" id="L396">        size += CacheSizes.sizeOfLong();                // id</span>
+<span class="nc" id="L397">        size += CacheSizes.sizeOfString(username);      // username</span>
+<span class="nc" id="L398">        size += CacheSizes.sizeOfString(name);          // name</span>
+<span class="nc" id="L399">        size += CacheSizes.sizeOfString(email);         // email</span>
+<span class="nc" id="L400">        size += CacheSizes.sizeOfDate() * 2;            // creationDate and modificationDate</span>
+<span class="nc" id="L401">        size += CacheSizes.sizeOfMap(properties);       // properties</span>
+<span class="nc" id="L402">        return size;</span>
+    }
+
+    @Override
+    public String toString() {
+<span class="nc" id="L407">        return username;</span>
+    }
+
+    @Override
+    public int hashCode() {
+<span class="nc" id="L412">        return username.hashCode();</span>
+    }
+
+    @Override
+    public boolean equals(Object object) {
+<span class="nc bnc" id="L417" title="All 2 branches missed.">        if (this == object) {</span>
+<span class="nc" id="L418">            return true;</span>
+        }
+<span class="nc bnc" id="L420" title="All 4 branches missed.">        if (object != null &amp;&amp; object instanceof User) {</span>
+<span class="nc" id="L421">            return username.equals(((User)object).getUsername());</span>
+        }
+        else {
+<span class="nc" id="L424">            return false;</span>
+        }
+    }
+
+    /**
+     * Map implementation that updates the database when properties are modified.
+     */
+<span class="nc" id="L431">    private class PropertiesMap extends AbstractMap&lt;String, String&gt; {</span>
+
+        @Override
+        public String put(String key, String value) {
+<span class="nc" id="L435">            Map&lt;String,Object&gt; eventParams = new HashMap&lt;&gt;();</span>
+            String answer;
+<span class="nc" id="L437">            String keyString = key;</span>
+
+            try {
+<span class="nc" id="L440">                synchronized ((getName() + keyString).intern()) {</span>
+<span class="nc bnc" id="L441" title="All 2 branches missed.">                    if (properties.containsKey(keyString)) {</span>
+<span class="nc" id="L442">                        String originalValue = properties.get(keyString);</span>
+<span class="nc" id="L443">                        answer = properties.put(keyString, value);</span>
+<span class="nc" id="L444">                        UserManager.getUserPropertyProvider().updateProperty(username, keyString, value);</span>
+                        // Configure event.
+<span class="nc" id="L446">                        eventParams.put(&quot;type&quot;, &quot;propertyModified&quot;);</span>
+<span class="nc" id="L447">                        eventParams.put(&quot;propertyKey&quot;, key);</span>
+<span class="nc" id="L448">                        eventParams.put(&quot;originalValue&quot;, originalValue);</span>
+<span class="nc" id="L449">                    }</span>
+                    else {
+<span class="nc" id="L451">                        answer = properties.put(keyString, value);</span>
+<span class="nc" id="L452">                        UserManager.getUserPropertyProvider().insertProperty(username, keyString, value);</span>
+                        // Configure event.
+<span class="nc" id="L454">                        eventParams.put(&quot;type&quot;, &quot;propertyAdded&quot;);</span>
+<span class="nc" id="L455">                        eventParams.put(&quot;propertyKey&quot;, key);</span>
+                    }
+<span class="nc" id="L457">                }</span>
+
+                // Fire event.
+<span class="nc" id="L460">                UserEventDispatcher.dispatchEvent(User.this,</span>
+                                                  UserEventDispatcher.EventType.user_modified, eventParams);
+<span class="nc" id="L462">                return answer;</span>
+<span class="nc" id="L463">            } catch (UserNotFoundException e ) {</span>
+<span class="nc" id="L464">                Log.error( &quot;Unable to put property for user &quot; + username, e );</span>
+            }
+<span class="nc" id="L466">            return null;</span>
+        }
+
+        @Override
+        public Set&lt;Entry&lt;String, String&gt;&gt; entrySet() {
+<span class="nc" id="L471">            return new PropertiesEntrySet();</span>
+        }
+    }
+
+    /**
+     * Set implementation that updates the database when properties are deleted.
+     */
+<span class="nc" id="L478">    private class PropertiesEntrySet extends AbstractSet&lt;Map.Entry&lt;String, String&gt;&gt; {</span>
+
+        @Override
+        public int size() {
+<span class="nc" id="L482">            return properties.entrySet().size();</span>
+        }
+
+        @Override
+        public Iterator&lt;Map.Entry&lt;String, String&gt;&gt; iterator() {
+<span class="nc" id="L487">            return new Iterator&lt;Map.Entry&lt;String, String&gt;&gt;() {</span>
+
+<span class="nc" id="L489">                Iterator&lt;Map.Entry&lt;String, String&gt;&gt; iter = properties.entrySet().iterator();</span>
+<span class="nc" id="L490">                Map.Entry&lt;String,String&gt; current = null;</span>
+
+                @Override
+                public boolean hasNext() {
+<span class="nc" id="L494">                    return iter.hasNext();</span>
+                }
+
+                @Override
+                public Map.Entry&lt;String, String&gt; next() {
+<span class="nc" id="L499">                    current = iter.next();</span>
+<span class="nc" id="L500">                    return current;</span>
+                }
+
+                @Override
+                public void remove() {
+<span class="nc bnc" id="L505" title="All 2 branches missed.">                    if (current == null) {</span>
+<span class="nc" id="L506">                        throw new IllegalStateException();</span>
+                    }
+<span class="nc" id="L508">                    String key = current.getKey();</span>
+                    try {
+<span class="nc" id="L510">                        UserManager.getUserPropertyProvider().deleteProperty(username, key);</span>
+<span class="nc" id="L511">                        iter.remove();</span>
+                        // Fire event.
+<span class="nc" id="L513">                        Map&lt;String,Object&gt; params = new HashMap&lt;&gt;();</span>
+<span class="nc" id="L514">                        params.put(&quot;type&quot;, &quot;propertyDeleted&quot;);</span>
+<span class="nc" id="L515">                        params.put(&quot;propertyKey&quot;, key);</span>
+<span class="nc" id="L516">                        UserEventDispatcher.dispatchEvent(User.this,</span>
+                                                          UserEventDispatcher.EventType.user_modified, params);
+<span class="nc" id="L518">                    } catch (UserNotFoundException e ) {</span>
+<span class="nc" id="L519">                        Log.error( &quot;Unable to delete property for user &quot; + username, e );</span>
+<span class="nc" id="L520">                    }</span>
+<span class="nc" id="L521">                }</span>
+            };
+        }
+    }
+
+    @Override
+    public void writeExternal(ObjectOutput out) throws IOException {
+<span class="nc" id="L528">        ExternalizableUtil.getInstance().writeSafeUTF(out, username);</span>
+<span class="nc" id="L529">        ExternalizableUtil.getInstance().writeSafeUTF(out, getName());</span>
+<span class="nc bnc" id="L530" title="All 2 branches missed.">        ExternalizableUtil.getInstance().writeBoolean(out, email != null);</span>
+<span class="nc bnc" id="L531" title="All 2 branches missed.">        if (email != null) {</span>
+<span class="nc" id="L532">            ExternalizableUtil.getInstance().writeSafeUTF(out, email);</span>
+        }
+<span class="nc" id="L534">        ExternalizableUtil.getInstance().writeLong(out, creationDate.getTime());</span>
+<span class="nc" id="L535">        ExternalizableUtil.getInstance().writeLong(out, modificationDate.getTime());</span>
+<span class="nc" id="L536">    }</span>
+
+    @Override
+    public void readExternal(ObjectInput in) throws IOException, ClassNotFoundException {
+<span class="nc" id="L540">        username = ExternalizableUtil.getInstance().readSafeUTF(in);</span>
+<span class="nc" id="L541">        name = ExternalizableUtil.getInstance().readSafeUTF(in);</span>
+<span class="nc bnc" id="L542" title="All 2 branches missed.">        if (ExternalizableUtil.getInstance().readBoolean(in)) {</span>
+<span class="nc" id="L543">            email = ExternalizableUtil.getInstance().readSafeUTF(in);</span>
+        }
+<span class="nc" id="L545">        creationDate = new Date(ExternalizableUtil.getInstance().readLong(in));</span>
+<span class="nc" id="L546">        modificationDate = new Date(ExternalizableUtil.getInstance().readLong(in));</span>
+<span class="nc" id="L547">    }</span>
+
+    /*
+     * (non-Javadoc)
+     * @see org.jivesoftware.util.resultsetmanager.Result#getUID()
+     */
+    @Override
+    public String getUID()
+    {
+<span class="nc" id="L556">        return username;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

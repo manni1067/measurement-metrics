@@ -1,0 +1,275 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>AdHocCommand.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.commands</a> &gt; <span class="el_source">AdHocCommand.java</span></div><h1>AdHocCommand.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.commands;
+
+import org.dom4j.Element;
+import org.jivesoftware.openfire.admin.AdminManager;
+import org.xmpp.packet.JID;
+
+import java.util.List;
+import java.util.Map;
+
+/**
+ * An ad-hoc command is a stateless object responsbile for executing the provided service. Each
+ * subclass will only have one instance that will be shared across all users sessions. Therefore,
+ * it is important to not keep any information related to executions as permanent data
+ * (i.e. as instance or static variables). Each command has a {@code code} that should be
+ * unique within a given JID.&lt;p&gt;
+ *
+ * Commands may have zero or more stages. Each stage is usually used for gathering information
+ * required for the command execution. Users are able to move forward or backward across the
+ * different stages. Commands may not be cancelled while they are beig executed. However, users
+ * may request the &quot;cancel&quot; action when submiting a stage response indicating that the command
+ * execution should be aborted. Thus, releasing any collected information. Commands that require
+ * user interaction (i.e. have more than one stage) will have to provide the data forms the user
+ * must complete in each stage and the allowed actions the user might perform during each stage
+ * (e.g. go to the previous stage or go to the next stage).
+ *
+ * @author Gaston Dombiak
+ */
+public abstract class AdHocCommand {
+
+    /**
+     * Label of the command. This information may be used to display the command as a button
+     * or menu item.
+     */
+<span class="nc" id="L50">    private String label = getDefaultLabel();</span>
+
+<span class="nc" id="L52">    public AdHocCommand() {</span>
+<span class="nc" id="L53">    }</span>
+
+    public String getLabel() {
+<span class="nc" id="L56">        return label;</span>
+    }
+
+    public void setLabel(String label) {
+<span class="nc" id="L60">        this.label = label;</span>
+<span class="nc" id="L61">    }</span>
+
+    /**
+     * Returns true if the requester is allowed to execute this command. By default only admins
+     * are allowed to execute commands. Subclasses may redefine this method with any specific
+     * logic.&lt;p&gt;
+     *
+     * Note: The bare JID of the requester will be compared with the bare JID of the admins.
+     *
+     * @param requester the JID of the user requesting to execute this command.
+     * @return true if the requester is allowed to execute this command.
+     */
+    public boolean hasPermission(JID requester) {
+<span class="nc" id="L74">        return AdminManager.getInstance().isUserAdmin(requester, false);</span>
+    }
+
+    /**
+     * Returns the unique identifier for this command for the containing JID. The code will
+     * be used as the node in the disco#items or the node when executing the command.
+     *
+     * @return the unique identifier for this command for the containing JID.
+     */
+    public abstract String getCode();
+
+    /**
+     * Returns the default label used for describing this commmand. This information is usually
+     * used when returning commands as disco#items. Admins can later use {@link #setLabel(String)}
+     * to set a new label and reset to the default value at any time.
+     *
+     * @return the default label used for describing this commmand.
+     */
+    public abstract String getDefaultLabel();
+
+    /**
+     * Returns the max number of stages for this command. The number of stages may vary according
+     * to the collected data in previous stages. Therefore, a SessionData object is passed as a
+     * parameter. When the max number of stages has been reached then the command is ready to
+     * be executed.
+     *
+     * @param data the gathered data through the command stages or {@code null} if the
+     *        command does not have stages or the requester is requesting the execution for the
+     *        first time.
+     * @return the max number of stages for this command.
+     */
+    public abstract int getMaxStages(SessionData data);
+
+    /**
+     * Executes the command with the specified session data.
+     *
+     * @param data the gathered data through the command stages or {@code null} if the
+     *        command does not have stages.
+     * @param command the command element to be sent to the command requester with a reported
+     *        data result or note element with the answer of the execution.
+     */
+    public abstract void execute(SessionData data, Element command);
+
+    /**
+     * Adds to the command element the data form or notes required by the current stage. The
+     * current stage is specified in the SessionData. This method will never be invoked for
+     * commands that have no stages.
+     *
+     * @param data the gathered data through the command stages or {@code null} if the
+     *        command does not have stages or the requester is requesting the execution for the
+     *        first time.
+     * @param command the command element to be sent to the command requester.
+     */
+    protected abstract void addStageInformation(SessionData data, Element command);
+
+    /**
+     * Returns a collection with the allowed actions based on the current stage as defined
+     * in the SessionData. Possible actions are: {@code prev}, {@code next} and {@code complete}.
+     * This method will never be invoked for commands that have no stages.
+     *
+     * @param data the gathered data through the command stages or {@code null} if the
+     *        command does not have stages or the requester is requesting the execution for the
+     *        first time.
+     * @return a collection with the allowed actions based on the current stage as defined
+     *         in the SessionData.
+     */
+    protected abstract List&lt;Action&gt; getActions(SessionData data);
+
+    /**
+     * Returns which of the actions available for the current stage is considered the equivalent
+     * to &quot;execute&quot;. When the requester sends his reply, if no action was defined in the command
+     * then the action will be assumed &quot;execute&quot; thus assuming the action returned by this
+     * method. This method will never be invoked for commands that have no stages.
+     *
+     * @param data the gathered data through the command stages or {@code null} if the
+     *        command does not have stages or the requester is requesting the execution for the
+     *        first time.
+     * @return which of the actions available for the current stage is considered the equivalent
+     *         to &quot;execute&quot;.
+     */
+    protected abstract Action getExecuteAction(SessionData data);
+
+    /**
+     * Increments the stage number by one and adds to the command element the new data form and
+     * new allowed actions that the user might perform.
+     *
+     * @param data the gathered data through the command stages.
+     * @param command the command element to be sent to the command requester.
+     */
+    public void addNextStageInformation(SessionData data, Element command) {
+        // Increment the stage number to the next stage
+<span class="nc" id="L165">        data.setStage(data.getStage() + 1);</span>
+        // Return the data form of the current stage to the command requester. The
+        // requester will need to specify the action to follow (e.g. execute, prev,
+        // cancel, etc.) and complete the form is going &quot;forward&quot;
+<span class="nc" id="L169">        addStageInformation(data, command);</span>
+        // Include the available actions at this stage
+<span class="nc" id="L171">        addStageActions(data, command);</span>
+<span class="nc" id="L172">    }</span>
+
+    /**
+     * Decrements the stage number by one and adds to the command the data form and allowed
+     * actions that the user might perform of the previous stage.
+     *
+     * @param data the gathered data through the command stages.
+     * @param command the command element to be sent to the command requester.
+     */
+    public void addPreviousStageInformation(SessionData data, Element command) {
+        // Decrement the stage number to the previous stage
+<span class="nc" id="L183">        data.setStage(data.getStage() - 1);</span>
+        // Return the data form of the current stage to the command requester. The
+        // requester will need to specify the action to follow (e.g. execute, prev,
+        // cancel, etc.) and complete the form is going &quot;forward&quot;
+<span class="nc" id="L187">        addStageInformation(data, command);</span>
+        // Include the available actions at this stage
+<span class="nc" id="L189">        addStageActions(data, command);</span>
+<span class="nc" id="L190">    }</span>
+
+    /**
+     * Adds the allowed actions to follow from the current stage. Possible actions are:
+     * {@code prev}, {@code next} and {@code complete}.
+     *
+     * @param data the gathered data through the command stages or {@code null} if the
+     *        command does not have stages or the requester is requesting the execution for the
+     *        first time.
+     * @param command the command element to be sent to the command requester.
+     */
+    protected void addStageActions(SessionData data, Element command) {
+        // Add allowed actions to the response
+<span class="nc" id="L203">        Element actions = command.addElement(&quot;actions&quot;);</span>
+<span class="nc" id="L204">        List&lt;Action&gt; validActions = getActions(data);</span>
+<span class="nc bnc" id="L205" title="All 2 branches missed.">        for (AdHocCommand.Action action : validActions) {</span>
+<span class="nc" id="L206">            actions.addElement(action.name());</span>
+<span class="nc" id="L207">        }</span>
+<span class="nc" id="L208">        Action executeAction = getExecuteAction(data);</span>
+        // Add default execute action to the response
+<span class="nc" id="L210">        actions.addAttribute(&quot;execute&quot;, executeAction.name());</span>
+
+        // Store the allowed actions that the user can follow from this stage
+<span class="nc" id="L213">        data.setAllowedActions(validActions);</span>
+        // Store the default execute action to follow if the user does not specify an
+        // action in his command
+<span class="nc" id="L216">        data.setExecuteAction(executeAction);</span>
+<span class="nc" id="L217">    }</span>
+
+    protected String get(Map&lt;String, List&lt;String&gt;&gt; data, String key, int value) {
+<span class="nc" id="L220">        List&lt;String&gt; list = data.get(key);</span>
+<span class="nc bnc" id="L221" title="All 2 branches missed.">        if (list == null) {</span>
+<span class="nc" id="L222">            return null;</span>
+        } else {
+<span class="nc" id="L224">            return list.get(value);</span>
+        }
+    }
+
+
+<span class="nc" id="L229">    public enum Status {</span>
+
+        /**
+         * The command is being executed.
+         */
+<span class="nc" id="L234">        executing,</span>
+
+        /**
+         * The command has completed. The command session has ended.
+         */
+<span class="nc" id="L239">        completed,</span>
+
+        /**
+         * The command has been canceled. The command session has ended.
+         */
+<span class="nc" id="L244">        canceled</span>
+    }
+
+<span class="nc" id="L247">    public enum Action {</span>
+
+        /**
+         * The command should be executed or continue to be executed. This is the default value.
+         */
+<span class="nc" id="L252">        execute,</span>
+
+        /**
+         * The command should be canceled.
+         */
+<span class="nc" id="L257">        cancel,</span>
+
+        /**
+         * The command should be digress to the previous stage of execution.
+         */
+<span class="nc" id="L262">        prev,</span>
+
+        /**
+         * The command should progress to the next stage of execution.
+         */
+<span class="nc" id="L267">        next,</span>
+
+        /**
+         * The command should be completed (if possible).
+         */
+<span class="nc" id="L272">        complete</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

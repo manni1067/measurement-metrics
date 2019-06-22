@@ -1,0 +1,913 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>MultiUserChatManager.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.muc</a> &gt; <span class="el_source">MultiUserChatManager.java</span></div><h1>MultiUserChatManager.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.jivesoftware.openfire.muc;
+
+import java.nio.charset.StandardCharsets;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Types;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+
+import org.jivesoftware.database.DbConnectionManager;
+import org.jivesoftware.database.SequenceManager;
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.cluster.ClusterEventListener;
+import org.jivesoftware.openfire.cluster.ClusterManager;
+import org.jivesoftware.openfire.container.BasicModule;
+import org.jivesoftware.openfire.event.UserEventDispatcher;
+import org.jivesoftware.openfire.event.UserEventListener;
+import org.jivesoftware.openfire.muc.cluster.GetNewMemberRoomsRequest;
+import org.jivesoftware.openfire.muc.cluster.OccupantAddedEvent;
+import org.jivesoftware.openfire.muc.cluster.RoomInfo;
+import org.jivesoftware.openfire.muc.cluster.SeniorMemberServicesRequest;
+import org.jivesoftware.openfire.muc.cluster.ServiceInfo;
+import org.jivesoftware.openfire.muc.cluster.ServiceUpdatedEvent;
+import org.jivesoftware.openfire.muc.spi.LocalMUCRoom;
+import org.jivesoftware.openfire.muc.spi.MUCPersistenceManager;
+import org.jivesoftware.openfire.muc.spi.MUCServicePropertyEventListener;
+import org.jivesoftware.openfire.muc.spi.MultiUserChatServiceImpl;
+import org.jivesoftware.openfire.stats.Statistic;
+import org.jivesoftware.openfire.stats.StatisticsManager;
+import org.jivesoftware.openfire.user.User;
+import org.jivesoftware.util.AlreadyExistsException;
+import org.jivesoftware.util.JiveConstants;
+import org.jivesoftware.util.LocaleUtils;
+import org.jivesoftware.util.NotFoundException;
+import org.jivesoftware.util.cache.CacheFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmpp.component.ComponentException;
+import org.xmpp.component.ComponentManagerFactory;
+import org.xmpp.packet.JID;
+
+/**
+ * Provides centralized management of all configured Multi User Chat (MUC) services.
+ * 
+ * @author Daniel Henninger
+ */
+public class MultiUserChatManager extends BasicModule implements ClusterEventListener, MUCServicePropertyEventListener,
+        UserEventListener {
+
+<span class="nc" id="L71">    private static final Logger Log = LoggerFactory.getLogger(MultiUserChatManager.class);</span>
+
+    private static final String LOAD_SERVICES = &quot;SELECT subdomain,description,isHidden FROM ofMucService&quot;;
+    private static final String CREATE_SERVICE = &quot;INSERT INTO ofMucService(serviceID,subdomain,description,isHidden) VALUES(?,?,?,?)&quot;;
+    private static final String UPDATE_SERVICE = &quot;UPDATE ofMucService SET subdomain=?,description=? WHERE serviceID=?&quot;;
+    private static final String DELETE_SERVICE = &quot;DELETE FROM ofMucService WHERE serviceID=?&quot;;
+    private static final String LOAD_SERVICE_ID = &quot;SELECT serviceID FROM ofMucService WHERE subdomain=?&quot;;
+    private static final String LOAD_SUBDOMAIN = &quot;SELECT subdomain FROM ofMucService WHERE serviceID=?&quot;;
+
+    /**
+     * Statistics keys
+     */
+    private static final String roomsStatKey = &quot;muc_rooms&quot;;
+    private static final String occupantsStatKey = &quot;muc_occupants&quot;;
+    private static final String usersStatKey = &quot;muc_users&quot;;
+    private static final String incomingStatKey = &quot;muc_incoming&quot;;
+    private static final String outgoingStatKey = &quot;muc_outgoing&quot;;
+    private static final String trafficStatGroup = &quot;muc_traffic&quot;;
+
+<span class="nc" id="L90">    private ConcurrentHashMap&lt;String,MultiUserChatService&gt; mucServices = new ConcurrentHashMap&lt;&gt;();</span>
+
+    /**
+     * Creates a new MultiUserChatManager instance.
+     */
+    public MultiUserChatManager() {
+<span class="nc" id="L96">        super(&quot;Multi user chat manager&quot;);</span>
+<span class="nc" id="L97">    }</span>
+
+    /**
+     * Called when manager starts up, to initialize things.
+     */
+    @Override
+    public void start() {
+<span class="nc" id="L104">        super.start();</span>
+
+<span class="nc" id="L106">        loadServices();</span>
+
+<span class="nc bnc" id="L108" title="All 2 branches missed.">        for (MultiUserChatService service : mucServices.values()) {</span>
+<span class="nc" id="L109">            registerMultiUserChatService(service);</span>
+<span class="nc" id="L110">        }</span>
+
+        // Add statistics
+<span class="nc" id="L113">        addTotalRoomStats();</span>
+<span class="nc" id="L114">        addTotalOccupantsStats();</span>
+<span class="nc" id="L115">        addTotalConnectedUsers();</span>
+<span class="nc" id="L116">        addNumberIncomingMessages();</span>
+<span class="nc" id="L117">        addNumberOutgoingMessages();</span>
+
+<span class="nc" id="L119">        ClusterManager.addListener(this);</span>
+<span class="nc" id="L120">        UserEventDispatcher.addListener(this);</span>
+<span class="nc" id="L121">    }</span>
+
+    /**
+     * Called when manager is stopped, to clean things up.
+     */
+    @Override
+    public void stop() {
+<span class="nc" id="L128">        super.stop();</span>
+
+<span class="nc" id="L130">        ClusterManager.removeListener(this);</span>
+<span class="nc" id="L131">        UserEventDispatcher.removeListener(this);</span>
+
+        // Remove the statistics.
+<span class="nc" id="L134">        StatisticsManager.getInstance().removeStatistic(roomsStatKey);</span>
+<span class="nc" id="L135">        StatisticsManager.getInstance().removeStatistic(occupantsStatKey);</span>
+<span class="nc" id="L136">        StatisticsManager.getInstance().removeStatistic(usersStatKey);</span>
+<span class="nc" id="L137">        StatisticsManager.getInstance().removeStatistic(incomingStatKey);</span>
+<span class="nc" id="L138">        StatisticsManager.getInstance().removeStatistic(outgoingStatKey);</span>
+
+<span class="nc bnc" id="L140" title="All 2 branches missed.">        for (MultiUserChatService service : mucServices.values()) {</span>
+<span class="nc" id="L141">            unregisterMultiUserChatService(service.getServiceName());</span>
+<span class="nc" id="L142">        }</span>
+<span class="nc" id="L143">    }</span>
+
+    /**
+     * Registers a new MultiUserChatService implementation to the manager.
+     * This is typically used if you have a custom MUC implementation that you
+     * want to register with the manager.  In other words, it may not be database
+     * stored and may follow special rules, implementating MultiUserChatService.
+     * It is also used internally to register services from the database.  Triggers
+     * the service to start up.
+     *
+     * @param service The MultiUserChatService to be registered.
+     */
+    public void registerMultiUserChatService(MultiUserChatService service) {
+<span class="nc" id="L156">        Log.debug(&quot;MultiUserChatManager: Registering MUC service &quot;+service.getServiceName());</span>
+        try {
+<span class="nc" id="L158">            ComponentManagerFactory.getComponentManager().addComponent(service.getServiceName(), service);</span>
+<span class="nc" id="L159">            mucServices.put(service.getServiceName(), service);</span>
+        }
+<span class="nc" id="L161">        catch (ComponentException e) {</span>
+<span class="nc" id="L162">            Log.error(&quot;MultiUserChatManager: Unable to add &quot;+service.getServiceName()+&quot; as component.&quot;, e);</span>
+<span class="nc" id="L163">        }</span>
+<span class="nc" id="L164">    }</span>
+
+    /**
+     * Unregisters a MultiUserChatService from the manager.  It can be used
+     * to explicitly unregister services, and is also used internally to unregister
+     * database stored services.  Triggers the service to shut down.
+     *
+     * @param subdomain The subdomain of the service to be unregistered.
+     */
+    public void unregisterMultiUserChatService(String subdomain) {
+<span class="nc" id="L174">        Log.debug(&quot;MultiUserChatManager: Unregistering MUC service &quot;+subdomain);</span>
+<span class="nc" id="L175">        MultiUserChatService service = mucServices.get(subdomain);</span>
+<span class="nc bnc" id="L176" title="All 2 branches missed.">        if (service != null) {</span>
+<span class="nc" id="L177">            service.shutdown();</span>
+            try {
+<span class="nc" id="L179">                ComponentManagerFactory.getComponentManager().removeComponent(subdomain);</span>
+            }
+<span class="nc" id="L181">            catch (ComponentException e) {</span>
+<span class="nc" id="L182">                Log.error(&quot;MultiUserChatManager: Unable to remove &quot;+subdomain+&quot; from component manager.&quot;, e);</span>
+<span class="nc" id="L183">            }</span>
+<span class="nc" id="L184">            mucServices.remove(subdomain);</span>
+        }
+<span class="nc" id="L186">    }</span>
+
+    /**
+     * Returns the number of registered MultiUserChatServices.
+     *
+     * @param includePrivate True if you want to include private/hidden services in the count.
+     * @return Number of registered services.
+     */
+    public Integer getServicesCount(boolean includePrivate) {
+<span class="nc" id="L195">        Integer servicesCnt = mucServices.size();</span>
+<span class="nc bnc" id="L196" title="All 2 branches missed.">        if (!includePrivate) {</span>
+<span class="nc bnc" id="L197" title="All 2 branches missed.">            for (MultiUserChatService service : mucServices.values()) {</span>
+<span class="nc bnc" id="L198" title="All 2 branches missed.">                if (service.isHidden()) {</span>
+<span class="nc" id="L199">                    servicesCnt--;</span>
+                }
+<span class="nc" id="L201">            }</span>
+        }
+<span class="nc" id="L203">        return servicesCnt;</span>
+    }
+
+    /**
+     * Creates a new MUC service and registers it with the manager, and starts up the service.
+     *
+     * @param subdomain Subdomain of the MUC service.
+     * @param description Description of the MUC service (can be null for default description)
+     * @param isHidden True if the service is hidden from view in services lists.
+     * @return MultiUserChatService implementation that was just created.
+     * @throws AlreadyExistsException if the service already exists.
+     */
+    public MultiUserChatServiceImpl createMultiUserChatService(String subdomain, String description, Boolean isHidden) throws AlreadyExistsException {
+<span class="nc bnc" id="L216" title="All 2 branches missed.">        if (getMultiUserChatServiceID(subdomain) != null) throw new AlreadyExistsException();</span>
+<span class="nc" id="L217">        MultiUserChatServiceImpl muc = new MultiUserChatServiceImpl(subdomain, description, isHidden);</span>
+<span class="nc" id="L218">        insertService(subdomain, description, isHidden);</span>
+<span class="nc" id="L219">        registerMultiUserChatService(muc);</span>
+<span class="nc" id="L220">        return muc;</span>
+    }
+
+    /**
+     * Updates the configuration of a MUC service.  This is more involved than it may seem.  If the
+     * subdomain is changed, we need to shut down the old service and start up the new one, registering
+     * the new subdomain and cleaning up the old one.  Properties are tied to the ID, which will not change.
+     *
+     * @param serviceID The ID of the service to be updated.
+     * @param subdomain New subdomain to assign to the service.
+     * @param description New description to assign to the service.
+     * @throws NotFoundException if service was not found.
+     */
+    public void updateMultiUserChatService(Long serviceID, String subdomain, String description) throws NotFoundException {
+<span class="nc" id="L234">        MultiUserChatServiceImpl muc = (MultiUserChatServiceImpl) getMultiUserChatService(serviceID);</span>
+<span class="nc bnc" id="L235" title="All 2 branches missed.">        if (muc == null) throw new NotFoundException();</span>
+        // A NotFoundException is thrown if the specified service was not found.
+<span class="nc" id="L237">        String oldsubdomain = muc.getServiceName();</span>
+<span class="nc bnc" id="L238" title="All 2 branches missed.">        if (!mucServices.containsKey(oldsubdomain)) {</span>
+            // This should never occur, but just in case...
+<span class="nc" id="L240">            throw new NotFoundException();</span>
+        }
+<span class="nc bnc" id="L242" title="All 2 branches missed.">        if (oldsubdomain.equals(subdomain)) {</span>
+            // Alright, all we're changing is the description.  This is easy.
+<span class="nc" id="L244">            updateService(serviceID, subdomain, description);</span>
+            // Update the existing service's description.
+<span class="nc" id="L246">            muc.setDescription(description);</span>
+        }
+        else {
+            // Changing the subdomain, here's where it gets complex.
+            // Unregister existing muc service
+<span class="nc" id="L251">            unregisterMultiUserChatService(subdomain);</span>
+            // Update the information stored about the MUC service
+<span class="nc" id="L253">            updateService(serviceID, subdomain, description);</span>
+            // Create new MUC service with new settings
+<span class="nc" id="L255">            muc = new MultiUserChatServiceImpl(subdomain, description, muc.isHidden());</span>
+            // Register to new service
+<span class="nc" id="L257">            registerMultiUserChatService(muc);</span>
+        }
+<span class="nc" id="L259">    }</span>
+
+    /**
+     * Updates the configuration of a MUC service.  This is more involved than it may seem.  If the
+     * subdomain is changed, we need to shut down the old service and start up the new one, registering
+     * the new subdomain and cleaning up the old one.  Properties are tied to the ID, which will not change.
+     *
+     * @param cursubdomain The current subdomain assigned to the service.
+     * @param newsubdomain New subdomain to assign to the service.
+     * @param description New description to assign to the service.
+     * @throws NotFoundException if service was not found.
+     */
+    public void updateMultiUserChatService(String cursubdomain, String newsubdomain, String description) throws NotFoundException {
+<span class="nc" id="L272">        Long serviceID = getMultiUserChatServiceID(cursubdomain);</span>
+<span class="nc bnc" id="L273" title="All 2 branches missed.">        if (serviceID == null) throw new NotFoundException();</span>
+<span class="nc" id="L274">        updateMultiUserChatService(serviceID, newsubdomain, description);</span>
+<span class="nc" id="L275">    }</span>
+
+    /**
+     * Deletes a configured MultiUserChatService by subdomain, and shuts it down.
+     *
+     * @param subdomain The subdomain of the service to be deleted.
+     * @throws NotFoundException if the service was not found.
+     */
+    public void removeMultiUserChatService(String subdomain) throws NotFoundException {
+<span class="nc" id="L284">        Long serviceID = getMultiUserChatServiceID(subdomain);</span>
+<span class="nc bnc" id="L285" title="All 2 branches missed.">        if (serviceID == null) {</span>
+<span class="nc" id="L286">            Log.error(&quot;MultiUserChatManager: Unable to find service to remove for &quot;+subdomain);</span>
+<span class="nc" id="L287">            throw new NotFoundException();</span>
+        }
+<span class="nc" id="L289">        removeMultiUserChatService(serviceID);</span>
+<span class="nc" id="L290">    }</span>
+
+    /**
+     * Deletes a configured MultiUserChatService by ID, and shuts it down.
+     *
+     * @param serviceID The ID opf the service to be deleted.
+     * @throws NotFoundException if the service was not found.
+     */
+    public void removeMultiUserChatService(Long serviceID) throws NotFoundException {
+<span class="nc" id="L299">        MultiUserChatServiceImpl muc = (MultiUserChatServiceImpl) getMultiUserChatService(serviceID);</span>
+<span class="nc bnc" id="L300" title="All 2 branches missed.">        if (muc == null) {</span>
+<span class="nc" id="L301">            Log.error(&quot;MultiUserChatManager: Unable to find service to remove for service ID &quot;+serviceID);</span>
+<span class="nc" id="L302">            throw new NotFoundException();</span>
+        }
+<span class="nc" id="L304">        unregisterMultiUserChatService(muc.getServiceName());</span>
+<span class="nc" id="L305">        deleteService(serviceID);</span>
+<span class="nc" id="L306">    }</span>
+
+    /**
+     * Retrieves a MultiUserChatService instance specified by it's service ID.
+     *
+     * @param serviceID ID of the conference service you wish to query.
+     * @return The MultiUserChatService instance associated with the id, or null if none found.
+     */
+    public MultiUserChatService getMultiUserChatService(Long serviceID) {
+<span class="nc" id="L315">        String subdomain = getMultiUserChatSubdomain(serviceID);</span>
+<span class="nc bnc" id="L316" title="All 2 branches missed.">        if (subdomain == null) return null;</span>
+<span class="nc" id="L317">        return mucServices.get(subdomain);</span>
+    }
+
+
+    /**
+     * Retrieves a MultiUserChatService instance specified by it's subdomain of the
+     * server's primary domain.  In other words, if the service is conference.example.org,
+     * and the server is example.org, you would specify conference here.
+     *
+     * @param subdomain Subdomain of the conference service you wish to query.
+     * @return The MultiUserChatService instance associated with the subdomain, or null if none found.
+     */
+    public MultiUserChatService getMultiUserChatService(String subdomain) {
+<span class="nc" id="L330">        return mucServices.get(subdomain);</span>
+    }
+
+    /**
+     * Retrieves a MultiUserChatService instance specified by any JID that refers to it.
+     * In other words, it can be a hostname for the service, a room JID, or even the JID
+     * of a occupant of the room.  Basically it takes the hostname part of the JID,
+     * strips off the server hostname from the end, leaving only the subdomain, and then calls
+     * the subdomain version of the call.
+     *
+     * @param jid JID that contains a reference to the conference service.
+     * @return The MultiUserChatService instance associated with the JID, or null if none found.
+     */
+    public MultiUserChatService getMultiUserChatService(JID jid) {
+<span class="nc" id="L344">        String subdomain = jid.getDomain().replace(&quot;.&quot;+ XMPPServer.getInstance().getServerInfo().getXMPPDomain(), &quot;&quot;);</span>
+<span class="nc" id="L345">        return getMultiUserChatService(subdomain);</span>
+    }
+
+    /**
+     * Retrieves all of the MultiUserChatServices managed and configured for this server, sorted by
+     * subdomain.
+     *
+     * @return A list of MultiUserChatServices configured for this server.
+     */
+    public List&lt;MultiUserChatService&gt; getMultiUserChatServices() {
+<span class="nc" id="L355">        List&lt;MultiUserChatService&gt; services = new ArrayList&lt;&gt;(mucServices.values());</span>
+<span class="nc" id="L356">        Collections.sort(services, new ServiceComparator());</span>
+<span class="nc" id="L357">        return services;</span>
+    }
+
+    /**
+     * Retrieves the number of MultiUserChatServices that are configured for this server.
+     *
+     * @return The number of registered MultiUserChatServices.
+     */
+    public Integer getMultiUserChatServicesCount() {
+<span class="nc" id="L366">        return mucServices.size();</span>
+    }
+
+    /**
+     * Returns true if a MUC service is configured/exists for a given subdomain.
+     *
+     * @param subdomain Subdomain of service to check on.
+     * @return True or false if the subdomain is registered as a MUC service.
+     */
+    public boolean isServiceRegistered(String subdomain) {
+<span class="nc bnc" id="L376" title="All 2 branches missed.">        if (subdomain == null) return false;</span>
+<span class="nc" id="L377">        return mucServices.containsKey(subdomain);</span>
+    }
+
+    /**
+     * Retrieves ID of MUC service by subdomain.
+     *
+     * @param subdomain Subdomain of service to get ID of.
+     * @return ID number of MUC service, or null if none found.
+     */
+    public Long getMultiUserChatServiceID(String subdomain) {
+<span class="nc" id="L387">        Long id = loadServiceID(subdomain);</span>
+<span class="nc bnc" id="L388" title="All 2 branches missed.">        if (id == -1) {</span>
+<span class="nc" id="L389">            return null;</span>
+        }
+<span class="nc" id="L391">        return id;</span>
+    }
+
+    /**
+     * Retrieves the subdomain of a specified service ID.
+     *
+     * @param serviceID ID of service to get subdomain of.
+     * @return Subdomain of MUC service, or null if none found.
+     */
+    public String getMultiUserChatSubdomain(Long serviceID) {
+<span class="nc" id="L401">        return loadServiceSubdomain(serviceID);</span>
+    }
+
+    /**
+     * Loads the list of configured services stored in the database.
+     */
+    private void loadServices() {
+<span class="nc" id="L408">        Connection con = null;</span>
+<span class="nc" id="L409">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L410">        ResultSet rs = null;</span>
+        try {
+<span class="nc" id="L412">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L413">            pstmt = con.prepareStatement(LOAD_SERVICES);</span>
+<span class="nc" id="L414">            rs = pstmt.executeQuery();</span>
+<span class="nc bnc" id="L415" title="All 2 branches missed.">            while (rs.next()) {</span>
+<span class="nc" id="L416">                String subdomain = rs.getString(1);</span>
+<span class="nc" id="L417">                String description = rs.getString(2);</span>
+<span class="nc" id="L418">                Boolean isHidden = Boolean.valueOf(rs.getString(3));</span>
+<span class="nc" id="L419">                MultiUserChatServiceImpl muc = new MultiUserChatServiceImpl(subdomain, description, isHidden);</span>
+<span class="nc" id="L420">                mucServices.put(subdomain, muc);</span>
+<span class="nc" id="L421">            }</span>
+        }
+<span class="nc" id="L423">        catch (Exception e) {</span>
+<span class="nc" id="L424">            Log.error(e.getMessage(), e);</span>
+        }
+        finally {
+<span class="nc" id="L427">            DbConnectionManager.closeConnection(rs, pstmt, con);</span>
+<span class="nc" id="L428">        }</span>
+<span class="nc" id="L429">    }</span>
+
+    /**
+     * Gets a specific subdomain/service's ID number.
+     * @param subdomain Subdomain to retrieve ID for.
+     * @return ID number of service.
+     */
+    private long loadServiceID(String subdomain) {
+<span class="nc" id="L437">        Connection con = null;</span>
+<span class="nc" id="L438">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L439">        ResultSet rs = null;</span>
+<span class="nc" id="L440">        Long id = (long)-1;</span>
+        try {
+<span class="nc" id="L442">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L443">            pstmt = con.prepareStatement(LOAD_SERVICE_ID);</span>
+<span class="nc" id="L444">            pstmt.setString(1, subdomain);</span>
+<span class="nc" id="L445">            rs = pstmt.executeQuery();</span>
+<span class="nc bnc" id="L446" title="All 2 branches missed.">            if (rs.next()) {</span>
+<span class="nc" id="L447">                id = rs.getLong(1);</span>
+            }
+            else {
+<span class="nc" id="L450">                throw new Exception(&quot;Unable to locate Service ID for subdomain &quot;+subdomain);</span>
+            }
+        }
+<span class="nc" id="L453">        catch (Exception e) {</span>
+            // No problem, considering this as a &quot;not found&quot;.
+        }
+        finally {
+<span class="nc" id="L457">            DbConnectionManager.closeConnection(rs, pstmt, con);</span>
+<span class="nc" id="L458">        }</span>
+<span class="nc" id="L459">        return id;</span>
+    }
+
+    /**
+     * Gets a specific subdomain by a service's ID number.
+     * @param serviceID ID to retrieve subdomain for.
+     * @return Subdomain of service.
+     */
+    private String loadServiceSubdomain(Long serviceID) {
+<span class="nc" id="L468">        Connection con = null;</span>
+<span class="nc" id="L469">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L470">        ResultSet rs = null;</span>
+<span class="nc" id="L471">        String subdomain = null;</span>
+        try {
+<span class="nc" id="L473">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L474">            pstmt = con.prepareStatement(LOAD_SUBDOMAIN);</span>
+<span class="nc" id="L475">            pstmt.setLong(1, serviceID);</span>
+<span class="nc" id="L476">            rs = pstmt.executeQuery();</span>
+<span class="nc bnc" id="L477" title="All 2 branches missed.">            if (rs.next()) {</span>
+<span class="nc" id="L478">                subdomain = rs.getString(1);</span>
+            }
+            else {
+<span class="nc" id="L481">                throw new Exception(&quot;Unable to locate subdomain for service ID &quot;+serviceID);</span>
+            }
+        }
+<span class="nc" id="L484">        catch (Exception e) {</span>
+            // No problem, considering this as a &quot;not found&quot;.
+        }
+        finally {
+<span class="nc" id="L488">            DbConnectionManager.closeConnection(rs, pstmt, con);</span>
+<span class="nc" id="L489">        }</span>
+<span class="nc" id="L490">        return subdomain;</span>
+    }
+
+    /**
+     * Inserts a new MUC service into the database.
+     * @param subdomain Subdomain of new service.
+     * @param description Description of MUC service.  Can be null for default description.
+     * @param isHidden True if the service should be hidden from service listing.
+     */
+    private void insertService(String subdomain, String description, Boolean isHidden) {
+<span class="nc" id="L500">        Connection con = null;</span>
+<span class="nc" id="L501">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L502">        Long serviceID = SequenceManager.nextID(JiveConstants.MUC_SERVICE);</span>
+        try {
+<span class="nc" id="L504">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L505">            pstmt = con.prepareStatement(CREATE_SERVICE);</span>
+<span class="nc" id="L506">            pstmt.setLong(1, serviceID);</span>
+<span class="nc" id="L507">            pstmt.setString(2, subdomain);</span>
+<span class="nc bnc" id="L508" title="All 2 branches missed.">            if (description != null) {</span>
+<span class="nc" id="L509">                pstmt.setString(3, description);</span>
+            }
+            else {
+<span class="nc" id="L512">                pstmt.setNull(3, Types.VARCHAR);</span>
+            }
+<span class="nc bnc" id="L514" title="All 2 branches missed.">            pstmt.setInt(4, (isHidden ? 1 : 0));</span>
+<span class="nc" id="L515">            pstmt.executeUpdate();</span>
+        }
+<span class="nc" id="L517">        catch (SQLException e) {</span>
+<span class="nc" id="L518">            Log.error(e.getMessage(), e);</span>
+        }
+        finally {
+<span class="nc" id="L521">            DbConnectionManager.closeConnection(pstmt, con);</span>
+<span class="nc" id="L522">        }</span>
+<span class="nc" id="L523">    }</span>
+
+    /**
+     * Updates an existing service's subdomain and description in the database.
+     * @param serviceID ID of the service to update.
+     * @param subdomain Subdomain to set service to.
+     * @param description Description of MUC service.  Can be null for default description.
+     */
+    private void updateService(Long serviceID, String subdomain, String description) {
+<span class="nc" id="L532">        Connection con = null;</span>
+<span class="nc" id="L533">        PreparedStatement pstmt = null;</span>
+        try {
+<span class="nc" id="L535">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L536">            pstmt = con.prepareStatement(UPDATE_SERVICE);</span>
+<span class="nc" id="L537">            pstmt.setString(1, subdomain);</span>
+<span class="nc bnc" id="L538" title="All 2 branches missed.">            if (description != null) {</span>
+<span class="nc" id="L539">                pstmt.setString(2, description);</span>
+            }
+            else {
+<span class="nc" id="L542">                pstmt.setNull(2, Types.VARCHAR);</span>
+            }
+<span class="nc" id="L544">            pstmt.setLong(3, serviceID);</span>
+<span class="nc" id="L545">            pstmt.executeUpdate();</span>
+        }
+<span class="nc" id="L547">        catch (SQLException e) {</span>
+<span class="nc" id="L548">            Log.error(e.getMessage(), e);</span>
+        }
+        finally {
+<span class="nc" id="L551">            DbConnectionManager.closeConnection(pstmt, con);</span>
+<span class="nc" id="L552">        }</span>
+<span class="nc" id="L553">    }</span>
+
+    /**
+     * Deletes a service based on service ID.
+     * @param serviceID ID of the service to delete.
+     */
+    private void deleteService(Long serviceID) {
+<span class="nc" id="L560">        Connection con = null;</span>
+<span class="nc" id="L561">        PreparedStatement pstmt = null;</span>
+        try {
+<span class="nc" id="L563">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L564">            pstmt = con.prepareStatement(DELETE_SERVICE);</span>
+<span class="nc" id="L565">            pstmt.setLong(1, serviceID);</span>
+<span class="nc" id="L566">            pstmt.executeUpdate();</span>
+        }
+<span class="nc" id="L568">        catch (SQLException e) {</span>
+<span class="nc" id="L569">            Log.error(e.getMessage(), e);</span>
+        }
+        finally {
+<span class="nc" id="L572">            DbConnectionManager.closeConnection(pstmt, con);</span>
+<span class="nc" id="L573">        }</span>
+<span class="nc" id="L574">    }</span>
+
+    /****************** Statistics code ************************/
+    private void addTotalRoomStats() {
+        // Register a statistic.
+<span class="nc" id="L579">        Statistic statistic = new Statistic() {</span>
+            @Override
+            public String getName() {
+<span class="nc" id="L582">                return LocaleUtils.getLocalizedString(&quot;muc.stats.active_group_chats.name&quot;);</span>
+            }
+
+            @Override
+            public Type getStatType() {
+<span class="nc" id="L587">                return Type.count;</span>
+            }
+
+            @Override
+            public String getDescription() {
+<span class="nc" id="L592">                return LocaleUtils.getLocalizedString(&quot;muc.stats.active_group_chats.desc&quot;);</span>
+            }
+
+            @Override
+            public String getUnits() {
+<span class="nc" id="L597">                return LocaleUtils.getLocalizedString(&quot;muc.stats.active_group_chats.units&quot;);</span>
+            }
+
+            @Override
+            public double sample() {
+<span class="nc" id="L602">                double rooms = 0;</span>
+<span class="nc bnc" id="L603" title="All 2 branches missed.">                for (MultiUserChatService service : getMultiUserChatServices()) {</span>
+<span class="nc" id="L604">                    rooms += service.getNumberChatRooms();</span>
+<span class="nc" id="L605">                }</span>
+<span class="nc" id="L606">                return rooms;</span>
+            }
+
+            @Override
+            public boolean isPartialSample() {
+<span class="nc" id="L611">                return false;</span>
+            }
+        };
+<span class="nc" id="L614">        StatisticsManager.getInstance().addStatistic(roomsStatKey, statistic);</span>
+<span class="nc" id="L615">    }</span>
+
+    private void addTotalOccupantsStats() {
+        // Register a statistic.
+<span class="nc" id="L619">        Statistic statistic = new Statistic() {</span>
+            @Override
+            public String getName() {
+<span class="nc" id="L622">                return LocaleUtils.getLocalizedString(&quot;muc.stats.occupants.name&quot;);</span>
+            }
+
+            @Override
+            public Type getStatType() {
+<span class="nc" id="L627">                return Type.count;</span>
+            }
+
+            @Override
+            public String getDescription() {
+<span class="nc" id="L632">                return LocaleUtils.getLocalizedString(&quot;muc.stats.occupants.description&quot;);</span>
+            }
+
+            @Override
+            public String getUnits() {
+<span class="nc" id="L637">                return LocaleUtils.getLocalizedString(&quot;muc.stats.occupants.label&quot;);</span>
+            }
+
+            @Override
+            public double sample() {
+<span class="nc" id="L642">                double occupants = 0;</span>
+<span class="nc bnc" id="L643" title="All 2 branches missed.">                for (MultiUserChatService service : getMultiUserChatServices()) {</span>
+<span class="nc" id="L644">                    occupants += service.getNumberRoomOccupants();</span>
+<span class="nc" id="L645">                }</span>
+<span class="nc" id="L646">                return occupants;</span>
+            }
+
+            @Override
+            public boolean isPartialSample() {
+<span class="nc" id="L651">                return false;</span>
+            }
+        };
+<span class="nc" id="L654">        StatisticsManager.getInstance().addStatistic(occupantsStatKey, statistic);</span>
+<span class="nc" id="L655">    }</span>
+
+    private void addTotalConnectedUsers() {
+        // Register a statistic.
+<span class="nc" id="L659">        Statistic statistic = new Statistic() {</span>
+            @Override
+            public String getName() {
+<span class="nc" id="L662">                return LocaleUtils.getLocalizedString(&quot;muc.stats.users.name&quot;);</span>
+            }
+
+            @Override
+            public Type getStatType() {
+<span class="nc" id="L667">                return Type.count;</span>
+            }
+
+            @Override
+            public String getDescription() {
+<span class="nc" id="L672">                return LocaleUtils.getLocalizedString(&quot;muc.stats.users.description&quot;);</span>
+            }
+
+            @Override
+            public String getUnits() {
+<span class="nc" id="L677">                return LocaleUtils.getLocalizedString(&quot;muc.stats.users.label&quot;);</span>
+            }
+
+            @Override
+            public double sample() {
+<span class="nc" id="L682">                double users = 0;</span>
+<span class="nc bnc" id="L683" title="All 2 branches missed.">                for (MultiUserChatService service : getMultiUserChatServices()) {</span>
+<span class="nc" id="L684">                    users += service.getNumberConnectedUsers(false);</span>
+<span class="nc" id="L685">                }</span>
+<span class="nc" id="L686">                return users;</span>
+            }
+
+            @Override
+            public boolean isPartialSample() {
+<span class="nc" id="L691">                return false;</span>
+            }
+        };
+<span class="nc" id="L694">        StatisticsManager.getInstance().addStatistic(usersStatKey, statistic);</span>
+<span class="nc" id="L695">    }</span>
+
+    private void addNumberIncomingMessages() {
+        // Register a statistic.
+<span class="nc" id="L699">        Statistic statistic = new Statistic() {</span>
+            @Override
+            public String getName() {
+<span class="nc" id="L702">                return LocaleUtils.getLocalizedString(&quot;muc.stats.incoming.name&quot;);</span>
+            }
+
+            @Override
+            public Type getStatType() {
+<span class="nc" id="L707">                return Type.rate;</span>
+            }
+
+            @Override
+            public String getDescription() {
+<span class="nc" id="L712">                return LocaleUtils.getLocalizedString(&quot;muc.stats.incoming.description&quot;);</span>
+            }
+
+            @Override
+            public String getUnits() {
+<span class="nc" id="L717">                return LocaleUtils.getLocalizedString(&quot;muc.stats.incoming.label&quot;);</span>
+            }
+
+            @Override
+            public double sample() {
+<span class="nc" id="L722">                double msgcnt = 0;</span>
+<span class="nc bnc" id="L723" title="All 2 branches missed.">                for (MultiUserChatService service : getMultiUserChatServices()) {</span>
+<span class="nc" id="L724">                    msgcnt += service.getIncomingMessageCount(true);</span>
+<span class="nc" id="L725">                }</span>
+<span class="nc" id="L726">                return msgcnt;</span>
+            }
+
+            @Override
+            public boolean isPartialSample() {
+                // Get this value from the other cluster nodes
+<span class="nc" id="L732">                return true;</span>
+            }
+        };
+<span class="nc" id="L735">        StatisticsManager.getInstance().addMultiStatistic(incomingStatKey, trafficStatGroup, statistic);</span>
+<span class="nc" id="L736">    }</span>
+
+    private void addNumberOutgoingMessages() {
+        // Register a statistic.
+<span class="nc" id="L740">        Statistic statistic = new Statistic() {</span>
+            @Override
+            public String getName() {
+<span class="nc" id="L743">                return LocaleUtils.getLocalizedString(&quot;muc.stats.outgoing.name&quot;);</span>
+            }
+
+            @Override
+            public Type getStatType() {
+<span class="nc" id="L748">                return Type.rate;</span>
+            }
+
+            @Override
+            public String getDescription() {
+<span class="nc" id="L753">                return LocaleUtils.getLocalizedString(&quot;muc.stats.outgoing.description&quot;);</span>
+            }
+
+            @Override
+            public String getUnits() {
+<span class="nc" id="L758">                return LocaleUtils.getLocalizedString(&quot;muc.stats.outgoing.label&quot;);</span>
+            }
+
+            @Override
+            public double sample() {
+<span class="nc" id="L763">                double msgcnt = 0;</span>
+<span class="nc bnc" id="L764" title="All 2 branches missed.">                for (MultiUserChatService service : getMultiUserChatServices()) {</span>
+<span class="nc" id="L765">                    msgcnt += service.getOutgoingMessageCount(true);</span>
+<span class="nc" id="L766">                }</span>
+<span class="nc" id="L767">                return msgcnt;</span>
+            }
+
+            @Override
+            public boolean isPartialSample() {
+                // Each cluster node knows the total across the cluster
+<span class="nc" id="L773">                return false;</span>
+            }
+        };
+<span class="nc" id="L776">        StatisticsManager.getInstance().addMultiStatistic(outgoingStatKey, trafficStatGroup, statistic);</span>
+<span class="nc" id="L777">    }</span>
+
+    // Cluster management tasks
+    @Override
+    public void joinedCluster() {
+<span class="nc bnc" id="L782" title="All 2 branches missed.">        if (!ClusterManager.isSeniorClusterMember()) {</span>
+            // Get transient rooms and persistent rooms with occupants from senior
+            // cluster member and merge with local ones. If room configuration was
+            // changed in both places then latest configuration will be kept
+            @SuppressWarnings(&quot;unchecked&quot;)
+<span class="nc" id="L787">            List&lt;ServiceInfo&gt; result = (List&lt;ServiceInfo&gt;) CacheFactory.doSynchronousClusterTask(</span>
+<span class="nc" id="L788">                    new SeniorMemberServicesRequest(), ClusterManager.getSeniorClusterMember().toByteArray());</span>
+<span class="nc bnc" id="L789" title="All 2 branches missed.">            if (result != null) {</span>
+<span class="nc bnc" id="L790" title="All 2 branches missed.">                for (ServiceInfo serviceInfo : result) {</span>
+                    MultiUserChatService service;
+<span class="nc" id="L792">                    service = XMPPServer.getInstance().getMultiUserChatManager().getMultiUserChatService(serviceInfo.getSubdomain());</span>
+<span class="nc bnc" id="L793" title="All 2 branches missed.">                    if (service == null) {</span>
+                        // This is a service we don't know about yet, create it locally and register it;
+<span class="nc" id="L795">                        service = new MultiUserChatServiceImpl(serviceInfo.getSubdomain(), serviceInfo.getDescription(), serviceInfo.isHidden());</span>
+<span class="nc" id="L796">                        XMPPServer.getInstance().getMultiUserChatManager().registerMultiUserChatService(service);</span>
+                    }
+
+<span class="nc" id="L799">                    MultiUserChatServiceImpl serviceImpl = (MultiUserChatServiceImpl)service;</span>
+
+<span class="nc bnc" id="L801" title="All 2 branches missed.">                    for (RoomInfo roomInfo : serviceInfo.getRooms()) {</span>
+<span class="nc" id="L802">                        LocalMUCRoom remoteRoom = roomInfo.getRoom();</span>
+<span class="nc" id="L803">                        LocalMUCRoom localRoom = serviceImpl.getLocalChatRoom(remoteRoom.getName());</span>
+<span class="nc bnc" id="L804" title="All 2 branches missed.">                        if (localRoom == null) {</span>
+                            // Create local room with remote information
+<span class="nc" id="L806">                            localRoom = remoteRoom;</span>
+<span class="nc" id="L807">                            serviceImpl.chatRoomAdded(localRoom);</span>
+                        }
+                        else {
+                            // Update local room with remote information
+<span class="nc" id="L811">                            localRoom.updateConfiguration(remoteRoom);</span>
+                        }
+                        // Add remote occupants to local room
+                        // TODO Handle conflict of nicknames
+<span class="nc bnc" id="L815" title="All 2 branches missed.">                        for (OccupantAddedEvent event : roomInfo.getOccupants()) {</span>
+<span class="nc" id="L816">                            event.setSendPresence(true);</span>
+<span class="nc" id="L817">                            event.run();</span>
+<span class="nc" id="L818">                        }</span>
+<span class="nc" id="L819">                    }</span>
+<span class="nc" id="L820">                }</span>
+            }
+        }
+<span class="nc" id="L823">    }</span>
+    
+    @Override
+    @SuppressWarnings(&quot;unchecked&quot;)
+    public void joinedCluster(byte[] nodeID) {
+<span class="nc" id="L828">        Object result = CacheFactory.doSynchronousClusterTask(new GetNewMemberRoomsRequest(), nodeID);</span>
+<span class="nc bnc" id="L829" title="All 2 branches missed.">        if (result instanceof List&lt;?&gt;) {</span>
+<span class="nc" id="L830">            List&lt;RoomInfo&gt; rooms = (List&lt;RoomInfo&gt;) result;</span>
+<span class="nc bnc" id="L831" title="All 2 branches missed.">            for (RoomInfo roomInfo : rooms) {</span>
+<span class="nc" id="L832">                LocalMUCRoom remoteRoom = roomInfo.getRoom();</span>
+<span class="nc" id="L833">                MultiUserChatServiceImpl service = (MultiUserChatServiceImpl)remoteRoom.getMUCService();</span>
+<span class="nc" id="L834">                LocalMUCRoom localRoom = service.getLocalChatRoom(remoteRoom.getName());</span>
+<span class="nc bnc" id="L835" title="All 2 branches missed.">                if (localRoom == null) {</span>
+                    // Create local room with remote information
+<span class="nc" id="L837">                    localRoom = remoteRoom;</span>
+<span class="nc" id="L838">                    service.chatRoomAdded(localRoom);</span>
+                }
+                // Add remote occupants to local room
+<span class="nc bnc" id="L841" title="All 2 branches missed.">                for (OccupantAddedEvent event : roomInfo.getOccupants()) {</span>
+<span class="nc" id="L842">                    event.setSendPresence(true);</span>
+<span class="nc" id="L843">                    event.run();</span>
+<span class="nc" id="L844">                }</span>
+<span class="nc" id="L845">            }</span>
+        }
+<span class="nc" id="L847">    }</span>
+
+    @Override
+    public void leftCluster() {
+        // Do nothing. An unavailable presence will be created for occupants hosted in other cluster nodes.
+<span class="nc" id="L852">    }</span>
+
+    @Override
+    public void leftCluster(byte[] nodeID) {
+        // Remove all room occupants linked to the defunct node as their sessions are cleaned out earlier
+<span class="nc" id="L857">        Log.debug(&quot;Removing orphaned occupants associated with defunct node: &quot; +  new String(nodeID, StandardCharsets.UTF_8));</span>
+
+<span class="nc bnc" id="L859" title="All 2 branches missed.">        for (MultiUserChatService service : getMultiUserChatServices()) {</span>
+<span class="nc bnc" id="L860" title="All 2 branches missed.">            for (MUCRoom mucRoom : service.getChatRooms()) {</span>
+<span class="nc bnc" id="L861" title="All 2 branches missed.">                for (MUCRole mucRole : mucRoom.getOccupants()) {</span>
+<span class="nc bnc" id="L862" title="All 2 branches missed.">                    if (mucRole.getNodeID().equals(nodeID)) {</span>
+<span class="nc" id="L863">                        mucRoom.leaveRoom(mucRole);</span>
+                    }
+<span class="nc" id="L865">                }</span>
+<span class="nc" id="L866">            }</span>
+<span class="nc" id="L867">        }</span>
+<span class="nc" id="L868">    }</span>
+
+    @Override
+    public void markedAsSeniorClusterMember() {
+        // Do nothing
+<span class="nc" id="L873">    }</span>
+
+    @Override
+    public void propertySet(String service, String property, Map&lt;String, Object&gt; params) {
+        // Let everyone know we've had an update.
+<span class="nc" id="L878">        CacheFactory.doSynchronousClusterTask(new ServiceUpdatedEvent(service), false);</span>
+<span class="nc" id="L879">    }</span>
+
+    @Override
+    public void propertyDeleted(String service, String property, Map&lt;String, Object&gt; params) {
+        // Let everyone know we've had an update.
+<span class="nc" id="L884">        CacheFactory.doSynchronousClusterTask(new ServiceUpdatedEvent(service), false);</span>
+<span class="nc" id="L885">    }</span>
+
+    @Override
+    public void userCreated(User user, Map&lt;String, Object&gt; params) {
+        // Do nothing
+<span class="nc" id="L890">    }</span>
+
+    @Override
+    public void userDeleting(User user, Map&lt;String, Object&gt; params) {
+        // Delete any affiliation of the user to any room of any MUC service
+        MUCPersistenceManager
+<span class="nc" id="L896">                .removeAffiliationFromDB(XMPPServer.getInstance().createJID(user.getUsername(), null, true));</span>
+        // TODO Delete any user information from the rooms loaded into memory
+<span class="nc" id="L898">    }</span>
+
+    @Override
+    public void userModified(User user, Map&lt;String, Object&gt; params) {
+        // Do nothing
+<span class="nc" id="L903">    }</span>
+
+<span class="nc" id="L905">    private static class ServiceComparator implements Comparator&lt;MultiUserChatService&gt; {</span>
+        @Override
+        public int compare(MultiUserChatService o1, MultiUserChatService o2) {
+<span class="nc" id="L908">            return o1.getServiceName().compareTo(o2.getServiceName());</span>
+        }
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

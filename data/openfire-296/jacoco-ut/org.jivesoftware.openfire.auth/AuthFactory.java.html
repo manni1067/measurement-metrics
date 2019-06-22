@@ -1,0 +1,316 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>AuthFactory.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.auth</a> &gt; <span class="el_source">AuthFactory.java</span></div><h1>AuthFactory.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2004-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.auth;
+
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+
+import org.jivesoftware.openfire.lockout.LockOutManager;
+import org.jivesoftware.openfire.user.UserNotFoundException;
+import org.jivesoftware.util.Blowfish;
+import org.jivesoftware.util.JiveGlobals;
+import org.jivesoftware.util.LocaleUtils;
+import org.jivesoftware.util.StringUtils;
+import org.jivesoftware.util.SystemProperty;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Pluggable authentication service. Users of Openfire that wish to change the AuthProvider
+ * implementation used to authenticate users can set the &lt;code&gt;AuthProvider.className&lt;/code&gt;
+ * system property. For example, if you have configured Openfire to use LDAP for user information,
+ * you'd want to send a custom implementation of AuthFactory to make LDAP auth queries.
+ * After changing the &lt;code&gt;AuthProvider.className&lt;/code&gt; system property, you must restart your
+ * application server.
+ *
+ * @author Matt Tucker
+ */
+<span class="nc" id="L42">public class AuthFactory {</span>
+
+<span class="fc" id="L44">    private static final Logger Log = LoggerFactory.getLogger(AuthFactory.class);</span>
+<span class="fc" id="L45">    private static final SystemProperty&lt;String&gt; PASSWORD_KEY = SystemProperty.Builder.ofType(String.class)</span>
+<span class="fc" id="L46">        .setKey(&quot;passwordKey&quot;)</span>
+<span class="fc" id="L47">        .setDynamic(true)</span>
+<span class="fc" id="L48">        .build();</span>
+<span class="fc" id="L49">    public static final SystemProperty&lt;Class&gt; AUTH_PROVIDER = SystemProperty.Builder.ofType(Class.class)</span>
+<span class="fc" id="L50">        .setKey(&quot;provider.auth.className&quot;)</span>
+<span class="fc" id="L51">        .setBaseClass(AuthProvider.class)</span>
+<span class="fc" id="L52">        .setDefaultValue(DefaultAuthProvider.class)</span>
+<span class="fc" id="L53">        .setDynamic(true)</span>
+<span class="fc" id="L54">        .addListener(AuthFactory::initProvider)</span>
+<span class="fc" id="L55">        .build();</span>
+
+<span class="fc" id="L57">    private static AuthProvider authProvider = null;</span>
+    private static MessageDigest digest;
+<span class="fc" id="L59">    private static final Object DIGEST_LOCK = new Object();</span>
+<span class="fc" id="L60">    private static Blowfish cipher = null;</span>
+
+    static {
+        // Create a message digest instance.
+        try {
+<span class="fc" id="L65">            digest = MessageDigest.getInstance(&quot;SHA&quot;);</span>
+        }
+<span class="nc" id="L67">        catch (NoSuchAlgorithmException e) {</span>
+<span class="nc" id="L68">            Log.error(LocaleUtils.getLocalizedString(&quot;admin.error&quot;), e);</span>
+<span class="fc" id="L69">        }</span>
+        // Load an auth provider.
+<span class="fc" id="L71">        initProvider(AUTH_PROVIDER.getValue());</span>
+<span class="fc" id="L72">    }</span>
+
+    private static void initProvider(final Class clazz) {
+
+        // Check if we need to reset the auth provider class
+<span class="pc bpc" id="L77" title="3 of 4 branches missed.">        if (authProvider == null || !clazz.equals(authProvider.getClass())) {</span>
+            try {
+<span class="fc" id="L79">                authProvider = (AuthProvider)clazz.newInstance();</span>
+            }
+<span class="nc" id="L81">            catch (Exception e) {</span>
+<span class="nc" id="L82">                Log.error(&quot;Error loading auth provider: &quot; + clazz.getName(), e);</span>
+<span class="nc" id="L83">                authProvider = new DefaultAuthProvider();</span>
+<span class="fc" id="L84">            }</span>
+        }
+<span class="fc" id="L86">    }</span>
+
+    /**
+     * Returns the currently-installed AuthProvider. &lt;b&gt;Warning:&lt;/b&gt; in virtually all
+     * cases the auth provider should not be used directly. Instead, the appropriate
+     * methods in AuthFactory should be called. Direct access to the auth provider is
+     * only provided for special-case logic.
+     *
+     * @return the current UserProvider.
+     * @deprecated Prefer using the corresponding factory method, rather than 
+     * 					invoking methods on the provider directly
+     */
+    public static AuthProvider getAuthProvider() {
+<span class="nc" id="L99">        return authProvider;</span>
+    }
+
+    /**
+     * Returns whether the currently-installed AuthProvider is instance of a specific class.
+     * @param c the class to compare with
+     * @return true - if the currently-installed AuthProvider is instance of c, false otherwise.
+     */
+    public static boolean isProviderInstanceOf(Class&lt;?&gt; c) {
+<span class="nc" id="L108">        return c.isInstance(authProvider);</span>
+    }
+
+    /**
+     * Indicates if the currently-installed AuthProvider is the HybridAuthProvider supporting a specific class.
+     *
+     * @param clazz the class to check
+     * @return {@code true}  if the currently-installed AuthProvider is a HybridAuthProvider that supports an instance of clazz, otherwise {@code false}.
+     */
+    public static boolean isProviderHybridInstanceOf(Class&lt;? extends AuthProvider&gt; clazz) {
+<span class="nc bnc" id="L118" title="All 2 branches missed.">        return authProvider instanceof HybridAuthProvider &amp;&amp;</span>
+<span class="nc bnc" id="L119" title="All 2 branches missed.">            ((HybridAuthProvider) authProvider).isProvider(clazz);</span>
+    }
+
+    /**
+     * Returns true if the currently installed {@link AuthProvider} supports password
+     * retrieval. Certain implementation utilize password hashes and other authentication
+     * mechanisms that do not require the original password.
+     *
+     * @return true if plain password retrieval is supported.
+     */
+    public static boolean supportsPasswordRetrieval() {
+<span class="nc" id="L130">        return authProvider.supportsPasswordRetrieval();</span>
+    }
+
+    /**
+     * Returns the user's password. This method will throw an UnsupportedOperationException
+     * if this operation is not supported by the backend user store.
+     *
+     * @param username the username of the user.
+     * @return the user's password.
+     * @throws UserNotFoundException if the given user could not be found.
+     * @throws UnsupportedOperationException if the provider does not
+     *      support the operation (this is an optional operation).
+     */
+    public static String getPassword(String username) throws UserNotFoundException,
+            UnsupportedOperationException {
+<span class="nc" id="L145">        return authProvider.getPassword(username.toLowerCase());</span>
+    }
+
+    /**
+     * Sets the users's password. This method should throw an UnsupportedOperationException
+     * if this operation is not supported by the backend user store.
+     *
+     * @param username the username of the user.
+     * @param password the new plaintext password for the user.
+     * @throws UserNotFoundException if the given user could not be loaded.
+     * @throws UnsupportedOperationException if the provider does not
+     *      support the operation (this is an optional operation).
+     * @throws ConnectionException if there is a problem connecting to user and group system
+     * @throws InternalUnauthenticatedException if there is a problem authentication Openfire itself into the user and group system
+     */
+    public static void setPassword(String username, String password) throws UserNotFoundException, 
+            UnsupportedOperationException, ConnectionException, InternalUnauthenticatedException {
+<span class="nc" id="L162">            authProvider.setPassword(username, password);</span>
+<span class="nc" id="L163">        }</span>
+
+    /**
+     * Authenticates a user with a username and plain text password and returns and
+     * AuthToken. If the username and password do not match the record of
+     * any user in the system, this method throws an UnauthorizedException.
+     *
+     * @param username the username.
+     * @param password the password.
+     * @return an AuthToken token if the username and password are correct.
+     * @throws UnauthorizedException if the username and password do not match any existing user
+     *      or the account is locked out.
+     * @throws ConnectionException if there is a problem connecting to user and group system
+     * @throws InternalUnauthenticatedException if there is a problem authentication Openfire itself into the user and group system
+     */
+    public static AuthToken authenticate(String username, String password)
+            throws UnauthorizedException, ConnectionException, InternalUnauthenticatedException {
+<span class="nc bnc" id="L180" title="All 2 branches missed.">        if (LockOutManager.getInstance().isAccountDisabled(username)) {</span>
+<span class="nc" id="L181">            LockOutManager.getInstance().recordFailedLogin(username);</span>
+<span class="nc" id="L182">            throw new UnauthorizedException();</span>
+        }
+<span class="nc" id="L184">        authProvider.authenticate(username, password);</span>
+<span class="nc" id="L185">        return AuthToken.generateUserToken( username );</span>
+    }
+
+    /**
+     * Returns a digest given a token and password, according to JEP-0078.
+     *
+     * @param token the token used in the digest.
+     * @param password the plain-text password to be digested.
+     * @return the digested result as a hex string.
+     */
+    public static String createDigest(String token, String password) {
+<span class="nc" id="L196">        synchronized (DIGEST_LOCK) {</span>
+<span class="nc" id="L197">            digest.update(token.getBytes());</span>
+<span class="nc" id="L198">            return StringUtils.encodeHex(digest.digest(password.getBytes()));</span>
+<span class="nc" id="L199">        }</span>
+    }
+
+    /**
+     * Returns an encrypted version of the plain-text password. Encryption is performed
+     * using the Blowfish algorithm. The encryption key is stored as the Jive property
+     * &quot;passwordKey&quot;. If the key is not present, it will be automatically generated.
+     *
+     * @param password the plain-text password.
+     * @return the encrypted password.
+     * @throws UnsupportedOperationException if encryption/decryption is not possible;
+     *      for example, during setup mode.
+     */
+    public static String encryptPassword(String password) {
+<span class="nc bnc" id="L213" title="All 2 branches missed.">        if (password == null) {</span>
+<span class="nc" id="L214">            return null;</span>
+        }
+<span class="nc" id="L216">        Blowfish cipher = getCipher();</span>
+<span class="nc bnc" id="L217" title="All 2 branches missed.">        if (cipher == null) {</span>
+<span class="nc" id="L218">            throw new UnsupportedOperationException();</span>
+        }
+<span class="nc" id="L220">        return cipher.encryptString(password);</span>
+    }
+
+    /**
+     * Returns a decrypted version of the encrypted password. Encryption is performed
+     * using the Blowfish algorithm. The encryption key is stored as the Jive property
+     * &quot;passwordKey&quot;. If the key is not present, it will be automatically generated.
+     *
+     * @param encryptedPassword the encrypted password.
+     * @return the encrypted password.
+     * @throws UnsupportedOperationException if encryption/decryption is not possible;
+     *      for example, during setup mode.
+     */
+    public static String decryptPassword(String encryptedPassword) {
+<span class="nc bnc" id="L234" title="All 2 branches missed.">        if (encryptedPassword == null) {</span>
+<span class="nc" id="L235">            return null;</span>
+        }
+<span class="nc" id="L237">        Blowfish cipher = getCipher();</span>
+<span class="nc bnc" id="L238" title="All 2 branches missed.">        if (cipher == null) {</span>
+<span class="nc" id="L239">            throw new UnsupportedOperationException();</span>
+        }
+<span class="nc" id="L241">        return cipher.decryptString(encryptedPassword);</span>
+    }
+
+    /**
+     * Returns a Blowfish cipher that can be used for encrypting and decrypting passwords.
+     * The encryption key is stored as the Jive property &quot;passwordKey&quot;. If it's not present,
+     * it will be automatically generated.
+     *
+     * @return the Blowfish cipher, or {@code null} if Openfire is not able to create a Cipher;
+     *      for example, during setup mode.
+     */
+    private static synchronized Blowfish getCipher() {
+<span class="nc bnc" id="L253" title="All 2 branches missed.">        if (cipher != null) {</span>
+<span class="nc" id="L254">            return cipher;</span>
+        }
+        // Get the password key, stored as a database property. Obviously,
+        // protecting your database is critical for making the
+        // encryption fully secure.
+        String keyString;
+        try {
+<span class="nc" id="L261">            keyString = PASSWORD_KEY.getValue();</span>
+<span class="nc bnc" id="L262" title="All 2 branches missed.">            if (keyString == null) {</span>
+<span class="nc" id="L263">                keyString = StringUtils.randomString(15);</span>
+<span class="nc" id="L264">                PASSWORD_KEY.setValue(keyString);</span>
+                // Check to make sure that setting the property worked. It won't work,
+                // for example, when in setup mode.
+<span class="nc bnc" id="L267" title="All 2 branches missed.">                if (!keyString.equals(PASSWORD_KEY.getValue())) {</span>
+<span class="nc" id="L268">                    return null;</span>
+                }
+            }
+<span class="nc" id="L271">            cipher = new Blowfish(keyString);</span>
+        }
+<span class="nc" id="L273">        catch (Exception e) {</span>
+<span class="nc" id="L274">            Log.error(e.getMessage(), e);</span>
+<span class="nc" id="L275">        }</span>
+<span class="nc" id="L276">        return cipher;</span>
+    }
+
+    public static boolean supportsScram() {
+        // TODO Auto-generated method stub
+<span class="nc" id="L281">        return authProvider.isScramSupported();</span>
+    }
+
+    public static String getSalt(String username) throws UnsupportedOperationException, UserNotFoundException {
+<span class="nc" id="L285">        return authProvider.getSalt(username);</span>
+    }
+    public static int getIterations(String username) throws UnsupportedOperationException, UserNotFoundException {
+<span class="nc" id="L288">        return authProvider.getIterations(username);</span>
+    }
+    public static String getServerKey(String username) throws UnsupportedOperationException, UserNotFoundException {
+<span class="nc" id="L291">        return authProvider.getServerKey(username);</span>
+    }
+    public static String getStoredKey(String username) throws UnsupportedOperationException, UserNotFoundException {
+<span class="nc" id="L294">        return authProvider.getStoredKey(username);</span>
+    }
+
+    public static final String ONE_TIME_PROPERTY = &quot;oneTimeAccessToken&quot;;
+
+    public static boolean isOneTimeAccessTokenEnabled() {
+<span class="fc" id="L300">        return org.apache.commons.lang3.StringUtils.isNotBlank(JiveGlobals.getXMLProperty(ONE_TIME_PROPERTY));</span>
+    }
+
+    public static AuthToken checkOneTimeAccessToken(String userToken) throws UnauthorizedException {
+<span class="nc" id="L304">        String accessToken = JiveGlobals.getXMLProperty(ONE_TIME_PROPERTY);</span>
+<span class="nc bnc" id="L305" title="All 4 branches missed.">        if (isOneTimeAccessTokenEnabled() &amp;&amp; accessToken.equals(userToken)) {</span>
+            // Remove the one time token.
+            // This invocation will overwrite the openfire.xml with removing the OneTimeAccessToken tag.
+<span class="nc" id="L308">            JiveGlobals.deleteXMLProperty(ONE_TIME_PROPERTY);</span>
+<span class="nc" id="L309">            Log.info(&quot;Login with the one time access token.&quot;);</span>
+<span class="nc" id="L310">            return AuthToken.generateOneTimeToken(accessToken);</span>
+        } else {
+<span class="nc" id="L312">            throw new UnauthorizedException();</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

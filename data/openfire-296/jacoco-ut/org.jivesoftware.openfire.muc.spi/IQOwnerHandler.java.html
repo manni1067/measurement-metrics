@@ -1,0 +1,729 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>IQOwnerHandler.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.muc.spi</a> &gt; <span class="el_source">IQOwnerHandler.java</span></div><h1>IQOwnerHandler.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2004-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.muc.spi;
+
+import java.util.ArrayList;
+import java.util.Date;
+import java.util.List;
+
+import org.dom4j.DocumentHelper;
+import org.dom4j.Element;
+import org.dom4j.QName;
+import org.jivesoftware.openfire.PacketRouter;
+import org.jivesoftware.openfire.group.Group;
+import org.jivesoftware.openfire.group.GroupJID;
+import org.jivesoftware.openfire.group.GroupManager;
+import org.jivesoftware.openfire.group.GroupNotFoundException;
+import org.jivesoftware.openfire.muc.*;
+import org.jivesoftware.openfire.muc.cluster.RoomUpdatedEvent;
+import org.jivesoftware.util.JiveGlobals;
+import org.jivesoftware.util.LocaleUtils;
+import org.jivesoftware.util.cache.CacheFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmpp.forms.DataForm;
+import org.xmpp.forms.FormField;
+import org.xmpp.forms.FormField.Type;
+import org.xmpp.packet.IQ;
+import org.xmpp.packet.JID;
+import org.xmpp.packet.PacketError;
+import org.xmpp.packet.Presence;
+
+/**
+ * A handler for the IQ packet with namespace http://jabber.org/protocol/muc#owner. This kind of 
+ * packets are usually sent by room owners. So this handler provides the necessary functionality
+ * to support owner requirements such as: room configuration and room destruction.
+ *
+ * @author Gaston Dombiak
+ */
+public class IQOwnerHandler {
+    
+<span class="nc" id="L55">    private static final Logger Log = LoggerFactory.getLogger(IQOwnerHandler.class);</span>
+
+    private final LocalMUCRoom room;
+
+    private final PacketRouter router;
+
+    private DataForm configurationForm;
+
+    private Element probeResult;
+
+    private final boolean skipInvite;
+
+<span class="nc" id="L67">    public IQOwnerHandler(LocalMUCRoom chatroom, PacketRouter packetRouter) {</span>
+<span class="nc" id="L68">        this.room = chatroom;</span>
+<span class="nc" id="L69">        this.router = packetRouter;</span>
+<span class="nc" id="L70">        this.skipInvite = JiveGlobals.getBooleanProperty(</span>
+                &quot;xmpp.muc.skipInvite&quot;, false);
+<span class="nc" id="L72">        init();</span>
+<span class="nc" id="L73">    }</span>
+
+    /**
+     * Handles the IQ packet sent by an owner of the room. Possible actions are:
+     * &lt;ul&gt;
+     * &lt;li&gt;Return the list of owners&lt;/li&gt;
+     * &lt;li&gt;Return the list of admins&lt;/li&gt;
+     * &lt;li&gt;Change user's affiliation to owner&lt;/li&gt;
+     * &lt;li&gt;Change user's affiliation to admin&lt;/li&gt;
+     * &lt;li&gt;Change user's affiliation to member&lt;/li&gt;
+     * &lt;li&gt;Change user's affiliation to none&lt;/li&gt;
+     * &lt;li&gt;Destroy the room&lt;/li&gt;
+     * &lt;li&gt;Return the room configuration within a dataform&lt;/li&gt;
+     * &lt;li&gt;Update the room configuration based on the sent dataform&lt;/li&gt;
+     * &lt;/ul&gt;
+     *
+     * @param packet the IQ packet sent by an owner of the room.
+     * @param role the role of the user that sent the packet.
+     * @throws ForbiddenException if the user does not have enough permissions (ie. is not an owner).
+     * @throws ConflictException If the room was going to lose all of its owners.
+     * @throws CannotBeInvitedException never
+     * @throws NotAcceptableException if the room requires a password that was not supplied
+     */
+    public void handleIQ(IQ packet, MUCRole role) throws ForbiddenException, ConflictException, CannotBeInvitedException, NotAcceptableException
+    {
+        // Only owners can send packets with the namespace &quot;http://jabber.org/protocol/muc#owner&quot;
+<span class="nc bnc" id="L99" title="All 2 branches missed.">        if (MUCRole.Affiliation.owner != role.getAffiliation()) {</span>
+<span class="nc" id="L100">            throw new ForbiddenException();</span>
+        }
+
+<span class="nc" id="L103">        IQ reply = IQ.createResultIQ(packet);</span>
+<span class="nc" id="L104">        Element element = packet.getChildElement();</span>
+
+        // Analyze the action to perform based on the included element
+<span class="nc" id="L107">        Element formElement = element.element(QName.get(&quot;x&quot;, &quot;jabber:x:data&quot;));</span>
+<span class="nc bnc" id="L108" title="All 2 branches missed.">        if (formElement != null) {</span>
+<span class="nc" id="L109">            handleDataFormElement(role, formElement);</span>
+        }
+        else {
+<span class="nc" id="L112">            Element destroyElement = element.element(&quot;destroy&quot;);</span>
+<span class="nc bnc" id="L113" title="All 2 branches missed.">            if (destroyElement != null) {</span>
+<span class="nc bnc" id="L114" title="All 2 branches missed.">                if (((MultiUserChatServiceImpl)room.getMUCService()).getMUCDelegate() != null) {</span>
+<span class="nc bnc" id="L115" title="All 2 branches missed.">                    if (!((MultiUserChatServiceImpl)room.getMUCService()).getMUCDelegate().destroyingRoom(room.getName(), role.getUserAddress())) {</span>
+                        // Delegate said no, reject destroy request.
+<span class="nc" id="L117">                        throw new ForbiddenException();</span>
+                    }
+                }
+
+<span class="nc" id="L121">                JID alternateJID = null;</span>
+<span class="nc" id="L122">                final String jid = destroyElement.attributeValue(&quot;jid&quot;);</span>
+<span class="nc bnc" id="L123" title="All 2 branches missed.">                if (jid != null) {</span>
+<span class="nc" id="L124">                    alternateJID = new JID(jid);</span>
+                }
+<span class="nc" id="L126">                room.destroyRoom(alternateJID, destroyElement.elementTextTrim(&quot;reason&quot;));</span>
+<span class="nc" id="L127">            }</span>
+            else {
+                // If no element was included in the query element then answer the
+                // configuration form
+<span class="nc bnc" id="L131" title="All 2 branches missed.">                if (!element.elementIterator().hasNext()) {</span>
+<span class="nc" id="L132">                    refreshConfigurationFormValues();</span>
+<span class="nc" id="L133">                    reply.setChildElement(probeResult.createCopy());</span>
+                }
+                // An unknown and possibly incorrect element was included in the query
+                // element so answer a BAD_REQUEST error
+                else {
+<span class="nc" id="L138">                    reply.setChildElement(packet.getChildElement().createCopy());</span>
+<span class="nc" id="L139">                    reply.setError(PacketError.Condition.bad_request);</span>
+                }
+            }
+        }
+<span class="nc bnc" id="L143" title="All 2 branches missed.">        if (reply.getTo() != null) {</span>
+            // Send a reply only if the sender of the original packet was from a real JID. (i.e. not
+            // a packet generated locally)
+<span class="nc" id="L146">            router.route(reply);</span>
+        }
+<span class="nc" id="L148">    }</span>
+
+    /**
+     * Handles packets that includes a data form. The data form was sent using an element with name
+     * &quot;x&quot; and namespace &quot;jabber:x:data&quot;.
+     *
+     * @param senderRole  the role of the user that sent the data form.
+     * @param formElement the element that contains the data form specification.
+     * @throws ForbiddenException    if the user does not have enough privileges.
+     * @throws ConflictException If the room was going to lose all of its owners.
+     * @throws NotAcceptableException if the room requires a password that was not supplied
+     */
+    private void handleDataFormElement(MUCRole senderRole, Element formElement)
+            throws ForbiddenException, ConflictException, NotAcceptableException {
+<span class="nc" id="L162">        DataForm completedForm = new DataForm(formElement);</span>
+
+<span class="nc bnc" id="L164" title="All 3 branches missed.">        switch(completedForm.getType()) {</span>
+        case cancel:
+            // If the room was just created (i.e. is locked) and the owner cancels the configuration
+            // form then destroy the room
+<span class="nc bnc" id="L168" title="All 2 branches missed.">            if (room.isLocked()) {</span>
+<span class="nc" id="L169">                room.destroyRoom(null, null);</span>
+            }
+            break;
+            
+        case submit:
+            // The owner is requesting an instant room
+<span class="nc bnc" id="L175" title="All 2 branches missed.">            if (completedForm.getFields().isEmpty()) {</span>
+                // Do nothing
+            }
+            // The owner is requesting a reserved room or is changing the current configuration
+            else {
+<span class="nc" id="L180">                processConfigurationForm(completedForm, senderRole);</span>
+            }
+            // If the room was locked, unlock it and send to the owner the &quot;room is now unlocked&quot;
+            // message
+<span class="nc bnc" id="L184" title="All 4 branches missed.">            if (room.isLocked() &amp;&amp; !room.isManuallyLocked()) {</span>
+<span class="nc" id="L185">                room.unlock(senderRole);</span>
+            }
+<span class="nc bnc" id="L187" title="All 2 branches missed.">            if (!room.isDestroyed) {</span>
+                // Let other cluster nodes that the room has been updated
+<span class="nc" id="L189">                CacheFactory.doClusterTask(new RoomUpdatedEvent(room));</span>
+            }
+            break;
+            
+        default:
+<span class="nc" id="L194">            Log.warn(&quot;cannot handle data form element: &quot; + formElement.asXML());</span>
+            break;
+        }
+<span class="nc" id="L197">    }</span>
+
+    /**
+     * Processes the completed form sent by an owner of the room. This will modify the room's
+     * configuration as well as the list of owners and admins.
+     *
+     * @param completedForm the completed form sent by an owner of the room.
+     * @param senderRole the role of the user that sent the completed form.
+     * @throws ForbiddenException if the user does not have enough privileges.
+     * @throws ConflictException If the room was going to lose all of its owners.
+     * @throws NotAcceptableException if the room requires a password that was not supplied
+     */
+    private void processConfigurationForm(DataForm completedForm, MUCRole senderRole)
+            throws ForbiddenException, ConflictException, NotAcceptableException
+    {
+        List&lt;String&gt; values;
+        FormField field;
+
+        // Get the new list of admins
+<span class="nc" id="L216">        field = completedForm.getField(&quot;muc#roomconfig_roomadmins&quot;);</span>
+<span class="nc bnc" id="L217" title="All 2 branches missed.">        boolean adminsSent = field != null;</span>
+<span class="nc" id="L218">        List&lt;JID&gt; admins = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L219" title="All 2 branches missed.">        if (field != null) {</span>
+<span class="nc bnc" id="L220" title="All 2 branches missed.">            for (String value : field.getValues()) {</span>
+                // XEP-0045: &quot;Affiliations are granted, revoked, and 
+                // maintained based on the user's bare JID, (...)&quot;
+<span class="nc bnc" id="L223" title="All 4 branches missed.">                if (value != null &amp;&amp; value.trim().length() != 0) {</span>
+                    // could be a group jid
+<span class="nc" id="L225">                    admins.add(GroupJID.fromString((value.trim())).asBareJID());</span>
+                }
+<span class="nc" id="L227">            }</span>
+        }
+
+        // Get the new list of owners
+<span class="nc" id="L231">        field = completedForm.getField(&quot;muc#roomconfig_roomowners&quot;);</span>
+<span class="nc bnc" id="L232" title="All 2 branches missed.">        boolean ownersSent = field != null;</span>
+<span class="nc" id="L233">        List&lt;JID&gt; owners = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L234" title="All 2 branches missed.">        if (field != null) {</span>
+<span class="nc bnc" id="L235" title="All 2 branches missed.">            for(String value : field.getValues()) {</span>
+                // XEP-0045: &quot;Affiliations are granted, revoked, and 
+                // maintained based on the user's bare JID, (...)&quot;
+<span class="nc bnc" id="L238" title="All 4 branches missed.">                if (value != null &amp;&amp; value.trim().length() != 0) {</span>
+                    // could be a group jid
+<span class="nc" id="L240">                    owners.add(GroupJID.fromString((value.trim())).asBareJID());</span>
+                }
+<span class="nc" id="L242">            }</span>
+        }
+
+        // Answer a conflict error if all the current owners will be removed
+<span class="nc bnc" id="L246" title="All 4 branches missed.">        if (ownersSent &amp;&amp; owners.isEmpty()) {</span>
+<span class="nc" id="L247">            throw new ConflictException();</span>
+        }
+
+        // Keep a registry of the updated presences
+<span class="nc" id="L251">        List&lt;Presence&gt; presences = new ArrayList&lt;&gt;(admins.size() + owners.size());</span>
+
+<span class="nc" id="L253">        field = completedForm.getField(&quot;muc#roomconfig_roomname&quot;);</span>
+<span class="nc bnc" id="L254" title="All 2 branches missed.">        if (field != null) {</span>
+<span class="nc" id="L255">            final String value = field.getFirstValue();</span>
+<span class="nc bnc" id="L256" title="All 2 branches missed.">            room.setNaturalLanguageName((value != null ? value : &quot; &quot;));</span>
+        }
+
+<span class="nc" id="L259">        field = completedForm.getField(&quot;muc#roomconfig_roomdesc&quot;);</span>
+<span class="nc bnc" id="L260" title="All 2 branches missed.">        if (field != null) {</span>
+<span class="nc" id="L261">            final String value = field.getFirstValue();</span>
+<span class="nc bnc" id="L262" title="All 2 branches missed.">            room.setDescription((value != null ? value : &quot; &quot;));</span>
+        }
+
+<span class="nc" id="L265">        field = completedForm.getField(&quot;muc#roomconfig_changesubject&quot;);</span>
+<span class="nc bnc" id="L266" title="All 2 branches missed.">        if (field != null) {</span>
+<span class="nc" id="L267">            room.setCanOccupantsChangeSubject( parseFirstValueAsBoolean( field, true ) );</span>
+        }
+
+<span class="nc" id="L270">        field = completedForm.getField(&quot;muc#roomconfig_maxusers&quot;);</span>
+<span class="nc bnc" id="L271" title="All 2 branches missed.">        if (field != null) {</span>
+<span class="nc" id="L272">            final String value = field.getFirstValue();</span>
+<span class="nc bnc" id="L273" title="All 2 branches missed.">            room.setMaxUsers((value != null ? Integer.parseInt(value) : 30));</span>
+        }
+
+<span class="nc" id="L276">        field = completedForm.getField(&quot;muc#roomconfig_presencebroadcast&quot;);</span>
+<span class="nc bnc" id="L277" title="All 2 branches missed.">        if (field != null) {</span>
+<span class="nc" id="L278">            values = new ArrayList&lt;&gt;(field.getValues());</span>
+<span class="nc" id="L279">            room.setRolesToBroadcastPresence(values);</span>
+        }
+
+<span class="nc" id="L282">        field = completedForm.getField(&quot;muc#roomconfig_publicroom&quot;);</span>
+<span class="nc bnc" id="L283" title="All 2 branches missed.">        if (field != null) {</span>
+<span class="nc" id="L284">            room.setPublicRoom( parseFirstValueAsBoolean( field, true ) );</span>
+        }
+
+<span class="nc" id="L287">        field = completedForm.getField(&quot;muc#roomconfig_persistentroom&quot;);</span>
+<span class="nc bnc" id="L288" title="All 2 branches missed.">        if (field != null) {</span>
+<span class="nc" id="L289">            boolean isPersistent = parseFirstValueAsBoolean( field, true );</span>
+            // Delete the room from the DB if it's no longer persistent
+<span class="nc bnc" id="L291" title="All 4 branches missed.">            if (room.isPersistent() &amp;&amp; !isPersistent) {</span>
+<span class="nc" id="L292">                MUCPersistenceManager.deleteFromDB(room);</span>
+            }
+<span class="nc" id="L294">            room.setPersistent(isPersistent);</span>
+        }
+
+<span class="nc" id="L297">        field = completedForm.getField(&quot;muc#roomconfig_moderatedroom&quot;);</span>
+<span class="nc bnc" id="L298" title="All 2 branches missed.">        if (field != null) {</span>
+<span class="nc" id="L299">            room.setModerated( parseFirstValueAsBoolean( field, true ) );</span>
+        }
+
+<span class="nc" id="L302">        field = completedForm.getField(&quot;muc#roomconfig_membersonly&quot;);</span>
+<span class="nc bnc" id="L303" title="All 2 branches missed.">        if (field != null) {</span>
+<span class="nc" id="L304">            presences.addAll(room.setMembersOnly( parseFirstValueAsBoolean( field, true ) ) );</span>
+        }
+
+<span class="nc" id="L307">        field = completedForm.getField(&quot;muc#roomconfig_allowinvites&quot;);</span>
+<span class="nc bnc" id="L308" title="All 2 branches missed.">        if (field != null) {</span>
+<span class="nc" id="L309">            room.setCanOccupantsInvite( parseFirstValueAsBoolean( field, true ) );</span>
+        }
+
+
+<span class="nc" id="L313">        boolean passwordProtectionChanged = false;</span>
+<span class="nc" id="L314">        boolean passwordChanged = false;</span>
+
+<span class="nc" id="L316">        boolean updatedIsPasswordProtected = false;</span>
+<span class="nc" id="L317">        String updatedPassword = null;</span>
+
+<span class="nc" id="L319">        field = completedForm.getField(&quot;muc#roomconfig_passwordprotectedroom&quot;);</span>
+<span class="nc bnc" id="L320" title="All 2 branches missed.">        if (field != null)</span>
+        {
+<span class="nc" id="L322">            passwordProtectionChanged = true;</span>
+<span class="nc" id="L323">            updatedIsPasswordProtected = parseFirstValueAsBoolean( field, true );</span>
+        }
+
+<span class="nc" id="L326">        field = completedForm.getField(&quot;muc#roomconfig_roomsecret&quot;);</span>
+<span class="nc bnc" id="L327" title="All 2 branches missed.">        if (field != null) {</span>
+<span class="nc" id="L328">            passwordChanged = true;</span>
+<span class="nc" id="L329">            updatedPassword = completedForm.getField(&quot;muc#roomconfig_roomsecret&quot;).getFirstValue();</span>
+<span class="nc bnc" id="L330" title="All 4 branches missed.">            if ( updatedPassword != null &amp;&amp; updatedPassword.isEmpty() )</span>
+            {
+<span class="nc" id="L332">                updatedPassword = null;</span>
+            }
+        }
+
+<span class="nc bnc" id="L336" title="All 2 branches missed.">        if ( passwordProtectionChanged )</span>
+        {
+            // The owner signifies that a change in password-protection status is desired.
+<span class="nc bnc" id="L339" title="All 2 branches missed.">            if ( !updatedIsPasswordProtected )</span>
+            {
+                // The owner lifts password protection.
+<span class="nc" id="L342">                room.setPassword( null );</span>
+            }
+<span class="nc bnc" id="L344" title="All 4 branches missed.">            else if ( updatedPassword == null &amp;&amp; room.getPassword() == null )</span>
+            {
+                // The owner sets password-protection, but does not provide a password (and the room does not already have a password).
+<span class="nc" id="L347">                throw new NotAcceptableException( &quot;Room is made password-protected, but is missing a password.&quot; );</span>
+            }
+<span class="nc bnc" id="L349" title="All 2 branches missed.">            else if ( updatedPassword != null )</span>
+            {
+                // The owner sets password-protection and provided a new password.
+<span class="nc" id="L352">                room.setPassword( updatedPassword );</span>
+            }
+        }
+<span class="nc bnc" id="L355" title="All 2 branches missed.">        else if ( passwordChanged )</span>
+        {
+            // The owner did not explicitly signal a password protection change, but did change the password value.
+            // This implies a change in password protection.
+<span class="nc" id="L359">            room.setPassword( updatedPassword );</span>
+        }
+
+<span class="nc" id="L362">        field = completedForm.getField(&quot;muc#roomconfig_whois&quot;);</span>
+<span class="nc bnc" id="L363" title="All 2 branches missed.">        if (field != null) {</span>
+<span class="nc" id="L364">            room.setCanAnyoneDiscoverJID((&quot;anyone&quot;.equals(field.getFirstValue())));</span>
+        }
+
+<span class="nc" id="L367">        field = completedForm.getField(&quot;muc#roomconfig_allowpm&quot;);</span>
+<span class="nc bnc" id="L368" title="All 2 branches missed.">        if (field != null) {</span>
+<span class="nc" id="L369">            room.setCanSendPrivateMessage(field.getFirstValue());</span>
+        }
+
+<span class="nc" id="L372">        field = completedForm.getField(&quot;muc#roomconfig_enablelogging&quot;);</span>
+<span class="nc bnc" id="L373" title="All 2 branches missed.">        if (field != null) {</span>
+<span class="nc" id="L374">            room.setLogEnabled( parseFirstValueAsBoolean( field, true ) );</span>
+        }
+
+<span class="nc" id="L377">        field = completedForm.getField(&quot;x-muc#roomconfig_reservednick&quot;);</span>
+<span class="nc bnc" id="L378" title="All 2 branches missed.">        if (field != null) {</span>
+<span class="nc" id="L379">            room.setLoginRestrictedToNickname( parseFirstValueAsBoolean( field, true ) );</span>
+        }
+
+<span class="nc" id="L382">        field = completedForm.getField(&quot;x-muc#roomconfig_canchangenick&quot;);</span>
+<span class="nc bnc" id="L383" title="All 2 branches missed.">        if (field != null) {</span>
+<span class="nc" id="L384">            room.setChangeNickname( parseFirstValueAsBoolean( field, true ) );</span>
+        }
+
+<span class="nc" id="L387">        field = completedForm.getField(&quot;x-muc#roomconfig_registration&quot;);</span>
+<span class="nc bnc" id="L388" title="All 2 branches missed.">        if (field != null) {</span>
+<span class="nc" id="L389">            room.setRegistrationEnabled( parseFirstValueAsBoolean( field, true ) );</span>
+        }
+
+        // Update the modification date to reflect the last time when the room's configuration
+        // was modified
+<span class="nc" id="L394">        room.setModificationDate(new Date());</span>
+
+<span class="nc bnc" id="L396" title="All 2 branches missed.">        if (room.isPersistent()) {</span>
+<span class="nc" id="L397">            room.saveToDB();</span>
+        }
+
+        // Set the new owners and admins of the room
+<span class="nc" id="L401">        presences.addAll(room.addOwners(owners, senderRole));</span>
+<span class="nc" id="L402">        presences.addAll(room.addAdmins(admins, senderRole));</span>
+
+<span class="nc bnc" id="L404" title="All 2 branches missed.">        if (ownersSent) {</span>
+            // Change the affiliation to &quot;member&quot; for the current owners that won't be neither
+            // owner nor admin (if the form included the owners field)
+<span class="nc" id="L407">            List&lt;JID&gt; ownersToRemove = new ArrayList&lt;&gt;(room.owners);</span>
+<span class="nc" id="L408">            ownersToRemove.removeAll(admins);</span>
+<span class="nc" id="L409">            ownersToRemove.removeAll(owners);</span>
+<span class="nc bnc" id="L410" title="All 2 branches missed.">            for (JID jid : ownersToRemove) {</span>
+                // ignore group jids
+<span class="nc bnc" id="L412" title="All 2 branches missed.">                if (!GroupJID.isGroup(jid)) {</span>
+<span class="nc" id="L413">                    presences.addAll(room.addMember(jid, null, senderRole));</span>
+                }
+<span class="nc" id="L415">            }</span>
+        }
+
+<span class="nc bnc" id="L418" title="All 2 branches missed.">        if (adminsSent) {</span>
+            // Change the affiliation to &quot;member&quot; for the current admins that won't be neither
+            // owner nor admin (if the form included the admins field)
+<span class="nc" id="L421">            List&lt;JID&gt; adminsToRemove = new ArrayList&lt;&gt;(room.admins);</span>
+<span class="nc" id="L422">            adminsToRemove.removeAll(admins);</span>
+<span class="nc" id="L423">            adminsToRemove.removeAll(owners);</span>
+<span class="nc bnc" id="L424" title="All 2 branches missed.">            for (JID jid : adminsToRemove) {</span>
+                // ignore group jids
+<span class="nc bnc" id="L426" title="All 2 branches missed.">                if (!GroupJID.isGroup(jid)) {</span>
+<span class="nc" id="L427">                    presences.addAll(room.addMember(jid, null, senderRole));</span>
+                }
+<span class="nc" id="L429">            }</span>
+        }
+
+        // Destroy the room if the room is no longer persistent and there are no occupants in
+        // the room
+<span class="nc bnc" id="L434" title="All 4 branches missed.">        if (!room.isPersistent() &amp;&amp; room.getOccupantsCount() == 0) {</span>
+<span class="nc" id="L435">            room.destroyRoom(null, null);</span>
+        }
+
+        // Send the updated presences to the room occupants
+<span class="nc bnc" id="L439" title="All 2 branches missed.">        for (Object presence : presences) {</span>
+<span class="nc" id="L440">            room.send((Presence) presence);</span>
+<span class="nc" id="L441">        }</span>
+<span class="nc" id="L442">    }</span>
+
+    private void refreshConfigurationFormValues() {
+<span class="nc" id="L445">        room.lock.readLock().lock();</span>
+        try {
+<span class="nc" id="L447">            FormField field = configurationForm.getField(&quot;muc#roomconfig_roomname&quot;);</span>
+<span class="nc" id="L448">            field.clearValues();</span>
+<span class="nc" id="L449">            field.addValue(room.getNaturalLanguageName());</span>
+
+<span class="nc" id="L451">            field = configurationForm.getField(&quot;muc#roomconfig_roomdesc&quot;);</span>
+<span class="nc" id="L452">            field.clearValues();</span>
+<span class="nc" id="L453">            field.addValue(room.getDescription());</span>
+
+<span class="nc" id="L455">            field = configurationForm.getField(&quot;muc#roomconfig_changesubject&quot;);</span>
+<span class="nc" id="L456">            field.clearValues();</span>
+<span class="nc bnc" id="L457" title="All 2 branches missed.">            field.addValue((room.canOccupantsChangeSubject() ? &quot;1&quot; : &quot;0&quot;));</span>
+
+<span class="nc" id="L459">            field = configurationForm.getField(&quot;muc#roomconfig_maxusers&quot;);</span>
+<span class="nc" id="L460">            field.clearValues();</span>
+<span class="nc" id="L461">            field.addValue(Integer.toString(room.getMaxUsers()));</span>
+
+<span class="nc" id="L463">            field = configurationForm.getField(&quot;muc#roomconfig_presencebroadcast&quot;);</span>
+<span class="nc" id="L464">            field.clearValues();</span>
+<span class="nc bnc" id="L465" title="All 2 branches missed.">            for (String roleToBroadcast : room.getRolesToBroadcastPresence()) {</span>
+<span class="nc" id="L466">                field.addValue(roleToBroadcast);</span>
+<span class="nc" id="L467">            }</span>
+
+<span class="nc" id="L469">            field = configurationForm.getField(&quot;muc#roomconfig_publicroom&quot;);</span>
+<span class="nc" id="L470">            field.clearValues();</span>
+<span class="nc bnc" id="L471" title="All 2 branches missed.">            field.addValue((room.isPublicRoom() ? &quot;1&quot; : &quot;0&quot;));</span>
+
+<span class="nc" id="L473">            field = configurationForm.getField(&quot;muc#roomconfig_persistentroom&quot;);</span>
+<span class="nc" id="L474">            field.clearValues();</span>
+<span class="nc bnc" id="L475" title="All 2 branches missed.">            field.addValue((room.isPersistent() ? &quot;1&quot; : &quot;0&quot;));</span>
+
+<span class="nc" id="L477">            field = configurationForm.getField(&quot;muc#roomconfig_moderatedroom&quot;);</span>
+<span class="nc" id="L478">            field.clearValues();</span>
+<span class="nc bnc" id="L479" title="All 2 branches missed.">            field.addValue((room.isModerated() ? &quot;1&quot; : &quot;0&quot;));</span>
+
+<span class="nc" id="L481">            field = configurationForm.getField(&quot;muc#roomconfig_membersonly&quot;);</span>
+<span class="nc" id="L482">            field.clearValues();</span>
+<span class="nc bnc" id="L483" title="All 2 branches missed.">            field.addValue((room.isMembersOnly() ? &quot;1&quot; : &quot;0&quot;));</span>
+
+<span class="nc" id="L485">            field = configurationForm.getField(&quot;muc#roomconfig_allowinvites&quot;);</span>
+<span class="nc" id="L486">            field.clearValues();</span>
+<span class="nc bnc" id="L487" title="All 2 branches missed.">            field.addValue((room.canOccupantsInvite() ? &quot;1&quot; : &quot;0&quot;));</span>
+
+<span class="nc" id="L489">            field = configurationForm.getField(&quot;muc#roomconfig_passwordprotectedroom&quot;);</span>
+<span class="nc" id="L490">            field.clearValues();</span>
+<span class="nc bnc" id="L491" title="All 2 branches missed.">            field.addValue((room.isPasswordProtected() ? &quot;1&quot; : &quot;0&quot;));</span>
+
+<span class="nc" id="L493">            field = configurationForm.getField(&quot;muc#roomconfig_roomsecret&quot;);</span>
+<span class="nc" id="L494">            field.clearValues();</span>
+<span class="nc" id="L495">            field.addValue(room.getPassword());</span>
+
+<span class="nc" id="L497">            field = configurationForm.getField(&quot;muc#roomconfig_whois&quot;);</span>
+<span class="nc" id="L498">            field.clearValues();</span>
+<span class="nc bnc" id="L499" title="All 2 branches missed.">            field.addValue((room.canAnyoneDiscoverJID() ? &quot;anyone&quot; : &quot;moderators&quot;));</span>
+
+<span class="nc" id="L501">            field = configurationForm.getField(&quot;muc#roomconfig_allowpm&quot;);</span>
+<span class="nc" id="L502">            field.clearValues();</span>
+<span class="nc" id="L503">            field.addValue((room.canSendPrivateMessage() ));</span>
+
+<span class="nc" id="L505">            field = configurationForm.getField(&quot;muc#roomconfig_enablelogging&quot;);</span>
+<span class="nc" id="L506">            field.clearValues();</span>
+<span class="nc bnc" id="L507" title="All 2 branches missed.">            field.addValue((room.isLogEnabled() ? &quot;1&quot; : &quot;0&quot;));</span>
+
+<span class="nc" id="L509">            field = configurationForm.getField(&quot;x-muc#roomconfig_reservednick&quot;);</span>
+<span class="nc" id="L510">            field.clearValues();</span>
+<span class="nc bnc" id="L511" title="All 2 branches missed.">            field.addValue((room.isLoginRestrictedToNickname() ? &quot;1&quot; : &quot;0&quot;));</span>
+
+<span class="nc" id="L513">            field = configurationForm.getField(&quot;x-muc#roomconfig_canchangenick&quot;);</span>
+<span class="nc" id="L514">            field.clearValues();</span>
+<span class="nc bnc" id="L515" title="All 2 branches missed.">            field.addValue((room.canChangeNickname() ? &quot;1&quot; : &quot;0&quot;));</span>
+
+<span class="nc" id="L517">            field = configurationForm.getField(&quot;x-muc#roomconfig_registration&quot;);</span>
+<span class="nc" id="L518">            field.clearValues();</span>
+<span class="nc bnc" id="L519" title="All 2 branches missed.">            field.addValue((room.isRegistrationEnabled() ? &quot;1&quot; : &quot;0&quot;));</span>
+
+<span class="nc" id="L521">            field = configurationForm.getField(&quot;muc#roomconfig_roomadmins&quot;);</span>
+<span class="nc" id="L522">            field.clearValues();</span>
+<span class="nc bnc" id="L523" title="All 2 branches missed.">            for (JID jid : room.getAdmins()) {</span>
+<span class="nc bnc" id="L524" title="All 2 branches missed.">                if (GroupJID.isGroup(jid)) {</span>
+                    try {
+                        // add each group member to the result (clients don't understand groups)
+<span class="nc" id="L527">                        Group group = GroupManager.getInstance().getGroup(jid);</span>
+<span class="nc bnc" id="L528" title="All 2 branches missed.">                        for (JID groupMember : group.getAll()) {</span>
+<span class="nc" id="L529">                            field.addValue(groupMember);</span>
+<span class="nc" id="L530">                        }</span>
+<span class="nc" id="L531">                    } catch (GroupNotFoundException gnfe) {</span>
+<span class="nc" id="L532">                        Log.warn(&quot;Invalid group JID in the member list: &quot; + jid);</span>
+<span class="nc" id="L533">                    }</span>
+                } else {
+<span class="nc" id="L535">                    field.addValue(jid.toString());</span>
+                }
+<span class="nc" id="L537">            }</span>
+
+<span class="nc" id="L539">            field = configurationForm.getField(&quot;muc#roomconfig_roomowners&quot;);</span>
+<span class="nc" id="L540">            field.clearValues();</span>
+<span class="nc bnc" id="L541" title="All 2 branches missed.">            for (JID jid : room.getOwners()) {</span>
+<span class="nc bnc" id="L542" title="All 2 branches missed.">                if (GroupJID.isGroup(jid)) {</span>
+                    try {
+                        // add each group member to the result (clients don't understand groups)
+<span class="nc" id="L545">                        Group group = GroupManager.getInstance().getGroup(jid);</span>
+<span class="nc bnc" id="L546" title="All 2 branches missed.">                        for (JID groupMember : group.getAll()) {</span>
+<span class="nc" id="L547">                            field.addValue(groupMember);</span>
+<span class="nc" id="L548">                        }</span>
+<span class="nc" id="L549">                    } catch (GroupNotFoundException gnfe) {</span>
+<span class="nc" id="L550">                        Log.warn(&quot;Invalid group JID in the member list: &quot; + jid);</span>
+<span class="nc" id="L551">                    }</span>
+                } else {
+<span class="nc" id="L553">                    field.addValue(jid.toString());</span>
+                }
+<span class="nc" id="L555">            }</span>
+
+            // Remove the old element
+<span class="nc" id="L558">            probeResult.remove(probeResult.element(QName.get(&quot;x&quot;, &quot;jabber:x:data&quot;)));</span>
+            // Add the new representation of configurationForm as an element 
+<span class="nc" id="L560">            probeResult.add(configurationForm.getElement());</span>
+
+        }
+        finally {
+<span class="nc" id="L564">            room.lock.readLock().unlock();</span>
+<span class="nc" id="L565">        }</span>
+<span class="nc" id="L566">    }</span>
+
+    private void init() {
+<span class="nc" id="L569">        Element element = DocumentHelper.createElement(QName.get(&quot;query&quot;,</span>
+                &quot;http://jabber.org/protocol/muc#owner&quot;));
+
+<span class="nc" id="L572">        configurationForm = new DataForm(DataForm.Type.form);</span>
+<span class="nc" id="L573">        configurationForm.setTitle(LocaleUtils.getLocalizedString(&quot;muc.form.conf.title&quot;));</span>
+<span class="nc" id="L574">        List&lt;String&gt; params = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L575">        params.add(room.getName());</span>
+<span class="nc" id="L576">        configurationForm.addInstruction(LocaleUtils.getLocalizedString(&quot;muc.form.conf.instruction&quot;, params));</span>
+
+<span class="nc" id="L578">        configurationForm.addField(&quot;FORM_TYPE&quot;, null, Type.hidden)</span>
+<span class="nc" id="L579">                .addValue(&quot;http://jabber.org/protocol/muc#roomconfig&quot;);</span>
+
+<span class="nc" id="L581">        configurationForm.addField(&quot;muc#roomconfig_roomname&quot;, </span>
+<span class="nc" id="L582">                LocaleUtils.getLocalizedString(&quot;muc.form.conf.owner_roomname&quot;),</span>
+                Type.text_single);
+
+<span class="nc" id="L585">        configurationForm.addField(&quot;muc#roomconfig_roomdesc&quot;,</span>
+<span class="nc" id="L586">                LocaleUtils.getLocalizedString(&quot;muc.form.conf.owner_roomdesc&quot;),</span>
+                Type.text_single);
+
+<span class="nc" id="L589">        configurationForm.addField(&quot;muc#roomconfig_changesubject&quot;,</span>
+<span class="nc" id="L590">                LocaleUtils.getLocalizedString(&quot;muc.form.conf.owner_changesubject&quot;),</span>
+                Type.boolean_type);
+        
+<span class="nc" id="L593">        final FormField maxUsers = configurationForm.addField(</span>
+                &quot;muc#roomconfig_maxusers&quot;,
+<span class="nc" id="L595">                LocaleUtils.getLocalizedString(&quot;muc.form.conf.owner_maxusers&quot;),</span>
+                Type.list_single);
+<span class="nc" id="L597">        maxUsers.addOption(&quot;10&quot;, &quot;10&quot;);</span>
+<span class="nc" id="L598">        maxUsers.addOption(&quot;20&quot;, &quot;20&quot;);</span>
+<span class="nc" id="L599">        maxUsers.addOption(&quot;30&quot;, &quot;30&quot;);</span>
+<span class="nc" id="L600">        maxUsers.addOption(&quot;40&quot;, &quot;40&quot;);</span>
+<span class="nc" id="L601">        maxUsers.addOption(&quot;50&quot;, &quot;50&quot;);</span>
+<span class="nc" id="L602">        maxUsers.addOption(LocaleUtils.getLocalizedString(&quot;muc.form.conf.none&quot;), &quot;0&quot;);</span>
+
+<span class="nc" id="L604">        final FormField broadcast = configurationForm.addField(</span>
+                &quot;muc#roomconfig_presencebroadcast&quot;,
+<span class="nc" id="L606">                LocaleUtils.getLocalizedString(&quot;muc.form.conf.owner_presencebroadcast&quot;),</span>
+                Type.list_multi);
+<span class="nc" id="L608">        broadcast.addOption(LocaleUtils.getLocalizedString(&quot;muc.form.conf.moderator&quot;), &quot;moderator&quot;);</span>
+<span class="nc" id="L609">        broadcast.addOption(LocaleUtils.getLocalizedString(&quot;muc.form.conf.participant&quot;), &quot;participant&quot;);</span>
+<span class="nc" id="L610">        broadcast.addOption(LocaleUtils.getLocalizedString(&quot;muc.form.conf.visitor&quot;), &quot;visitor&quot;);</span>
+
+<span class="nc" id="L612">        configurationForm.addField(&quot;muc#roomconfig_publicroom&quot;, </span>
+<span class="nc" id="L613">                LocaleUtils.getLocalizedString(&quot;muc.form.conf.owner_publicroom&quot;),</span>
+                Type.boolean_type);
+
+<span class="nc" id="L616">        configurationForm.addField(&quot;muc#roomconfig_persistentroom&quot;,</span>
+<span class="nc" id="L617">                LocaleUtils.getLocalizedString(&quot;muc.form.conf.owner_persistentroom&quot;),</span>
+                Type.boolean_type);
+
+<span class="nc" id="L620">        configurationForm.addField(&quot;muc#roomconfig_moderatedroom&quot;,</span>
+<span class="nc" id="L621">                LocaleUtils.getLocalizedString(&quot;muc.form.conf.owner_moderatedroom&quot;),</span>
+                Type.boolean_type);
+
+<span class="nc" id="L624">        configurationForm.addField(&quot;muc#roomconfig_membersonly&quot;,</span>
+<span class="nc" id="L625">                LocaleUtils.getLocalizedString(&quot;muc.form.conf.owner_membersonly&quot;),</span>
+                Type.boolean_type);
+
+<span class="nc" id="L628">        configurationForm.addField(null, null, Type.fixed)</span>
+<span class="nc" id="L629">                .addValue(LocaleUtils.getLocalizedString(&quot;muc.form.conf.allowinvitesfixed&quot;));</span>
+
+<span class="nc" id="L631">        configurationForm.addField(&quot;muc#roomconfig_allowinvites&quot;,</span>
+<span class="nc" id="L632">                LocaleUtils.getLocalizedString(&quot;muc.form.conf.owner_allowinvites&quot;),</span>
+                Type.boolean_type);
+
+<span class="nc" id="L635">        configurationForm.addField(&quot;muc#roomconfig_passwordprotectedroom&quot;,</span>
+<span class="nc" id="L636">                LocaleUtils.getLocalizedString(&quot;muc.form.conf.owner_passwordprotectedroom&quot;),</span>
+                Type.boolean_type);
+
+<span class="nc" id="L639">        configurationForm.addField(null, null, Type.fixed)</span>
+<span class="nc" id="L640">                .addValue(LocaleUtils.getLocalizedString(&quot;muc.form.conf.roomsecretfixed&quot;));</span>
+
+<span class="nc" id="L642">        configurationForm.addField(&quot;muc#roomconfig_roomsecret&quot;,</span>
+<span class="nc" id="L643">                LocaleUtils.getLocalizedString(&quot;muc.form.conf.owner_roomsecret&quot;),</span>
+                Type.text_private);
+        
+<span class="nc" id="L646">        final FormField whois = configurationForm.addField(</span>
+                &quot;muc#roomconfig_whois&quot;,
+<span class="nc" id="L648">                LocaleUtils.getLocalizedString(&quot;muc.form.conf.owner_whois&quot;),</span>
+                Type.list_single);
+<span class="nc" id="L650">        whois.addOption(LocaleUtils.getLocalizedString(&quot;muc.form.conf.moderator&quot;), &quot;moderators&quot;);</span>
+<span class="nc" id="L651">        whois.addOption(LocaleUtils.getLocalizedString(&quot;muc.form.conf.anyone&quot;), &quot;anyone&quot;);</span>
+
+<span class="nc" id="L653">        final FormField allowpm = configurationForm.addField(</span>
+                &quot;muc#roomconfig_allowpm&quot;,
+<span class="nc" id="L655">                LocaleUtils.getLocalizedString(&quot;muc.form.conf.owner_allowpm&quot;),</span>
+                Type.list_single);
+<span class="nc" id="L657">        allowpm.addOption(LocaleUtils.getLocalizedString(&quot;muc.form.conf.anyone&quot;), &quot;anyone&quot;);</span>
+<span class="nc" id="L658">        allowpm.addOption(LocaleUtils.getLocalizedString(&quot;muc.form.conf.moderator&quot;), &quot;moderators&quot;);</span>
+<span class="nc" id="L659">        allowpm.addOption(LocaleUtils.getLocalizedString(&quot;muc.form.conf.participant&quot;), &quot;participants&quot;);</span>
+<span class="nc" id="L660">        allowpm.addOption(LocaleUtils.getLocalizedString(&quot;muc.form.conf.none&quot;), &quot;none&quot;);</span>
+
+<span class="nc" id="L662">        configurationForm.addField(&quot;muc#roomconfig_enablelogging&quot;,</span>
+<span class="nc" id="L663">                LocaleUtils.getLocalizedString(&quot;muc.form.conf.owner_enablelogging&quot;),</span>
+                Type.boolean_type);
+
+<span class="nc" id="L666">        configurationForm.addField(&quot;x-muc#roomconfig_reservednick&quot;,</span>
+<span class="nc" id="L667">                LocaleUtils.getLocalizedString(&quot;muc.form.conf.owner_reservednick&quot;),</span>
+                Type.boolean_type);
+
+<span class="nc" id="L670">        configurationForm.addField(&quot;x-muc#roomconfig_canchangenick&quot;,</span>
+<span class="nc" id="L671">                LocaleUtils.getLocalizedString(&quot;muc.form.conf.owner_canchangenick&quot;),</span>
+                Type.boolean_type);
+
+<span class="nc" id="L674">        configurationForm.addField(null, null, Type.fixed)</span>
+<span class="nc" id="L675">                .addValue(LocaleUtils.getLocalizedString(&quot;muc.form.conf.owner_registration&quot;));</span>
+
+<span class="nc" id="L677">        configurationForm.addField(&quot;x-muc#roomconfig_registration&quot;,</span>
+<span class="nc" id="L678">                LocaleUtils.getLocalizedString(&quot;muc.form.conf.owner_registration&quot;),</span>
+                Type.boolean_type);
+
+<span class="nc" id="L681">        configurationForm.addField(null, null, Type.fixed)</span>
+<span class="nc" id="L682">                .addValue(LocaleUtils.getLocalizedString(&quot;muc.form.conf.roomadminsfixed&quot;));</span>
+
+<span class="nc" id="L684">        configurationForm.addField(&quot;muc#roomconfig_roomadmins&quot;,</span>
+<span class="nc" id="L685">                LocaleUtils.getLocalizedString(&quot;muc.form.conf.owner_roomadmins&quot;),</span>
+                Type.jid_multi);
+
+<span class="nc" id="L688">        configurationForm.addField(null, null, Type.fixed)</span>
+<span class="nc" id="L689">                .addValue(LocaleUtils.getLocalizedString(&quot;muc.form.conf.roomownersfixed&quot;));</span>
+
+<span class="nc" id="L691">        configurationForm.addField(&quot;muc#roomconfig_roomowners&quot;,</span>
+<span class="nc" id="L692">                LocaleUtils.getLocalizedString(&quot;muc.form.conf.owner_roomowners&quot;),</span>
+                Type.jid_multi);
+
+        // Create the probeResult and add the basic info together with the configuration form
+<span class="nc" id="L696">        probeResult = element;</span>
+<span class="nc" id="L697">        probeResult.add(configurationForm.getElement());</span>
+<span class="nc" id="L698">    }</span>
+
+    /**
+     * Returns the first value of the formfield as a boolean.
+     *
+     * @param field A form field (cannot be null)
+     * @param defaultValue Returned if first value is null or empty.
+     * @return true if the provided input equals '1' or 'true', false if the input equals '0' or 'false'.
+     * @throws IllegalArgumentException when the input cannot be parsed as a boolean.
+     * @deprecated Use FormField#parseFirstValueAsBoolean(String) provided by Tinder version 1.3.1 or newer.
+     */
+    @Deprecated
+    public static boolean parseFirstValueAsBoolean( FormField field, boolean defaultValue )
+    {
+<span class="nc" id="L712">        final String value = field.getFirstValue();</span>
+<span class="nc bnc" id="L713" title="All 4 branches missed.">        if ( value == null || value.isEmpty() )</span>
+        {
+<span class="nc" id="L715">            return defaultValue;</span>
+        }
+<span class="nc bnc" id="L717" title="All 4 branches missed.">        if ( &quot;0&quot;.equals( value ) || &quot;false&quot;.equals( value ) )</span>
+        {
+<span class="nc" id="L719">            return false;</span>
+        }
+<span class="nc bnc" id="L721" title="All 4 branches missed.">        if ( &quot;1&quot;.equals( value ) || &quot;true&quot;.equals( value ) )</span>
+        {
+<span class="nc" id="L723">            return true;</span>
+        }
+
+<span class="nc" id="L726">        throw new IllegalArgumentException( &quot;Unable to parse value '&quot; + value + &quot;' as Data Form Field boolean.&quot; );</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

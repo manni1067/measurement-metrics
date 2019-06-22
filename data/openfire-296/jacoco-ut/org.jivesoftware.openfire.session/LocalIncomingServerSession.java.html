@@ -1,0 +1,385 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>LocalIncomingServerSession.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.session</a> &gt; <span class="el_source">LocalIncomingServerSession.java</span></div><h1>LocalIncomingServerSession.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.jivesoftware.openfire.session;
+
+import java.io.IOException;
+import java.security.KeyStoreException;
+import java.security.cert.Certificate;
+import java.security.cert.X509Certificate;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.Set;
+
+import org.dom4j.Element;
+import org.dom4j.io.XMPPPacketReader;
+import org.jivesoftware.openfire.Connection;
+import org.jivesoftware.openfire.SessionManager;
+import org.jivesoftware.openfire.StreamID;
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.auth.UnauthorizedException;
+import org.jivesoftware.openfire.net.SASLAuthentication;
+import org.jivesoftware.openfire.net.SocketConnection;
+import org.jivesoftware.openfire.server.ServerDialback;
+import org.jivesoftware.openfire.spi.ConnectionType;
+import org.jivesoftware.util.CertificateManager;
+import org.jivesoftware.util.JiveGlobals;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmlpull.v1.XmlPullParser;
+import org.xmlpull.v1.XmlPullParserException;
+import org.xmpp.packet.JID;
+import org.xmpp.packet.Packet;
+
+/**
+ * Server-to-server communication is done using two TCP connections between the servers. One
+ * connection is used for sending packets while the other connection is used for receiving packets.
+ * The {@code IncomingServerSession} represents the connection to a remote server that will only
+ * be used for receiving packets.&lt;p&gt;
+ *
+ * Currently only the Server Dialback method is being used for authenticating the remote server.
+ * Once the remote server has been authenticated incoming packets will be processed by this server.
+ * It is also possible for remote servers to authenticate more domains once the session has been
+ * established. For optimization reasons the existing connection is used between the servers.
+ * Therefore, the incoming server session holds the list of authenticated domains which are allowed
+ * to send packets to this server.&lt;p&gt;
+ *
+ * Using the Server Dialback method it is possible that this server may also act as the
+ * Authoritative Server. This implies that an incoming connection will be established with this
+ * server for authenticating a domain. This incoming connection will only last for a brief moment
+ * and after the domain has been authenticated the connection will be closed and no session will
+ * exist.
+ *
+ * @author Gaston Dombiak
+ */
+public class LocalIncomingServerSession extends LocalServerSession implements IncomingServerSession {
+    
+<span class="nc" id="L70">    private static final Logger Log = LoggerFactory.getLogger(LocalIncomingServerSession.class);</span>
+
+    /**
+     * List of domains, subdomains and virtual hostnames of the remote server that were
+     * validated with this server. The remote server is allowed to send packets to this
+     * server from any of the validated domains.
+     */
+<span class="nc" id="L77">    private Set&lt;String&gt; validatedDomains = new HashSet&lt;&gt;();</span>
+
+    /**
+     * Domains or subdomain of this server that was used by the remote server
+     * when validating the new connection. This information is useful to prevent
+     * many connections from the same remote server to the same local domain.
+     */
+<span class="nc" id="L84">    private String localDomain = null;</span>
+    
+    /**
+     * Default domain, as supplied in stream header typically.
+     */
+<span class="nc" id="L89">    private String fromDomain = null;</span>
+
+    /**
+     * Creates a new session that will receive packets. The new session will be authenticated
+     * before being returned. If the authentication process fails then the answer will be
+     * {@code null}.&lt;p&gt;
+     *
+     * @param serverName hostname of this server.
+     * @param reader reader on the new established connection with the remote server.
+     * @param connection the new established connection with the remote server.
+     * @param directTLS true of connections are immediately encrypted (as opposed to plain text / startls).
+     * @return a new session that will receive packets or null if a problem occured while
+     *         authenticating the remote server or when acting as the Authoritative Server during
+     *         a Server Dialback authentication process.
+     * @throws org.xmlpull.v1.XmlPullParserException if an error occurs while parsing the XML.
+     * @throws java.io.IOException if an input/output error occurs while using the connection.
+     */
+    public static LocalIncomingServerSession createSession(String serverName, XMPPPacketReader reader,
+            SocketConnection connection, boolean directTLS) throws XmlPullParserException, IOException {
+<span class="nc" id="L108">        XmlPullParser xpp = reader.getXPPParser();</span>
+                
+<span class="nc" id="L110">        String version = xpp.getAttributeValue(&quot;&quot;, &quot;version&quot;);</span>
+<span class="nc" id="L111">        String fromDomain = xpp.getAttributeValue(&quot;&quot;, &quot;from&quot;);</span>
+<span class="nc" id="L112">        String toDomain = xpp.getAttributeValue(&quot;&quot;, &quot;to&quot;);</span>
+<span class="nc bnc" id="L113" title="All 2 branches missed.">        int[] serverVersion = version != null ? decodeVersion(version) : new int[] {0,0};</span>
+
+<span class="nc bnc" id="L115" title="All 2 branches missed.">        if (toDomain == null) {</span>
+<span class="nc" id="L116">            toDomain = serverName;</span>
+        }
+        
+        try {
+            // Get the stream ID for the new session
+<span class="nc" id="L121">            StreamID streamID = SessionManager.getInstance().nextStreamID();</span>
+            // Create a server Session for the remote server
+            LocalIncomingServerSession session =
+<span class="nc" id="L124">                    SessionManager.getInstance().createIncomingServerSession(connection, streamID, fromDomain);</span>
+
+            // Send the stream header
+<span class="nc" id="L127">            StringBuilder openingStream = new StringBuilder();</span>
+<span class="nc" id="L128">            openingStream.append(&quot;&lt;stream:stream&quot;);</span>
+<span class="nc" id="L129">            openingStream.append(&quot; xmlns:db=\&quot;jabber:server:dialback\&quot;&quot;);</span>
+<span class="nc" id="L130">            openingStream.append(&quot; xmlns:stream=\&quot;http://etherx.jabber.org/streams\&quot;&quot;);</span>
+<span class="nc" id="L131">            openingStream.append(&quot; xmlns=\&quot;jabber:server\&quot;&quot;);</span>
+<span class="nc" id="L132">            openingStream.append(&quot; from=\&quot;&quot;).append(toDomain).append(&quot;\&quot;&quot;);</span>
+<span class="nc bnc" id="L133" title="All 2 branches missed.">            if (fromDomain != null) {</span>
+<span class="nc" id="L134">                openingStream.append(&quot; to=\&quot;&quot;).append(fromDomain).append(&quot;\&quot;&quot;);</span>
+            }
+<span class="nc" id="L136">            openingStream.append(&quot; id=\&quot;&quot;).append(streamID).append(&quot;\&quot;&quot;);</span>
+            
+            // OF-443: Not responding with a 1.0 version in the stream header when federating with older
+            // implementations appears to reduce connection issues with those domains (patch by Marcin Cieślak).
+<span class="nc bnc" id="L140" title="All 2 branches missed.">            if (serverVersion[0] &gt;= 1) {</span>
+<span class="nc" id="L141">                openingStream.append(&quot; version=\&quot;1.0\&quot;&gt;&quot;);</span>
+            } else {
+<span class="nc" id="L143">                openingStream.append('&gt;');</span>
+            }
+            
+<span class="nc" id="L146">            connection.deliverRawText(openingStream.toString());</span>
+
+<span class="nc bnc" id="L148" title="All 2 branches missed.">            if (serverVersion[0] &gt;= 1) {        	</span>
+                // Remote server is XMPP 1.0 compliant so offer TLS and SASL to establish the connection (and server dialback)
+
+                // Indicate the TLS policy to use for this connection
+<span class="nc" id="L152">                Connection.TLSPolicy tlsPolicy = connection.getTlsPolicy();</span>
+<span class="nc" id="L153">                boolean hasCertificates = false;</span>
+                try {
+<span class="nc bnc" id="L155" title="All 2 branches missed.">                    hasCertificates = XMPPServer.getInstance().getCertificateStoreManager().getIdentityStore( ConnectionType.SOCKET_S2S ).getStore().size() &gt; 0;</span>
+                }
+<span class="nc" id="L157">                catch (Exception e) {</span>
+<span class="nc" id="L158">                    Log.error(e.getMessage(), e);</span>
+<span class="nc" id="L159">                }</span>
+<span class="nc bnc" id="L160" title="All 4 branches missed.">                if (Connection.TLSPolicy.required == tlsPolicy &amp;&amp; !hasCertificates) {</span>
+<span class="nc" id="L161">                    Log.error(&quot;Server session rejected. TLS is required but no certificates &quot; +</span>
+                            &quot;were created.&quot;);
+<span class="nc" id="L163">                    return null;</span>
+                }
+<span class="nc bnc" id="L165" title="All 2 branches missed.">                connection.setTlsPolicy(hasCertificates ? tlsPolicy : Connection.TLSPolicy.disabled);</span>
+            }
+
+            // Indicate the compression policy to use for this connection
+<span class="nc" id="L169">            connection.setCompressionPolicy( connection.getConfiguration().getCompressionPolicy() );</span>
+
+<span class="nc" id="L171">            StringBuilder sb = new StringBuilder();</span>
+            
+<span class="nc bnc" id="L173" title="All 2 branches missed.">            if (serverVersion[0] &gt;= 1) {        	</span>
+                // Remote server is XMPP 1.0 compliant so offer TLS and SASL to establish the connection (and server dialback)
+                // Don't offer stream-features to pre-1.0 servers, as it confuses them. Sending features to Openfire &lt; 3.7.1 confuses it too - OF-443) 
+<span class="nc" id="L176">                sb.append(&quot;&lt;stream:features&gt;&quot;);</span>
+
+<span class="nc bnc" id="L178" title="All 4 branches missed.">                if (!directTLS &amp;&amp; JiveGlobals.getBooleanProperty(ConnectionSettings.Server.TLS_ENABLED, true)) {</span>
+<span class="nc" id="L179">                    sb.append(&quot;&lt;starttls xmlns=\&quot;urn:ietf:params:xml:ns:xmpp-tls\&quot;&gt;&quot;);</span>
+<span class="nc bnc" id="L180" title="All 2 branches missed.">                    if (!ServerDialback.isEnabled()) {</span>
+                        // Server dialback is disabled so TLS is required
+<span class="nc" id="L182">                        sb.append(&quot;&lt;required/&gt;&quot;);</span>
+                    }
+<span class="nc" id="L184">                    sb.append(&quot;&lt;/starttls&gt;&quot;);</span>
+                }
+                
+                // Include available SASL Mechanisms
+<span class="nc" id="L188">                sb.append(SASLAuthentication.getSASLMechanisms(session));</span>
+                
+<span class="nc bnc" id="L190" title="All 2 branches missed.">                if (ServerDialback.isEnabled()) {</span>
+                    // Also offer server dialback (when TLS is not required). Server dialback may be offered
+                    // after TLS has been negotiated and a self-signed certificate is being used
+<span class="nc" id="L193">                    sb.append(&quot;&lt;dialback xmlns=\&quot;urn:xmpp:features:dialback\&quot;&gt;&lt;errors/&gt;&lt;/dialback&gt;&quot;);</span>
+                }
+
+<span class="nc" id="L196">                sb.append(&quot;&lt;/stream:features&gt;&quot;);</span>
+            }
+            
+<span class="nc" id="L199">            connection.deliverRawText(sb.toString());</span>
+
+            // Set the domain or subdomain of the local server targeted by the remote server
+<span class="nc" id="L202">            session.setLocalDomain(serverName);</span>
+<span class="nc" id="L203">            return session;</span>
+        }
+<span class="nc" id="L205">        catch (Exception e) {</span>
+<span class="nc" id="L206">            Log.error(&quot;Error establishing connection from remote server:&quot; + connection, e);</span>
+<span class="nc" id="L207">            connection.close();</span>
+<span class="nc" id="L208">            return null;</span>
+        }
+    }
+
+
+    public LocalIncomingServerSession(String serverName, Connection connection, StreamID streamID, String fromDomain) {
+<span class="nc" id="L214">        super(serverName, connection, streamID);</span>
+<span class="nc" id="L215">        this.fromDomain = fromDomain;</span>
+<span class="nc" id="L216">    }</span>
+    
+    public String getDefaultIdentity() {
+<span class="nc" id="L219">        return this.fromDomain;</span>
+    }
+
+    @Override
+    boolean canProcess(Packet packet) {
+<span class="nc" id="L224">        return true;</span>
+    }
+
+
+    @Override
+    void deliver(Packet packet) throws UnauthorizedException {
+        // Do nothing
+<span class="nc" id="L231">    }</span>
+
+    /**
+     * Returns true if the request of a new domain was valid. Sessions may receive subsequent
+     * domain validation request. If the validation of the new domain fails then the session and
+     * the underlying TCP connection will be closed.&lt;p&gt;
+     *
+     * For optimization reasons, the same session may be servicing several domains of a
+     * remote server.
+     *
+     * @param dbResult the DOM stanza requesting the domain validation.
+     * @return true if the requested domain was valid.
+     */
+    public boolean validateSubsequentDomain(Element dbResult) {
+<span class="nc" id="L245">        ServerDialback method = new ServerDialback(getConnection(), getServerName());</span>
+<span class="nc bnc" id="L246" title="All 2 branches missed.">        if (method.validateRemoteDomain(dbResult, getStreamID())) {</span>
+            // Add the validated domain as a valid domain
+<span class="nc" id="L248">            addValidatedDomain(dbResult.attributeValue(&quot;from&quot;));</span>
+<span class="nc" id="L249">            return true;</span>
+        }
+<span class="nc" id="L251">        return false;</span>
+    }
+
+    /**
+     * Returns true if the specified domain has been validated for this session. The remote
+     * server should send a &quot;db:result&quot; packet for registering new subdomains or even
+     * virtual hosts.&lt;p&gt;
+     *
+     * In the spirit of being flexible we allow remote servers to not register subdomains
+     * and even so consider subdomains that include the server domain in their domain part
+     * as valid domains.
+     *
+     * @param domain the domain to validate.
+     * @return true if the specified domain has been validated for this session.
+     */
+    public boolean isValidDomain(String domain) {
+        // Check if the specified domain is contained in any of the validated domains
+<span class="nc bnc" id="L268" title="All 2 branches missed.">        for (String validatedDomain : getValidatedDomains()) {</span>
+<span class="nc bnc" id="L269" title="All 2 branches missed.">            if (domain.equals(validatedDomain)) {</span>
+<span class="nc" id="L270">                return true;</span>
+            }
+<span class="nc" id="L272">        }</span>
+<span class="nc" id="L273">        return false;</span>
+    }
+
+    /**
+     * Returns a collection with all the domains, subdomains and virtual hosts that where
+     * validated. The remote server is allowed to send packets from any of these domains,
+     * subdomains and virtual hosts.
+     *
+     * @return domains, subdomains and virtual hosts that where validated.
+     */
+    public Collection&lt;String&gt; getValidatedDomains() {
+<span class="nc" id="L284">        return Collections.unmodifiableCollection(validatedDomains);</span>
+    }
+
+    /**
+     * Adds a new validated domain, subdomain or virtual host to the list of
+     * validated domains for the remote server.
+     *
+     * @param domain the new validated domain, subdomain or virtual host to add.
+     */
+    public void addValidatedDomain(String domain) {
+<span class="nc bnc" id="L294" title="All 2 branches missed.">        if (validatedDomains.add(domain)) {</span>
+            // Set the first validated domain as the address of the session
+<span class="nc bnc" id="L296" title="All 2 branches missed.">            if (validatedDomains.size() &lt; 2) {</span>
+<span class="nc" id="L297">                setAddress(new JID(null, domain, null));</span>
+            }
+            // Register the new validated domain for this server session in SessionManager
+<span class="nc" id="L300">            SessionManager.getInstance().registerIncomingServerSession(domain, this);</span>
+        }
+<span class="nc" id="L302">    }</span>
+
+    /**
+     * Removes the previously validated domain from the list of validated domains. The remote
+     * server will no longer be able to send packets from the removed domain, subdomain or
+     * virtual host.
+     *
+     * @param domain the domain, subdomain or virtual host to remove from the list of
+     *        validated domains.
+     */
+    public void removeValidatedDomain(String domain) {
+<span class="nc" id="L313">        validatedDomains.remove(domain);</span>
+        // Unregister the validated domain for this server session in SessionManager
+<span class="nc" id="L315">        SessionManager.getInstance().unregisterIncomingServerSession(domain, this);</span>
+<span class="nc" id="L316">    }</span>
+
+    /**
+     * Returns the domain or subdomain of the local server used by the remote server
+     * when validating the session. This information is only used to prevent many
+     * connections from the same remote server to the same domain or subdomain of
+     * the local server.
+     *
+     * @return the domain or subdomain of the local server used by the remote server
+     *         when validating the session.
+     */
+    @Override
+    public String getLocalDomain() {
+<span class="nc" id="L329">        return localDomain;</span>
+    }
+
+    /**
+     * Sets the domain or subdomain of the local server used by the remote server when asking
+     * to validate the session. This information is only used to prevent many connections from
+     * the same remote server to the same domain or subdomain of the local server.
+     *
+     * @param domain the domain or subdomain of the local server used when validating the
+     *        session.
+     */
+    public void setLocalDomain(String domain) {
+<span class="nc" id="L341">        localDomain = domain;</span>
+<span class="nc" id="L342">    }</span>
+
+    /**
+     * Verifies the received key sent by the remote server. This server is trying to generate
+     * an outgoing connection to the remote server and the remote server is reusing an incoming
+     * connection for validating the key.
+     *
+     * @param doc the received Element that contains the key to verify.
+     */
+    public void verifyReceivedKey(Element doc) {
+<span class="nc" id="L352">        ServerDialback.verifyReceivedKey(doc, getConnection());</span>
+<span class="nc" id="L353">    }</span>
+
+    @Override
+    public String getAvailableStreamFeatures() {
+<span class="nc" id="L357">        StringBuilder sb = new StringBuilder();</span>
+        
+        // Include Stream Compression Mechanism
+<span class="nc bnc" id="L360" title="All 2 branches missed.">        if (conn.getCompressionPolicy() != Connection.CompressionPolicy.disabled &amp;&amp;</span>
+<span class="nc bnc" id="L361" title="All 2 branches missed.">                !conn.isCompressed()) {</span>
+<span class="nc" id="L362">            sb.append(&quot;&lt;compression xmlns=\&quot;http://jabber.org/features/compress\&quot;&gt;&lt;method&gt;zlib&lt;/method&gt;&lt;/compression&gt;&quot;);</span>
+        }
+        
+        // Offer server dialback if using self-signed certificates and no authentication has been done yet
+        boolean usingSelfSigned;
+<span class="nc" id="L367">        final Certificate[] chain = conn.getLocalCertificates();</span>
+<span class="nc bnc" id="L368" title="All 4 branches missed.">        if (chain == null || chain.length == 0) {</span>
+<span class="nc" id="L369">            usingSelfSigned = true;</span>
+        } else {
+<span class="nc" id="L371">            usingSelfSigned = CertificateManager.isSelfSignedCertificate((X509Certificate) chain[0]);</span>
+        }
+        
+<span class="nc bnc" id="L374" title="All 6 branches missed.">        if (usingSelfSigned &amp;&amp; ServerDialback.isEnabledForSelfSigned() &amp;&amp; validatedDomains.isEmpty()) {</span>
+<span class="nc" id="L375">            sb.append(&quot;&lt;dialback xmlns=\&quot;urn:xmpp:features:dialback\&quot;&gt;&lt;errors/&gt;&lt;/dialback&gt;&quot;);</span>
+        }
+        
+<span class="nc" id="L378">        return sb.toString();</span>
+    }
+    
+    public void tlsAuth() {
+<span class="nc" id="L382">        usingServerDialback = false;</span>
+<span class="nc" id="L383">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

@@ -1,0 +1,392 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>LdapUserProvider.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.ldap</a> &gt; <span class="el_source">LdapUserProvider.java</span></div><h1>LdapUserProvider.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2004-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.ldap;
+
+import java.text.MessageFormat;
+import java.text.SimpleDateFormat;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Date;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.StringTokenizer;
+import java.util.TimeZone;
+
+import javax.naming.NamingEnumeration;
+import javax.naming.directory.Attribute;
+import javax.naming.directory.Attributes;
+import javax.naming.directory.DirContext;
+
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.user.User;
+import org.jivesoftware.openfire.user.UserAlreadyExistsException;
+import org.jivesoftware.openfire.user.UserCollection;
+import org.jivesoftware.openfire.user.UserNotFoundException;
+import org.jivesoftware.openfire.user.UserProvider;
+import org.jivesoftware.util.JiveConstants;
+import org.jivesoftware.util.JiveGlobals;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmpp.packet.JID;
+
+/**
+ * LDAP implementation of the UserProvider interface. All data in the directory is
+ * treated as read-only so any set operations will result in an exception.
+ *
+ * @author Matt Tucker
+ */
+public class LdapUserProvider implements UserProvider {
+
+<span class="nc" id="L56">    private static final Logger Log = LoggerFactory.getLogger(LdapUserProvider.class);</span>
+
+    // LDAP date format parser.
+<span class="nc" id="L59">    private static SimpleDateFormat ldapDateFormat = new SimpleDateFormat(&quot;yyyyMMddHHmmss&quot;);</span>
+
+    private LdapManager manager;
+    private Map&lt;String, String&gt; searchFields;
+<span class="nc" id="L63">    private int userCount = -1;</span>
+<span class="nc" id="L64">    private long expiresStamp = System.currentTimeMillis();</span>
+
+<span class="nc" id="L66">    public LdapUserProvider() {</span>
+        // Convert XML based provider setup to Database based
+<span class="nc" id="L68">        JiveGlobals.migrateProperty(&quot;ldap.searchFields&quot;);</span>
+
+<span class="nc" id="L70">        manager = LdapManager.getInstance();</span>
+<span class="nc" id="L71">        searchFields = new LinkedHashMap&lt;&gt;();</span>
+<span class="nc" id="L72">        String fieldList = JiveGlobals.getProperty(&quot;ldap.searchFields&quot;);</span>
+        // If the value isn't present, default to to username, name, and email.
+<span class="nc bnc" id="L74" title="All 2 branches missed.">        if (fieldList == null) {</span>
+<span class="nc" id="L75">            searchFields.put(&quot;Username&quot;, manager.getUsernameField());</span>
+<span class="nc" id="L76">            searchFields.put(&quot;Name&quot;, manager.getNameField());</span>
+<span class="nc" id="L77">            searchFields.put(&quot;Email&quot;, manager.getEmailField());</span>
+        }
+        else {
+            try {
+<span class="nc bnc" id="L81" title="All 2 branches missed.">                for (StringTokenizer i=new StringTokenizer(fieldList, &quot;,&quot;); i.hasMoreTokens(); ) {</span>
+<span class="nc" id="L82">                    String[] field = i.nextToken().split(&quot;/&quot;);</span>
+<span class="nc" id="L83">                    searchFields.put(field[0], field[1]);</span>
+<span class="nc" id="L84">                }</span>
+            }
+<span class="nc" id="L86">            catch (Exception e) {</span>
+<span class="nc" id="L87">                Log.error(&quot;Error parsing LDAP search fields: &quot; + fieldList, e);</span>
+<span class="nc" id="L88">            }</span>
+        }
+<span class="nc" id="L90">    }</span>
+
+    @Override
+    public User loadUser(String username) throws UserNotFoundException {
+<span class="nc bnc" id="L94" title="All 2 branches missed.">        if(username.contains(&quot;@&quot;)) {</span>
+<span class="nc bnc" id="L95" title="All 2 branches missed.">            if (!XMPPServer.getInstance().isLocal(new JID(username))) {</span>
+<span class="nc" id="L96">                throw new UserNotFoundException(&quot;Cannot load user of remote server: &quot; + username);</span>
+            }
+<span class="nc" id="L98">            username = username.substring(0,username.lastIndexOf(&quot;@&quot;));</span>
+        }
+        // Un-escape username.
+<span class="nc" id="L101">        username = JID.unescapeNode(username);</span>
+<span class="nc" id="L102">        DirContext ctx = null;</span>
+        try {
+<span class="nc" id="L104">            String userDN = manager.findUserDN(username);</span>
+            // Load record.
+<span class="nc" id="L106">            String[] attributes = new String[]{</span>
+<span class="nc" id="L107">                manager.getUsernameField(), manager.getNameField(),</span>
+<span class="nc" id="L108">                manager.getEmailField(), &quot;createTimestamp&quot;, &quot;modifyTimestamp&quot;</span>
+            };
+<span class="nc" id="L110">            ctx = manager.getContext(manager.getUsersBaseDN(username));</span>
+<span class="nc" id="L111">            Attributes attrs = ctx.getAttributes(userDN, attributes);</span>
+<span class="nc" id="L112">            String name = null;</span>
+<span class="nc" id="L113">            Attribute nameField = attrs.get(manager.getNameField());</span>
+<span class="nc bnc" id="L114" title="All 2 branches missed.">            if (nameField != null) {</span>
+<span class="nc" id="L115">                name = (String)nameField.get();</span>
+            }
+<span class="nc" id="L117">            String email = null;</span>
+<span class="nc" id="L118">            Attribute emailField = attrs.get(manager.getEmailField());</span>
+<span class="nc bnc" id="L119" title="All 2 branches missed.">            if (emailField != null) {</span>
+<span class="nc" id="L120">                email = (String)emailField.get();</span>
+            }
+<span class="nc" id="L122">            Date creationDate = new Date();</span>
+<span class="nc" id="L123">            Attribute creationDateField = attrs.get(&quot;createTimestamp&quot;);</span>
+<span class="nc bnc" id="L124" title="All 4 branches missed.">            if (creationDateField != null &amp;&amp; &quot;&quot;.equals(((String) creationDateField.get()).trim())) {</span>
+<span class="nc" id="L125">                creationDate = parseLDAPDate((String) creationDateField.get());</span>
+            }
+<span class="nc" id="L127">            Date modificationDate = new Date();</span>
+<span class="nc" id="L128">            Attribute modificationDateField = attrs.get(&quot;modifyTimestamp&quot;);</span>
+<span class="nc bnc" id="L129" title="All 4 branches missed.">            if (modificationDateField != null &amp;&amp; &quot;&quot;.equals(((String) modificationDateField.get()).trim())) {</span>
+<span class="nc" id="L130">                modificationDate = parseLDAPDate((String)modificationDateField.get());</span>
+            }
+            // Escape the username so that it can be used as a JID.
+<span class="nc" id="L133">            username = JID.escapeNode(username);</span>
+            
+            // As defined by RFC5803.
+<span class="nc" id="L136">            Attribute authPassword = attrs.get(&quot;authPassword&quot;);</span>
+<span class="nc" id="L137">            User user = new User(username, name, email, creationDate, modificationDate);</span>
+<span class="nc bnc" id="L138" title="All 2 branches missed.">            if (authPassword != null) {</span>
+                // The authPassword attribute can be multivalued.
+                // Not sure if this is the right API to loop through them.
+<span class="nc" id="L141">                NamingEnumeration values = authPassword.getAll();</span>
+<span class="nc bnc" id="L142" title="All 2 branches missed.">                while (values.hasMore()) {</span>
+<span class="nc" id="L143">                    Attribute authPasswordValue = (Attribute) values.next();</span>
+<span class="nc" id="L144">                    String[] parts = ((String) authPasswordValue.get()).split(&quot;$&quot;);</span>
+<span class="nc" id="L145">                    String[] authInfo = parts[1].split(&quot;:&quot;);</span>
+<span class="nc" id="L146">                    String[] authValue = parts[2].split(&quot;:&quot;);</span>
+    
+<span class="nc" id="L148">                    String scheme = parts[0].trim();</span>
+    
+                    // We only support SCRAM-SHA-1 at the moment.
+<span class="nc bnc" id="L151" title="All 2 branches missed.">                    if (&quot;SCRAM-SHA-1&quot;.equals(scheme)) {</span>
+<span class="nc" id="L152">                        int iterations = Integer.valueOf(authInfo[0].trim());</span>
+<span class="nc" id="L153">                        String salt = authInfo[1].trim();</span>
+<span class="nc" id="L154">                        String storedKey = authValue[0].trim();</span>
+<span class="nc" id="L155">                        String serverKey = authValue[1].trim();</span>
+                        
+<span class="nc" id="L157">                        user.setSalt(salt);</span>
+<span class="nc" id="L158">                        user.setStoredKey(storedKey);</span>
+<span class="nc" id="L159">                        user.setServerKey(serverKey);</span>
+<span class="nc" id="L160">                        user.setIterations(iterations);</span>
+                        
+<span class="nc" id="L162">                        break;</span>
+                    }
+<span class="nc" id="L164">                }</span>
+            }
+<span class="nc" id="L166">            return user;</span>
+        }
+<span class="nc" id="L168">        catch (Exception e) {</span>
+<span class="nc" id="L169">            throw new UserNotFoundException(e);</span>
+        }
+        finally {
+<span class="nc" id="L172">            try {</span>
+<span class="nc bnc" id="L173" title="All 4 branches missed.">                if (ctx != null) {</span>
+<span class="nc" id="L174">                    ctx.close();</span>
+                }
+            }
+<span class="nc" id="L177">            catch (Exception ignored) {</span>
+                // Ignore.
+<span class="nc" id="L179">            }</span>
+<span class="nc" id="L180">        }</span>
+    }
+
+    @Override
+    public User createUser(String username, String password, String name, String email)
+            throws UserAlreadyExistsException
+    {
+<span class="nc" id="L187">        throw new UnsupportedOperationException();</span>
+    }
+
+    @Override
+    public void deleteUser(String username) {
+<span class="nc" id="L192">        throw new UnsupportedOperationException();</span>
+    }
+
+    @Override
+    public int getUserCount() {
+        // Cache user count for 5 minutes.
+<span class="nc bnc" id="L198" title="All 4 branches missed.">        if (userCount != -1 &amp;&amp; System.currentTimeMillis() &lt; expiresStamp) {</span>
+<span class="nc" id="L199">            return userCount;</span>
+        }
+<span class="nc" id="L201">        this.userCount = manager.retrieveListCount(</span>
+<span class="nc" id="L202">                manager.getUsernameField(),</span>
+<span class="nc" id="L203">                MessageFormat.format(manager.getSearchFilter(), &quot;*&quot;)</span>
+        );
+<span class="nc" id="L205">        this.expiresStamp = System.currentTimeMillis() + JiveConstants.MINUTE *5;</span>
+<span class="nc" id="L206">        return this.userCount;</span>
+    }
+
+    @Override
+    public Collection&lt;String&gt; getUsernames() {
+<span class="nc" id="L211">        return manager.retrieveList(</span>
+<span class="nc" id="L212">                manager.getUsernameField(),</span>
+<span class="nc" id="L213">                MessageFormat.format(manager.getSearchFilter(), &quot;*&quot;),</span>
+                -1,
+                -1,
+                null,
+                true
+        );
+    }
+    
+    @Override
+    public Collection&lt;User&gt; getUsers() {
+<span class="nc" id="L223">        return getUsers(-1, -1);</span>
+    }
+
+    @Override
+    public Collection&lt;User&gt; getUsers(int startIndex, int numResults) {
+<span class="nc" id="L228">        List&lt;String&gt; userlist = manager.retrieveList(</span>
+<span class="nc" id="L229">                manager.getUsernameField(),</span>
+<span class="nc" id="L230">                MessageFormat.format(manager.getSearchFilter(), &quot;*&quot;),</span>
+                startIndex,
+                numResults,
+<span class="nc" id="L233">                manager.getUsernameSuffix(),</span>
+                true
+        );
+<span class="nc" id="L236">        return new UserCollection(userlist.toArray(new String[userlist.size()]));</span>
+    }
+
+    @Override
+    public void setName(String username, String name) throws UserNotFoundException {
+<span class="nc" id="L241">        throw new UnsupportedOperationException();</span>
+    }
+
+    @Override
+    public void setEmail(String username, String email) throws UserNotFoundException {
+<span class="nc" id="L246">        throw new UnsupportedOperationException();</span>
+    }
+
+    @Override
+    public void setCreationDate(String username, Date creationDate) throws UserNotFoundException {
+<span class="nc" id="L251">        throw new UnsupportedOperationException();</span>
+    }
+
+    @Override
+    public void setModificationDate(String username, Date modificationDate) throws UserNotFoundException {
+<span class="nc" id="L256">        throw new UnsupportedOperationException();</span>
+    }
+
+    @Override
+    public Set&lt;String&gt; getSearchFields() throws UnsupportedOperationException {
+<span class="nc" id="L261">        return Collections.unmodifiableSet(searchFields.keySet());</span>
+    }
+
+    public void setSearchFields(String fieldList) {
+<span class="nc" id="L265">        this.searchFields = new LinkedHashMap&lt;&gt;();</span>
+        // If the value isn't present, default to to username, name, and email.
+<span class="nc bnc" id="L267" title="All 2 branches missed.">        if (fieldList == null) {</span>
+<span class="nc" id="L268">            searchFields.put(&quot;Username&quot;, manager.getUsernameField());</span>
+<span class="nc" id="L269">            searchFields.put(&quot;Name&quot;, manager.getNameField());</span>
+<span class="nc" id="L270">            searchFields.put(&quot;Email&quot;, manager.getEmailField());</span>
+        }
+        else {
+            try {
+<span class="nc bnc" id="L274" title="All 2 branches missed.">                for (StringTokenizer i=new StringTokenizer(fieldList, &quot;,&quot;); i.hasMoreTokens(); ) {</span>
+<span class="nc" id="L275">                    String[] field = i.nextToken().split(&quot;/&quot;);</span>
+<span class="nc" id="L276">                    searchFields.put(field[0], field[1]);</span>
+<span class="nc" id="L277">                }</span>
+            }
+<span class="nc" id="L279">            catch (Exception e) {</span>
+<span class="nc" id="L280">                Log.error(&quot;Error parsing LDAP search fields: &quot; + fieldList, e);</span>
+<span class="nc" id="L281">            }</span>
+        }
+<span class="nc" id="L283">        JiveGlobals.setProperty(&quot;ldap.searchFields&quot;, fieldList);</span>
+<span class="nc" id="L284">    }</span>
+
+    @Override
+    public Collection&lt;User&gt; findUsers(Set&lt;String&gt; fields, String query)
+            throws UnsupportedOperationException
+    {
+<span class="nc" id="L290">        return findUsers(fields, query, -1, -1);</span>
+    }
+
+    @Override
+    public Collection&lt;User&gt; findUsers(Set&lt;String&gt; fields, String query, int startIndex,
+            int numResults) throws UnsupportedOperationException
+    {
+<span class="nc bnc" id="L297" title="All 6 branches missed.">        if (fields.isEmpty() || query == null || &quot;&quot;.equals(query)) {</span>
+<span class="nc" id="L298">            return Collections.emptyList();</span>
+        }
+        
+<span class="nc" id="L301">        query = LdapManager.sanitizeSearchFilter(query, true);</span>
+        
+        // Make the query be a wildcard search by default. So, if the user searches for
+        // &quot;John&quot;, make the search be &quot;John*&quot; instead.
+<span class="nc bnc" id="L305" title="All 2 branches missed.">        if (!query.endsWith(&quot;*&quot;)) {</span>
+<span class="nc" id="L306">            query = query + &quot;*&quot;;</span>
+        }
+
+<span class="nc bnc" id="L309" title="All 2 branches missed.">        if (!searchFields.keySet().containsAll(fields)) {</span>
+<span class="nc" id="L310">            throw new IllegalArgumentException(&quot;Search fields &quot; + fields + &quot; are not valid.&quot;);</span>
+        }
+<span class="nc" id="L312">        StringBuilder filter = new StringBuilder();</span>
+        //Add the global search filter so only those users the directory administrator wants to include
+        //are returned from the directory
+<span class="nc" id="L315">        filter.append(&quot;(&amp;(&quot;);</span>
+<span class="nc" id="L316">        filter.append(MessageFormat.format(manager.getSearchFilter(),&quot;*&quot;));</span>
+<span class="nc" id="L317">        filter.append(')');</span>
+<span class="nc bnc" id="L318" title="All 2 branches missed.">        if (fields.size() &gt; 1) {</span>
+<span class="nc" id="L319">            filter.append(&quot;(|&quot;);</span>
+        }
+<span class="nc bnc" id="L321" title="All 2 branches missed.">        for (String field:fields) {</span>
+<span class="nc" id="L322">            String attribute = searchFields.get(field);</span>
+<span class="nc" id="L323">            filter.append('(').append(attribute).append('=')</span>
+<span class="nc" id="L324">                .append( query ).append(&quot;)&quot;);</span>
+<span class="nc" id="L325">        }</span>
+<span class="nc bnc" id="L326" title="All 2 branches missed.">        if (fields.size() &gt; 1) {</span>
+<span class="nc" id="L327">            filter.append(')');</span>
+        }
+<span class="nc" id="L329">        filter.append(')');</span>
+<span class="nc" id="L330">        List&lt;String&gt; userlist = manager.retrieveList(</span>
+<span class="nc" id="L331">                manager.getUsernameField(),</span>
+<span class="nc" id="L332">                filter.toString(),</span>
+                startIndex,
+                numResults,
+<span class="nc" id="L335">                manager.getUsernameSuffix(),</span>
+                true
+        );
+<span class="nc" id="L338">        return new UserCollection(userlist.toArray(new String[userlist.size()]));</span>
+    }
+
+    @Override
+    public boolean isReadOnly() {
+<span class="nc" id="L343">        return true;</span>
+    }
+
+    @Override
+    public boolean isNameRequired() {
+<span class="nc" id="L348">        return false;</span>
+    }
+
+    @Override
+    public boolean isEmailRequired() {
+<span class="nc" id="L353">        return false;</span>
+    }
+
+    /**
+     * Parses dates/time stamps stored in LDAP. Some possible values:
+     *
+     * &lt;ul&gt;
+     *      &lt;li&gt;20020228150820&lt;/li&gt;
+     *      &lt;li&gt;20030228150820Z&lt;/li&gt;
+     *      &lt;li&gt;20050228150820.12&lt;/li&gt;
+     *      &lt;li&gt;20060711011740.0Z&lt;/li&gt;
+     * &lt;/ul&gt;
+     *
+     * @param dateText the date string.
+     * @return the Date.
+     */
+    private static Date parseLDAPDate(String dateText) {
+        // If the date ends with a &quot;Z&quot;, that means that it's in the UTC time zone. Otherwise,
+        // Use the default time zone.
+<span class="nc" id="L372">        boolean useUTC = false;</span>
+<span class="nc bnc" id="L373" title="All 2 branches missed.">        if (dateText.endsWith(&quot;Z&quot;)) {</span>
+<span class="nc" id="L374">            useUTC = true;</span>
+        }
+<span class="nc" id="L376">        Date date = new Date();</span>
+        try {
+<span class="nc bnc" id="L378" title="All 2 branches missed.">            if (useUTC) {</span>
+<span class="nc" id="L379">                ldapDateFormat.setTimeZone(TimeZone.getTimeZone(&quot;UTC&quot;));</span>
+            }
+            else {
+<span class="nc" id="L382">                ldapDateFormat.setTimeZone(TimeZone.getDefault());</span>
+            }
+<span class="nc" id="L384">            date = ldapDateFormat.parse(dateText);</span>
+        }
+<span class="nc" id="L386">        catch (Exception e) {</span>
+<span class="nc" id="L387">            Log.error(e.getMessage(), e);</span>
+<span class="nc" id="L388">        }</span>
+<span class="nc" id="L389">        return date;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

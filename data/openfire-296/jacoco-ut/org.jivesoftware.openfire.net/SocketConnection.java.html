@@ -1,0 +1,730 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>SocketConnection.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.net</a> &gt; <span class="el_source">SocketConnection.java</span></div><h1>SocketConnection.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.net;
+
+import java.io.BufferedWriter;
+import java.io.IOException;
+import java.io.OutputStreamWriter;
+import java.io.Writer;
+import java.net.Socket;
+import java.net.UnknownHostException;
+import java.nio.channels.Channels;
+import java.nio.charset.StandardCharsets;
+import java.security.cert.Certificate;
+import java.util.Collection;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
+
+import javax.net.ssl.SSLPeerUnverifiedException;
+
+import org.jivesoftware.openfire.*;
+import org.jivesoftware.openfire.auth.UnauthorizedException;
+import org.jivesoftware.openfire.session.IncomingServerSession;
+import org.jivesoftware.openfire.session.LocalSession;
+import org.jivesoftware.openfire.session.Session;
+import org.jivesoftware.openfire.spi.ConnectionConfiguration;
+import org.jivesoftware.openfire.spi.ConnectionManagerImpl;
+import org.jivesoftware.openfire.spi.ConnectionType;
+import org.jivesoftware.util.JiveGlobals;
+import org.jivesoftware.util.LocaleUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmpp.packet.Packet;
+
+import com.jcraft.jzlib.JZlib;
+import com.jcraft.jzlib.ZOutputStream;
+
+/**
+ * An object to track the state of a XMPP client-server session.
+ * Currently this class contains the socket channel connecting the
+ * client and server.
+ *
+ * @author Iain Shigeoka
+ * @deprecated Old, pre NIO / MINA code. Should not be used as NIO offers better performance. Currently only in use for s2s.
+ */
+public class SocketConnection implements Connection {
+
+<span class="nc" id="L65">    private static final Logger Log = LoggerFactory.getLogger(SocketConnection.class);</span>
+
+<span class="nc" id="L67">    private static Map&lt;SocketConnection, String&gt; instances =</span>
+            new ConcurrentHashMap&lt;&gt;();
+
+    /**
+     * Milliseconds a connection has to be idle to be closed. Timeout is disabled by default. It's
+     * up to the connection's owner to configure the timeout value. Sending stanzas to the client
+     * is not considered as activity. We are only considering the connection active when the
+     * client sends some data or hearbeats (i.e. whitespaces) to the server.
+     * The reason for this is that sending data will fail if the connection is closed. And if
+     * the thread is blocked while sending data (because the socket is closed) then the clean up
+     * thread will close the socket anyway.
+     */
+<span class="nc" id="L79">    private long idleTimeout = -1;</span>
+
+<span class="nc" id="L81">    final private Map&lt;ConnectionCloseListener, Object&gt; listeners =</span>
+            new HashMap&lt;&gt;();
+
+    private Socket socket;
+    private SocketReader socketReader;
+
+    private Writer writer;
+<span class="nc" id="L88">    private AtomicBoolean writing = new AtomicBoolean(false);</span>
+<span class="nc" id="L89">    private AtomicReference&lt;State&gt; state = new AtomicReference&lt;State&gt;(State.OPEN);</span>
+
+    /**
+     * Deliverer to use when the connection is closed or was closed when delivering
+     * a packet.
+     */
+    private PacketDeliverer backupDeliverer;
+
+    private LocalSession session;
+    private boolean secure;
+    private boolean compressed;
+    private org.jivesoftware.util.XMLWriter xmlSerializer;
+<span class="nc" id="L101">    private boolean flashClient = false;</span>
+<span class="nc" id="L102">    private int majorVersion = 1;</span>
+<span class="nc" id="L103">    private int minorVersion = 0;</span>
+<span class="nc" id="L104">    private String language = null;</span>
+    private TLSStreamHandler tlsStreamHandler;
+
+<span class="nc" id="L107">    private long writeStarted = -1;</span>
+
+    /**
+     * TLS policy currently in use for this connection.
+     */
+<span class="nc" id="L112">    private TLSPolicy tlsPolicy = TLSPolicy.optional;</span>
+    private boolean usingSelfSignedCertificate;
+
+    /**
+     * Compression policy currently in use for this connection.
+     */
+<span class="nc" id="L118">    private CompressionPolicy compressionPolicy = CompressionPolicy.disabled;</span>
+
+    public static Collection&lt;SocketConnection&gt; getInstances() {
+<span class="nc" id="L121">        return instances.keySet();</span>
+    }
+
+    /**
+     * Create a new session using the supplied socket.
+     *
+     * @param backupDeliverer the packet deliverer this connection will use when socket is closed.
+     * @param socket the socket to represent.
+     * @param isSecure true if this is a secure connection.
+     * @throws java.io.IOException if there was a socket error while sending the packet.
+     */
+    public SocketConnection(PacketDeliverer backupDeliverer, Socket socket, boolean isSecure)
+<span class="nc" id="L133">            throws IOException {</span>
+<span class="nc bnc" id="L134" title="All 2 branches missed.">        if (socket == null) {</span>
+<span class="nc" id="L135">            throw new NullPointerException(&quot;Socket channel must be non-null&quot;);</span>
+        }
+
+<span class="nc" id="L138">        this.secure = isSecure;</span>
+<span class="nc" id="L139">        this.socket = socket;</span>
+        // DANIELE: Modify socket to use channel
+<span class="nc bnc" id="L141" title="All 2 branches missed.">        if (socket.getChannel() != null) {</span>
+<span class="nc" id="L142">            writer = Channels.newWriter(</span>
+<span class="nc" id="L143">                    ServerTrafficCounter.wrapWritableChannel(socket.getChannel()), StandardCharsets.UTF_8.newEncoder(), -1);</span>
+        }
+        else {
+<span class="nc" id="L146">            writer = new BufferedWriter(new OutputStreamWriter(</span>
+<span class="nc" id="L147">                    ServerTrafficCounter.wrapOutputStream(socket.getOutputStream()), StandardCharsets.UTF_8));</span>
+        }
+<span class="nc" id="L149">        this.backupDeliverer = backupDeliverer;</span>
+<span class="nc" id="L150">        xmlSerializer = new XMLSocketWriter(writer, this);</span>
+
+<span class="nc" id="L152">        instances.put(this, &quot;&quot;);</span>
+
+        // Default this sensibly.
+<span class="nc" id="L155">        this.tlsPolicy = this.getConfiguration().getTlsPolicy();</span>
+<span class="nc" id="L156">    }</span>
+
+    /**
+     * Returns the stream handler responsible for securing the plain connection and providing
+     * the corresponding input and output streams.
+     *
+     * @return the stream handler responsible for securing the plain connection and providing
+     *         the corresponding input and output streams.
+     */
+    public TLSStreamHandler getTLSStreamHandler() {
+<span class="nc" id="L166">        return tlsStreamHandler;</span>
+    }
+
+    public void startTLS(boolean clientMode, boolean directTLS) throws IOException {
+<span class="nc bnc" id="L170" title="All 2 branches missed.">        if (!secure) {</span>
+<span class="nc" id="L171">            secure = true;</span>
+
+            // Prepare for TLS
+            final ClientAuth clientAuth;
+<span class="nc bnc" id="L175" title="All 2 branches missed.">            if (session instanceof IncomingServerSession)</span>
+            {
+<span class="nc" id="L177">                clientAuth = ClientAuth.needed;</span>
+            }
+            else
+            {
+<span class="nc" id="L181">                clientAuth = ClientAuth.wanted;</span>
+            }
+<span class="nc" id="L183">            tlsStreamHandler = new TLSStreamHandler(socket, getConfiguration(), clientMode);</span>
+<span class="nc bnc" id="L184" title="All 4 branches missed.">            if (!clientMode &amp;&amp; !directTLS) {</span>
+                // Indicate the client that the server is ready to negotiate TLS
+<span class="nc" id="L186">                deliverRawText(&quot;&lt;proceed xmlns=\&quot;urn:ietf:params:xml:ns:xmpp-tls\&quot;/&gt;&quot;);</span>
+            }
+            // Start handshake
+<span class="nc" id="L189">            tlsStreamHandler.start();</span>
+            // Use new wrapped writers
+<span class="nc" id="L191">            writer = new BufferedWriter(new OutputStreamWriter(tlsStreamHandler.getOutputStream(), StandardCharsets.UTF_8));</span>
+<span class="nc" id="L192">            xmlSerializer = new XMLSocketWriter(writer, this);</span>
+        }
+<span class="nc" id="L194">    }</span>
+
+    @Override
+    public void addCompression() {
+        // WARNING: We do not support adding compression for incoming traffic but not for outgoing traffic.
+<span class="nc" id="L199">    }</span>
+
+    @Override
+    public void startCompression() {
+<span class="nc" id="L203">        compressed = true;</span>
+
+        try {
+<span class="nc bnc" id="L206" title="All 2 branches missed.">            if (tlsStreamHandler == null) {</span>
+<span class="nc" id="L207">                ZOutputStream out = new ZOutputStream(</span>
+<span class="nc" id="L208">                        ServerTrafficCounter.wrapOutputStream(socket.getOutputStream()),</span>
+                        JZlib.Z_BEST_COMPRESSION);
+<span class="nc" id="L210">                out.setFlushMode(JZlib.Z_PARTIAL_FLUSH);</span>
+<span class="nc" id="L211">                writer = new BufferedWriter(new OutputStreamWriter(out, StandardCharsets.UTF_8));</span>
+<span class="nc" id="L212">                xmlSerializer = new XMLSocketWriter(writer, this);</span>
+<span class="nc" id="L213">            }</span>
+            else {
+<span class="nc" id="L215">                ZOutputStream out = new ZOutputStream(tlsStreamHandler.getOutputStream(), JZlib.Z_BEST_COMPRESSION);</span>
+<span class="nc" id="L216">                out.setFlushMode(JZlib.Z_PARTIAL_FLUSH);</span>
+<span class="nc" id="L217">                writer = new BufferedWriter(new OutputStreamWriter(out, StandardCharsets.UTF_8));</span>
+<span class="nc" id="L218">                xmlSerializer = new XMLSocketWriter(writer, this);</span>
+            }
+<span class="nc" id="L220">        } catch (IOException e) {</span>
+            // TODO Would be nice to still be able to throw the exception and not catch it here
+<span class="nc" id="L222">            Log.error(&quot;Error while starting compression&quot;, e);</span>
+<span class="nc" id="L223">            compressed = false;</span>
+<span class="nc" id="L224">        }</span>
+<span class="nc" id="L225">    }</span>
+
+    @Override
+    public ConnectionConfiguration getConfiguration()
+    {
+        // This is an ugly hack to get backwards compatibility with the pre-MINA era. As this implementation is being
+        // removed (it is marked as deprecated - at the time of writing, it is only used for S2S). The ugly hack: assume
+        // S2S:
+<span class="nc" id="L233">        final ConnectionManagerImpl connectionManager = ((ConnectionManagerImpl) XMPPServer.getInstance().getConnectionManager());</span>
+<span class="nc" id="L234">        return connectionManager.getListener( ConnectionType.SOCKET_S2S, false ).generateConnectionConfiguration();</span>
+    }
+
+    public boolean validate() {
+<span class="nc bnc" id="L238" title="All 2 branches missed.">        if (isClosed()) {</span>
+<span class="nc" id="L239">            return false;</span>
+        }
+<span class="nc" id="L241">        boolean allowedToWrite = false;</span>
+        try {
+<span class="nc" id="L243">            requestWriting();</span>
+<span class="nc" id="L244">            allowedToWrite = true;</span>
+            // Register that we started sending data on the connection
+<span class="nc" id="L246">            writeStarted();</span>
+<span class="nc" id="L247">            writer.write(&quot; &quot;);</span>
+<span class="nc" id="L248">            writer.flush();</span>
+        }
+<span class="nc" id="L250">        catch (Exception e) {</span>
+<span class="nc" id="L251">            Log.warn(&quot;Closing no longer valid connection&quot; + &quot;\n&quot; + this.toString(), e);</span>
+<span class="nc" id="L252">            close();</span>
+        }
+        finally {
+            // Register that we finished sending data on the connection
+<span class="nc" id="L256">            writeFinished();</span>
+<span class="nc bnc" id="L257" title="All 6 branches missed.">            if (allowedToWrite) {</span>
+<span class="nc" id="L258">                releaseWriting();</span>
+            }
+<span class="nc" id="L260">        }</span>
+<span class="nc bnc" id="L261" title="All 2 branches missed.">        return !isClosed();</span>
+    }
+
+    @Override
+    public void init(LocalSession owner) {
+<span class="nc" id="L266">        session = owner;</span>
+<span class="nc" id="L267">    }</span>
+
+    @Override
+    public void reinit(LocalSession owner) {
+<span class="nc" id="L271">        session = owner;</span>
+<span class="nc" id="L272">    }</span>
+
+    @Override
+    public void registerCloseListener(ConnectionCloseListener listener, Object handbackMessage) {
+<span class="nc bnc" id="L276" title="All 2 branches missed.">        if (isClosed()) {</span>
+<span class="nc" id="L277">            listener.onConnectionClose(handbackMessage);</span>
+        }
+        else {
+<span class="nc" id="L280">            listeners.put(listener, handbackMessage);</span>
+        }
+<span class="nc" id="L282">    }</span>
+
+    @Override
+    public void removeCloseListener(ConnectionCloseListener listener) {
+<span class="nc" id="L286">        listeners.remove(listener);</span>
+<span class="nc" id="L287">    }</span>
+
+    @Override
+    public byte[] getAddress() throws UnknownHostException {
+<span class="nc" id="L291">        return socket.getInetAddress().getAddress();</span>
+    }
+
+    @Override
+    public String getHostAddress() throws UnknownHostException {
+<span class="nc" id="L296">        return socket.getInetAddress().getHostAddress();</span>
+    }
+
+    @Override
+    public String getHostName() throws UnknownHostException {
+<span class="nc" id="L301">        return socket.getInetAddress().getHostName();</span>
+    }
+
+    /**
+     * Returns the port that the connection uses.
+     *
+     * @return the port that the connection uses.
+     */
+    public int getPort() {
+<span class="nc" id="L310">        return socket.getPort();</span>
+    }
+
+    /**
+     * Returns the Writer used to send data to the connection. The writer should be
+     * used with caution. In the majority of cases, the {@link #deliver(Packet)}
+     * method should be used to send data instead of using the writer directly.
+     * You must synchronize on the writer before writing data to it to ensure
+     * data consistency:
+     *
+     * &lt;pre&gt;
+     *  Writer writer = connection.getWriter();
+     * synchronized(writer) {
+     *     // write data....
+     * }&lt;/pre&gt;
+     *
+     * @return the Writer for this connection.
+     */
+    public Writer getWriter() {
+<span class="nc" id="L329">        return writer;</span>
+    }
+
+    @Override
+    public boolean isClosed() {
+<span class="nc bnc" id="L334" title="All 2 branches missed.">        return state.get() == State.CLOSED;</span>
+    }
+
+    @Override
+    public boolean isSecure() {
+<span class="nc" id="L339">        return secure;</span>
+    }
+
+    @Override
+    public boolean isCompressed() {
+<span class="nc" id="L344">        return compressed;</span>
+    }
+
+    @Override
+    public TLSPolicy getTlsPolicy() {
+<span class="nc" id="L349">        return tlsPolicy;</span>
+    }
+
+    /**
+     * Sets whether TLS is mandatory, optional or is disabled. When TLS is mandatory clients
+     * are required to secure their connections or otherwise their connections will be closed.
+     * On the other hand, when TLS is disabled clients are not allowed to secure their connections
+     * using TLS. Their connections will be closed if they try to secure the connection. in this
+     * last case.
+     *
+     * @param tlsPolicy whether TLS is mandatory, optional or is disabled.
+     */
+    @Override
+    public void setTlsPolicy(TLSPolicy tlsPolicy) {
+<span class="nc" id="L363">        this.tlsPolicy = tlsPolicy;</span>
+<span class="nc" id="L364">    }</span>
+
+    @Override
+    public CompressionPolicy getCompressionPolicy() {
+<span class="nc" id="L368">        return compressionPolicy;</span>
+    }
+
+    /**
+     * Sets whether compression is enabled or is disabled.
+     *
+     * @param compressionPolicy whether Compression is enabled or is disabled.
+     */
+    @Override
+    public void setCompressionPolicy(CompressionPolicy compressionPolicy) {
+<span class="nc" id="L378">        this.compressionPolicy = compressionPolicy;</span>
+<span class="nc" id="L379">    }</span>
+
+    public long getIdleTimeout() {
+<span class="nc" id="L382">        return idleTimeout;</span>
+    }
+
+    /**
+     * Sets the number of milliseconds a connection has to be idle to be closed. Sending
+     * stanzas to the client is not considered as activity. We are only considering the
+     * connection active when the client sends some data or hearbeats (i.e. whitespaces)
+     * to the server.
+     *
+     * @param timeout the number of milliseconds a connection has to be idle to be closed.
+     */
+    public void setIdleTimeout(long timeout) {
+<span class="nc" id="L394">        this.idleTimeout = timeout;</span>
+<span class="nc" id="L395">    }</span>
+
+    @Override
+    public int getMajorXMPPVersion() {
+<span class="nc" id="L399">        return majorVersion;</span>
+    }
+
+    @Override
+    public int getMinorXMPPVersion() {
+<span class="nc" id="L404">        return minorVersion;</span>
+    }
+
+    /**
+     * Sets the XMPP version information. In most cases, the version should be &quot;1.0&quot;.
+     * However, older clients using the &quot;Jabber&quot; protocol do not set a version. In that
+     * case, the version is &quot;0.0&quot;.
+     *
+     * @param majorVersion the major version.
+     * @param minorVersion the minor version.
+     */
+    @Override
+    public void setXMPPVersion(int majorVersion, int minorVersion) {
+<span class="nc" id="L417">        this.majorVersion = majorVersion;</span>
+<span class="nc" id="L418">        this.minorVersion = minorVersion;</span>
+<span class="nc" id="L419">    }</span>
+
+    @Override
+    public boolean isFlashClient() {
+<span class="nc" id="L423">        return flashClient;</span>
+    }
+
+    /**
+     * Sets whether the connected client is a flash client. Flash clients need to
+     * receive a special character (i.e. \0) at the end of each xml packet. Flash
+     * clients may send the character \0 in incoming packets and may start a
+     * connection using another openning tag such as: &quot;flash:client&quot;.
+     *
+     * @param flashClient true if the if the connection is a flash client.
+     */
+    @Override
+    public void setFlashClient(boolean flashClient) {
+<span class="nc" id="L436">        this.flashClient = flashClient;</span>
+<span class="nc" id="L437">    }</span>
+
+    @Override
+    public Certificate[] getLocalCertificates() {
+<span class="nc bnc" id="L441" title="All 2 branches missed.">        if (tlsStreamHandler != null) {</span>
+<span class="nc" id="L442">            return tlsStreamHandler.getSSLSession().getLocalCertificates();</span>
+        }
+<span class="nc" id="L444">        return new Certificate[0];</span>
+    }
+
+    @Override
+    public Certificate[] getPeerCertificates() {
+<span class="nc bnc" id="L449" title="All 2 branches missed.">        if (tlsStreamHandler != null) {</span>
+            try {
+<span class="nc" id="L451">                return tlsStreamHandler.getSSLSession().getPeerCertificates();</span>
+<span class="nc" id="L452">            } catch (SSLPeerUnverifiedException e ) {</span>
+                // Perfectly valid when client-auth is 'want', a problem when it is 'need'.
+<span class="nc" id="L454">                Log.debug( &quot;Peer certificates have not been verified - there are no certificates to return for: {}&quot;, tlsStreamHandler.getSSLSession().getPeerHost(), e );</span>
+            }
+        }
+<span class="nc" id="L457">        return new Certificate[0];</span>
+    }
+
+    @Override
+    public void setUsingSelfSignedCertificate(boolean isSelfSigned) {
+<span class="nc" id="L462">        this.usingSelfSignedCertificate = isSelfSigned;</span>
+<span class="nc" id="L463">    }</span>
+
+    @Override
+    public boolean isUsingSelfSignedCertificate() {
+<span class="nc" id="L467">        return usingSelfSignedCertificate;</span>
+    }
+
+    @Override
+    public PacketDeliverer getPacketDeliverer() {
+<span class="nc" id="L472">        return backupDeliverer;</span>
+    }
+
+    /**
+     * Closes the connection without sending any data (not even a stream end-tag).
+     */
+    public void forceClose() {
+<span class="nc" id="L479">        close( true );</span>
+<span class="nc" id="L480">    }</span>
+
+    /**
+     * Closes the connection after trying to send a stream end tag.
+     */
+    @Override
+    public void close() {
+<span class="nc" id="L487">        close( false );</span>
+<span class="nc" id="L488">    }</span>
+
+    /**
+     * Normal connection close will attempt to write the stream end tag. Otherwise this method
+     * forces the connection closed immediately. This method will be called from {@link SocketSendingTracker} 
+     * when sending data over the socket has taken a long time and we need to close the socket, discard
+     * the connection and its session.
+     */
+    private void close(boolean force) {
+<span class="nc bnc" id="L497" title="All 2 branches missed.">        if (state.compareAndSet(State.OPEN, State.CLOSED)) {</span>
+            
+<span class="nc bnc" id="L499" title="All 2 branches missed.">            if (session != null) {</span>
+<span class="nc" id="L500">                session.setStatus(Session.STATUS_CLOSED);</span>
+            }
+
+<span class="nc bnc" id="L503" title="All 2 branches missed.">            if (!force) {</span>
+<span class="nc" id="L504">                boolean allowedToWrite = false;</span>
+                try {
+<span class="nc" id="L506">                    requestWriting();</span>
+<span class="nc" id="L507">                    allowedToWrite = true;</span>
+                    // Register that we started sending data on the connection
+<span class="nc" id="L509">                    writeStarted();</span>
+<span class="nc" id="L510">                    writer.write(&quot;&lt;/stream:stream&gt;&quot;);</span>
+<span class="nc bnc" id="L511" title="All 2 branches missed.">                    if (flashClient) {</span>
+<span class="nc" id="L512">                        writer.write('\0');</span>
+                    }
+<span class="nc" id="L514">                    writer.flush();</span>
+                }
+<span class="nc" id="L516">                catch (Exception e) {</span>
+<span class="nc" id="L517">                    Log.debug(&quot;Failed to deliver stream close tag: &quot; + e.getMessage());</span>
+<span class="nc" id="L518">                }</span>
+                
+                // Register that we finished sending data on the connection
+<span class="nc" id="L521">                writeFinished();</span>
+<span class="nc bnc" id="L522" title="All 2 branches missed.">                if (allowedToWrite) {</span>
+<span class="nc" id="L523">                    releaseWriting();</span>
+                }
+            }
+                
+<span class="nc" id="L527">            closeConnection();</span>
+<span class="nc" id="L528">            notifyCloseListeners();</span>
+<span class="nc" id="L529">            listeners.clear();</span>
+        }
+<span class="nc" id="L531">    }</span>
+
+    @Override
+    public void systemShutdown() {
+<span class="nc" id="L535">        deliverRawText(&quot;&lt;stream:error&gt;&lt;system-shutdown &quot; +</span>
+                &quot;xmlns='urn:ietf:params:xml:ns:xmpp-streams'/&gt;&lt;/stream:error&gt;&quot;);
+<span class="nc" id="L537">        close();</span>
+<span class="nc" id="L538">    }</span>
+
+    void writeStarted() {
+<span class="nc" id="L541">        writeStarted = System.currentTimeMillis();</span>
+<span class="nc" id="L542">    }</span>
+
+    void writeFinished() {
+<span class="nc" id="L545">        writeStarted = -1;</span>
+<span class="nc" id="L546">    }</span>
+
+    /**
+     * Returns true if the socket was closed due to a bad health. The socket is considered to
+     * be in a bad state if a thread has been writing for a while and the write operation has
+     * not finished in a long time or when the client has not sent a heartbeat for a long time.
+     * In any of both cases the socket will be closed.
+     *
+     * @return true if the socket was closed due to a bad health.s
+     */
+    boolean checkHealth() {
+        // Check that the sending operation is still active
+<span class="nc" id="L558">        long writeTimestamp = writeStarted;</span>
+<span class="nc bnc" id="L559" title="All 2 branches missed.">        if (writeTimestamp &gt; -1 &amp;&amp; System.currentTimeMillis() - writeTimestamp &gt;</span>
+<span class="nc bnc" id="L560" title="All 2 branches missed.">                JiveGlobals.getIntProperty(&quot;xmpp.session.sending-limit&quot;, 60000)) {</span>
+            // Close the socket
+<span class="nc bnc" id="L562" title="All 2 branches missed.">            if (Log.isDebugEnabled()) {</span>
+<span class="nc" id="L563">                Log.debug(&quot;Closing connection: &quot; + this + &quot; that started sending data at: &quot; +</span>
+                        new Date(writeTimestamp));
+            }
+<span class="nc" id="L566">            forceClose();</span>
+<span class="nc" id="L567">            return true;</span>
+        }
+        else {
+            // Check if the connection has been idle. A connection is considered idle if the client
+            // has not been receiving data for a period. Sending data to the client is not
+            // considered as activity.
+<span class="nc bnc" id="L573" title="All 4 branches missed.">            if (idleTimeout &gt; -1 &amp;&amp; socketReader != null &amp;&amp;</span>
+<span class="nc bnc" id="L574" title="All 2 branches missed.">                    System.currentTimeMillis() - socketReader.getLastActive() &gt; idleTimeout) {</span>
+                // Close the socket
+<span class="nc bnc" id="L576" title="All 2 branches missed.">                if (Log.isDebugEnabled()) {</span>
+<span class="nc" id="L577">                    Log.debug(&quot;Closing connection that has been idle: &quot; + this);</span>
+                }
+<span class="nc" id="L579">                forceClose();</span>
+<span class="nc" id="L580">                return true;</span>
+            }
+        }
+<span class="nc" id="L583">        return false;</span>
+    }
+
+    private void release() {
+<span class="nc" id="L587">        writeStarted = -1;</span>
+<span class="nc" id="L588">        instances.remove(this);</span>
+<span class="nc" id="L589">    }</span>
+
+    private void closeConnection() {
+<span class="nc" id="L592">        release();</span>
+        try {
+<span class="nc bnc" id="L594" title="All 2 branches missed.">            if (tlsStreamHandler == null) {</span>
+<span class="nc" id="L595">                socket.close();</span>
+            }
+            else {
+                // Close the channels since we are using TLS (i.e. NIO). If the channels implement
+                // the InterruptibleChannel interface then any other thread that was blocked in
+                // an I/O operation will be interrupted and an exception thrown
+<span class="nc" id="L601">                tlsStreamHandler.close();</span>
+            }
+        }
+<span class="nc" id="L604">        catch (Exception e) {</span>
+<span class="nc" id="L605">            Log.error(LocaleUtils.getLocalizedString(&quot;admin.error.close&quot;)</span>
+<span class="nc" id="L606">                    + &quot;\n&quot; + this.toString(), e);</span>
+<span class="nc" id="L607">        }</span>
+<span class="nc" id="L608">    }</span>
+
+    @Override
+    public void deliver(Packet packet) throws UnauthorizedException, PacketException {
+<span class="nc bnc" id="L612" title="All 2 branches missed.">        if (isClosed()) {</span>
+<span class="nc" id="L613">            backupDeliverer.deliver(packet);</span>
+        }
+        else {
+<span class="nc" id="L616">            boolean errorDelivering = false;</span>
+<span class="nc" id="L617">            boolean allowedToWrite = false;</span>
+            try {
+<span class="nc" id="L619">                requestWriting();</span>
+<span class="nc" id="L620">                allowedToWrite = true;</span>
+<span class="nc" id="L621">                xmlSerializer.write(packet.getElement());</span>
+<span class="nc bnc" id="L622" title="All 2 branches missed.">                if (flashClient) {</span>
+<span class="nc" id="L623">                    writer.write('\0');</span>
+                }
+<span class="nc" id="L625">                xmlSerializer.flush();</span>
+            }
+<span class="nc" id="L627">            catch (Exception e) {</span>
+<span class="nc" id="L628">                Log.debug(&quot;Error delivering packet&quot; + &quot;\n&quot; + this.toString(), e);</span>
+<span class="nc" id="L629">                errorDelivering = true;</span>
+            }
+            finally {
+<span class="nc bnc" id="L632" title="All 6 branches missed.">                if (allowedToWrite) {</span>
+<span class="nc" id="L633">                    releaseWriting();</span>
+                }
+<span class="nc" id="L635">            }</span>
+<span class="nc bnc" id="L636" title="All 2 branches missed.">            if (errorDelivering) {</span>
+<span class="nc" id="L637">                close();</span>
+                // Retry sending the packet again. Most probably if the packet is a
+                // Message it will be stored offline
+<span class="nc" id="L640">                backupDeliverer.deliver(packet);</span>
+            }
+            else {
+<span class="nc" id="L643">                session.incrementServerPacketCount();</span>
+            }
+        }
+<span class="nc" id="L646">    }</span>
+
+    @Override
+    public void deliverRawText(String text) {
+<span class="nc bnc" id="L650" title="All 2 branches missed.">        if (!isClosed()) {</span>
+<span class="nc" id="L651">            boolean errorDelivering = false;</span>
+<span class="nc" id="L652">            boolean allowedToWrite = false;</span>
+            try {
+<span class="nc" id="L654">                requestWriting();</span>
+<span class="nc" id="L655">                allowedToWrite = true;</span>
+                // Register that we started sending data on the connection
+<span class="nc" id="L657">                writeStarted();</span>
+<span class="nc" id="L658">                writer.write(text);</span>
+<span class="nc bnc" id="L659" title="All 2 branches missed.">                if (flashClient) {</span>
+<span class="nc" id="L660">                    writer.write('\0');</span>
+                }
+<span class="nc" id="L662">                writer.flush();</span>
+            }
+<span class="nc" id="L664">            catch (Exception e) {</span>
+<span class="nc" id="L665">                Log.debug(&quot;Error delivering raw text&quot; + &quot;\n&quot; + this.toString(), e);</span>
+<span class="nc" id="L666">                errorDelivering = true;</span>
+            }
+            finally {
+                // Register that we finished sending data on the connection
+<span class="nc" id="L670">                writeFinished();</span>
+<span class="nc bnc" id="L671" title="All 6 branches missed.">                if (allowedToWrite) {</span>
+<span class="nc" id="L672">                    releaseWriting();</span>
+                }
+<span class="nc" id="L674">            }</span>
+<span class="nc bnc" id="L675" title="All 2 branches missed.">            if (errorDelivering) {</span>
+<span class="nc" id="L676">                close();</span>
+            }
+        }
+<span class="nc" id="L679">    }</span>
+
+    /**
+     * Notifies all close listeners that the connection has been closed.
+     * Used by subclasses to properly finish closing the connection.
+     */
+    private void notifyCloseListeners() {
+<span class="nc" id="L686">        synchronized (listeners) {</span>
+<span class="nc bnc" id="L687" title="All 2 branches missed.">            for (ConnectionCloseListener listener : listeners.keySet()) {</span>
+                try {
+<span class="nc" id="L689">                    listener.onConnectionClose(listeners.get(listener));</span>
+                }
+<span class="nc" id="L691">                catch (Exception e) {</span>
+<span class="nc" id="L692">                    Log.error(&quot;Error notifying listener: &quot; + listener, e);</span>
+<span class="nc" id="L693">                }</span>
+<span class="nc" id="L694">            }</span>
+<span class="nc" id="L695">        }</span>
+<span class="nc" id="L696">    }</span>
+
+    private void requestWriting() throws Exception {
+        for (;;) {
+<span class="nc bnc" id="L700" title="All 2 branches missed.">            if (writing.compareAndSet(false, true)) {</span>
+                // We are now in writing mode and only we can write to the socket
+<span class="nc" id="L702">                return;</span>
+            }
+            else {
+                // Check health of the socket
+<span class="nc bnc" id="L706" title="All 2 branches missed.">                if (checkHealth()) {</span>
+                    // Connection was closed then stop
+<span class="nc" id="L708">                    throw new Exception(&quot;Probable dead connection was closed&quot;);</span>
+                }
+                else {
+<span class="nc" id="L711">                    Thread.sleep(1);</span>
+                }
+            }
+        }
+    }
+
+    private void releaseWriting() {
+<span class="nc" id="L718">        writing.compareAndSet(true, false);</span>
+<span class="nc" id="L719">    }</span>
+
+    @Override
+    public String toString() {
+<span class="nc" id="L723">        return super.toString() + &quot; socket: &quot; + socket + &quot; session: &quot; + session;</span>
+    }
+
+    public void setSocketReader(SocketReader socketReader) {
+<span class="nc" id="L727">        this.socketReader = socketReader;</span>
+<span class="nc" id="L728">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

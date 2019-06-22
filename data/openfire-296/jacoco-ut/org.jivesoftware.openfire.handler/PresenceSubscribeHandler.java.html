@@ -1,0 +1,551 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>PresenceSubscribeHandler.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.handler</a> &gt; <span class="el_source">PresenceSubscribeHandler.java</span></div><h1>PresenceSubscribeHandler.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2004-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.handler;
+
+import java.util.Hashtable;
+import java.util.List;
+import java.util.Map;
+
+import org.jivesoftware.openfire.ChannelHandler;
+import org.jivesoftware.openfire.PacketDeliverer;
+import org.jivesoftware.openfire.PacketException;
+import org.jivesoftware.openfire.PresenceManager;
+import org.jivesoftware.openfire.RoutingTable;
+import org.jivesoftware.openfire.SharedGroupException;
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.container.BasicModule;
+import org.jivesoftware.openfire.roster.Roster;
+import org.jivesoftware.openfire.roster.RosterItem;
+import org.jivesoftware.openfire.roster.RosterManager;
+import org.jivesoftware.openfire.user.PresenceEventDispatcher;
+import org.jivesoftware.openfire.user.UserAlreadyExistsException;
+import org.jivesoftware.openfire.user.UserManager;
+import org.jivesoftware.openfire.user.UserNotFoundException;
+import org.jivesoftware.util.LocaleUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmpp.packet.JID;
+import org.xmpp.packet.PacketError;
+import org.xmpp.packet.Presence;
+
+/**
+ * Implements the presence protocol. Clients use this protocol to
+ * update presence and roster information.
+ * &lt;p&gt;
+ * The handler must properly detect the presence type, update the user's roster,
+ * and inform presence subscribers of the session's updated presence
+ * status. Presence serves many purposes in Jabber so this handler will
+ * likely be the most complex of all handlers in the server.&lt;/p&gt;
+ * &lt;p&gt;
+ * There are four basic types of presence updates:&lt;/p&gt;
+ * &lt;ul&gt;
+ * &lt;li&gt;Simple presence updates - addressed to the server (or to address), these updates
+ * are properly addressed by the server, and multicast to
+ * interested subscribers on the user's roster. An empty, missing,
+ * or &quot;unavailable&quot; type attribute indicates a simple update (there
+ * is no &quot;available&quot; type although it should be accepted by the server.
+ * &lt;li&gt;Directed presence updates - addressed to particular jabber entities,
+ * these presence updates are properly addressed and directly delivered
+ * to the entity without broadcast to roster subscribers. Any update type
+ * is possible except those reserved for subscription requests.
+ * &lt;li&gt;Subscription requests - these updates request presence subscription
+ * status changes. Such requests always affect the roster.  The server must:
+ * &lt;ul&gt;
+ * &lt;li&gt;update the roster with the proper subscriber info
+ * &lt;li&gt;push the roster changes to the user
+ * &lt;li&gt;forward the update to the correct parties.
+ * &lt;/ul&gt;
+ * The valid types include &quot;subscribe&quot;, &quot;subscribed&quot;, &quot;unsubscribed&quot;,
+ * and &quot;unsubscribe&quot;.
+ * &lt;li&gt;XMPPServer probes - Provides a mechanism for servers to query the presence
+ * status of users on another server. This allows users to immediately
+ * know the presence status of users when they come online rather than way
+ * for a presence update broadcast from the other server or tracking them
+ * as they are received.  Requires S2S capabilities.
+ * &lt;/ul&gt;
+ * &lt;h2&gt;Warning&lt;/h2&gt;
+ * There should be a way of determining whether a session has
+ * authorization to access this feature. I'm not sure it is a good
+ * idea to do authorization in each handler. It would be nice if
+ * the framework could assert authorization policies across channels.
+ *
+ * @author Iain Shigeoka
+ */
+public class PresenceSubscribeHandler extends BasicModule implements ChannelHandler&lt;Presence&gt; {
+
+<span class="nc" id="L90">    private static final Logger Log = LoggerFactory.getLogger(PresenceSubscribeHandler.class);</span>
+
+    private RoutingTable routingTable;
+    private XMPPServer localServer;
+    private String serverName;
+    private PacketDeliverer deliverer;
+    private PresenceManager presenceManager;
+    private RosterManager rosterManager;
+    private UserManager userManager;
+
+    public PresenceSubscribeHandler() {
+<span class="nc" id="L101">        super(&quot;Presence subscription handler&quot;);</span>
+<span class="nc" id="L102">    }</span>
+
+    @Override
+    public void process(Presence presence) throws PacketException {
+<span class="nc bnc" id="L106" title="All 2 branches missed.">        if (presence == null) {</span>
+<span class="nc" id="L107">            throw new IllegalArgumentException(&quot;Argument 'presence' cannot be null.&quot;);</span>
+        }
+
+<span class="nc" id="L110">        final Presence.Type type = presence.getType();</span>
+
+<span class="nc bnc" id="L112" title="All 8 branches missed.">        if (type != Presence.Type.subscribe </span>
+                &amp;&amp; type != Presence.Type.unsubscribe
+                &amp;&amp; type != Presence.Type.subscribed 
+                &amp;&amp; type != Presence.Type.unsubscribed) {
+<span class="nc" id="L116">            throw new IllegalArgumentException(&quot;Packet processed by PresenceSubscribeHandler is &quot;</span>
+                    + &quot;not of a subscription-related type, but: &quot; + type);
+        }
+
+        // RFC-6121 paragraph 3: &quot;When a server processes or generates an outbound presence stanza
+        // of type &quot;subscribe&quot;, &quot;subscribed&quot;, &quot;unsubscribe&quot;, or &quot;unsubscribed&quot;, the server MUST stamp
+        // the outgoing presence stanza with the bare JID &lt;localpart@domainpart&gt; of the sending entity,
+        // not the full JID &lt;localpart@domainpart/resourcepart&gt;.&quot;
+<span class="nc" id="L124">        presence.setFrom(presence.getFrom().toBareJID());</span>
+        
+        // RFC-6121 paragraph 3.1.3: &quot;Before processing the inbound presence subscription request, the
+        // contact's server SHOULD check the syntax of the JID contained in the 'to' attribute. If the
+        // JID is of the form &lt;contact@domainpart/resourcepart&gt; instead of &lt;contact@domainpart&gt;, the
+        // contact's server SHOULD treat it as if the request had been directed to the contact's bare
+        // JID and modify the 'to' address accordingly.
+<span class="nc bnc" id="L131" title="All 2 branches missed.">        if (presence.getTo() != null) {</span>
+<span class="nc" id="L132">            presence.setTo(presence.getTo().toBareJID());</span>
+        }
+
+<span class="nc" id="L135">        final JID senderJID = presence.getFrom();</span>
+<span class="nc" id="L136">        final JID recipientJID = presence.getTo();</span>
+
+        try {            
+            // Reject presence subscription requests sent to the local server itself.
+<span class="nc bnc" id="L140" title="All 4 branches missed.">            if (recipientJID == null || recipientJID.toString().equals(serverName)) {</span>
+<span class="nc bnc" id="L141" title="All 2 branches missed.">                if (type == Presence.Type.subscribe) {</span>
+<span class="nc" id="L142">                    Presence reply = new Presence();</span>
+<span class="nc" id="L143">                    reply.setTo(senderJID);</span>
+<span class="nc" id="L144">                    reply.setFrom(recipientJID);</span>
+<span class="nc" id="L145">                    reply.setType(Presence.Type.unsubscribed);</span>
+<span class="nc" id="L146">                    deliverer.deliver(reply);</span>
+                }
+<span class="nc" id="L148">                return;</span>
+            }
+
+            try {
+<span class="nc" id="L152">                Roster senderRoster = getRoster(senderJID);</span>
+<span class="nc bnc" id="L153" title="All 2 branches missed.">                if (senderRoster != null) {</span>
+<span class="nc" id="L154">                    manageSub(recipientJID, true, type, senderRoster);</span>
+                }
+<span class="nc" id="L156">                Roster recipientRoster = getRoster(recipientJID);</span>
+<span class="nc" id="L157">                boolean recipientSubChanged = false;</span>
+<span class="nc bnc" id="L158" title="All 2 branches missed.">                if (recipientRoster != null) {</span>
+<span class="nc" id="L159">                    recipientSubChanged = manageSub(senderJID, false, type, recipientRoster);</span>
+                }
+
+                // Do not forward the packet to the recipient if the presence is of type subscribed
+                // and the recipient user has not changed its subscription state.
+<span class="nc bnc" id="L164" title="All 6 branches missed.">                if (!(type == Presence.Type.subscribed &amp;&amp; recipientRoster != null &amp;&amp; !recipientSubChanged)) {</span>
+
+                    // If the user is already subscribed to the *local* user's presence then do not 
+                    // forward the subscription request. Also, do not send an auto-reply on behalf
+                    // of the user. This presence stanza is the user's server know that it MUST no 
+                    // longer send notification of the subscription state change to the user. 
+                    // See http://tools.ietf.org/html/rfc3921#section-7 and/or OF-38 
+<span class="nc bnc" id="L171" title="All 6 branches missed.">                    if (type == Presence.Type.subscribe &amp;&amp; recipientRoster != null &amp;&amp; !recipientSubChanged) {</span>
+                        try {
+<span class="nc" id="L173">                            RosterItem.SubType subType = recipientRoster.getRosterItem(senderJID)</span>
+<span class="nc" id="L174">                                    .getSubStatus();</span>
+<span class="nc bnc" id="L175" title="All 4 branches missed.">                            if (subType == RosterItem.SUB_FROM || subType == RosterItem.SUB_BOTH) {</span>
+<span class="nc" id="L176">                                return;</span>
+                            }
+                        }
+<span class="nc" id="L179">                        catch (UserNotFoundException e) {</span>
+                            // Weird case: Roster item does not exist. Should never happen
+<span class="nc" id="L181">                            Log.error(&quot;User does not exist while trying to update roster item. &quot; +</span>
+                                    &quot;This should never happen (this indicates a programming &quot; +
+<span class="nc" id="L183">                                    &quot;logic error). Processing stanza: &quot; + presence.toString(), e);</span>
+<span class="nc" id="L184">                        }</span>
+                    }
+
+                    // Try to obtain a handler for the packet based on the routes. If the handler is
+                    // a module, the module will be able to handle the packet. If the handler is a
+                    // Session the packet will be routed to the client. If a route cannot be found
+                    // then the packet will be delivered based on its recipient and sender.
+<span class="nc" id="L191">                    List&lt;JID&gt; jids = routingTable.getRoutes(recipientJID, null);</span>
+<span class="nc bnc" id="L192" title="All 2 branches missed.">                    if (!jids.isEmpty()) {</span>
+<span class="nc bnc" id="L193" title="All 2 branches missed.">                        for (JID jid : jids) {</span>
+<span class="nc" id="L194">                            Presence presenteToSend = presence.createCopy();</span>
+                            // Stamp the presence with the user's bare JID as the 'from' address,
+                            // as required by section 8.2.5 of RFC 3921
+<span class="nc" id="L197">                            presenteToSend.setFrom(senderJID.toBareJID());</span>
+<span class="nc" id="L198">                            routingTable.routePacket(jid, presenteToSend, false);</span>
+<span class="nc" id="L199">                        }</span>
+                    }
+                    else {
+<span class="nc" id="L202">                        deliverer.deliver(presence.createCopy());</span>
+                    }
+
+<span class="nc bnc" id="L205" title="All 2 branches missed.">                    if (type == Presence.Type.subscribed) {</span>
+                        // Send the presence of the local user to the remote user. The remote user
+                        // subscribed to the presence of the local user and the local user accepted
+<span class="nc bnc" id="L208" title="All 2 branches missed.">                        JID prober = localServer.isLocal(recipientJID) ? recipientJID.asBareJID() : recipientJID;</span>
+<span class="nc bnc" id="L209" title="All 2 branches missed.">                        if (presenceManager.canProbePresence(prober, senderJID.getNode())){</span>
+<span class="nc" id="L210">                            presenceManager.probePresence(prober, senderJID);</span>
+<span class="nc" id="L211">                            PresenceEventDispatcher.subscribedToPresence(recipientJID, senderJID);</span>
+                        }
+                        else {
+<span class="nc" id="L214">                            Presence nonProbablePresence = new Presence();</span>
+<span class="nc" id="L215">                            nonProbablePresence.setStatus(&quot;unavailable&quot;);</span>
+<span class="nc" id="L216">                            nonProbablePresence.setFrom(senderJID);</span>
+<span class="nc" id="L217">                            nonProbablePresence.setTo(recipientJID);</span>
+<span class="nc" id="L218">                            presenceManager.handleProbe(nonProbablePresence);</span>
+                        }
+                    }
+                }
+
+<span class="nc bnc" id="L223" title="All 2 branches missed.">                if (type == Presence.Type.unsubscribed) {</span>
+                    // Send unavailable presence from all of the local user's available resources
+                    // to the remote user
+<span class="nc" id="L226">                    presenceManager.sendUnavailableFromSessions(recipientJID, senderJID);</span>
+<span class="nc" id="L227">                    PresenceEventDispatcher.unsubscribedToPresence(senderJID, recipientJID);</span>
+                }
+            }
+<span class="nc" id="L230">            catch (SharedGroupException e) {</span>
+<span class="nc" id="L231">                Presence result = presence.createCopy();</span>
+<span class="nc" id="L232">                JID sender = result.getFrom();</span>
+<span class="nc" id="L233">                result.setFrom(presence.getTo());</span>
+<span class="nc" id="L234">                result.setTo(sender);</span>
+<span class="nc" id="L235">                result.setError(PacketError.Condition.not_acceptable);</span>
+<span class="nc" id="L236">                deliverer.deliver(result);</span>
+<span class="nc" id="L237">            }</span>
+        }
+<span class="nc" id="L239">        catch (Exception e) {</span>
+<span class="nc" id="L240">            Log.error(LocaleUtils.getLocalizedString(&quot;admin.error&quot;), e);</span>
+<span class="nc" id="L241">        }</span>
+<span class="nc" id="L242">    }</span>
+
+    /**
+     * &lt;p&gt;Obtain the roster for the given address or null if the address doesn't have a roster.&lt;/p&gt;
+     *
+     * @param address The address to check
+     * @return The roster or null if the address is not managed on the server
+     */
+    private Roster getRoster(JID address) {
+        String username;
+<span class="nc" id="L252">        Roster roster = null;</span>
+<span class="nc bnc" id="L253" title="All 4 branches missed.">        if (localServer.isLocal(address) &amp;&amp; userManager.isRegisteredUser(address.getNode())) {</span>
+<span class="nc" id="L254">            username = address.getNode();</span>
+            try {
+<span class="nc" id="L256">                roster = rosterManager.getRoster(username);</span>
+            }
+<span class="nc" id="L258">            catch (UserNotFoundException e) {</span>
+                // Do nothing
+<span class="nc" id="L260">            }</span>
+        }
+<span class="nc" id="L262">        return roster;</span>
+    }
+
+    /**
+     * Manage the subscription request. This method updates a user's roster
+     * state, storing any changes made, and updating the roster owner if changes
+     * occured.
+     *
+     * @param target    The roster target's jid (the item's jid to be changed)
+     * @param isSending True if the request is being sent by the owner
+     * @param type      The subscription change type (subscribe, unsubscribe, etc.)
+     * @param roster    The Roster that is updated.
+     * @return {@code true} if the subscription state has changed.
+     */
+    private boolean manageSub(JID target, boolean isSending, Presence.Type type, Roster roster)
+            throws UserAlreadyExistsException, SharedGroupException
+    {
+<span class="nc" id="L279">        RosterItem item = null;</span>
+        RosterItem.AskType oldAsk;
+<span class="nc" id="L281">        RosterItem.SubType oldSub = null;</span>
+        RosterItem.RecvType oldRecv;
+<span class="nc" id="L283">        boolean newItem = false;</span>
+        try {
+<span class="nc bnc" id="L285" title="All 2 branches missed.">            if (roster.isRosterItem(target)) {</span>
+<span class="nc" id="L286">                item = roster.getRosterItem(target);</span>
+            }
+            else {
+<span class="nc bnc" id="L289" title="All 6 branches missed.">                if (Presence.Type.unsubscribed == type || Presence.Type.unsubscribe == type ||</span>
+                        Presence.Type.subscribed == type) {
+                    // Do not create a roster item when processing a confirmation of
+                    // an unsubscription or receiving an unsubscription request or a
+                    // subscription approval from an unknown user
+<span class="nc" id="L294">                    return false;</span>
+                }
+<span class="nc" id="L296">                item = roster.createRosterItem(target, false, true);</span>
+<span class="nc" id="L297">                newItem = true;</span>
+            }
+            // Get a snapshot of the item state
+<span class="nc" id="L300">            oldAsk = item.getAskStatus();</span>
+<span class="nc" id="L301">            oldSub = item.getSubStatus();</span>
+<span class="nc" id="L302">            oldRecv = item.getRecvStatus();</span>
+            // Update the item state based in the received presence type
+<span class="nc" id="L304">            updateState(item, type, isSending);</span>
+            // Update the roster IF the item state has changed
+<span class="nc bnc" id="L306" title="All 4 branches missed.">            if (oldAsk != item.getAskStatus() || oldSub != item.getSubStatus() ||</span>
+<span class="nc bnc" id="L307" title="All 2 branches missed.">                    oldRecv != item.getRecvStatus()) {</span>
+<span class="nc" id="L308">                roster.updateRosterItem(item);</span>
+            }
+<span class="nc bnc" id="L310" title="All 2 branches missed.">            else if (newItem) {</span>
+                // Do not push items with a state of &quot;None + Pending In&quot;
+<span class="nc bnc" id="L312" title="All 2 branches missed.">                if (item.getSubStatus() != RosterItem.SUB_NONE ||</span>
+<span class="nc bnc" id="L313" title="All 2 branches missed.">                        item.getRecvStatus() != RosterItem.RECV_SUBSCRIBE) {</span>
+<span class="nc" id="L314">                    roster.broadcast(item, false);</span>
+                }
+            }
+        }
+<span class="nc" id="L318">        catch (UserNotFoundException e) {</span>
+            // Should be there because we just checked that it's an item
+<span class="nc" id="L320">            Log.error(LocaleUtils.getLocalizedString(&quot;admin.error&quot;), e);</span>
+<span class="nc" id="L321">        }</span>
+<span class="nc bnc" id="L322" title="All 2 branches missed.">        return oldSub != item.getSubStatus();</span>
+    }
+
+    /**
+     * &lt;p&gt;The transition state table.&lt;/p&gt;
+     * &lt;p&gt;The root 'old state' transition table is a Map of RosterItem.SubType keys to match
+     * to the old state of the item. Each key returns a Map containing the next
+     * transition table. Transitions are defined as:&lt;/p&gt;
+     * &lt;ul&gt;
+     * &lt;li&gt;'send/receive' table: Lookup whether this updates was sent or received: obtain 'action' table - key: Presence.Type subcribe action, value: Map (transition table).&lt;/li&gt;
+     * &lt;li&gt;'new state' table: the changed item values&lt;/li&gt;
+     * &lt;/ul&gt;
+     */
+<span class="nc" id="L335">    private static Hashtable&lt;RosterItem.SubType, Map&lt;String, Map&lt;Presence.Type, Change&gt;&gt;&gt; stateTable =</span>
+            new Hashtable&lt;&gt;();
+
+    static {
+        Hashtable&lt;Presence.Type, Change&gt; subrTable;
+        Hashtable&lt;Presence.Type, Change&gt; subsTable;
+        Hashtable&lt;String,Map&lt;Presence.Type, Change&gt;&gt; sr;
+
+<span class="nc" id="L343">        sr = new Hashtable&lt;&gt;();</span>
+<span class="nc" id="L344">        subrTable = new Hashtable&lt;&gt;();</span>
+<span class="nc" id="L345">        subsTable = new Hashtable&lt;&gt;();</span>
+<span class="nc" id="L346">        sr.put(&quot;recv&quot;, subrTable);</span>
+<span class="nc" id="L347">        sr.put(&quot;send&quot;, subsTable);</span>
+<span class="nc" id="L348">        stateTable.put(RosterItem.SUB_NONE, sr);</span>
+        // Item wishes to subscribe from owner
+        // Set flag and update roster if this is a new state, this is the normal way to begin
+        // a roster subscription negotiation.
+<span class="nc" id="L352">        subrTable.put(Presence.Type.subscribe, new Change(RosterItem.RECV_SUBSCRIBE, null, null)); // no transition</span>
+        // Item granted subscription to owner
+        // The item's state immediately goes from NONE to TO and ask is reset
+<span class="nc" id="L355">        subrTable.put(Presence.Type.subscribed, new Change(null, RosterItem.SUB_TO, RosterItem.ASK_NONE));</span>
+        // Item wishes to unsubscribe from owner
+        // This makes no sense, there is no subscription to remove
+<span class="nc" id="L358">        subrTable.put(Presence.Type.unsubscribe, new Change(null, null, null));</span>
+        // Owner has subscription to item revoked
+        // Valid response if item requested subscription and we're denying request
+<span class="nc" id="L361">        subrTable.put(Presence.Type.unsubscribed, new Change(null, null, RosterItem.ASK_NONE));</span>
+        // Owner asking to subscribe to item this is the normal way to begin
+        // a roster subscription negotiation.
+<span class="nc" id="L364">        subsTable.put(Presence.Type.subscribe, new Change(null, null, RosterItem.ASK_SUBSCRIBE));</span>
+        // Item granted a subscription from owner
+<span class="nc" id="L366">        subsTable.put(Presence.Type.subscribed, new Change(RosterItem.RECV_NONE, RosterItem.SUB_FROM, null));</span>
+        // Owner asking to unsubscribe to item
+        // This makes no sense (there is no subscription to unsubscribe from)
+<span class="nc" id="L369">        subsTable.put(Presence.Type.unsubscribe, new Change(null, null, null));</span>
+        // Item has subscription from owner revoked
+        // Valid response if item requested subscription and we're denying request
+<span class="nc" id="L372">        subsTable.put(Presence.Type.unsubscribed, new Change(RosterItem.RECV_NONE, null, null));</span>
+
+<span class="nc" id="L374">        sr = new Hashtable&lt;&gt;();</span>
+<span class="nc" id="L375">        subrTable = new Hashtable&lt;&gt;();</span>
+<span class="nc" id="L376">        subsTable = new Hashtable&lt;&gt;();</span>
+<span class="nc" id="L377">        sr.put(&quot;recv&quot;, subrTable);</span>
+<span class="nc" id="L378">        sr.put(&quot;send&quot;, subsTable);</span>
+<span class="nc" id="L379">        stateTable.put(RosterItem.SUB_FROM, sr);</span>
+        // Owner asking to subscribe to item
+        // Set flag and update roster if this is a new state, this is the normal way to begin
+        // a mutual roster subscription negotiation.
+<span class="nc" id="L383">        subsTable.put(Presence.Type.subscribe, new Change(null, null, RosterItem.ASK_SUBSCRIBE));</span>
+        // Item granted a subscription from owner
+        // This may be necessary if the recipient didn't get an earlier subscribed grant
+        // or as a denial of an unsubscribe request
+<span class="nc" id="L387">        subsTable.put(Presence.Type.subscribed, new Change(RosterItem.RECV_NONE, null, null));</span>
+        // Owner asking to unsubscribe to item
+        // This makes no sense (there is no subscription to unsubscribe from)
+<span class="nc" id="L390">        subsTable.put(Presence.Type.unsubscribe, new Change(null, RosterItem.SUB_NONE, null));</span>
+        // Item has subscription from owner revoked
+        // Immediately transition to NONE state
+<span class="nc" id="L393">        subsTable.put(Presence.Type.unsubscribed, new Change(RosterItem.RECV_NONE, RosterItem.SUB_NONE, null));</span>
+        // Item wishes to subscribe from owner
+        // Item already has a subscription so only interesting if item had requested unsubscribe
+        // Set flag and update roster if this is a new state, this is the normal way to begin
+        // a mutual roster subscription negotiation.
+<span class="nc" id="L398">        subrTable.put(Presence.Type.subscribe, new Change(RosterItem.RECV_NONE, null, null));</span>
+        // Item granted subscription to owner
+        // The item's state immediately goes from FROM to BOTH and ask is reset
+<span class="nc" id="L401">        subrTable.put(Presence.Type.subscribed, new Change(null, RosterItem.SUB_BOTH, RosterItem.ASK_NONE));</span>
+        // Item wishes to unsubscribe from owner
+        // This is the normal mechanism of removing subscription
+<span class="nc" id="L404">        subrTable.put(Presence.Type.unsubscribe, new Change(RosterItem.RECV_UNSUBSCRIBE, RosterItem.SUB_NONE, null));</span>
+        // Owner has subscription to item revoked
+        // Valid response if owner requested subscription and item is denying request
+<span class="nc" id="L407">        subrTable.put(Presence.Type.unsubscribed, new Change(null, null, RosterItem.ASK_NONE));</span>
+
+<span class="nc" id="L409">        sr = new Hashtable&lt;&gt;();</span>
+<span class="nc" id="L410">        subrTable = new Hashtable&lt;&gt;();</span>
+<span class="nc" id="L411">        subsTable = new Hashtable&lt;&gt;();</span>
+<span class="nc" id="L412">        sr.put(&quot;recv&quot;, subrTable);</span>
+<span class="nc" id="L413">        sr.put(&quot;send&quot;, subsTable);</span>
+<span class="nc" id="L414">        stateTable.put(RosterItem.SUB_TO, sr);</span>
+        // Owner asking to subscribe to item
+        // We're already subscribed, may be trying to unset a unsub request
+<span class="nc" id="L417">        subsTable.put(Presence.Type.subscribe, new Change(null, null, RosterItem.ASK_NONE));</span>
+        // Item granted a subscription from owner
+        // Sets mutual subscription
+<span class="nc" id="L420">        subsTable.put(Presence.Type.subscribed, new Change(RosterItem.RECV_NONE, RosterItem.SUB_BOTH, null));</span>
+        // Owner asking to unsubscribe to item
+        // Normal method of removing subscription
+<span class="nc" id="L423">        subsTable.put(Presence.Type.unsubscribe, new Change(null, RosterItem.SUB_NONE, RosterItem.ASK_UNSUBSCRIBE));</span>
+        // Item has subscription from owner revoked
+        // No subscription to unsub, makes sense if denying subscription request or for
+        // situations where the original unsubscribed got lost
+<span class="nc" id="L427">        subsTable.put(Presence.Type.unsubscribed, new Change(RosterItem.RECV_NONE, null, null));</span>
+        // Item wishes to subscribe from owner
+        // This is the normal way to negotiate a mutual subscription
+<span class="nc" id="L430">        subrTable.put(Presence.Type.subscribe, new Change(RosterItem.RECV_SUBSCRIBE, null, null));</span>
+        // Item granted subscription to owner
+        // Owner already subscribed to item, could be a unsub denial or a lost packet
+<span class="nc" id="L433">        subrTable.put(Presence.Type.subscribed, new Change(null, null, RosterItem.ASK_NONE));</span>
+        // Item wishes to unsubscribe from owner
+        // There is no subscription. May be trying to cancel earlier subscribe request.
+<span class="nc" id="L436">        subrTable.put(Presence.Type.unsubscribe, new Change(RosterItem.RECV_NONE, RosterItem.SUB_NONE, null));</span>
+        // Owner has subscription to item revoked
+        // Setting subscription to none
+<span class="nc" id="L439">        subrTable.put(Presence.Type.unsubscribed, new Change(null, RosterItem.SUB_NONE, RosterItem.ASK_NONE));</span>
+
+<span class="nc" id="L441">        sr = new Hashtable&lt;&gt;();</span>
+<span class="nc" id="L442">        subrTable = new Hashtable&lt;&gt;();</span>
+<span class="nc" id="L443">        subsTable = new Hashtable&lt;&gt;();</span>
+<span class="nc" id="L444">        sr.put(&quot;recv&quot;, subrTable);</span>
+<span class="nc" id="L445">        sr.put(&quot;send&quot;, subsTable);</span>
+<span class="nc" id="L446">        stateTable.put(RosterItem.SUB_BOTH, sr);</span>
+        // Owner asking to subscribe to item
+        // Makes sense if trying to cancel previous unsub request
+<span class="nc" id="L449">        subsTable.put(Presence.Type.subscribe, new Change(null, null, RosterItem.ASK_NONE));</span>
+        // Item granted a subscription from owner
+        // This may be necessary if the recipient didn't get an earlier subscribed grant
+        // or as a denial of an unsubscribe request
+<span class="nc" id="L453">        subsTable.put(Presence.Type.subscribed, new Change(RosterItem.RECV_NONE, null, null));</span>
+        // Owner asking to unsubscribe to item
+        // Set flags
+<span class="nc" id="L456">        subsTable.put(Presence.Type.unsubscribe, new Change(null, RosterItem.SUB_FROM, RosterItem.ASK_UNSUBSCRIBE));</span>
+        // Item has subscription from owner revoked
+        // Immediately transition them to TO state
+<span class="nc" id="L459">        subsTable.put(Presence.Type.unsubscribed, new Change(RosterItem.RECV_NONE, RosterItem.SUB_TO, null));</span>
+        // Item wishes to subscribe to owner
+        // Item already has a subscription so only interesting if item had requested unsubscribe
+        // Set flag and update roster if this is a new state, this is the normal way to begin
+        // a mutual roster subscription negotiation.
+<span class="nc" id="L464">        subrTable.put(Presence.Type.subscribe, new Change(RosterItem.RECV_NONE, null, null));</span>
+        // Item granted subscription to owner
+        // Redundant unless denying unsub request
+<span class="nc" id="L467">        subrTable.put(Presence.Type.subscribed, new Change(null, null, RosterItem.ASK_NONE));</span>
+        // Item wishes to unsubscribe from owner
+        // This is the normal mechanism of removing subscription
+<span class="nc" id="L470">        subrTable.put(Presence.Type.unsubscribe, new Change(RosterItem.RECV_UNSUBSCRIBE, RosterItem.SUB_TO, null));</span>
+        // Owner has subscription to item revoked
+        // Immediately downgrade state to FROM
+<span class="nc" id="L473">        subrTable.put(Presence.Type.unsubscribed, new Change(RosterItem.RECV_NONE, RosterItem.SUB_FROM, RosterItem.ASK_NONE));</span>
+<span class="nc" id="L474">    }</span>
+
+    /**
+     * &lt;p&gt;Indicate a state change.&lt;/p&gt;
+     * &lt;p&gt;Use nulls to indicate fields that should not be changed.&lt;/p&gt;
+     */
+    public static class Change {
+<span class="nc" id="L481">        public Change(RosterItem.RecvType recv, RosterItem.SubType sub, RosterItem.AskType ask) {</span>
+<span class="nc" id="L482">            newRecv = recv;</span>
+<span class="nc" id="L483">            newSub = sub;</span>
+<span class="nc" id="L484">            newAsk = ask;</span>
+<span class="nc" id="L485">        }</span>
+
+<span class="nc" id="L487">        public RosterItem.RecvType getNewRecv() { return newRecv; }</span>
+<span class="nc" id="L488">        public RosterItem.SubType  getNewSub()  { return newSub; }</span>
+<span class="nc" id="L489">        public RosterItem.AskType  getNewAsk()  { return newAsk; }</span>
+        
+        private RosterItem.RecvType newRecv;
+        private RosterItem.SubType newSub;
+        private RosterItem.AskType newAsk;
+    }
+
+    /**
+     * Determine the changes to apply to the item, according to its subscription state.
+     * The method also turns the action and sending status into an integer code
+     * for easier processing (switch statements).
+     * &lt;p&gt;
+     * Code relies on states being in numerical order without skipping.
+     * In addition, the receive states must parallel the send states
+     * so that (send state X) + STATE_RECV_SUBSCRIBE == (receive state X)
+     * where X is subscribe, subscribed, etc.
+     * &lt;/p&gt;
+     *
+     * @param  itemSubType The item to be updated
+     * @param  action      The new state change request
+     * @param  isSending   True if the roster owner of the item is sending the new state change request
+     * @return Change      changes to apply to the item 
+     */
+    public static Change getStateChange(RosterItem.SubType itemSubType, Presence.Type action, boolean isSending) {
+<span class="nc" id="L513">        Map&lt;String, Map&lt;Presence.Type, Change&gt;&gt; srTable = stateTable.get(itemSubType);</span>
+<span class="nc bnc" id="L514" title="All 2 branches missed.">        Map&lt;Presence.Type, Change&gt; changeTable = srTable.get(isSending ? &quot;send&quot; : &quot;recv&quot;);</span>
+<span class="nc" id="L515">        return changeTable.get(action);</span>
+    }
+    
+    /**
+     * Determine and call the update method based on the item's subscription state.
+     * &lt;p/&gt;
+     *
+     * @param item      The item to be updated
+     * @param action    The new state change request
+     * @param isSending True if the roster owner of the item is sending the new state change request
+     */
+    private static void updateState(RosterItem item, Presence.Type action, boolean isSending) {
+<span class="nc" id="L527">        Change change = getStateChange(item.getSubStatus(), action, isSending);</span>
+<span class="nc bnc" id="L528" title="All 4 branches missed.">        if (change.getNewAsk() != null &amp;&amp; change.getNewAsk() != item.getAskStatus()) {</span>
+<span class="nc" id="L529">            item.setAskStatus(change.getNewAsk());</span>
+        }
+<span class="nc bnc" id="L531" title="All 4 branches missed.">        if (change.getNewSub() != null &amp;&amp; change.getNewSub() != item.getSubStatus()) {</span>
+<span class="nc" id="L532">            item.setSubStatus(change.getNewSub());</span>
+        }
+<span class="nc bnc" id="L534" title="All 4 branches missed.">        if (change.getNewRecv() != null &amp;&amp; change.getNewRecv() != item.getRecvStatus()) {</span>
+<span class="nc" id="L535">            item.setRecvStatus(change.getNewRecv());</span>
+        }
+<span class="nc" id="L537">    }</span>
+
+    @Override
+    public void initialize(XMPPServer server) {
+<span class="nc" id="L541">        super.initialize(server);</span>
+<span class="nc" id="L542">        localServer = server;</span>
+<span class="nc" id="L543">        serverName = server.getServerInfo().getXMPPDomain();</span>
+<span class="nc" id="L544">        routingTable = server.getRoutingTable();</span>
+<span class="nc" id="L545">        deliverer = server.getPacketDeliverer();</span>
+<span class="nc" id="L546">        presenceManager = server.getPresenceManager();</span>
+<span class="nc" id="L547">        rosterManager = server.getRosterManager();</span>
+<span class="nc" id="L548">        userManager = server.getUserManager();</span>
+<span class="nc" id="L549">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

@@ -1,0 +1,130 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>IQLastActivityHandler.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.handler</a> &gt; <span class="el_source">IQLastActivityHandler.java</span></div><h1>IQLastActivityHandler.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2004-2009 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.handler;
+
+import org.dom4j.Element;
+import org.jivesoftware.openfire.IQHandlerInfo;
+import org.jivesoftware.openfire.PresenceManager;
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.auth.UnauthorizedException;
+import org.jivesoftware.openfire.disco.ServerFeaturesProvider;
+import org.jivesoftware.openfire.user.User;
+import org.jivesoftware.openfire.user.UserManager;
+import org.jivesoftware.openfire.user.UserNotFoundException;
+import org.xmpp.packet.IQ;
+import org.xmpp.packet.PacketError;
+
+import java.util.Collections;
+import java.util.Iterator;
+
+/**
+ * Implements the TYPE_IQ jabber:iq:last protocol (last activity). Allows users to find out
+ * the number of seconds another user has been offline. This information is only available to
+ * those users that already subscribed to the users presence. Otherwhise, a {@code forbidden}
+ * error will be returned.
+ *
+ * @author Gaston Dombiak
+ */
+public class IQLastActivityHandler extends IQHandler implements ServerFeaturesProvider {
+
+    private static final String NAMESPACE = &quot;jabber:iq:last&quot;;
+
+    private final IQHandlerInfo info;
+    private PresenceManager presenceManager;
+
+    public IQLastActivityHandler() {
+<span class="nc" id="L50">        super(&quot;XMPP Last Activity Handler&quot;);</span>
+<span class="nc" id="L51">        info = new IQHandlerInfo(&quot;query&quot;, NAMESPACE);</span>
+<span class="nc" id="L52">    }</span>
+
+    @Override
+    public IQ handleIQ(IQ packet) throws UnauthorizedException {
+<span class="nc" id="L56">        IQ reply = IQ.createResultIQ(packet);</span>
+<span class="nc" id="L57">        Element lastActivity = reply.setChildElement(&quot;query&quot;, NAMESPACE);</span>
+<span class="nc" id="L58">        String sender = packet.getFrom().getNode();</span>
+
+        // Check if any of the usernames is null
+<span class="nc bnc" id="L61" title="All 2 branches missed.">        if (sender == null) {</span>
+<span class="nc" id="L62">            reply.setError(PacketError.Condition.forbidden);</span>
+<span class="nc" id="L63">            return reply;</span>
+        }
+
+<span class="nc bnc" id="L66" title="All 6 branches missed.">        if (packet.getTo() != null &amp;&amp; packet.getTo().getNode() == null &amp;&amp; XMPPServer.getInstance().isLocal(packet.getTo())) {</span>
+            // http://xmpp.org/extensions/xep-0012.html#server
+            // When the last activity query is sent to a server or component (i.e., to a JID of the form &lt;domain.tld&gt;),
+            // the information contained in the IQ reply reflects the uptime of the JID sending the reply.
+            // The seconds attribute specifies how long the host has been running since it was last (re-)started.
+<span class="nc" id="L71">            long uptime = XMPPServer.getInstance().getServerInfo().getLastStarted().getTime();</span>
+<span class="nc" id="L72">            long lastActivityTime = (System.currentTimeMillis() - uptime) / 1000;</span>
+<span class="nc" id="L73">            lastActivity.addAttribute(&quot;seconds&quot;, String.valueOf(lastActivityTime));</span>
+<span class="nc" id="L74">            return reply;</span>
+        }
+
+        // If the 'to' attribute is null, treat the IQ on behalf of the account from which received the stanza
+        // in accordance with RFC 6120 § 10.3.3.
+<span class="nc bnc" id="L79" title="All 2 branches missed.">        String username = packet.getTo() == null ? packet.getFrom().getNode() : packet.getTo().getNode();</span>
+
+        try {
+<span class="nc bnc" id="L82" title="All 2 branches missed.">            if (username != null) {</span>
+                // Check that the user requesting this information is subscribed to the user's presence
+<span class="nc bnc" id="L84" title="All 2 branches missed.">                if (presenceManager.canProbePresence(packet.getFrom(), username)) {</span>
+<span class="nc bnc" id="L85" title="All 2 branches missed.">                    if (sessionManager.getSessions(username).isEmpty()) {</span>
+<span class="nc" id="L86">                        User user = UserManager.getInstance().getUser(username);</span>
+                        // The user is offline so answer the user's &quot;last available time and the
+                        // status message of the last unavailable presence received from the user&quot;
+<span class="nc" id="L89">                        long lastActivityTime = presenceManager.getLastActivity(user);</span>
+<span class="nc bnc" id="L90" title="All 2 branches missed.">                        if (lastActivityTime &gt; -1) {</span>
+                            // Convert it to seconds
+<span class="nc" id="L92">                            lastActivityTime = lastActivityTime / 1000;</span>
+                        }
+<span class="nc" id="L94">                        lastActivity.addAttribute(&quot;seconds&quot;, String.valueOf(lastActivityTime));</span>
+<span class="nc" id="L95">                        String lastStatus = presenceManager.getLastPresenceStatus(user);</span>
+<span class="nc bnc" id="L96" title="All 4 branches missed.">                        if (lastStatus != null &amp;&amp; lastStatus.length() &gt; 0) {</span>
+<span class="nc" id="L97">                            lastActivity.setText(lastStatus);</span>
+                        }
+<span class="nc" id="L99">                    } else {</span>
+                        // The user is online so answer seconds=0
+<span class="nc" id="L101">                        lastActivity.addAttribute(&quot;seconds&quot;, &quot;0&quot;);</span>
+                    }
+                } else {
+<span class="nc" id="L104">                    reply.setError(PacketError.Condition.forbidden);</span>
+                }
+            }
+        }
+<span class="nc" id="L108">        catch (UserNotFoundException e) {</span>
+<span class="nc" id="L109">            reply.setError(PacketError.Condition.forbidden);</span>
+<span class="nc" id="L110">        }</span>
+<span class="nc" id="L111">        return reply;</span>
+    }
+
+    @Override
+    public IQHandlerInfo getInfo() {
+<span class="nc" id="L116">        return info;</span>
+    }
+
+    @Override
+    public Iterator&lt;String&gt; getFeatures() {
+<span class="nc" id="L121">        return Collections.singleton(NAMESPACE).iterator();</span>
+    }
+
+    @Override
+    public void initialize(XMPPServer server) {
+<span class="nc" id="L126">        super.initialize(server);</span>
+<span class="nc" id="L127">        presenceManager = server.getPresenceManager();</span>
+<span class="nc" id="L128">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

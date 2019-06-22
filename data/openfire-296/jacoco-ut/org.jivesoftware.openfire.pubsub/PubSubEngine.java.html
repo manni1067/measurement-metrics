@@ -1,0 +1,2084 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>PubSubEngine.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.pubsub</a> &gt; <span class="el_source">PubSubEngine.java</span></div><h1>PubSubEngine.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.pubsub;
+
+import org.dom4j.DocumentHelper;
+import org.dom4j.Element;
+import org.dom4j.QName;
+import org.jivesoftware.openfire.*;
+import org.jivesoftware.openfire.component.InternalComponentManager;
+import org.jivesoftware.openfire.pep.PEPService;
+import org.jivesoftware.openfire.pubsub.cluster.RefreshNodeTask;
+import org.jivesoftware.openfire.pubsub.models.AccessModel;
+import org.jivesoftware.openfire.user.UserManager;
+import org.jivesoftware.util.ImmediateFuture;
+import org.jivesoftware.util.StringUtils;
+import org.jivesoftware.util.TaskEngine;
+import org.jivesoftware.util.cache.CacheFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmpp.forms.DataForm;
+import org.xmpp.forms.FormField;
+import org.xmpp.packet.*;
+
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Future;
+
+/**
+ * A PubSubEngine is responsible for handling packets sent to a pub-sub service.
+ *
+ * @author Matt Tucker
+ */
+public class PubSubEngine {
+
+<span class="nc" id="L49">    private static final Logger Log = LoggerFactory.getLogger(PubSubEngine.class);</span>
+
+    private static final String MUTEX_SUFFIX_USER = &quot; psu&quot;;
+    private static final String MUTEX_SUFFIX_NODE = &quot; psn&quot;;
+    /**
+     * The packet router for the server.
+     */
+<span class="nc" id="L56">    private PacketRouter router = null;</span>
+
+<span class="nc" id="L58">    public PubSubEngine(PacketRouter router) {</span>
+<span class="nc" id="L59">        this.router = router;</span>
+<span class="nc" id="L60">    }</span>
+
+    /**
+     * Handles IQ packets sent to the pubsub service. Requests of disco#info and disco#items
+     * are not being handled by the engine. Instead the service itself should handle disco packets.
+     *
+     * @param service the PubSub service this action is to be performed for.
+     * @param iq      the IQ packet sent to the pubsub service.
+     * @return &lt;code&gt;null&lt;/code&gt; if the IQ packet was not handled by the engine, otherwise a {@link Future} that
+     * indicates when processing is complete. Processing will be carried out asynchronously if there is the possibility
+     * of sending a disco#info to a remote server, which could block for up to 60 seconds. If processing is carried out
+     * synchronously, the returned future completes immediately. Note that the returned future will only return
+     * &lt;code&gt;null&lt;/code&gt; when it completes.
+     */
+    public Future process(final PubSubService service, final IQ iq) {
+        // Ignore IQs of type ERROR or RESULT
+<span class="nc bnc" id="L76" title="All 4 branches missed.">        if (IQ.Type.error == iq.getType() || IQ.Type.result == iq.getType()) {</span>
+<span class="nc" id="L77">            return new ImmediateFuture&lt;&gt;();</span>
+        }
+<span class="nc" id="L79">        final Element childElement = iq.getChildElement();</span>
+<span class="nc" id="L80">        String namespace = null;</span>
+
+<span class="nc bnc" id="L82" title="All 2 branches missed.">        if (childElement != null) {</span>
+<span class="nc" id="L83">            namespace = childElement.getNamespaceURI();</span>
+        }
+<span class="nc bnc" id="L85" title="All 2 branches missed.">        if (&quot;http://jabber.org/protocol/pubsub&quot;.equals(namespace)) {</span>
+<span class="nc" id="L86">            Element action = childElement.element(&quot;publish&quot;);</span>
+<span class="nc bnc" id="L87" title="All 2 branches missed.">            if (action != null) {</span>
+                // Entity publishes an item
+                // Complete this asynchronously, as UserManager::isRegisteredUser(JID) blocks, waiting for a result which may come in on this thread
+<span class="nc" id="L90">                final Element finalAction = action;</span>
+<span class="nc" id="L91">                return TaskEngine.getInstance().submit(new Runnable() {</span>
+                    @Override
+                    public void run() {
+<span class="nc" id="L94">                        publishItemsToNode(service, iq, finalAction);</span>
+<span class="nc" id="L95">                    }</span>
+                });
+            }
+<span class="nc" id="L98">            action = childElement.element(&quot;subscribe&quot;);</span>
+<span class="nc bnc" id="L99" title="All 2 branches missed.">            if (action != null) {</span>
+                // Entity subscribes to a node
+<span class="nc" id="L101">                return subscribeNode(service, iq, childElement, action);</span>
+            }
+<span class="nc" id="L103">            action = childElement.element(&quot;options&quot;);</span>
+<span class="nc bnc" id="L104" title="All 2 branches missed.">            if (action != null) {</span>
+<span class="nc bnc" id="L105" title="All 2 branches missed.">                if (IQ.Type.get == iq.getType()) {</span>
+                    // Subscriber requests subscription options form
+<span class="nc" id="L107">                    getSubscriptionConfiguration(service, iq, childElement, action);</span>
+                }
+                else {
+                    // Subscriber submits completed options form
+<span class="nc" id="L111">                    configureSubscription(service, iq, action);</span>
+                }
+<span class="nc" id="L113">                return new ImmediateFuture&lt;&gt;();</span>
+            }
+<span class="nc" id="L115">            action = childElement.element(&quot;create&quot;);</span>
+<span class="nc bnc" id="L116" title="All 2 branches missed.">            if (action != null) {</span>
+                // Entity is requesting to create a new node
+<span class="nc" id="L118">                final Element finalAction = action;</span>
+                // Complete this asynchronously, as UserManager::isRegisteredUser(JID) blocks, waiting for a result which may come in on this thread
+<span class="nc" id="L120">                return TaskEngine.getInstance().submit(new Runnable() {</span>
+                    @Override
+                    public void run() {
+<span class="nc" id="L123">                        createNode(service, iq, childElement, finalAction, getPublishOptions( iq ));</span>
+<span class="nc" id="L124">                    }</span>
+                });
+            }
+<span class="nc" id="L127">            action = childElement.element(&quot;unsubscribe&quot;);</span>
+<span class="nc bnc" id="L128" title="All 2 branches missed.">            if (action != null) {</span>
+                // Entity unsubscribes from a node
+<span class="nc" id="L130">                unsubscribeNode(service, iq, action);</span>
+<span class="nc" id="L131">                return new ImmediateFuture&lt;&gt;();</span>
+            }
+<span class="nc" id="L133">            action = childElement.element(&quot;subscriptions&quot;);</span>
+<span class="nc bnc" id="L134" title="All 2 branches missed.">            if (action != null) {</span>
+                // Entity requests all current subscriptions
+<span class="nc" id="L136">                getSubscriptions(service, iq, childElement);</span>
+<span class="nc" id="L137">                return new ImmediateFuture&lt;&gt;();</span>
+            }
+<span class="nc" id="L139">            action = childElement.element(&quot;affiliations&quot;);</span>
+<span class="nc bnc" id="L140" title="All 2 branches missed.">            if (action != null) {</span>
+                // Entity requests all current affiliations
+<span class="nc" id="L142">                getAffiliations(service, iq, childElement);</span>
+<span class="nc" id="L143">                return new ImmediateFuture&lt;&gt;();</span>
+            }
+<span class="nc" id="L145">            action = childElement.element(&quot;items&quot;);</span>
+<span class="nc bnc" id="L146" title="All 2 branches missed.">            if (action != null) {</span>
+                // Subscriber requests all active items
+<span class="nc" id="L148">                getPublishedItems(service, iq, action);</span>
+<span class="nc" id="L149">                return new ImmediateFuture&lt;&gt;();</span>
+            }
+<span class="nc" id="L151">            action = childElement.element(&quot;retract&quot;);</span>
+<span class="nc bnc" id="L152" title="All 2 branches missed.">            if (action != null) {</span>
+                // Entity deletes an item
+<span class="nc" id="L154">                deleteItems(service, iq, action);</span>
+<span class="nc" id="L155">                return new ImmediateFuture&lt;&gt;();</span>
+            }
+            // Unknown action requested
+<span class="nc" id="L158">            sendErrorPacket(iq, PacketError.Condition.bad_request, null);</span>
+<span class="nc" id="L159">            return new ImmediateFuture&lt;&gt;();</span>
+        }
+<span class="nc bnc" id="L161" title="All 2 branches missed.">        else if (&quot;http://jabber.org/protocol/pubsub#owner&quot;.equals(namespace)) {</span>
+<span class="nc" id="L162">            Element action = childElement.element(&quot;configure&quot;);</span>
+<span class="nc bnc" id="L163" title="All 2 branches missed.">            if (action != null) {</span>
+<span class="nc" id="L164">                String nodeID = action.attributeValue(&quot;node&quot;);</span>
+<span class="nc bnc" id="L165" title="All 2 branches missed.">                if (nodeID == null) {</span>
+                    // if user is not sysadmin then return nodeid-required error
+<span class="nc bnc" id="L167" title="All 2 branches missed.">                    if (!service.isServiceAdmin(iq.getFrom()) ||</span>
+<span class="nc bnc" id="L168" title="All 2 branches missed.">                            !service.isCollectionNodesSupported()) {</span>
+                        // Configure elements must have a node attribute so answer an error
+<span class="nc" id="L170">                        Element pubsubError = DocumentHelper.createElement(QName.get(</span>
+                                &quot;nodeid-required&quot;, &quot;http://jabber.org/protocol/pubsub#errors&quot;));
+<span class="nc" id="L172">                        sendErrorPacket(iq, PacketError.Condition.bad_request, pubsubError);</span>
+<span class="nc" id="L173">                        return new ImmediateFuture&lt;&gt;();</span>
+                    }
+                    else {
+                        // Sysadmin is trying to configure root collection node
+<span class="nc" id="L177">                        nodeID = service.getRootCollectionNode().getNodeID();</span>
+                    }
+                }
+<span class="nc bnc" id="L180" title="All 2 branches missed.">                if (IQ.Type.get == iq.getType()) {</span>
+                    // Owner requests configuration form of a node
+<span class="nc" id="L182">                    getNodeConfiguration(service, iq, childElement, nodeID);</span>
+                }
+                else {
+                    // Owner submits or cancels node configuration form
+<span class="nc" id="L186">                    configureNode(service, iq, action, nodeID);</span>
+                }
+<span class="nc" id="L188">                return new ImmediateFuture&lt;&gt;();</span>
+            }
+<span class="nc" id="L190">            action = childElement.element(&quot;default&quot;);</span>
+<span class="nc bnc" id="L191" title="All 2 branches missed.">            if (action != null) {</span>
+                // Owner requests default configuration options for
+                // leaf or collection nodes
+<span class="nc" id="L194">                getDefaultNodeConfiguration(service, iq, childElement, action);</span>
+<span class="nc" id="L195">                return new ImmediateFuture&lt;&gt;();</span>
+            }
+<span class="nc" id="L197">            action = childElement.element(&quot;delete&quot;);</span>
+<span class="nc bnc" id="L198" title="All 2 branches missed.">            if (action != null) {</span>
+                // Owner deletes a node
+<span class="nc" id="L200">                deleteNode(service, iq, action);</span>
+<span class="nc" id="L201">                return new ImmediateFuture&lt;&gt;();</span>
+            }
+<span class="nc" id="L203">            action = childElement.element(&quot;subscriptions&quot;);</span>
+<span class="nc bnc" id="L204" title="All 2 branches missed.">            if (action != null) {</span>
+<span class="nc bnc" id="L205" title="All 2 branches missed.">                if (IQ.Type.get == iq.getType()) {</span>
+                    // Owner requests all affiliated entities
+<span class="nc" id="L207">                    getNodeSubscriptions(service, iq, action);</span>
+                }
+                else {
+<span class="nc" id="L210">                    modifyNodeSubscriptions(service, iq, action);</span>
+                }
+<span class="nc" id="L212">                return new ImmediateFuture&lt;&gt;();</span>
+            }
+<span class="nc" id="L214">            action = childElement.element(&quot;affiliations&quot;);</span>
+<span class="nc bnc" id="L215" title="All 2 branches missed.">            if (action != null) {</span>
+<span class="nc bnc" id="L216" title="All 2 branches missed.">                if (IQ.Type.get == iq.getType()) {</span>
+                    // Owner requests all affiliated entities
+<span class="nc" id="L218">                    getNodeAffiliations(service, iq, action);</span>
+                }
+                else {
+<span class="nc" id="L221">                    modifyNodeAffiliations(service, iq, action);</span>
+                }
+<span class="nc" id="L223">                return new ImmediateFuture&lt;&gt;();</span>
+            }
+<span class="nc" id="L225">            action = childElement.element(&quot;purge&quot;);</span>
+<span class="nc bnc" id="L226" title="All 2 branches missed.">            if (action != null) {</span>
+                // Owner purges items from a node
+<span class="nc" id="L228">                purgeNode(service, iq, action);</span>
+<span class="nc" id="L229">                return new ImmediateFuture&lt;&gt;();</span>
+            }
+            // Unknown action requested so return error to sender
+<span class="nc" id="L232">            sendErrorPacket(iq, PacketError.Condition.bad_request, null);</span>
+<span class="nc" id="L233">            return new ImmediateFuture&lt;&gt;();</span>
+        }
+<span class="nc bnc" id="L235" title="All 2 branches missed.">        else if (&quot;http://jabber.org/protocol/commands&quot;.equals(namespace)) {</span>
+            // Process ad-hoc command
+<span class="nc" id="L237">            IQ reply = service.getManager().process(iq);</span>
+<span class="nc" id="L238">            router.route(reply);</span>
+<span class="nc" id="L239">            return new ImmediateFuture&lt;&gt;();</span>
+        }
+<span class="nc" id="L241">        return null;</span>
+    }
+
+    /**
+     * Handles Presence packets sent to the pubsub service. Only process available and not
+     * available presences.
+     *
+     * @param service the PubSub service this action is to be performed for.
+     * @param presence the Presence packet sent to the pubsub service.
+     */
+    public void process(PubSubService service, Presence presence) {
+<span class="nc bnc" id="L252" title="All 2 branches missed.">        if (presence.isAvailable()) {</span>
+<span class="nc" id="L253">            JID subscriber = presence.getFrom();</span>
+<span class="nc" id="L254">            Map&lt;String, String&gt; fullPresences = service.getBarePresences().get(subscriber.toBareJID());</span>
+<span class="nc bnc" id="L255" title="All 2 branches missed.">            if (fullPresences == null) {</span>
+<span class="nc" id="L256">                synchronized ((subscriber.toBareJID() + MUTEX_SUFFIX_USER).intern()) {</span>
+<span class="nc" id="L257">                    fullPresences = service.getBarePresences().get(subscriber.toBareJID());</span>
+<span class="nc bnc" id="L258" title="All 2 branches missed.">                    if (fullPresences == null) {</span>
+<span class="nc" id="L259">                        fullPresences = new ConcurrentHashMap&lt;&gt;();</span>
+<span class="nc" id="L260">                        service.getBarePresences().put(subscriber.toBareJID(), fullPresences);</span>
+                    }
+<span class="nc" id="L262">                }</span>
+            }
+<span class="nc" id="L264">            Presence.Show show = presence.getShow();</span>
+<span class="nc bnc" id="L265" title="All 2 branches missed.">            fullPresences.put(subscriber.toString(), show == null ? &quot;online&quot; : show.name());</span>
+<span class="nc" id="L266">        }</span>
+<span class="nc bnc" id="L267" title="All 2 branches missed.">        else if (presence.getType() == Presence.Type.unavailable) {</span>
+<span class="nc" id="L268">            JID subscriber = presence.getFrom();</span>
+<span class="nc" id="L269">            Map&lt;String, String&gt; fullPresences = service.getBarePresences().get(subscriber.toBareJID());</span>
+<span class="nc bnc" id="L270" title="All 2 branches missed.">            if (fullPresences != null) {</span>
+<span class="nc" id="L271">                fullPresences.remove(subscriber.toString());</span>
+<span class="nc bnc" id="L272" title="All 2 branches missed.">                if (fullPresences.isEmpty()) {</span>
+<span class="nc" id="L273">                    service.getBarePresences().remove(subscriber.toBareJID());</span>
+                }
+            }
+        }
+<span class="nc" id="L277">    }</span>
+
+    /**
+     * Handles Message packets sent to the pubsub service. Messages may be of type error
+     * when an event notification was sent to a susbcriber whose address is no longer available.&lt;p&gt;
+     *
+     * Answers to authorization requests sent to node owners to approve pending subscriptions
+     * will also be processed by this method.
+     *
+     * @param service the PubSub service this action is to be performed for.
+     * @param message the Message packet sent to the pubsub service.
+     */
+    public void process(PubSubService service, Message message) {
+<span class="nc bnc" id="L290" title="All 2 branches missed.">        if (message.getType() == Message.Type.error) {</span>
+            // Process Messages of type error to identify possible subscribers that no longer exist
+<span class="nc bnc" id="L292" title="All 2 branches missed.">            if (message.getError().getType() == PacketError.Type.cancel) {</span>
+                // TODO Assuming that owner is the bare JID (as defined in the JEP). This can be replaced with an explicit owner specified in the packet
+<span class="nc" id="L294">                JID owner = message.getFrom().asBareJID();</span>
+                // Terminate the subscription of the entity to all nodes hosted at the service
+<span class="nc" id="L296">               cancelAllSubscriptions(service, owner);</span>
+<span class="nc" id="L297">            }</span>
+<span class="nc bnc" id="L298" title="All 2 branches missed.">            else if (message.getError().getType() == PacketError.Type.auth) {</span>
+                // TODO Queue the message to be sent again later (will retry a few times and
+                // will be discarded when the retry limit is reached)
+            }
+        }
+<span class="nc bnc" id="L303" title="All 2 branches missed.">        else if (message.getType() == Message.Type.normal) {</span>
+            // Check that this is an answer to an authorization request
+<span class="nc" id="L305">            DataForm authForm = (DataForm) message.getExtension(&quot;x&quot;, &quot;jabber:x:data&quot;);</span>
+<span class="nc bnc" id="L306" title="All 4 branches missed.">            if (authForm != null &amp;&amp; authForm.getType() == DataForm.Type.submit) {</span>
+<span class="nc" id="L307">                String formType = authForm.getField(&quot;FORM_TYPE&quot;).getValues().get(0);</span>
+                // Check that completed data form belongs to an authorization request
+<span class="nc bnc" id="L309" title="All 2 branches missed.">                if (&quot;http://jabber.org/protocol/pubsub#subscribe_authorization&quot;.equals(formType)) {</span>
+                    // Process the answer to the authorization request
+<span class="nc" id="L311">                    processAuthorizationAnswer(service, authForm, message);</span>
+                }
+            }
+        }
+<span class="nc" id="L315">    }</span>
+
+    private void publishItemsToNode(PubSubService service, IQ iq, Element publishElement) {
+<span class="nc" id="L318">        String nodeID = publishElement.attributeValue(&quot;node&quot;);</span>
+        Node node;
+
+<span class="nc" id="L321">        JID from = iq.getFrom();</span>
+        // TODO Assuming that owner is the bare JID (as defined in the JEP). This can be replaced with an explicit owner specified in the packet
+<span class="nc" id="L323">        JID owner = from.asBareJID();</span>
+
+<span class="nc bnc" id="L325" title="All 2 branches missed.">        if (nodeID == null) {</span>
+            // XEP-0060 Section 7.2.3.3 - No node was specified. Return bad_request error
+            // This suggests that Instant nodes should not be auto-created
+<span class="nc" id="L328">            Element pubsubError = DocumentHelper.createElement(QName.get(&quot;nodeid-required&quot;, &quot;http://jabber.org/protocol/pubsub#errors&quot;));</span>
+<span class="nc" id="L329">            sendErrorPacket(iq, PacketError.Condition.bad_request, pubsubError);</span>
+<span class="nc" id="L330">            return;</span>
+        }
+
+        // Optional Publish Options.
+<span class="nc" id="L334">        final DataForm publishOptions = getPublishOptions( iq );</span>
+
+        // Look for the specified node
+<span class="nc" id="L337">        node = service.getNode(nodeID);</span>
+<span class="nc bnc" id="L338" title="All 2 branches missed.">        if (node == null) {</span>
+<span class="nc bnc" id="L339" title="All 6 branches missed.">            if (service instanceof PEPService &amp;&amp; service.isServiceAdmin(owner) &amp;&amp; canAutoCreate( publishOptions ) ) {</span>
+                // If it is a PEP service &amp; publisher is service owner - auto create nodes.
+<span class="nc" id="L341">                CreateNodeResponse response = createNodeHelper(service, iq.getFrom(), iq.getChildElement().element(&quot;configure&quot;), publishElement.attributeValue(&quot;node&quot;), publishOptions);</span>
+
+<span class="nc bnc" id="L343" title="All 2 branches missed.">                if (response.newNode == null) {</span>
+                    // New node creation failed. Since pep#auto-create is advertised
+                    // in disco#info, node creation error should be sent to the client.
+<span class="nc" id="L346">                    sendErrorPacket(iq, response.creationStatus, response.pubsubError);</span>
+<span class="nc" id="L347">                    return;</span>
+                } else {
+                    // Node creation succeeded, set node to newNode.
+<span class="nc" id="L350">                    node = response.newNode;</span>
+                }
+<span class="nc" id="L352">            } else {</span>
+                // Node does not exist. Return item-not-found error
+<span class="nc" id="L354">                sendErrorPacket(iq, PacketError.Condition.item_not_found, null);</span>
+<span class="nc" id="L355">                return;</span>
+            }
+        } else {
+            // Check if the preconditions defined in the publish options (if any) are met.
+<span class="nc bnc" id="L359" title="All 2 branches missed.">            if ( !nodeMeetsPreconditions( node, publishOptions ) )</span>
+            {
+<span class="nc" id="L361">                Element pubsubError = DocumentHelper.createElement(QName.get(&quot;precondition-not-met&quot;, &quot;http://jabber.org/protocol/pubsub#errors&quot;));</span>
+<span class="nc" id="L362">                sendErrorPacket(iq, PacketError.Condition.conflict, pubsubError);</span>
+<span class="nc" id="L363">                return;</span>
+            }
+        }
+
+<span class="nc bnc" id="L367" title="All 4 branches missed.">        if (!node.getPublisherModel().canPublish(node, owner) &amp;&amp; !service.isServiceAdmin(owner)) {</span>
+            // Entity does not have sufficient privileges to publish to node
+<span class="nc" id="L369">            sendErrorPacket(iq, PacketError.Condition.forbidden, null);</span>
+<span class="nc" id="L370">            return;</span>
+        }
+
+<span class="nc bnc" id="L373" title="All 2 branches missed.">        if (node.isCollectionNode()) {</span>
+            // Node is a collection node. Return feature-not-implemented error
+<span class="nc" id="L375">            Element pubsubError = DocumentHelper.createElement(</span>
+<span class="nc" id="L376">                    QName.get(&quot;unsupported&quot;, &quot;http://jabber.org/protocol/pubsub#errors&quot;));</span>
+<span class="nc" id="L377">            pubsubError.addAttribute(&quot;feature&quot;, &quot;publish&quot;);</span>
+<span class="nc" id="L378">            sendErrorPacket(iq, PacketError.Condition.feature_not_implemented, pubsubError);</span>
+<span class="nc" id="L379">            return;</span>
+        }
+
+<span class="nc" id="L382">        LeafNode leafNode = (LeafNode) node;</span>
+<span class="nc" id="L383">        Iterator itemElements = publishElement.elementIterator(&quot;item&quot;);</span>
+
+        // Check that an item was included if node persist items or includes payload
+<span class="nc bnc" id="L386" title="All 4 branches missed.">        if (!itemElements.hasNext() &amp;&amp; leafNode.isItemRequired()) {</span>
+<span class="nc" id="L387">            Element pubsubError = DocumentHelper.createElement(QName.get(</span>
+                    &quot;item-required&quot;, &quot;http://jabber.org/protocol/pubsub#errors&quot;));
+<span class="nc" id="L389">            sendErrorPacket(iq, PacketError.Condition.bad_request, pubsubError);</span>
+<span class="nc" id="L390">            return;</span>
+        }
+        // Check that no item was included if node doesn't persist items and doesn't
+        // includes payload
+<span class="nc bnc" id="L394" title="All 4 branches missed.">        if (itemElements.hasNext() &amp;&amp; !leafNode.isItemRequired()) {</span>
+<span class="nc" id="L395">            Element pubsubError = DocumentHelper.createElement(QName.get(</span>
+                    &quot;item-forbidden&quot;, &quot;http://jabber.org/protocol/pubsub#errors&quot;));
+<span class="nc" id="L397">            sendErrorPacket(iq, PacketError.Condition.bad_request, pubsubError);</span>
+<span class="nc" id="L398">            return;</span>
+        }
+<span class="nc" id="L400">        List&lt;Element&gt; items = new ArrayList&lt;&gt;();</span>
+        List entries;
+        Element payload;
+<span class="nc bnc" id="L403" title="All 2 branches missed.">        while (itemElements.hasNext()) {</span>
+<span class="nc" id="L404">            Element item = (Element) itemElements.next();</span>
+<span class="nc" id="L405">            entries = item.elements();</span>
+<span class="nc bnc" id="L406" title="All 2 branches missed.">            payload = entries.isEmpty() ? null : (Element) entries.get(0);</span>
+            // Check that a payload was included if node is configured to include payload
+            // in notifications
+<span class="nc bnc" id="L409" title="All 4 branches missed.">            if (payload == null &amp;&amp; leafNode.isPayloadDelivered()) {</span>
+<span class="nc" id="L410">                Element pubsubError = DocumentHelper.createElement(QName.get(</span>
+                        &quot;payload-required&quot;, &quot;http://jabber.org/protocol/pubsub#errors&quot;));
+<span class="nc" id="L412">                sendErrorPacket(iq, PacketError.Condition.bad_request, pubsubError);</span>
+<span class="nc" id="L413">                return;</span>
+            }
+            // Check that the payload (if any) contains only one child element
+<span class="nc bnc" id="L416" title="All 2 branches missed.">            if (entries.size() &gt; 1) {</span>
+<span class="nc" id="L417">                Element pubsubError = DocumentHelper.createElement(QName.get(</span>
+                        &quot;invalid-payload&quot;, &quot;http://jabber.org/protocol/pubsub#errors&quot;));
+<span class="nc" id="L419">                sendErrorPacket(iq, PacketError.Condition.bad_request, pubsubError);</span>
+<span class="nc" id="L420">                return;</span>
+            }
+<span class="nc" id="L422">            items.add(item);</span>
+<span class="nc" id="L423">        }</span>
+
+        // Return success operation
+<span class="nc" id="L426">        router.route(IQ.createResultIQ(iq));</span>
+        // Publish item and send event notifications to subscribers
+<span class="nc" id="L428">        leafNode.publishItems(from, items);</span>
+<span class="nc" id="L429">    }</span>
+
+    /**
+     * Get the dataform that describes the publish options from the request, or null if no such form was included.
+     *
+     * @param iq The publish request (cannot be null).
+     * @return A publish options data form (possibly null).
+     */
+    public static DataForm getPublishOptions( IQ iq )
+    {
+<span class="nc" id="L439">        final Element publishOptionsElement = iq.getChildElement().element( &quot;publish-options&quot; );</span>
+<span class="nc bnc" id="L440" title="All 2 branches missed.">        if ( publishOptionsElement == null )</span>
+        {
+<span class="nc" id="L442">            return null;</span>
+        }
+
+<span class="nc" id="L445">        final Element x = publishOptionsElement.element( QName.get( DataForm.ELEMENT_NAME, DataForm.NAMESPACE ) );</span>
+<span class="nc bnc" id="L446" title="All 2 branches missed.">        if ( x == null )</span>
+        {
+<span class="nc" id="L448">            return null;</span>
+        }
+
+<span class="nc" id="L451">        final DataForm result = new DataForm( x );</span>
+<span class="nc bnc" id="L452" title="All 2 branches missed.">        if ( result.getType() != DataForm.Type.submit )</span>
+        {
+<span class="nc" id="L454">            return null;</span>
+        }
+
+<span class="nc" id="L457">        final FormField formType = result.getField( &quot;FORM_TYPE&quot; );</span>
+<span class="nc bnc" id="L458" title="All 4 branches missed.">        if ( formType == null || !&quot;http://jabber.org/protocol/pubsub#publish-options&quot;.equals( formType.getFirstValue() ) )</span>
+        {
+<span class="nc" id="L460">            return null;</span>
+        }
+
+<span class="nc" id="L463">        return result;</span>
+    }
+
+    /**
+     * Checks if a node is allowed to be auto-created, given the configuration of the service and the optional publish options.
+     *
+     * @param publishOptions publish options (can be null)
+     * @return true if auto-creation of nodes on publish to a non-existent node is allowed, otherwise false.
+     */
+    private boolean canAutoCreate( DataForm publishOptions )
+    {
+        // Since pep#auto-create is advertised in disco#info in hard-code, this is always allowed, unless the publish options explicitly forbid this.
+<span class="nc bnc" id="L475" title="All 2 branches missed.">        if ( publishOptions == null )</span>
+        {
+<span class="nc" id="L477">            return true;</span>
+        }
+
+<span class="nc" id="L480">        final FormField field = publishOptions.getField( &quot;pubsub#auto-create&quot; );</span>
+<span class="nc bnc" id="L481" title="All 2 branches missed.">        if ( field == null )</span>
+        {
+<span class="nc" id="L483">            return true;</span>
+        }
+
+<span class="nc" id="L486">        final String firstValue = field.getFirstValue();</span>
+<span class="nc bnc" id="L487" title="All 4 branches missed.">        return &quot;1&quot;.equals( firstValue ) || &quot;true&quot;.equalsIgnoreCase( firstValue );</span>
+
+    }
+
+    /**
+     * Checks of the configuration of the node meets the preconditions, as supplied in the dataform.
+     *
+     * This method returns true only if the configuration of the node at least contains each of the fields
+     * defined in the preconditions (with matching values).
+     *
+     * @param node The node (cannot be null)
+     * @param preconditions The preconditions (can be null, in which case 'true' is returned).
+     * @return True if all preconditions are met, otherwise false.
+     */
+    private boolean nodeMeetsPreconditions( Node node, DataForm preconditions )
+    {
+<span class="nc bnc" id="L503" title="All 2 branches missed.">        if ( preconditions == null )</span>
+        {
+<span class="nc" id="L505">            return true;</span>
+        }
+
+<span class="nc" id="L508">        final DataForm conditions = node.getConfigurationForm();</span>
+<span class="nc bnc" id="L509" title="All 2 branches missed.">        for ( final FormField precondition : preconditions.getFields() )</span>
+        {
+<span class="nc bnc" id="L511" title="All 2 branches missed.">            if ( precondition.getVariable().equals( &quot;FORM_TYPE&quot; ) )</span>
+            {
+<span class="nc" id="L513">                continue;</span>
+            }
+
+<span class="nc" id="L516">            final FormField condition = conditions.getField( precondition.getVariable() );</span>
+<span class="nc bnc" id="L517" title="All 2 branches missed.">            if ( condition == null )</span>
+            {
+                // Unknown condition. Reject.
+<span class="nc" id="L520">                return false;</span>
+            }
+
+<span class="nc bnc" id="L523" title="All 2 branches missed.">            if ( condition.getValues().size() &gt; 1 )</span>
+            {
+<span class="nc bnc" id="L525" title="All 4 branches missed.">                if ( !condition.getValues().containsAll( precondition.getValues() ) || !precondition.getValues().containsAll( condition.getValues() ) )</span>
+                {
+                    // The condition value list does contain different values than the precondtion value list.
+<span class="nc" id="L528">                    return false;</span>
+                }
+            }
+            else
+            {
+<span class="nc" id="L533">                final String a = condition.getFirstValue();</span>
+<span class="nc" id="L534">                final String b = precondition.getFirstValue();</span>
+<span class="nc bnc" id="L535" title="All 10 branches missed.">                if ( !a.equals( b ) &amp;&amp; !(a.equals( &quot;true&quot; ) &amp;&amp; b.equals( &quot;1&quot; )) &amp;&amp; !(a.equals( &quot;1&quot; ) &amp;&amp; b.equals( &quot;true&quot; ))</span>
+<span class="nc bnc" id="L536" title="All 8 branches missed.">                                    &amp;&amp; !(a.equals( &quot;false&quot; ) &amp;&amp; b.equals( &quot;0&quot; )) &amp;&amp; !(a.equals( &quot;0&quot; ) &amp;&amp; b.equals( &quot;false&quot; )) )</span>
+                {
+<span class="nc" id="L538">                    return false;</span>
+                }
+            }
+<span class="nc" id="L541">        }</span>
+<span class="nc" id="L542">        return true;</span>
+    }
+
+    private void deleteItems(PubSubService service, IQ iq, Element retractElement) {
+<span class="nc" id="L546">        String nodeID = retractElement.attributeValue(&quot;node&quot;);</span>
+        Node node;
+<span class="nc bnc" id="L548" title="All 2 branches missed.">        if (nodeID == null) {</span>
+            // No node was specified. Return bad_request error
+<span class="nc" id="L550">            Element pubsubError = DocumentHelper.createElement(QName.get(</span>
+                    &quot;nodeid-required&quot;, &quot;http://jabber.org/protocol/pubsub#errors&quot;));
+<span class="nc" id="L552">            sendErrorPacket(iq, PacketError.Condition.bad_request, pubsubError);</span>
+<span class="nc" id="L553">            return;</span>
+        }
+        else {
+            // Look for the specified node
+<span class="nc" id="L557">            node = service.getNode(nodeID);</span>
+<span class="nc bnc" id="L558" title="All 2 branches missed.">            if (node == null) {</span>
+                // Node does not exist. Return item-not-found error
+<span class="nc" id="L560">                sendErrorPacket(iq, PacketError.Condition.item_not_found, null);</span>
+<span class="nc" id="L561">                return;</span>
+            }
+        }
+        // Get the items to delete
+<span class="nc" id="L565">        Iterator itemElements = retractElement.elementIterator(&quot;item&quot;);</span>
+<span class="nc bnc" id="L566" title="All 2 branches missed.">        if (!itemElements.hasNext()) {</span>
+<span class="nc" id="L567">            Element pubsubError = DocumentHelper.createElement(QName.get(</span>
+                    &quot;item-required&quot;, &quot;http://jabber.org/protocol/pubsub#errors&quot;));
+<span class="nc" id="L569">            sendErrorPacket(iq, PacketError.Condition.bad_request, pubsubError);</span>
+<span class="nc" id="L570">            return;</span>
+        }
+
+<span class="nc bnc" id="L573" title="All 2 branches missed.">        if (node.isCollectionNode()) {</span>
+            // Cannot delete items from a collection node. Return an error.
+<span class="nc" id="L575">            Element pubsubError = DocumentHelper.createElement(QName.get(</span>
+                    &quot;unsupported&quot;, &quot;http://jabber.org/protocol/pubsub#errors&quot;));
+<span class="nc" id="L577">            pubsubError.addAttribute(&quot;feature&quot;, &quot;persistent-items&quot;);</span>
+<span class="nc" id="L578">            sendErrorPacket(iq, PacketError.Condition.feature_not_implemented, pubsubError);</span>
+<span class="nc" id="L579">            return;</span>
+        }
+<span class="nc" id="L581">        LeafNode leafNode = (LeafNode) node;</span>
+
+<span class="nc bnc" id="L583" title="All 2 branches missed.">        if (!leafNode.isItemRequired()) {</span>
+            // Cannot delete items from a leaf node that doesn't handle itemIDs. Return an error.
+<span class="nc" id="L585">            Element pubsubError = DocumentHelper.createElement(QName.get(</span>
+                    &quot;unsupported&quot;, &quot;http://jabber.org/protocol/pubsub#errors&quot;));
+<span class="nc" id="L587">            pubsubError.addAttribute(&quot;feature&quot;, &quot;persistent-items&quot;);</span>
+<span class="nc" id="L588">            sendErrorPacket(iq, PacketError.Condition.feature_not_implemented, pubsubError);</span>
+<span class="nc" id="L589">            return;</span>
+        }
+
+<span class="nc" id="L592">        List&lt;PublishedItem&gt; items = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L593" title="All 2 branches missed.">        while (itemElements.hasNext()) {</span>
+<span class="nc" id="L594">            Element itemElement = (Element) itemElements.next();</span>
+<span class="nc" id="L595">            String itemID = itemElement.attributeValue(&quot;id&quot;);</span>
+<span class="nc bnc" id="L596" title="All 2 branches missed.">            if (itemID != null) {</span>
+<span class="nc" id="L597">                PublishedItem item = node.getPublishedItem(itemID);</span>
+<span class="nc bnc" id="L598" title="All 2 branches missed.">                if (item == null) {</span>
+                    // ItemID does not exist. Return item-not-found error
+<span class="nc" id="L600">                    sendErrorPacket(iq, PacketError.Condition.item_not_found, null);</span>
+<span class="nc" id="L601">                    return;</span>
+                }
+                else {
+<span class="nc bnc" id="L604" title="All 2 branches missed.">                    if (item.canDelete(iq.getFrom())) {</span>
+<span class="nc" id="L605">                        items.add(item);</span>
+                    }
+                    else {
+                        // Publisher does not have sufficient privileges to delete this item
+<span class="nc" id="L609">                        sendErrorPacket(iq, PacketError.Condition.forbidden, null);</span>
+<span class="nc" id="L610">                        return;</span>
+                    }
+                }
+<span class="nc" id="L613">            }</span>
+            else {
+                // No item ID was specified so return a bad_request error
+<span class="nc" id="L616">                Element pubsubError = DocumentHelper.createElement(QName.get(</span>
+                        &quot;item-required&quot;, &quot;http://jabber.org/protocol/pubsub#errors&quot;));
+<span class="nc" id="L618">                sendErrorPacket(iq, PacketError.Condition.bad_request, pubsubError);</span>
+<span class="nc" id="L619">                return;</span>
+            }
+<span class="nc" id="L621">        }</span>
+        // Send reply with success
+<span class="nc" id="L623">        router.route(IQ.createResultIQ(iq));</span>
+        // Delete items and send subscribers a notification
+<span class="nc" id="L625">        leafNode.deleteItems(items);</span>
+<span class="nc" id="L626">    }</span>
+
+    private Future subscribeNode(final PubSubService service, final IQ iq, final Element childElement, Element subscribeElement) {
+<span class="nc" id="L629">        String nodeID = subscribeElement.attributeValue(&quot;node&quot;);</span>
+        final Node node;
+<span class="nc bnc" id="L631" title="All 2 branches missed.">        if (nodeID == null) {</span>
+<span class="nc bnc" id="L632" title="All 2 branches missed.">            if (service.isCollectionNodesSupported()) {</span>
+                // Entity subscribes to root collection node
+<span class="nc" id="L634">                node = service.getRootCollectionNode();</span>
+            }
+            else {
+                // Service does not have a root collection node so return a nodeid-required error
+<span class="nc" id="L638">                Element pubsubError = DocumentHelper.createElement(QName.get(</span>
+                        &quot;nodeid-required&quot;, &quot;http://jabber.org/protocol/pubsub#errors&quot;));
+<span class="nc" id="L640">                sendErrorPacket(iq, PacketError.Condition.bad_request, pubsubError);</span>
+<span class="nc" id="L641">                return new ImmediateFuture&lt;&gt;();</span>
+            }
+        }
+        else {
+            // Look for the specified node
+<span class="nc" id="L646">            node = service.getNode(nodeID);</span>
+<span class="nc bnc" id="L647" title="All 2 branches missed.">            if (node == null) {</span>
+                // Node does not exist. Return item-not-found error
+<span class="nc" id="L649">                sendErrorPacket(iq, PacketError.Condition.item_not_found, null);</span>
+<span class="nc" id="L650">                return new ImmediateFuture&lt;&gt;();</span>
+            }
+        }
+        // Check if sender and subscriber JIDs match or if a valid &quot;trusted proxy&quot; is being used
+<span class="nc" id="L654">        final JID from = iq.getFrom();</span>
+<span class="nc" id="L655">        final JID subscriberJID = new JID(subscribeElement.attributeValue(&quot;jid&quot;));</span>
+<span class="nc bnc" id="L656" title="All 4 branches missed.">        if (!from.toBareJID().equals(subscriberJID.toBareJID()) &amp;&amp; !service.isServiceAdmin(from)) {</span>
+            // JIDs do not match and requestor is not a service admin so return an error
+<span class="nc" id="L658">            Element pubsubError = DocumentHelper.createElement(</span>
+<span class="nc" id="L659">                    QName.get(&quot;invalid-jid&quot;, &quot;http://jabber.org/protocol/pubsub#errors&quot;));</span>
+<span class="nc" id="L660">            sendErrorPacket(iq, PacketError.Condition.bad_request, pubsubError);</span>
+<span class="nc" id="L661">            return new ImmediateFuture&lt;&gt;();</span>
+        }
+        // TODO Assumed that the owner of the subscription is the bare JID of the subscription JID. Waiting StPeter answer for explicit field.
+<span class="nc" id="L664">        final JID owner = subscriberJID.asBareJID();</span>
+        // Check if the node's access model allows the subscription to proceed
+<span class="nc" id="L666">        final AccessModel accessModel = node.getAccessModel();</span>
+<span class="nc bnc" id="L667" title="All 2 branches missed.">        if (!accessModel.canSubscribe(node, owner, subscriberJID)) {</span>
+<span class="nc" id="L668">            sendErrorPacket(iq, accessModel.getSubsriptionError(),</span>
+<span class="nc" id="L669">                    accessModel.getSubsriptionErrorDetail());</span>
+<span class="nc" id="L670">            return new ImmediateFuture&lt;&gt;();</span>
+        }
+
+        // Complete this asynchronously, as UserManager::isRegisteredUser(JID) blocks, waiting for a result which may come in on this thread
+<span class="nc" id="L674">        return TaskEngine.getInstance().submit(new Runnable() {</span>
+            @Override
+            public void run() {
+<span class="nc" id="L677">                subscribeNodeAsync(iq, subscriberJID, node, owner, service, from, childElement, accessModel);</span>
+<span class="nc" id="L678">            }</span>
+        });
+    }
+
+    private void subscribeNodeAsync(final IQ iq, final JID subscriberJID, final Node node, final JID owner, final PubSubService service, final JID from, final Element childElement, final AccessModel accessModel) {
+
+        // Check if the subscriber is an anonymous user
+<span class="nc bnc" id="L685" title="All 6 branches missed.">        if (!isComponent(subscriberJID) &amp;&amp; !isRemoteServer(subscriberJID) &amp;&amp; !UserManager.getInstance().isRegisteredUser(subscriberJID)) {</span>
+            // Anonymous users cannot subscribe to the node. Return forbidden error
+<span class="nc" id="L687">            sendErrorPacket(iq, PacketError.Condition.forbidden, null);</span>
+<span class="nc" id="L688">            return;</span>
+        }
+        // Check if the subscription owner is a user with outcast affiliation
+<span class="nc" id="L691">        NodeAffiliate nodeAffiliate = node.getAffiliate(owner);</span>
+<span class="nc bnc" id="L692" title="All 2 branches missed.">        if (nodeAffiliate != null &amp;&amp;</span>
+<span class="nc bnc" id="L693" title="All 2 branches missed.">                nodeAffiliate.getAffiliation() == NodeAffiliate.Affiliation.outcast) {</span>
+            // Subscriber is an outcast. Return forbidden error
+<span class="nc" id="L695">            sendErrorPacket(iq, PacketError.Condition.forbidden, null);</span>
+<span class="nc" id="L696">            return;</span>
+        }
+        // Check that subscriptions to the node are enabled
+<span class="nc bnc" id="L699" title="All 4 branches missed.">        if (!node.isSubscriptionEnabled() &amp;&amp; !service.isServiceAdmin(from)) {</span>
+            // Sender is not a sysadmin and subscription is disabled so return an error
+<span class="nc" id="L701">            sendErrorPacket(iq, PacketError.Condition.not_allowed, null);</span>
+<span class="nc" id="L702">            return;</span>
+        }
+
+        // Get any configuration form included in the options element (if any)
+<span class="nc" id="L706">        DataForm optionsForm = null;</span>
+<span class="nc" id="L707">        Element options = childElement.element(&quot;options&quot;);</span>
+<span class="nc bnc" id="L708" title="All 2 branches missed.">        if (options != null) {</span>
+<span class="nc" id="L709">            Element formElement = options.element(QName.get(&quot;x&quot;, &quot;jabber:x:data&quot;));</span>
+<span class="nc bnc" id="L710" title="All 2 branches missed.">            if (formElement != null) {</span>
+<span class="nc" id="L711">                optionsForm = new DataForm(formElement);</span>
+            }
+        }
+
+        // If leaf node does not support multiple subscriptions then check whether subscriber is
+        // creating another subscription or not
+<span class="nc bnc" id="L717" title="All 4 branches missed.">        if (!node.isCollectionNode() &amp;&amp; !node.isMultipleSubscriptionsEnabled()) {</span>
+<span class="nc" id="L718">            NodeSubscription existingSubscription = node.getSubscription(subscriberJID);</span>
+<span class="nc bnc" id="L719" title="All 2 branches missed.">            if (existingSubscription != null) {</span>
+                // User is trying to create another subscription so
+                // return current subscription state
+<span class="nc" id="L722">                existingSubscription.sendSubscriptionState(iq);</span>
+<span class="nc" id="L723">                return;</span>
+            }
+        }
+
+        // Check if subscribing twice to a collection node using same subscription type
+<span class="nc bnc" id="L728" title="All 2 branches missed.">        if (node.isCollectionNode()) {</span>
+            // By default assume that new subscription is of type node
+<span class="nc" id="L730">            boolean isNodeType = true;</span>
+<span class="nc bnc" id="L731" title="All 2 branches missed.">            if (optionsForm != null) {</span>
+<span class="nc" id="L732">                FormField field = optionsForm.getField(&quot;pubsub#subscription_type&quot;);</span>
+<span class="nc bnc" id="L733" title="All 2 branches missed.">                if (field != null) {</span>
+<span class="nc bnc" id="L734" title="All 2 branches missed.">                    if (&quot;items&quot;.equals(field.getValues().get(0))) {</span>
+<span class="nc" id="L735">                        isNodeType = false;</span>
+                    }
+                }
+            }
+<span class="nc bnc" id="L739" title="All 2 branches missed.">            if (nodeAffiliate != null) {</span>
+<span class="nc bnc" id="L740" title="All 2 branches missed.">                for (NodeSubscription subscription : nodeAffiliate.getSubscriptions()) {</span>
+<span class="nc bnc" id="L741" title="All 2 branches missed.">                    if (isNodeType) {</span>
+                        // User is requesting a subscription of type &quot;nodes&quot;
+<span class="nc bnc" id="L743" title="All 2 branches missed.">                        if (NodeSubscription.Type.nodes == subscription.getType()) {</span>
+                            // Cannot have 2 subscriptions of the same type. Return conflict error
+<span class="nc" id="L745">                            sendErrorPacket(iq, PacketError.Condition.conflict, null);</span>
+<span class="nc" id="L746">                            return;</span>
+                        }
+                    }
+<span class="nc bnc" id="L749" title="All 2 branches missed.">                    else if (!node.isMultipleSubscriptionsEnabled()) {</span>
+                        // User is requesting a subscription of type &quot;items&quot; and
+                        // multiple subscriptions is not allowed
+<span class="nc bnc" id="L752" title="All 2 branches missed.">                        if (NodeSubscription.Type.items == subscription.getType()) {</span>
+                            // User is trying to create another subscription so
+                            // return current subscription state
+<span class="nc" id="L755">                            subscription.sendSubscriptionState(iq);</span>
+<span class="nc" id="L756">                            return;</span>
+                        }
+                    }
+<span class="nc" id="L759">                }</span>
+            }
+        }
+
+        // Create a subscription and an affiliation if the subscriber doesn't have one
+<span class="nc" id="L764">        node.createSubscription(iq, owner, subscriberJID, accessModel.isAuthorizationRequired(),</span>
+                optionsForm);
+<span class="nc" id="L766">    }</span>
+
+    private void unsubscribeNode(PubSubService service, IQ iq, Element unsubscribeElement) {
+<span class="nc" id="L769">        String nodeID = unsubscribeElement.attributeValue(&quot;node&quot;);</span>
+<span class="nc" id="L770">        String subID = unsubscribeElement.attributeValue(&quot;subid&quot;);</span>
+<span class="nc" id="L771">        String jidAttribute = unsubscribeElement.attributeValue(&quot;jid&quot;);</span>
+
+        // Check if the specified JID has a subscription with the node
+<span class="nc bnc" id="L774" title="All 2 branches missed.">        if (jidAttribute == null) {</span>
+            // No JID was specified so return an error indicating that jid is required
+<span class="nc" id="L776">            Element pubsubError = DocumentHelper.createElement(</span>
+<span class="nc" id="L777">                    QName.get(&quot;jid-required&quot;, &quot;http://jabber.org/protocol/pubsub#errors&quot;));</span>
+<span class="nc" id="L778">            sendErrorPacket(iq, PacketError.Condition.bad_request, pubsubError);</span>
+<span class="nc" id="L779">            return;</span>
+        }
+        Node node;
+
+<span class="nc bnc" id="L783" title="All 2 branches missed.">        if (nodeID == null) {</span>
+<span class="nc bnc" id="L784" title="All 2 branches missed.">            if (service.isCollectionNodesSupported()) {</span>
+                // Entity unsubscribes from root collection node
+<span class="nc" id="L786">                node = service.getRootCollectionNode();</span>
+            }
+            else {
+                // Service does not have a root collection node so return a nodeid-required error
+<span class="nc" id="L790">                Element pubsubError = DocumentHelper.createElement(QName.get(</span>
+                        &quot;nodeid-required&quot;, &quot;http://jabber.org/protocol/pubsub#errors&quot;));
+<span class="nc" id="L792">                sendErrorPacket(iq, PacketError.Condition.bad_request, pubsubError);</span>
+<span class="nc" id="L793">                return;</span>
+            }
+        }
+        else {
+            // Look for the specified node
+<span class="nc" id="L798">            node = service.getNode(nodeID);</span>
+<span class="nc bnc" id="L799" title="All 2 branches missed.">            if (node == null) {</span>
+                // Node does not exist. Return item-not-found error
+<span class="nc" id="L801">                sendErrorPacket(iq, PacketError.Condition.item_not_found, null);</span>
+<span class="nc" id="L802">                return;</span>
+            }
+        }
+        NodeSubscription subscription;
+<span class="nc" id="L806">        JID owner = new JID(jidAttribute);</span>
+        
+<span class="nc bnc" id="L808" title="All 4 branches missed.">        if (node.isMultipleSubscriptionsEnabled() &amp;&amp; node.getSubscriptions(owner).size() &gt; 1) {</span>
+<span class="nc bnc" id="L809" title="All 2 branches missed.">            if (subID == null) {</span>
+                // No subid was specified and the node supports multiple subscriptions
+<span class="nc" id="L811">                Element pubsubError = DocumentHelper.createElement(</span>
+<span class="nc" id="L812">                        QName.get(&quot;subid-required&quot;, &quot;http://jabber.org/protocol/pubsub#errors&quot;));</span>
+<span class="nc" id="L813">                sendErrorPacket(iq, PacketError.Condition.bad_request, pubsubError);</span>
+<span class="nc" id="L814">                return;</span>
+            }
+            else {
+                // Check if the specified subID belongs to an existing node subscription
+<span class="nc" id="L818">                subscription = node.getSubscription(subID);</span>
+<span class="nc bnc" id="L819" title="All 2 branches missed.">                if (subscription == null) {</span>
+<span class="nc" id="L820">                    Element pubsubError = DocumentHelper.createElement(</span>
+<span class="nc" id="L821">                            QName.get(&quot;invalid-subid&quot;, &quot;http://jabber.org/protocol/pubsub#errors&quot;));</span>
+<span class="nc" id="L822">                    sendErrorPacket(iq, PacketError.Condition.not_acceptable, pubsubError);</span>
+<span class="nc" id="L823">                    return;</span>
+                }
+            }
+        }
+        else {
+<span class="nc" id="L828">            JID subscriberJID = new JID(jidAttribute);</span>
+<span class="nc" id="L829">            subscription = node.getSubscription(subscriberJID);</span>
+<span class="nc bnc" id="L830" title="All 2 branches missed.">            if (subscription == null) {</span>
+<span class="nc" id="L831">                Element pubsubError = DocumentHelper.createElement(</span>
+<span class="nc" id="L832">                        QName.get(&quot;not-subscribed&quot;, &quot;http://jabber.org/protocol/pubsub#errors&quot;));</span>
+<span class="nc" id="L833">                sendErrorPacket(iq, PacketError.Condition.unexpected_request, pubsubError);</span>
+<span class="nc" id="L834">                return;</span>
+            }
+        }
+<span class="nc" id="L837">        JID from = iq.getFrom();</span>
+        // Check that unsubscriptions to the node are enabled
+<span class="nc bnc" id="L839" title="All 4 branches missed.">        if (!node.isSubscriptionEnabled() &amp;&amp; !service.isServiceAdmin(from)) {</span>
+            // Sender is not a sysadmin and unsubscription is disabled so return an error
+<span class="nc" id="L841">            sendErrorPacket(iq, PacketError.Condition.not_allowed, null);</span>
+<span class="nc" id="L842">            return;</span>
+        }
+
+        // A subscription was found so check if the user is allowed to cancel the subscription
+<span class="nc bnc" id="L846" title="All 4 branches missed.">        if (!subscription.canModify(from) &amp;&amp; !subscription.canModify(owner)) {</span>
+            // Requestor is prohibited from unsubscribing entity
+<span class="nc" id="L848">            sendErrorPacket(iq, PacketError.Condition.forbidden, null);</span>
+<span class="nc" id="L849">            return;</span>
+        }
+
+        // Cancel subscription
+<span class="nc" id="L853">        node.cancelSubscription(subscription);</span>
+        // Send reply with success
+<span class="nc" id="L855">        router.route(IQ.createResultIQ(iq));</span>
+<span class="nc" id="L856">    }</span>
+
+    private void getSubscriptionConfiguration(PubSubService service, IQ iq,
+                                              Element childElement, Element optionsElement) {
+<span class="nc" id="L860">        String nodeID = optionsElement.attributeValue(&quot;node&quot;);</span>
+<span class="nc" id="L861">        String subID = optionsElement.attributeValue(&quot;subid&quot;);</span>
+        Node node;
+<span class="nc bnc" id="L863" title="All 2 branches missed.">        if (nodeID == null) {</span>
+<span class="nc bnc" id="L864" title="All 2 branches missed.">            if (service.isCollectionNodesSupported()) {</span>
+                // Entity requests subscription options of root collection node
+<span class="nc" id="L866">                node = service.getRootCollectionNode();</span>
+            }
+            else {
+                // Service does not have a root collection node so return a nodeid-required error
+<span class="nc" id="L870">                Element pubsubError = DocumentHelper.createElement(QName.get(</span>
+                        &quot;nodeid-required&quot;, &quot;http://jabber.org/protocol/pubsub#errors&quot;));
+<span class="nc" id="L872">                sendErrorPacket(iq, PacketError.Condition.bad_request, pubsubError);</span>
+<span class="nc" id="L873">                return;</span>
+            }
+        }
+        else {
+            // Look for the specified node
+<span class="nc" id="L878">            node = service.getNode(nodeID);</span>
+<span class="nc bnc" id="L879" title="All 2 branches missed.">            if (node == null) {</span>
+                // Node does not exist. Return item-not-found error
+<span class="nc" id="L881">                sendErrorPacket(iq, PacketError.Condition.item_not_found, null);</span>
+<span class="nc" id="L882">                return;</span>
+            }
+        }
+        NodeSubscription subscription;
+<span class="nc bnc" id="L886" title="All 2 branches missed.">        if (node.isMultipleSubscriptionsEnabled()) {</span>
+<span class="nc bnc" id="L887" title="All 2 branches missed.">            if (subID == null) {</span>
+                // No subid was specified and the node supports multiple subscriptions
+<span class="nc" id="L889">                Element pubsubError = DocumentHelper.createElement(</span>
+<span class="nc" id="L890">                        QName.get(&quot;subid-required&quot;, &quot;http://jabber.org/protocol/pubsub#errors&quot;));</span>
+<span class="nc" id="L891">                sendErrorPacket(iq, PacketError.Condition.bad_request, pubsubError);</span>
+<span class="nc" id="L892">                return;</span>
+            }
+            else {
+                // Check if the specified subID belongs to an existing node subscription
+<span class="nc" id="L896">                subscription = node.getSubscription(subID);</span>
+<span class="nc bnc" id="L897" title="All 2 branches missed.">                if (subscription == null) {</span>
+<span class="nc" id="L898">                    Element pubsubError = DocumentHelper.createElement(</span>
+<span class="nc" id="L899">                            QName.get(&quot;invalid-subid&quot;, &quot;http://jabber.org/protocol/pubsub#errors&quot;));</span>
+<span class="nc" id="L900">                    sendErrorPacket(iq, PacketError.Condition.not_acceptable, pubsubError);</span>
+<span class="nc" id="L901">                    return;</span>
+                }
+            }
+        }
+        else {
+            // Check if the specified JID has a subscription with the node
+<span class="nc" id="L907">            String jidAttribute = optionsElement.attributeValue(&quot;jid&quot;);</span>
+<span class="nc bnc" id="L908" title="All 2 branches missed.">            if (jidAttribute == null) {</span>
+                // No JID was specified so return an error indicating that jid is required
+<span class="nc" id="L910">                Element pubsubError = DocumentHelper.createElement(</span>
+<span class="nc" id="L911">                        QName.get(&quot;jid-required&quot;, &quot;http://jabber.org/protocol/pubsub#errors&quot;));</span>
+<span class="nc" id="L912">                sendErrorPacket(iq, PacketError.Condition.bad_request, pubsubError);</span>
+<span class="nc" id="L913">                return;</span>
+            }
+<span class="nc" id="L915">            JID subscriberJID = new JID(jidAttribute);</span>
+<span class="nc" id="L916">            subscription = node.getSubscription(subscriberJID);</span>
+<span class="nc bnc" id="L917" title="All 2 branches missed.">            if (subscription == null) {</span>
+<span class="nc" id="L918">                Element pubsubError = DocumentHelper.createElement(</span>
+<span class="nc" id="L919">                        QName.get(&quot;not-subscribed&quot;, &quot;http://jabber.org/protocol/pubsub#errors&quot;));</span>
+<span class="nc" id="L920">                sendErrorPacket(iq, PacketError.Condition.unexpected_request, pubsubError);</span>
+<span class="nc" id="L921">                return;</span>
+            }
+        }
+
+        // A subscription was found so check if the user is allowed to get the subscription options
+<span class="nc bnc" id="L926" title="All 2 branches missed.">        if (!subscription.canModify(iq.getFrom())) {</span>
+            // Requestor is prohibited from getting the subscription options
+<span class="nc" id="L928">            sendErrorPacket(iq, PacketError.Condition.forbidden, null);</span>
+<span class="nc" id="L929">            return;</span>
+        }
+
+        // Return data form containing subscription configuration to the subscriber
+<span class="nc" id="L933">        IQ reply = IQ.createResultIQ(iq);</span>
+<span class="nc" id="L934">        Element replyChildElement = childElement.createCopy();</span>
+<span class="nc" id="L935">        reply.setChildElement(replyChildElement);</span>
+<span class="nc" id="L936">        replyChildElement.element(&quot;options&quot;).add(subscription.getConfigurationForm().getElement());</span>
+<span class="nc" id="L937">        router.route(reply);</span>
+<span class="nc" id="L938">    }</span>
+
+    private void configureSubscription(PubSubService service, IQ iq, Element optionsElement) {
+<span class="nc" id="L941">        String nodeID = optionsElement.attributeValue(&quot;node&quot;);</span>
+<span class="nc" id="L942">        String subID = optionsElement.attributeValue(&quot;subid&quot;);</span>
+        Node node;
+<span class="nc bnc" id="L944" title="All 2 branches missed.">        if (nodeID == null) {</span>
+<span class="nc bnc" id="L945" title="All 2 branches missed.">            if (service.isCollectionNodesSupported()) {</span>
+                // Entity submits new subscription options of root collection node
+<span class="nc" id="L947">                node = service.getRootCollectionNode();</span>
+            }
+            else {
+                // Service does not have a root collection node so return a nodeid-required error
+<span class="nc" id="L951">                Element pubsubError = DocumentHelper.createElement(QName.get(</span>
+                        &quot;nodeid-required&quot;, &quot;http://jabber.org/protocol/pubsub#errors&quot;));
+<span class="nc" id="L953">                sendErrorPacket(iq, PacketError.Condition.bad_request, pubsubError);</span>
+<span class="nc" id="L954">                return;</span>
+            }
+        }
+        else {
+            // Look for the specified node
+<span class="nc" id="L959">            node = service.getNode(nodeID);</span>
+<span class="nc bnc" id="L960" title="All 2 branches missed.">            if (node == null) {</span>
+                // Node does not exist. Return item-not-found error
+<span class="nc" id="L962">                sendErrorPacket(iq, PacketError.Condition.item_not_found, null);</span>
+<span class="nc" id="L963">                return;</span>
+            }
+        }
+        NodeSubscription subscription;
+<span class="nc bnc" id="L967" title="All 2 branches missed.">        if (node.isMultipleSubscriptionsEnabled()) {</span>
+<span class="nc bnc" id="L968" title="All 2 branches missed.">            if (subID == null) {</span>
+                // No subid was specified and the node supports multiple subscriptions
+<span class="nc" id="L970">                Element pubsubError = DocumentHelper.createElement(</span>
+<span class="nc" id="L971">                        QName.get(&quot;subid-required&quot;, &quot;http://jabber.org/protocol/pubsub#errors&quot;));</span>
+<span class="nc" id="L972">                sendErrorPacket(iq, PacketError.Condition.bad_request, pubsubError);</span>
+<span class="nc" id="L973">                return;</span>
+            }
+            else {
+                // Check if the specified subID belongs to an existing node subscription
+<span class="nc" id="L977">                subscription = node.getSubscription(subID);</span>
+<span class="nc bnc" id="L978" title="All 2 branches missed.">                if (subscription == null) {</span>
+<span class="nc" id="L979">                    Element pubsubError = DocumentHelper.createElement(</span>
+<span class="nc" id="L980">                            QName.get(&quot;invalid-subid&quot;, &quot;http://jabber.org/protocol/pubsub#errors&quot;));</span>
+<span class="nc" id="L981">                    sendErrorPacket(iq, PacketError.Condition.not_acceptable, pubsubError);</span>
+<span class="nc" id="L982">                    return;</span>
+                }
+            }
+        }
+        else {
+            // Check if the specified JID has a subscription with the node
+<span class="nc" id="L988">            String jidAttribute = optionsElement.attributeValue(&quot;jid&quot;);</span>
+<span class="nc bnc" id="L989" title="All 2 branches missed.">            if (jidAttribute == null) {</span>
+                // No JID was specified so return an error indicating that jid is required
+<span class="nc" id="L991">                Element pubsubError = DocumentHelper.createElement(</span>
+<span class="nc" id="L992">                        QName.get(&quot;jid-required&quot;, &quot;http://jabber.org/protocol/pubsub#errors&quot;));</span>
+<span class="nc" id="L993">                sendErrorPacket(iq, PacketError.Condition.bad_request, pubsubError);</span>
+<span class="nc" id="L994">                return;</span>
+            }
+<span class="nc" id="L996">            JID subscriberJID = new JID(jidAttribute);</span>
+<span class="nc" id="L997">            subscription = node.getSubscription(subscriberJID);</span>
+<span class="nc bnc" id="L998" title="All 2 branches missed.">            if (subscription == null) {</span>
+<span class="nc" id="L999">                Element pubsubError = DocumentHelper.createElement(</span>
+<span class="nc" id="L1000">                        QName.get(&quot;not-subscribed&quot;, &quot;http://jabber.org/protocol/pubsub#errors&quot;));</span>
+<span class="nc" id="L1001">                sendErrorPacket(iq, PacketError.Condition.unexpected_request, pubsubError);</span>
+<span class="nc" id="L1002">                return;</span>
+            }
+        }
+
+        // A subscription was found so check if the user is allowed to submits
+        // new subscription options
+<span class="nc bnc" id="L1008" title="All 2 branches missed.">        if (!subscription.canModify(iq.getFrom())) {</span>
+            // Requestor is prohibited from setting new subscription options
+<span class="nc" id="L1010">            sendErrorPacket(iq, PacketError.Condition.forbidden, null);</span>
+<span class="nc" id="L1011">            return;</span>
+        }
+
+<span class="nc" id="L1014">        Element formElement = optionsElement.element(QName.get(&quot;x&quot;, &quot;jabber:x:data&quot;));</span>
+<span class="nc bnc" id="L1015" title="All 2 branches missed.">        if (formElement != null) {</span>
+            // Change the subscription configuration based on the completed form
+<span class="nc" id="L1017">            subscription.configure(iq, new DataForm(formElement));</span>
+        }
+        else {
+            // No data form was included so return bad request error
+<span class="nc" id="L1021">            sendErrorPacket(iq, PacketError.Condition.bad_request, null);</span>
+        }
+<span class="nc" id="L1023">    }</span>
+
+    private void getSubscriptions(PubSubService service, IQ iq, Element childElement) {
+        // TODO Assuming that owner is the bare JID (as defined in the JEP). This can be replaced with an explicit owner specified in the packet
+<span class="nc" id="L1027">        JID owner = iq.getFrom().asBareJID();</span>
+<span class="nc" id="L1028">        Element subscriptionsElement = childElement.element(&quot;subscriptions&quot;);</span>
+        
+<span class="nc" id="L1030">        String nodeID = subscriptionsElement.attributeValue(&quot;node&quot;);</span>
+<span class="nc" id="L1031">        Collection&lt;NodeSubscription&gt; subscriptions = new ArrayList&lt;&gt;();</span>
+        
+<span class="nc bnc" id="L1033" title="All 2 branches missed.">        if (nodeID == null)</span>
+        {
+            // Collect subscriptions of owner for all nodes at the service
+<span class="nc bnc" id="L1036" title="All 2 branches missed.">            for (Node node : service.getNodes()) {</span>
+<span class="nc" id="L1037">                subscriptions.addAll(node.getSubscriptions(owner));</span>
+<span class="nc" id="L1038">            }</span>
+        }
+        else
+        {
+<span class="nc" id="L1042">            subscriptions.addAll(service.getNode(nodeID).getSubscriptions(owner));</span>
+        }
+        // Create reply to send
+<span class="nc" id="L1045">        IQ reply = IQ.createResultIQ(iq);</span>
+<span class="nc" id="L1046">        Element replyChildElement = childElement.createCopy();</span>
+<span class="nc" id="L1047">        reply.setChildElement(replyChildElement);</span>
+<span class="nc" id="L1048">        Element affiliationsElement = replyChildElement.element(&quot;subscriptions&quot;);</span>
+        // Add information about subscriptions including existing affiliations
+<span class="nc bnc" id="L1050" title="All 2 branches missed.">        for (NodeSubscription subscription : subscriptions) {</span>
+<span class="nc" id="L1051">            Element subElement = affiliationsElement.addElement(&quot;subscription&quot;);</span>
+<span class="nc" id="L1052">            Node node = subscription.getNode();</span>
+<span class="nc" id="L1053">            NodeAffiliate nodeAffiliate = subscription.getAffiliate();</span>
+            // Do not include the node id when node is the root collection node
+            // or the results are for a specific node
+<span class="nc bnc" id="L1056" title="All 4 branches missed.">            if (!node.isRootCollectionNode() &amp;&amp; (nodeID == null)) {</span>
+<span class="nc" id="L1057">                subElement.addAttribute(&quot;node&quot;, node.getNodeID());</span>
+            }
+<span class="nc" id="L1059">            subElement.addAttribute(&quot;jid&quot;, subscription.getJID().toString());</span>
+<span class="nc" id="L1060">            subElement.addAttribute(&quot;subscription&quot;, subscription.getState().name());</span>
+<span class="nc bnc" id="L1061" title="All 2 branches missed.">            if (node.isMultipleSubscriptionsEnabled()) {</span>
+<span class="nc" id="L1062">                subElement.addAttribute(&quot;subid&quot;, subscription.getID());</span>
+            }
+<span class="nc" id="L1064">        }</span>
+        // Send reply
+<span class="nc" id="L1066">        router.route(reply);</span>
+<span class="nc" id="L1067">    }</span>
+
+    private  void getAffiliations(PubSubService service, IQ iq, Element childElement) {
+        // TODO Assuming that owner is the bare JID (as defined in the JEP). This can be replaced with an explicit owner specified in the packet
+<span class="nc" id="L1071">        JID owner = iq.getFrom().asBareJID();</span>
+        // Collect affiliations of owner for all nodes at the service
+<span class="nc" id="L1073">        Collection&lt;NodeAffiliate&gt; affiliations = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L1074" title="All 2 branches missed.">        for (Node node : service.getNodes()) {</span>
+<span class="nc" id="L1075">            NodeAffiliate nodeAffiliate = node.getAffiliate(owner);</span>
+<span class="nc bnc" id="L1076" title="All 2 branches missed.">            if (nodeAffiliate != null) {</span>
+<span class="nc" id="L1077">                affiliations.add(nodeAffiliate);</span>
+            }
+<span class="nc" id="L1079">        }</span>
+        // Create reply to send
+<span class="nc" id="L1081">        IQ reply = IQ.createResultIQ(iq);</span>
+<span class="nc" id="L1082">        Element replyChildElement = childElement.createCopy();</span>
+<span class="nc" id="L1083">        reply.setChildElement(replyChildElement);</span>
+<span class="nc bnc" id="L1084" title="All 2 branches missed.">        if (affiliations.isEmpty()) {</span>
+            // User does not have any affiliation or subscription with the pubsub service
+<span class="nc" id="L1086">            reply.setError(PacketError.Condition.item_not_found);</span>
+        }
+        else {
+<span class="nc" id="L1089">            Element affiliationsElement = replyChildElement.element(&quot;affiliations&quot;);</span>
+            // Add information about affiliations without subscriptions
+<span class="nc bnc" id="L1091" title="All 2 branches missed.">            for (NodeAffiliate affiliate : affiliations) {</span>
+<span class="nc" id="L1092">                Element affiliateElement = affiliationsElement.addElement(&quot;affiliation&quot;);</span>
+                // Do not include the node id when node is the root collection node
+<span class="nc bnc" id="L1094" title="All 2 branches missed.">                if (!affiliate.getNode().isRootCollectionNode()) {</span>
+<span class="nc" id="L1095">                    affiliateElement.addAttribute(&quot;node&quot;, affiliate.getNode().getNodeID());</span>
+                }
+<span class="nc" id="L1097">                affiliateElement.addAttribute(&quot;jid&quot;, affiliate.getJID().toString());</span>
+<span class="nc" id="L1098">                affiliateElement.addAttribute(&quot;affiliation&quot;, affiliate.getAffiliation().name());</span>
+<span class="nc" id="L1099">            }</span>
+        }
+        // Send reply
+<span class="nc" id="L1102">        router.route(reply);</span>
+<span class="nc" id="L1103">    }</span>
+
+    private void getPublishedItems(PubSubService service, IQ iq, Element itemsElement) {
+<span class="nc" id="L1106">        String nodeID = itemsElement.attributeValue(&quot;node&quot;);</span>
+<span class="nc" id="L1107">        String subID = itemsElement.attributeValue(&quot;subid&quot;);</span>
+        Node node;
+<span class="nc bnc" id="L1109" title="All 2 branches missed.">        if (nodeID == null) {</span>
+            // User must specify a leaf node ID so return a nodeid-required error
+<span class="nc" id="L1111">            Element pubsubError = DocumentHelper.createElement(QName.get(</span>
+                    &quot;nodeid-required&quot;, &quot;http://jabber.org/protocol/pubsub#errors&quot;));
+<span class="nc" id="L1113">            sendErrorPacket(iq, PacketError.Condition.bad_request, pubsubError);</span>
+<span class="nc" id="L1114">            return;</span>
+        }
+        else {
+            // Look for the specified node
+<span class="nc" id="L1118">            node = service.getNode(nodeID);</span>
+<span class="nc bnc" id="L1119" title="All 2 branches missed.">            if (node == null) {</span>
+                // Node does not exist. Return item-not-found error
+<span class="nc" id="L1121">                sendErrorPacket(iq, PacketError.Condition.item_not_found, null);</span>
+<span class="nc" id="L1122">                return;</span>
+            }
+        }
+<span class="nc bnc" id="L1125" title="All 2 branches missed.">        if (node.isCollectionNode()) {</span>
+            // Node is a collection node. Return feature-not-implemented error
+<span class="nc" id="L1127">            Element pubsubError = DocumentHelper.createElement(</span>
+<span class="nc" id="L1128">                    QName.get(&quot;unsupported&quot;, &quot;http://jabber.org/protocol/pubsub#errors&quot;));</span>
+<span class="nc" id="L1129">            pubsubError.addAttribute(&quot;feature&quot;, &quot;retrieve-items&quot;);</span>
+<span class="nc" id="L1130">            sendErrorPacket(iq, PacketError.Condition.feature_not_implemented, pubsubError);</span>
+<span class="nc" id="L1131">            return;</span>
+        }
+        // Check if sender and subscriber JIDs match or if a valid &quot;trusted proxy&quot; is being used
+<span class="nc" id="L1134">        JID subscriberJID = iq.getFrom();</span>
+        // TODO Assumed that the owner of the subscription is the bare JID of the subscription JID. Waiting StPeter answer for explicit field.
+<span class="nc" id="L1136">        JID owner = subscriberJID.asBareJID();</span>
+        // Check if the node's access model allows the subscription to proceed
+<span class="nc" id="L1138">        AccessModel accessModel = node.getAccessModel();</span>
+<span class="nc bnc" id="L1139" title="All 2 branches missed.">        if (!accessModel.canAccessItems(node, owner, subscriberJID)) {</span>
+<span class="nc" id="L1140">            sendErrorPacket(iq, accessModel.getSubsriptionError(),</span>
+<span class="nc" id="L1141">                    accessModel.getSubsriptionErrorDetail());</span>
+<span class="nc" id="L1142">            return;</span>
+        }
+        // Check that the requester is not an outcast
+<span class="nc" id="L1145">        NodeAffiliate affiliate = node.getAffiliate(owner);</span>
+<span class="nc bnc" id="L1146" title="All 4 branches missed.">        if (affiliate != null &amp;&amp; affiliate.getAffiliation() == NodeAffiliate.Affiliation.outcast) {</span>
+<span class="nc" id="L1147">            sendErrorPacket(iq, PacketError.Condition.forbidden, null);</span>
+<span class="nc" id="L1148">            return;</span>
+        }
+
+        // Get the user's subscription
+<span class="nc" id="L1152">        NodeSubscription subscription = null;</span>
+<span class="nc bnc" id="L1153" title="All 4 branches missed.">        if (node.isMultipleSubscriptionsEnabled() &amp;&amp; (node.getSubscriptions(owner).size() &gt; 1)) {</span>
+<span class="nc bnc" id="L1154" title="All 2 branches missed.">            if (subID == null) {</span>
+                // No subid was specified and the node supports multiple subscriptions and the user
+                // has multiple subscriptions
+<span class="nc" id="L1157">                Element pubsubError = DocumentHelper.createElement(</span>
+<span class="nc" id="L1158">                        QName.get(&quot;subid-required&quot;, &quot;http://jabber.org/protocol/pubsub#errors&quot;));</span>
+<span class="nc" id="L1159">                sendErrorPacket(iq, PacketError.Condition.bad_request, pubsubError);</span>
+<span class="nc" id="L1160">                return;</span>
+            }
+            else {
+                // Check if the specified subID belongs to an existing node subscription
+<span class="nc" id="L1164">                subscription = node.getSubscription(subID);</span>
+<span class="nc bnc" id="L1165" title="All 2 branches missed.">                if (subscription == null) {</span>
+<span class="nc" id="L1166">                    Element pubsubError = DocumentHelper.createElement(</span>
+<span class="nc" id="L1167">                            QName.get(&quot;invalid-subid&quot;, &quot;http://jabber.org/protocol/pubsub#errors&quot;));</span>
+<span class="nc" id="L1168">                    sendErrorPacket(iq, PacketError.Condition.not_acceptable, pubsubError);</span>
+<span class="nc" id="L1169">                    return;</span>
+                }
+            }
+        }
+
+
+<span class="nc bnc" id="L1175" title="All 4 branches missed.">        if (subscription != null &amp;&amp; !subscription.isActive()) {</span>
+<span class="nc" id="L1176">            Element pubsubError = DocumentHelper.createElement(</span>
+<span class="nc" id="L1177">                    QName.get(&quot;not-subscribed&quot;, &quot;http://jabber.org/protocol/pubsub#errors&quot;));</span>
+<span class="nc" id="L1178">            sendErrorPacket(iq, PacketError.Condition.not_authorized, pubsubError);</span>
+<span class="nc" id="L1179">            return;</span>
+        }
+
+<span class="nc" id="L1182">        LeafNode leafNode = (LeafNode) node;</span>
+        // Get list of items to send to the user
+<span class="nc" id="L1184">        boolean forceToIncludePayload = false;</span>
+        List&lt;PublishedItem&gt; items;
+<span class="nc" id="L1186">        String max_items = itemsElement.attributeValue(&quot;max_items&quot;);</span>
+<span class="nc" id="L1187">        int recentItems = 0;</span>
+<span class="nc bnc" id="L1188" title="All 2 branches missed.">        if (max_items != null) {</span>
+            try {
+                // Parse the recent number of items requested
+<span class="nc" id="L1191">                recentItems = Integer.parseInt(max_items);</span>
+            }
+<span class="nc" id="L1193">            catch (NumberFormatException e) {</span>
+                // There was an error parsing the number so assume that all items were requested
+<span class="nc" id="L1195">                Log.warn(&quot;Assuming that all items were requested&quot;, e);</span>
+<span class="nc" id="L1196">                max_items = null;</span>
+<span class="nc" id="L1197">            }</span>
+        }
+<span class="nc bnc" id="L1199" title="All 2 branches missed.">        if (max_items != null) {</span>
+            // Get the N most recent published items
+<span class="nc" id="L1201">            items = new ArrayList&lt;&gt;(leafNode.getPublishedItems(recentItems));</span>
+        }
+        else {
+<span class="nc" id="L1204">            List requestedItems = itemsElement.elements(&quot;item&quot;);</span>
+<span class="nc bnc" id="L1205" title="All 2 branches missed.">            if (requestedItems.isEmpty()) {</span>
+                // Get all the active items that were published to the node
+<span class="nc" id="L1207">                items = new ArrayList&lt;&gt;(leafNode.getPublishedItems());</span>
+            }
+            else {
+<span class="nc" id="L1210">                items = new ArrayList&lt;&gt;();</span>
+                // Indicate that payload should be included (if exists) no matter
+                // the node configuration
+<span class="nc" id="L1213">                forceToIncludePayload = true;</span>
+                // Get the items as requested by the user
+<span class="nc bnc" id="L1215" title="All 2 branches missed.">                for (Iterator it = requestedItems.iterator(); it.hasNext();) {</span>
+<span class="nc" id="L1216">                    Element element = (Element) it.next();</span>
+<span class="nc" id="L1217">                    String itemID = element.attributeValue(&quot;id&quot;);</span>
+<span class="nc" id="L1218">                    PublishedItem item = leafNode.getPublishedItem(itemID);</span>
+<span class="nc bnc" id="L1219" title="All 2 branches missed.">                    if (item != null) {</span>
+<span class="nc" id="L1220">                        items.add(item);</span>
+                    }
+<span class="nc" id="L1222">                }</span>
+            }
+        }
+
+<span class="nc bnc" id="L1226" title="All 4 branches missed.">        if (subscription != null &amp;&amp; subscription.getKeyword() != null) {</span>
+            // Filter items that do not match the subscription keyword
+<span class="nc bnc" id="L1228" title="All 2 branches missed.">            for (Iterator&lt;PublishedItem&gt; it = items.iterator(); it.hasNext();) {</span>
+<span class="nc" id="L1229">                PublishedItem item = it.next();</span>
+<span class="nc bnc" id="L1230" title="All 2 branches missed.">                if (!subscription.isKeywordMatched(item)) {</span>
+                    // Remove item that does not match keyword
+<span class="nc" id="L1232">                    it.remove();</span>
+                }
+<span class="nc" id="L1234">            }</span>
+        }
+
+        // Send items to the user
+<span class="nc" id="L1238">        leafNode.sendPublishedItems(iq, items, forceToIncludePayload);</span>
+<span class="nc" id="L1239">    }</span>
+
+    private void createNode(PubSubService service, IQ iq, Element childElement, Element createElement, DataForm publishOptions) {
+        // Call createNodeHelper and get the node creation status.
+<span class="nc" id="L1243">        CreateNodeResponse response = createNodeHelper(service, iq.getFrom(), childElement.element(&quot;configure&quot;), createElement.attributeValue(&quot;node&quot;), publishOptions);</span>
+<span class="nc bnc" id="L1244" title="All 2 branches missed.">        if (response.newNode == null) {</span>
+            // New node creation failed
+<span class="nc" id="L1246">            sendErrorPacket(iq, response.creationStatus, response.pubsubError);</span>
+        } else {
+<span class="nc" id="L1248">            IQ reply = IQ.createResultIQ(iq);</span>
+<span class="nc" id="L1249">            Node newNode = response.newNode;</span>
+<span class="nc" id="L1250">            String nodeID = createElement.attributeValue(&quot;node&quot;);</span>
+            // Include new nodeID if it has changed from the original nodeID
+<span class="nc bnc" id="L1252" title="All 2 branches missed.">            if (!newNode.getNodeID().equals(nodeID)) {</span>
+<span class="nc" id="L1253">                Element elem = reply.setChildElement(&quot;pubsub&quot;, &quot;http://jabber.org/protocol/pubsub&quot;);</span>
+<span class="nc" id="L1254">                elem.addElement(&quot;create&quot;).addAttribute(&quot;node&quot;, newNode.getNodeID());</span>
+            }
+<span class="nc" id="L1256">            router.route(reply);</span>
+        }
+<span class="nc" id="L1258">    }</span>
+
+    /**
+     * Response Object returned by createNodeHelper method
+     */
+    public static class CreateNodeResponse {
+        public final PacketError.Condition creationStatus;
+        public final Node newNode;
+        public final Element pubsubError;
+
+<span class="nc" id="L1268">        public CreateNodeResponse(PacketError.Condition creationStatus, Element pubsubError, Node newNode) {</span>
+<span class="nc" id="L1269">            this.creationStatus = creationStatus;</span>
+<span class="nc" id="L1270">            this.newNode = newNode;</span>
+<span class="nc" id="L1271">            this.pubsubError = pubsubError;</span>
+<span class="nc" id="L1272">        }</span>
+    }
+
+    /**
+     * Checks if the following conditions are satisfied and creates a node
+     * - Requester can create nodes
+     * - Instant node creation is enabled
+     * - Node does not already exist
+     * - New node configuration is valid
+     *
+     * &lt;br&gt;NOTE 1: This method should not reply to the client
+     * &lt;br&gt;NOTE 2: This method calls UserManager::isRegisteredUser(JID) which can block waiting for a response - so
+     * do not call this method in the same thread in which a response might arrive
+     *
+     * @param service The service instance that's responsible for processing (cannot be null)
+     * @param requester The (full) JID of the entity that performs the action (cannot be null)
+     * @param configuration Optional Configuration dataform, if user requested to configure the node (can be null)
+     * @param nodeID The ID of the node to be created, or null when an instant node is to be created.
+     * @param publishOptions Optional Publishing Options, which are either preconditions or configuration overrides (can be null)
+     * @return {@link CreateNodeResponse}
+     */
+    public static CreateNodeResponse createNodeHelper(PubSubService service, JID requester, Element configuration, String nodeID, DataForm publishOptions) {
+        // Verify that sender has permissions to create nodes
+<span class="nc bnc" id="L1295" title="All 6 branches missed.">        if (!service.canCreateNode(requester) || (!isComponent(requester) &amp;&amp; !UserManager.getInstance().isRegisteredUser(requester))) {</span>
+            // The user is not allowed to create nodes so return an error
+<span class="nc" id="L1297">            return new CreateNodeResponse(PacketError.Condition.forbidden, null, null);</span>
+        }
+<span class="nc" id="L1299">        DataForm completedForm = null;</span>
+<span class="nc" id="L1300">        CollectionNode parentNode = null;</span>
+<span class="nc" id="L1301">        String newNodeID = nodeID;</span>
+<span class="nc bnc" id="L1302" title="All 2 branches missed.">        if (nodeID == null) {</span>
+            // User requested an instant node
+<span class="nc bnc" id="L1304" title="All 2 branches missed.">            if (!service.isInstantNodeSupported()) {</span>
+                // Instant nodes creation is not allowed so return an error
+<span class="nc" id="L1306">                Element pubsubError = DocumentHelper.createElement(</span>
+<span class="nc" id="L1307">                        QName.get(&quot;nodeid-required&quot;, &quot;http://jabber.org/protocol/pubsub#errors&quot;));</span>
+<span class="nc" id="L1308">                return new CreateNodeResponse(PacketError.Condition.not_acceptable, pubsubError, null);</span>
+            }
+            do {
+                // Create a new nodeID and make sure that the random generated string does not
+                // match an existing node. Probability to match an existing node are very very low
+                // but they exist :)
+<span class="nc" id="L1314">                newNodeID = StringUtils.randomString(15);</span>
+            }
+<span class="nc bnc" id="L1316" title="All 2 branches missed.">            while (service.getNode(newNodeID) != null);</span>
+        }
+<span class="nc" id="L1318">        boolean collectionType = false;</span>
+
+        // Check if user requested to configure the node (using a data form)
+<span class="nc bnc" id="L1321" title="All 2 branches missed.">        if (configuration!= null) {</span>
+            // Get the data form that contains the parent nodeID
+<span class="nc" id="L1323">            completedForm = getSentConfigurationForm( configuration );</span>
+        }
+
+<span class="nc bnc" id="L1326" title="All 2 branches missed.">        if (publishOptions != null) {</span>
+            // Apply publish options to override provided config.
+<span class="nc bnc" id="L1328" title="All 2 branches missed.">            if ( completedForm == null ) {</span>
+<span class="nc" id="L1329">                completedForm = publishOptions;</span>
+            } else {
+<span class="nc bnc" id="L1331" title="All 2 branches missed.">                for ( final FormField publishOption : publishOptions.getFields() ) {</span>
+<span class="nc" id="L1332">                    completedForm.removeField( publishOption.getVariable() );</span>
+<span class="nc" id="L1333">                    final FormField formField = completedForm.addField( publishOption.getVariable(), publishOption.getLabel(), publishOption.getType() );</span>
+<span class="nc bnc" id="L1334" title="All 2 branches missed.">                    for ( final String value : publishOption.getValues() ) {</span>
+<span class="nc" id="L1335">                        formField.addValue( value );</span>
+<span class="nc" id="L1336">                    }</span>
+<span class="nc" id="L1337">                }</span>
+            }
+        }
+
+<span class="nc bnc" id="L1341" title="All 2 branches missed.">        if (completedForm != null) {</span>
+            // Calculate newNodeID when new node is affiliated with a Collection
+<span class="nc" id="L1343">            FormField field = completedForm.getField(&quot;pubsub#collection&quot;);</span>
+<span class="nc bnc" id="L1344" title="All 2 branches missed.">            if (field != null) {</span>
+<span class="nc" id="L1345">                List&lt;String&gt; values = field.getValues();</span>
+<span class="nc bnc" id="L1346" title="All 2 branches missed.">                if (!values.isEmpty()) {</span>
+<span class="nc" id="L1347">                    String parentNodeID = values.get(0);</span>
+<span class="nc" id="L1348">                    Node tempNode = service.getNode(parentNodeID);</span>
+<span class="nc bnc" id="L1349" title="All 2 branches missed.">                    if (tempNode == null) {</span>
+                        // Requested parent node was not found so return an error
+<span class="nc" id="L1351">                        return new CreateNodeResponse(PacketError.Condition.item_not_found, null, null);</span>
+                    }
+<span class="nc bnc" id="L1353" title="All 2 branches missed.">                    else if (!tempNode.isCollectionNode()) {</span>
+                        // Requested parent node is not a collection node so return an error
+<span class="nc" id="L1355">                        return new CreateNodeResponse(PacketError.Condition.not_acceptable, null, null);</span>
+                    }
+<span class="nc" id="L1357">                    parentNode = (CollectionNode) tempNode;</span>
+                }
+            }
+<span class="nc" id="L1360">            field = completedForm.getField(&quot;pubsub#node_type&quot;);</span>
+<span class="nc bnc" id="L1361" title="All 2 branches missed.">            if (field != null) {</span>
+                // Check if user requested to create a new collection node
+<span class="nc" id="L1363">                List&lt;String&gt; values = field.getValues();</span>
+<span class="nc bnc" id="L1364" title="All 2 branches missed.">                if (!values.isEmpty()) {</span>
+<span class="nc" id="L1365">                    collectionType = &quot;collection&quot;.equals(values.get(0));</span>
+                }
+            }
+        }
+
+        // If no parent was defined then use the root collection node
+<span class="nc bnc" id="L1371" title="All 4 branches missed.">        if (parentNode == null &amp;&amp; service.isCollectionNodesSupported()) {</span>
+<span class="nc" id="L1372">            parentNode = service.getRootCollectionNode();</span>
+        }
+        // Check that the requested nodeID does not exist
+<span class="nc" id="L1375">        Node existingNode = service.getNode(newNodeID);</span>
+<span class="nc bnc" id="L1376" title="All 2 branches missed.">        if (existingNode != null) {</span>
+            // There is a conflict since a node with the same ID already exists
+<span class="nc" id="L1378">            return new CreateNodeResponse(PacketError.Condition.conflict, null, null);</span>
+        }
+
+<span class="nc bnc" id="L1381" title="All 4 branches missed.">        if (collectionType &amp;&amp; !service.isCollectionNodesSupported()) {</span>
+            // Cannot create a collection node since the service doesn't support it
+<span class="nc" id="L1383">            Element pubsubError = DocumentHelper.createElement(</span>
+<span class="nc" id="L1384">                    QName.get(&quot;unsupported&quot;, &quot;http://jabber.org/protocol/pubsub#errors&quot;));</span>
+<span class="nc" id="L1385">            pubsubError.addAttribute(&quot;feature&quot;, &quot;collections&quot;);</span>
+<span class="nc" id="L1386">            return new CreateNodeResponse(PacketError.Condition.feature_not_implemented, pubsubError, null);</span>
+        }
+
+<span class="nc bnc" id="L1389" title="All 4 branches missed.">        if (parentNode != null &amp;&amp; !collectionType) {</span>
+            // Check if requester is allowed to add a new leaf child node to the parent node
+<span class="nc bnc" id="L1391" title="All 2 branches missed.">            if (!parentNode.isAssociationAllowed(requester)) {</span>
+                // User is not allowed to add child leaf node to parent node. Return an error.
+<span class="nc" id="L1393">                return new CreateNodeResponse(PacketError.Condition.forbidden, null, null);</span>
+            }
+            // Check if number of child leaf nodes has not been exceeded
+<span class="nc bnc" id="L1396" title="All 2 branches missed.">            if (parentNode.isMaxLeafNodeReached()) {</span>
+                // Max number of child leaf nodes has been reached. Return an error.
+<span class="nc" id="L1398">                Element pubsubError = DocumentHelper.createElement(QName.get(&quot;max-nodes-exceeded&quot;,</span>
+                        &quot;http://jabber.org/protocol/pubsub#errors&quot;));
+<span class="nc" id="L1400">                return new CreateNodeResponse(PacketError.Condition.conflict, pubsubError, null);</span>
+            }
+        }
+
+        // Create and configure the node
+<span class="nc" id="L1405">        boolean conflict = false;</span>
+<span class="nc" id="L1406">        Node newNode = null;</span>
+        try {
+            // TODO Assumed that the owner of the subscription is the bare JID of the subscription JID. Waiting StPeter answer for explicit field.
+<span class="nc" id="L1409">            JID owner = requester.asBareJID();</span>
+<span class="nc" id="L1410">            synchronized ( (newNodeID + MUTEX_SUFFIX_NODE).intern()) {</span>
+<span class="nc bnc" id="L1411" title="All 2 branches missed.">                if (service.getNode(newNodeID) == null) {</span>
+                    // Create the node
+<span class="nc bnc" id="L1413" title="All 2 branches missed.">                    if (collectionType) {</span>
+<span class="nc" id="L1414">                        newNode = new CollectionNode(service, parentNode, newNodeID, requester);</span>
+                    }
+                    else {
+<span class="nc" id="L1417">                        newNode = new LeafNode(service, parentNode, newNodeID, requester);</span>
+                    }
+                    // Add the creator as the node owner
+<span class="nc" id="L1420">                    newNode.addOwner(owner);</span>
+                    // Configure and save the node to the backend store
+<span class="nc bnc" id="L1422" title="All 2 branches missed.">                    if (completedForm != null) {</span>
+<span class="nc" id="L1423">                        newNode.configure(completedForm);</span>
+                    }
+                    else {
+<span class="nc" id="L1426">                        newNode.saveToDB();</span>
+                    }
+
+<span class="nc" id="L1429">                    CacheFactory.doClusterTask(new RefreshNodeTask(newNode));</span>
+                }
+                else {
+<span class="nc" id="L1432">                    conflict = true;</span>
+                }
+<span class="nc" id="L1434">            }</span>
+<span class="nc bnc" id="L1435" title="All 2 branches missed.">            if (conflict) {</span>
+                // There is a conflict since a node with the same ID already exists
+<span class="nc" id="L1437">                return new CreateNodeResponse(PacketError.Condition.conflict, null, null);</span>
+            }
+            else {
+                // Return success to the node owner
+<span class="nc" id="L1441">                return new CreateNodeResponse(null, null, newNode);</span>
+            }
+        }
+<span class="nc" id="L1444">        catch (NotAcceptableException e) {</span>
+            // Node should have at least one owner. Return not-acceptable error.
+<span class="nc" id="L1446">            return new CreateNodeResponse(PacketError.Condition.not_acceptable, null, null);</span>
+        }
+    }
+
+    private void getNodeConfiguration(PubSubService service, IQ iq, Element childElement, String nodeID) {
+<span class="nc" id="L1451">        Node node = service.getNode(nodeID);</span>
+<span class="nc bnc" id="L1452" title="All 2 branches missed.">        if (node == null) {</span>
+            // Node does not exist. Return item-not-found error
+<span class="nc" id="L1454">            sendErrorPacket(iq, PacketError.Condition.item_not_found, null);</span>
+<span class="nc" id="L1455">            return;</span>
+        }
+<span class="nc bnc" id="L1457" title="All 2 branches missed.">        if (!node.isAdmin(iq.getFrom())) {</span>
+            // Requesting entity is prohibited from configuring this node. Return forbidden error
+<span class="nc" id="L1459">            sendErrorPacket(iq, PacketError.Condition.forbidden, null);</span>
+<span class="nc" id="L1460">            return;</span>
+        }
+
+        // Return data form containing node configuration to the owner
+<span class="nc" id="L1464">        IQ reply = IQ.createResultIQ(iq);</span>
+<span class="nc" id="L1465">        Element replyChildElement = childElement.createCopy();</span>
+<span class="nc" id="L1466">        reply.setChildElement(replyChildElement);</span>
+<span class="nc" id="L1467">        replyChildElement.element(&quot;configure&quot;).add(node.getConfigurationForm().getElement());</span>
+<span class="nc" id="L1468">        router.route(reply);</span>
+<span class="nc" id="L1469">    }</span>
+
+    private void getDefaultNodeConfiguration(PubSubService service, IQ iq,
+                                             Element childElement, Element defaultElement) {
+<span class="nc" id="L1473">        String type = defaultElement.attributeValue(&quot;type&quot;);</span>
+<span class="nc bnc" id="L1474" title="All 2 branches missed.">        type = type == null ? &quot;leaf&quot; : type;</span>
+
+<span class="nc" id="L1476">        boolean isLeafType = &quot;leaf&quot;.equals(type);</span>
+<span class="nc" id="L1477">        DefaultNodeConfiguration config = service.getDefaultNodeConfiguration(isLeafType);</span>
+<span class="nc bnc" id="L1478" title="All 2 branches missed.">        if (config == null) {</span>
+            // Service does not support the requested node type so return an error
+<span class="nc" id="L1480">            Element pubsubError = DocumentHelper.createElement(</span>
+<span class="nc" id="L1481">                    QName.get(&quot;unsupported&quot;, &quot;http://jabber.org/protocol/pubsub#errors&quot;));</span>
+<span class="nc bnc" id="L1482" title="All 2 branches missed.">            pubsubError.addAttribute(&quot;feature&quot;, isLeafType ? &quot;leaf&quot; : &quot;collections&quot;);</span>
+<span class="nc" id="L1483">            sendErrorPacket(iq, PacketError.Condition.feature_not_implemented, pubsubError);</span>
+<span class="nc" id="L1484">            return;</span>
+        }
+
+        // Return data form containing default node configuration
+<span class="nc" id="L1488">        IQ reply = IQ.createResultIQ(iq);</span>
+<span class="nc" id="L1489">        Element replyChildElement = childElement.createCopy();</span>
+<span class="nc" id="L1490">        reply.setChildElement(replyChildElement);</span>
+<span class="nc" id="L1491">        replyChildElement.element(&quot;default&quot;).add(config.getConfigurationForm().getElement());</span>
+<span class="nc" id="L1492">        router.route(reply);</span>
+<span class="nc" id="L1493">    }</span>
+
+    private void configureNode(PubSubService service, IQ iq, Element configureElement, String nodeID) {
+<span class="nc" id="L1496">        Node node = service.getNode(nodeID);</span>
+<span class="nc bnc" id="L1497" title="All 2 branches missed.">        if (node == null) {</span>
+            // Node does not exist. Return item-not-found error
+<span class="nc" id="L1499">            sendErrorPacket(iq, PacketError.Condition.item_not_found, null);</span>
+<span class="nc" id="L1500">            return;</span>
+        }
+<span class="nc bnc" id="L1502" title="All 2 branches missed.">        if (!node.isAdmin(iq.getFrom())) {</span>
+            // Requesting entity is not allowed to get node configuration. Return forbidden error
+<span class="nc" id="L1504">            sendErrorPacket(iq, PacketError.Condition.forbidden, null);</span>
+<span class="nc" id="L1505">            return;</span>
+        }
+
+        // Get the data form that contains the parent nodeID
+<span class="nc" id="L1509">        DataForm completedForm = getSentConfigurationForm(configureElement);</span>
+<span class="nc bnc" id="L1510" title="All 2 branches missed.">        if (completedForm != null) {</span>
+            try {
+                // Update node configuration with the provided data form
+                // (and update the backend store)
+<span class="nc" id="L1514">                node.configure(completedForm);</span>
+
+<span class="nc" id="L1516">                CacheFactory.doClusterTask(new RefreshNodeTask(node));</span>
+                // Return that node configuration was successful
+<span class="nc" id="L1518">                router.route(IQ.createResultIQ(iq));</span>
+            }
+<span class="nc" id="L1520">            catch (NotAcceptableException e) {</span>
+                // Node should have at least one owner. Return not-acceptable error.
+<span class="nc" id="L1522">                sendErrorPacket(iq, PacketError.Condition.not_acceptable, null);</span>
+<span class="nc" id="L1523">            }</span>
+        }
+        else {
+            // No data form was included so return bad-request error
+<span class="nc" id="L1527">            sendErrorPacket(iq, PacketError.Condition.bad_request, null);</span>
+        }
+<span class="nc" id="L1529">    }</span>
+
+    private void deleteNode(PubSubService service, IQ iq, Element deleteElement) {
+<span class="nc" id="L1532">        String nodeID = deleteElement.attributeValue(&quot;node&quot;);</span>
+<span class="nc bnc" id="L1533" title="All 2 branches missed.">        if (nodeID == null) {</span>
+            // NodeID was not provided. Return bad-request error
+<span class="nc" id="L1535">            sendErrorPacket(iq, PacketError.Condition.bad_request, null);</span>
+<span class="nc" id="L1536">            return;</span>
+        }
+<span class="nc" id="L1538">        Node node = service.getNode(nodeID);</span>
+<span class="nc bnc" id="L1539" title="All 2 branches missed.">        if (node == null) {</span>
+            // Node does not exist. Return item-not-found error
+<span class="nc" id="L1541">            sendErrorPacket(iq, PacketError.Condition.item_not_found, null);</span>
+<span class="nc" id="L1542">            return;</span>
+        }
+<span class="nc bnc" id="L1544" title="All 2 branches missed.">        if (!node.isAdmin(iq.getFrom())) {</span>
+            // Requesting entity is prohibited from deleting this node. Return forbidden error
+<span class="nc" id="L1546">            sendErrorPacket(iq, PacketError.Condition.forbidden, null);</span>
+<span class="nc" id="L1547">            return;</span>
+        }
+<span class="nc bnc" id="L1549" title="All 2 branches missed.">        if (node.isRootCollectionNode()) {</span>
+            // Root collection node cannot be deleted. Return not-allowed error
+<span class="nc" id="L1551">            sendErrorPacket(iq, PacketError.Condition.not_allowed, null);</span>
+<span class="nc" id="L1552">            return;</span>
+        }
+
+        // Delete the node
+<span class="nc bnc" id="L1556" title="All 2 branches missed.">        if (node.delete()) {</span>
+            // Return that node was deleted successfully
+<span class="nc" id="L1558">            router.route(IQ.createResultIQ(iq));</span>
+        }
+        else {
+            // Some error occured while trying to delete the node
+<span class="nc" id="L1562">            sendErrorPacket(iq, PacketError.Condition.internal_server_error, null);</span>
+        }
+<span class="nc" id="L1564">    }</span>
+
+    private void purgeNode(PubSubService service, IQ iq, Element purgeElement) {
+<span class="nc" id="L1567">        String nodeID = purgeElement.attributeValue(&quot;node&quot;);</span>
+<span class="nc bnc" id="L1568" title="All 2 branches missed.">        if (nodeID == null) {</span>
+            // NodeID was not provided. Return bad-request error
+<span class="nc" id="L1570">            sendErrorPacket(iq, PacketError.Condition.bad_request, null);</span>
+<span class="nc" id="L1571">            return;</span>
+        }
+<span class="nc" id="L1573">        Node node = service.getNode(nodeID);</span>
+<span class="nc bnc" id="L1574" title="All 2 branches missed.">        if (node == null) {</span>
+            // Node does not exist. Return item-not-found error
+<span class="nc" id="L1576">            sendErrorPacket(iq, PacketError.Condition.item_not_found, null);</span>
+<span class="nc" id="L1577">            return;</span>
+        }
+<span class="nc bnc" id="L1579" title="All 2 branches missed.">        if (!node.isAdmin(iq.getFrom())) {</span>
+            // Requesting entity is prohibited from configuring this node. Return forbidden error
+<span class="nc" id="L1581">            sendErrorPacket(iq, PacketError.Condition.forbidden, null);</span>
+<span class="nc" id="L1582">            return;</span>
+        }
+<span class="nc bnc" id="L1584" title="All 2 branches missed.">        if (!((LeafNode) node).isPersistPublishedItems()) {</span>
+            // Node does not persist items. Return feature-not-implemented error
+<span class="nc" id="L1586">            Element pubsubError = DocumentHelper.createElement(</span>
+<span class="nc" id="L1587">                    QName.get(&quot;unsupported&quot;, &quot;http://jabber.org/protocol/pubsub#errors&quot;));</span>
+<span class="nc" id="L1588">            pubsubError.addAttribute(&quot;feature&quot;, &quot;persistent-items&quot;);</span>
+<span class="nc" id="L1589">            sendErrorPacket(iq, PacketError.Condition.feature_not_implemented, pubsubError);</span>
+<span class="nc" id="L1590">            return;</span>
+        }
+<span class="nc bnc" id="L1592" title="All 2 branches missed.">        if (node.isCollectionNode()) {</span>
+            // Node is a collection node. Return feature-not-implemented error
+<span class="nc" id="L1594">            Element pubsubError = DocumentHelper.createElement(</span>
+<span class="nc" id="L1595">                    QName.get(&quot;unsupported&quot;, &quot;http://jabber.org/protocol/pubsub#errors&quot;));</span>
+<span class="nc" id="L1596">            pubsubError.addAttribute(&quot;feature&quot;, &quot;purge-nodes&quot;);</span>
+<span class="nc" id="L1597">            sendErrorPacket(iq, PacketError.Condition.feature_not_implemented, pubsubError);</span>
+<span class="nc" id="L1598">            return;</span>
+        }
+
+        // Purge the node
+<span class="nc" id="L1602">        ((LeafNode) node).purge();</span>
+        // Return that node purged successfully
+<span class="nc" id="L1604">        router.route(IQ.createResultIQ(iq));</span>
+<span class="nc" id="L1605">    }</span>
+
+    private void getNodeSubscriptions(PubSubService service, IQ iq, Element affiliationsElement) {
+<span class="nc" id="L1608">        String nodeID = affiliationsElement.attributeValue(&quot;node&quot;);</span>
+<span class="nc bnc" id="L1609" title="All 2 branches missed.">        if (nodeID == null) {</span>
+            // NodeID was not provided. Return bad-request error.
+<span class="nc" id="L1611">            sendErrorPacket(iq, PacketError.Condition.bad_request, null);</span>
+<span class="nc" id="L1612">            return;</span>
+        }
+<span class="nc" id="L1614">        Node node = service.getNode(nodeID);</span>
+<span class="nc bnc" id="L1615" title="All 2 branches missed.">        if (node == null) {</span>
+            // Node does not exist. Return item-not-found error.
+<span class="nc" id="L1617">            sendErrorPacket(iq, PacketError.Condition.item_not_found, null);</span>
+<span class="nc" id="L1618">            return;</span>
+        }
+<span class="nc bnc" id="L1620" title="All 2 branches missed.">        if (!node.isAdmin(iq.getFrom())) {</span>
+            // Requesting entity is prohibited from getting affiliates list. Return forbidden error.
+<span class="nc" id="L1622">            sendErrorPacket(iq, PacketError.Condition.forbidden, null);</span>
+<span class="nc" id="L1623">            return;</span>
+        }
+
+        // Ask the node to send the list of subscriptions to the owner
+<span class="nc" id="L1627">        node.sendSubscriptions(iq);</span>
+<span class="nc" id="L1628">    }</span>
+
+    private void modifyNodeSubscriptions(PubSubService service, IQ iq, Element entitiesElement) {
+<span class="nc" id="L1631">        String nodeID = entitiesElement.attributeValue(&quot;node&quot;);</span>
+<span class="nc bnc" id="L1632" title="All 2 branches missed.">        if (nodeID == null) {</span>
+            // NodeID was not provided. Return bad-request error.
+<span class="nc" id="L1634">            sendErrorPacket(iq, PacketError.Condition.bad_request, null);</span>
+<span class="nc" id="L1635">            return;</span>
+        }
+<span class="nc" id="L1637">        Node node = service.getNode(nodeID);</span>
+<span class="nc bnc" id="L1638" title="All 2 branches missed.">        if (node == null) {</span>
+            // Node does not exist. Return item-not-found error.
+<span class="nc" id="L1640">            sendErrorPacket(iq, PacketError.Condition.item_not_found, null);</span>
+<span class="nc" id="L1641">            return;</span>
+        }
+<span class="nc bnc" id="L1643" title="All 2 branches missed.">        if (!node.isAdmin(iq.getFrom())) {</span>
+            // Requesting entity is prohibited from getting affiliates list. Return forbidden error.
+<span class="nc" id="L1645">            sendErrorPacket(iq, PacketError.Condition.forbidden, null);</span>
+<span class="nc" id="L1646">            return;</span>
+        }
+
+<span class="nc" id="L1649">        IQ reply = IQ.createResultIQ(iq);</span>
+
+        // Process modifications or creations of affiliations and subscriptions.
+<span class="nc bnc" id="L1652" title="All 2 branches missed.">        for (Iterator it = entitiesElement.elementIterator(&quot;subscription&quot;); it.hasNext();) {</span>
+<span class="nc" id="L1653">            Element entity = (Element) it.next();</span>
+<span class="nc" id="L1654">            JID subscriber = new JID(entity.attributeValue(&quot;jid&quot;));</span>
+            // TODO Assumed that the owner of the subscription is the bare JID of the subscription JID. Waiting StPeter answer for explicit field.
+<span class="nc" id="L1656">            JID owner = subscriber.asBareJID();</span>
+<span class="nc" id="L1657">            String subStatus = entity.attributeValue(&quot;subscription&quot;);</span>
+<span class="nc" id="L1658">            String subID = entity.attributeValue(&quot;subid&quot;);</span>
+            // Process subscriptions changes
+            // Get current subscription (if any)
+<span class="nc" id="L1661">            NodeSubscription subscription = null;</span>
+<span class="nc bnc" id="L1662" title="All 2 branches missed.">            if (node.isMultipleSubscriptionsEnabled()) {</span>
+<span class="nc bnc" id="L1663" title="All 2 branches missed.">                if (subID != null) {</span>
+<span class="nc" id="L1664">                    subscription = node.getSubscription(subID);</span>
+                }
+            }
+            else {
+<span class="nc" id="L1668">                subscription = node.getSubscription(subscriber);</span>
+            }
+<span class="nc bnc" id="L1670" title="All 4 branches missed.">            if (&quot;none&quot;.equals(subStatus) &amp;&amp; subscription != null) {</span>
+                // Owner is cancelling an existing subscription
+<span class="nc" id="L1672">                node.cancelSubscription(subscription);</span>
+            }
+<span class="nc bnc" id="L1674" title="All 2 branches missed.">            else if (&quot;subscribed&quot;.equals(subStatus)) {</span>
+<span class="nc bnc" id="L1675" title="All 2 branches missed.">                if (subscription != null) {</span>
+                    // Owner is approving a subscription (i.e. making active)
+<span class="nc" id="L1677">                    node.approveSubscription(subscription, true);</span>
+                }
+                else {
+                    // Owner is creating a subscription for an entity to the node
+<span class="nc" id="L1681">                    node.createSubscription(null, owner, subscriber, false, null);</span>
+                }
+            }
+<span class="nc" id="L1684">        }</span>
+
+        // Send reply
+<span class="nc" id="L1687">        router.route(reply);</span>
+<span class="nc" id="L1688">    }</span>
+
+    private void getNodeAffiliations(PubSubService service, IQ iq, Element affiliationsElement) {
+<span class="nc" id="L1691">        String nodeID = affiliationsElement.attributeValue(&quot;node&quot;);</span>
+<span class="nc bnc" id="L1692" title="All 2 branches missed.">        if (nodeID == null) {</span>
+            // NodeID was not provided. Return bad-request error.
+<span class="nc" id="L1694">            sendErrorPacket(iq, PacketError.Condition.bad_request, null);</span>
+<span class="nc" id="L1695">            return;</span>
+        }
+<span class="nc" id="L1697">        Node node = service.getNode(nodeID);</span>
+<span class="nc bnc" id="L1698" title="All 2 branches missed.">        if (node == null) {</span>
+            // Node does not exist. Return item-not-found error.
+<span class="nc" id="L1700">            sendErrorPacket(iq, PacketError.Condition.item_not_found, null);</span>
+<span class="nc" id="L1701">            return;</span>
+        }
+<span class="nc bnc" id="L1703" title="All 2 branches missed.">        if (!node.isAdmin(iq.getFrom())) {</span>
+            // Requesting entity is prohibited from getting affiliates list. Return forbidden error.
+<span class="nc" id="L1705">            sendErrorPacket(iq, PacketError.Condition.forbidden, null);</span>
+<span class="nc" id="L1706">            return;</span>
+        }
+
+        // Ask the node to send the list of affiliations to the owner
+<span class="nc" id="L1710">        node.sendAffiliations(iq);</span>
+<span class="nc" id="L1711">    }</span>
+
+    private void modifyNodeAffiliations(PubSubService service, IQ iq, Element entitiesElement) {
+<span class="nc" id="L1714">        String nodeID = entitiesElement.attributeValue(&quot;node&quot;);</span>
+<span class="nc bnc" id="L1715" title="All 2 branches missed.">        if (nodeID == null) {</span>
+            // NodeID was not provided. Return bad-request error.
+<span class="nc" id="L1717">            sendErrorPacket(iq, PacketError.Condition.bad_request, null);</span>
+<span class="nc" id="L1718">            return;</span>
+        }
+<span class="nc" id="L1720">        Node node = service.getNode(nodeID);</span>
+<span class="nc bnc" id="L1721" title="All 2 branches missed.">        if (node == null) {</span>
+            // Node does not exist. Return item-not-found error.
+<span class="nc" id="L1723">            sendErrorPacket(iq, PacketError.Condition.item_not_found, null);</span>
+<span class="nc" id="L1724">            return;</span>
+        }
+<span class="nc bnc" id="L1726" title="All 2 branches missed.">        if (!node.isAdmin(iq.getFrom())) {</span>
+            // Requesting entity is prohibited from getting affiliates list. Return forbidden error.
+<span class="nc" id="L1728">            sendErrorPacket(iq, PacketError.Condition.forbidden, null);</span>
+<span class="nc" id="L1729">            return;</span>
+        }
+
+<span class="nc" id="L1732">        IQ reply = IQ.createResultIQ(iq);</span>
+<span class="nc" id="L1733">        Collection&lt;JID&gt; invalidAffiliates = new ArrayList&lt;&gt;();</span>
+
+        // Process modifications or creations of affiliations
+<span class="nc bnc" id="L1736" title="All 2 branches missed.">        for (Iterator it = entitiesElement.elementIterator(&quot;affiliation&quot;); it.hasNext();) {</span>
+<span class="nc" id="L1737">            Element affiliation = (Element) it.next();</span>
+<span class="nc" id="L1738">            JID owner = new JID(affiliation.attributeValue(&quot;jid&quot;));</span>
+<span class="nc" id="L1739">            String newAffiliation = affiliation.attributeValue(&quot;affiliation&quot;);</span>
+            // Get current affiliation of this user (if any)
+<span class="nc" id="L1741">            NodeAffiliate affiliate = node.getAffiliate(owner);</span>
+
+            // Check that we are not removing the only owner of the node
+<span class="nc bnc" id="L1744" title="All 4 branches missed.">            if (affiliate != null &amp;&amp; !affiliate.getAffiliation().name().equals(newAffiliation)) {</span>
+                // Trying to modify an existing affiliation
+<span class="nc bnc" id="L1746" title="All 2 branches missed.">                if (affiliate.getAffiliation() == NodeAffiliate.Affiliation.owner &amp;&amp;</span>
+<span class="nc bnc" id="L1747" title="All 2 branches missed.">                        node.getOwners().size() == 1) {</span>
+                    // Trying to remove the unique owner of the node. Include in error answer.
+<span class="nc" id="L1749">                    invalidAffiliates.add(owner);</span>
+<span class="nc" id="L1750">                    continue;</span>
+                }
+            }
+
+            // Owner is setting affiliations for new entities or modifying
+            // existing affiliations
+<span class="nc bnc" id="L1756" title="All 2 branches missed.">            if (&quot;owner&quot;.equals(newAffiliation)) {</span>
+<span class="nc" id="L1757">                node.addOwner(owner);</span>
+            }
+<span class="nc bnc" id="L1759" title="All 2 branches missed.">            else if (&quot;publisher&quot;.equals(newAffiliation)) {</span>
+<span class="nc" id="L1760">                node.addPublisher(owner);</span>
+            }
+<span class="nc bnc" id="L1762" title="All 2 branches missed.">            else if (&quot;none&quot;.equals(newAffiliation)) {</span>
+<span class="nc" id="L1763">                node.addNoneAffiliation(owner);</span>
+            }
+            else  {
+<span class="nc" id="L1766">                node.addOutcast(owner);</span>
+            }
+<span class="nc" id="L1768">        }</span>
+
+        // Process invalid entities that tried to remove node owners. Send original affiliation
+        // of the invalid entities.
+<span class="nc bnc" id="L1772" title="All 2 branches missed.">        if (!invalidAffiliates.isEmpty()) {</span>
+<span class="nc" id="L1773">            reply.setError(PacketError.Condition.not_acceptable);</span>
+<span class="nc" id="L1774">            Element child =</span>
+<span class="nc" id="L1775">                    reply.setChildElement(&quot;pubsub&quot;, &quot;http://jabber.org/protocol/pubsub#owner&quot;);</span>
+<span class="nc" id="L1776">            Element entities = child.addElement(&quot;affiliations&quot;);</span>
+<span class="nc bnc" id="L1777" title="All 2 branches missed.">            if (!node.isRootCollectionNode()) {</span>
+<span class="nc" id="L1778">                entities.addAttribute(&quot;node&quot;, node.getNodeID());</span>
+            }
+<span class="nc bnc" id="L1780" title="All 2 branches missed.">            for (JID affiliateJID : invalidAffiliates) {</span>
+<span class="nc" id="L1781">                NodeAffiliate affiliate = node.getAffiliate(affiliateJID);</span>
+<span class="nc" id="L1782">                Element entity = entities.addElement(&quot;affiliation&quot;);</span>
+<span class="nc" id="L1783">                entity.addAttribute(&quot;jid&quot;, affiliate.getJID().toString());</span>
+<span class="nc" id="L1784">                entity.addAttribute(&quot;affiliation&quot;, affiliate.getAffiliation().name());</span>
+<span class="nc" id="L1785">            }</span>
+        }
+        // Send reply
+<span class="nc" id="L1788">        router.route(reply);</span>
+<span class="nc" id="L1789">    }</span>
+
+    /**
+     * Terminates the subscription of the specified entity to all nodes hosted at the service.
+     * The affiliation with the node will be removed if the entity was not a node owner or
+     * publisher.
+     *
+     * @param service the PubSub service this action is to be performed for.
+     * @param user the entity that no longer exists.
+     */
+    private void cancelAllSubscriptions(PubSubService service, JID user) {
+<span class="nc bnc" id="L1800" title="All 2 branches missed.">        for (Node node : service.getNodes()) {</span>
+<span class="nc" id="L1801">            NodeAffiliate affiliate = node.getAffiliate(user);</span>
+<span class="nc bnc" id="L1802" title="All 2 branches missed.">            if (affiliate == null) {</span>
+<span class="nc" id="L1803">                continue;</span>
+            }
+<span class="nc bnc" id="L1805" title="All 2 branches missed.">            for (NodeSubscription subscription : affiliate.getSubscriptions()) {</span>
+                // Cancel subscription
+<span class="nc" id="L1807">                node.cancelSubscription(subscription);</span>
+<span class="nc" id="L1808">            }</span>
+<span class="nc" id="L1809">        }</span>
+<span class="nc" id="L1810">    }</span>
+
+    private void processAuthorizationAnswer(PubSubService service, DataForm authForm, Message message) {
+<span class="nc" id="L1813">        String nodeID = authForm.getField(&quot;pubsub#node&quot;).getValues().get(0);</span>
+<span class="nc" id="L1814">        String subID = authForm.getField(&quot;pubsub#subid&quot;).getValues().get(0);</span>
+<span class="nc" id="L1815">        String allow = authForm.getField(&quot;pubsub#allow&quot;).getValues().get(0);</span>
+        boolean approved;
+<span class="nc bnc" id="L1817" title="All 4 branches missed.">        if (&quot;1&quot;.equals(allow) || &quot;true&quot;.equals(allow)) {</span>
+<span class="nc" id="L1818">            approved = true;</span>
+        }
+<span class="nc bnc" id="L1820" title="All 4 branches missed.">        else if (&quot;0&quot;.equals(allow) || &quot;false&quot;.equals(allow)) {</span>
+<span class="nc" id="L1821">            approved = false;</span>
+        }
+        else {
+            // Unknown allow value. Ignore completed form
+<span class="nc" id="L1825">            Log.warn(&quot;Invalid allow value in completed authorization form: &quot; + message.toXML());</span>
+<span class="nc" id="L1826">            return;</span>
+        }
+        // Approve or cancel the pending subscription to the node
+<span class="nc" id="L1829">        Node node = service.getNode(nodeID);</span>
+<span class="nc bnc" id="L1830" title="All 2 branches missed.">        if (node != null) {</span>
+<span class="nc" id="L1831">            NodeSubscription subscription = node.getSubscription(subID);</span>
+<span class="nc bnc" id="L1832" title="All 2 branches missed.">            if (subscription != null) {</span>
+<span class="nc" id="L1833">                node.approveSubscription(subscription, approved);</span>
+            }
+        }
+<span class="nc" id="L1836">    }</span>
+
+    /**
+     * Generate a conflict packet to indicate that the nickname being requested/used is already in
+     * use by another user.
+     *
+     * @param packet the packet to be bounced.
+     */
+    void sendErrorPacket(IQ packet, PacketError.Condition error, Element pubsubError) {
+<span class="nc" id="L1845">        IQ reply = IQ.createResultIQ(packet);</span>
+<span class="nc" id="L1846">        reply.setChildElement(packet.getChildElement().createCopy());</span>
+<span class="nc" id="L1847">        reply.setError(error);</span>
+<span class="nc bnc" id="L1848" title="All 2 branches missed.">        if (pubsubError != null) {</span>
+            // Add specific pubsub error if available
+<span class="nc" id="L1850">            reply.getError().getElement().add(pubsubError);</span>
+        }
+<span class="nc" id="L1852">        router.route(reply);</span>
+<span class="nc" id="L1853">    }</span>
+
+    /**
+     * Returns the data form included in the configure element sent by the node owner or
+     * {@code null} if none was included or access model was defined. If the
+     * owner just wants to set the access model to use for the node and optionally set the
+     * list of roster groups (i.e. contacts present in the node owner roster in the
+     * specified groups are allowed to access the node) allowed to access the node then
+     * instead of including a data form the owner can just specify the &quot;access&quot; attribute
+     * of the configure element and optionally include a list of group elements. In this case,
+     * the method will create a data form including the specified data. This is a nice way
+     * to accept both ways to configure a node but always returning a data form.
+     *
+     * @param configureElement the configure element sent by the owner.
+     * @return the data form included in the configure element sent by the node owner or
+     *         {@code null} if none was included or access model was defined.
+     */
+    private static DataForm getSentConfigurationForm(Element configureElement) {
+<span class="nc" id="L1871">        DataForm completedForm = null;</span>
+        FormField formField;
+<span class="nc" id="L1873">        Element formElement = configureElement.element(QName.get(&quot;x&quot;, &quot;jabber:x:data&quot;));</span>
+<span class="nc bnc" id="L1874" title="All 2 branches missed.">        if (formElement != null) {</span>
+<span class="nc" id="L1875">            completedForm = new DataForm(formElement);</span>
+        }
+<span class="nc" id="L1877">        String accessModel = configureElement.attributeValue(&quot;access&quot;);</span>
+<span class="nc bnc" id="L1878" title="All 2 branches missed.">        if (accessModel != null) {</span>
+<span class="nc bnc" id="L1879" title="All 2 branches missed.">            if (completedForm == null) {</span>
+                // Create a form (i.e. simulate that the user sent a form with roster groups)
+<span class="nc" id="L1881">                completedForm = new DataForm(DataForm.Type.submit);</span>
+                // Add the hidden field indicating that this is a node config form
+<span class="nc" id="L1883">                formField = completedForm.addField();</span>
+<span class="nc" id="L1884">                formField.setVariable(&quot;FORM_TYPE&quot;);</span>
+<span class="nc" id="L1885">                formField.setType(FormField.Type.hidden);</span>
+<span class="nc" id="L1886">                formField.addValue(&quot;http://jabber.org/protocol/pubsub#node_config&quot;);</span>
+            }
+<span class="nc bnc" id="L1888" title="All 2 branches missed.">            if (completedForm.getField(&quot;pubsub#access_model&quot;) == null) {</span>
+                // Add the field that will specify the access model of the node
+<span class="nc" id="L1890">                formField = completedForm.addField();</span>
+<span class="nc" id="L1891">                formField.setVariable(&quot;pubsub#access_model&quot;);</span>
+<span class="nc" id="L1892">                formField.addValue(accessModel);</span>
+            }
+            else {
+<span class="nc" id="L1895">                Log.debug(&quot;PubSubEngine: Owner sent access model in data form and as attribute: &quot; +</span>
+<span class="nc" id="L1896">                        configureElement.asXML());</span>
+            }
+            // Check if a list of groups was specified
+<span class="nc" id="L1899">            List groups = configureElement.elements(&quot;group&quot;);</span>
+<span class="nc bnc" id="L1900" title="All 2 branches missed.">            if (!groups.isEmpty()) {</span>
+                // Add the field that will contain the specified groups
+<span class="nc" id="L1902">                formField = completedForm.addField();</span>
+<span class="nc" id="L1903">                formField.setVariable(&quot;pubsub#roster_groups_allowed&quot;);</span>
+                // Add each group as a value of the groups field
+<span class="nc bnc" id="L1905" title="All 2 branches missed.">                for (Iterator it = groups.iterator(); it.hasNext();) {</span>
+<span class="nc" id="L1906">                    formField.addValue(((Element) it.next()).getTextTrim());</span>
+                }
+            }
+        }
+<span class="nc" id="L1910">        return completedForm;</span>
+    }
+
+    public void start(final PubSubService service) {
+        // Probe presences of users that this service has subscribed to (once the server
+        // has started)
+        
+<span class="nc bnc" id="L1917" title="All 2 branches missed.">        if (XMPPServer.getInstance().isStarted()) {</span>
+<span class="nc" id="L1918">            probePresences(service);</span>
+        }
+        else {
+<span class="nc" id="L1921">            XMPPServer.getInstance().addServerListener(new XMPPServerListener() {</span>
+                @Override
+                public void serverStarted() {
+<span class="nc" id="L1924">                    probePresences(service);</span>
+<span class="nc" id="L1925">                }</span>
+
+                @Override
+                public void serverStopping() {
+<span class="nc" id="L1929">                }</span>
+            });
+        }        
+<span class="nc" id="L1932">    }</span>
+
+    private void probePresences(final PubSubService service) {
+<span class="nc" id="L1935">        Set&lt;JID&gt; affiliates = new HashSet&lt;&gt;();</span>
+<span class="nc bnc" id="L1936" title="All 2 branches missed.">        for (Node node : service.getNodes()) {</span>
+<span class="nc" id="L1937">            affiliates.addAll(node.getPresenceBasedSubscribers());</span>
+<span class="nc" id="L1938">        }</span>
+<span class="nc bnc" id="L1939" title="All 2 branches missed.">        for (JID jid : affiliates) {</span>
+            // Send probe presence
+<span class="nc" id="L1941">            Presence subscription = new Presence(Presence.Type.probe);</span>
+<span class="nc" id="L1942">            subscription.setTo(jid);</span>
+<span class="nc" id="L1943">            subscription.setFrom(service.getAddress());</span>
+<span class="nc" id="L1944">            service.send(subscription);</span>
+<span class="nc" id="L1945">        }</span>
+<span class="nc" id="L1946">    }</span>
+
+    public void shutdown(PubSubService service) {
+<span class="nc" id="L1949">        PubSubPersistenceManager.shutdown();</span>
+<span class="nc bnc" id="L1950" title="All 2 branches missed.">        if (service != null) {</span>
+
+<span class="nc bnc" id="L1952" title="All 2 branches missed.">            if (service.getManager() != null) {</span>
+                // Stop executing ad-hoc commands
+<span class="nc" id="L1954">                service.getManager().stop();</span>
+            }
+            
+            // clear all nodes for this service, to remove circular references back to the service instance.
+<span class="nc" id="L1958">            service.getNodes().clear(); // FIXME: this is an ugly hack. getNodes() is documented to return an unmodifiable collection (but does not).</span>
+        }
+<span class="nc" id="L1960">    }</span>
+
+    /*******************************************************************************
+     * Methods related to presence subscriptions to subscribers' presence.
+     ******************************************************************************/
+
+    /**
+     * Returns the show values of the last know presence of all connected resources of the
+     * specified subscriber. When the subscriber JID is a bare JID then the answered collection
+     * will have many entries one for each connected resource. Moreover, if the user
+     * is offline then an empty collectin is returned. Available show status is represented
+     * by a {@code online} value. The rest of the possible show values as defined in RFC 3921.
+     *
+     * @param service the PubSub service this action is to be performed for.
+     * @param subscriber the JID of the subscriber. This is not the JID of the affiliate.
+     * @return an empty collection when offline. Otherwise, a collection with the show value
+     *         of each connected resource.
+     */
+    public static Collection&lt;String&gt; getShowPresences(PubSubService service, JID subscriber) {
+<span class="nc" id="L1979">        Map&lt;String, String&gt; fullPresences = service.getBarePresences().get(subscriber.toBareJID());</span>
+<span class="nc bnc" id="L1980" title="All 2 branches missed.">        if (fullPresences == null) {</span>
+            // User is offline so return empty list
+<span class="nc" id="L1982">            return Collections.emptyList();</span>
+        }
+<span class="nc bnc" id="L1984" title="All 2 branches missed.">        if (subscriber.getResource() == null) {</span>
+            // Subscriber used bared JID so return show value of all connected resources
+<span class="nc" id="L1986">            return fullPresences.values();</span>
+        }
+        else {
+            // Look for the show value using the full JID
+<span class="nc" id="L1990">            String show = fullPresences.get(subscriber.toString());</span>
+<span class="nc bnc" id="L1991" title="All 2 branches missed.">            if (show == null) {</span>
+                // User at the specified resource is offline so return empty list
+<span class="nc" id="L1993">                return Collections.emptyList();</span>
+            }
+            // User is connected at specified resource so answer list with presence show value
+<span class="nc" id="L1996">            return Collections.singletonList(show);</span>
+        }
+    }
+
+    /**
+     * Requests the pubsub service to subscribe to the presence of the user. If the service
+     * has already subscribed to the user's presence then do nothing.
+     *
+     * @param service the PubSub service this action is to be performed for.
+     * @param node the node that originated the subscription request.
+     * @param user the JID of the affiliate to subscribe to his presence.
+     */
+    public static void presenceSubscriptionNotRequired(PubSubService service, Node node, JID user) {
+        // Check that no node is requiring to be subscribed to this user
+<span class="nc bnc" id="L2010" title="All 2 branches missed.">        for (Node hostedNode : service.getNodes()) {</span>
+<span class="nc bnc" id="L2011" title="All 2 branches missed.">            if (hostedNode.isPresenceBasedDelivery(user)) {</span>
+                // Do not unsubscribe since presence subscription is still required
+<span class="nc" id="L2013">                return;</span>
+            }
+<span class="nc" id="L2015">        }</span>
+        // Unscribe from the user presence
+<span class="nc" id="L2017">        Presence subscription = new Presence(Presence.Type.unsubscribe);</span>
+<span class="nc" id="L2018">        subscription.setTo(user);</span>
+<span class="nc" id="L2019">        subscription.setFrom(service.getAddress());</span>
+<span class="nc" id="L2020">        service.send(subscription);</span>
+<span class="nc" id="L2021">    }</span>
+
+    /**
+     * Requests the pubsub service to unsubscribe from the presence of the user. If the service
+     * was not subscribed to the user's presence or any node still requires to be subscribed to
+     * the user presence then do nothing.
+     *
+     * @param service the PubSub service this action is to be performed for.
+     * @param node the node that originated the unsubscription request.
+     * @param user the JID of the affiliate to unsubscribe from his presence.
+     */
+    public static void presenceSubscriptionRequired(PubSubService service, Node node, JID user) {
+<span class="nc" id="L2033">        Map&lt;String, String&gt; fullPresences = service.getBarePresences().get(user.toString());</span>
+<span class="nc bnc" id="L2034" title="All 4 branches missed.">        if (fullPresences == null || fullPresences.isEmpty()) {</span>
+<span class="nc" id="L2035">            Presence subscription = new Presence(Presence.Type.subscribe);</span>
+<span class="nc" id="L2036">            subscription.setTo(user);</span>
+<span class="nc" id="L2037">            subscription.setFrom(service.getAddress());</span>
+<span class="nc" id="L2038">            service.send(subscription);</span>
+            // Sending subscription requests based on received presences may generate
+            // that a sunscription request is sent to an offline user (since offline
+            // presences are not stored in the service's &quot;barePresences&quot;). However, this
+            // not optimal algorithm shouldn't bother the user since the user's server
+            // should reply when already subscribed to the user's presence instead of
+            // asking the user to accept the subscription request.
+        }
+<span class="nc" id="L2046">    }</span>
+
+    /**
+     * Checks to see if the jid given is a component by looking at the routing
+     * table. Similar to {@link InternalComponentManager#hasComponent(JID)}.
+     * 
+     * @param jid
+     * @return {@code true} if the JID is a component, {@code false&lt;.tt&gt; if not.
+     */
+    private static boolean isComponent(JID jid) {
+<span class="nc" id="L2056">        final RoutingTable routingTable = XMPPServer.getInstance().getRoutingTable();</span>
+<span class="nc bnc" id="L2057" title="All 2 branches missed.">        if (routingTable != null) {</span>
+<span class="nc" id="L2058">            return routingTable.hasComponentRoute(jid);</span>
+        }
+<span class="nc" id="L2060">        return false;</span>
+    }
+
+    /**
+     * Checks to see if the supplied JID is that of a connected remote server
+     * @param jid the JID representing the remote server
+     * @return true if the supplied JID is a connected server session
+     */
+    private static boolean isRemoteServer(final JID jid) {
+<span class="nc" id="L2069">        final String jidString = jid.toString();</span>
+<span class="nc" id="L2070">        final SessionManager sessionManager = SessionManager.getInstance();</span>
+<span class="nc bnc" id="L2071" title="All 2 branches missed.">        for (final String incomingServer : sessionManager.getIncomingServers()) {</span>
+<span class="nc bnc" id="L2072" title="All 2 branches missed.">            if(incomingServer.equals(jidString)) {</span>
+<span class="nc" id="L2073">                return true;</span>
+            }
+<span class="nc" id="L2075">        }</span>
+<span class="nc bnc" id="L2076" title="All 2 branches missed.">        for (final String outgoingServer : sessionManager.getOutgoingServers()) {</span>
+<span class="nc bnc" id="L2077" title="All 2 branches missed.">            if(outgoingServer.equals(jidString)) {</span>
+<span class="nc" id="L2078">                return true;</span>
+            }
+<span class="nc" id="L2080">        }</span>
+<span class="nc" id="L2081">        return false;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

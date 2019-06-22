@@ -1,0 +1,521 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>DefaultUserProvider.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.user</a> &gt; <span class="el_source">DefaultUserProvider.java</span></div><h1>DefaultUserProvider.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2004-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.user;
+
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Types;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Date;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Set;
+
+import org.jivesoftware.database.DbConnectionManager;
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.auth.AuthFactory;
+import org.jivesoftware.util.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmpp.packet.JID;
+
+/**
+ * Default implementation of the UserProvider interface, which reads and writes data
+ * from the {@code ofUser} database table.&lt;p&gt;
+ *
+ * Passwords can be stored as plain text, or encrypted using Blowfish. The
+ * encryption/decryption key is stored as the Openfire property {@code passwordKey},
+ * which is automatically created on first-time use. It's critical that the password key
+ * not be changed once created, or existing passwords will be lost. By default
+ * passwords will be stored encrypted. Plain-text password storage can be enabled
+ * by setting the Openfire property {@code user.usePlainPassword} to {@code true}.
+ *
+ * @author Matt Tucker
+ */
+<span class="fc" id="L54">public class DefaultUserProvider implements UserProvider {</span>
+
+<span class="fc" id="L56">    private static final Logger Log = LoggerFactory.getLogger(DefaultUserProvider.class);</span>
+
+    private static final String LOAD_USER =
+            &quot;SELECT salt, serverKey, storedKey, iterations, name, email, creationDate, modificationDate FROM ofUser WHERE username=?&quot;;
+    private static final String USER_COUNT =
+            &quot;SELECT count(*) FROM ofUser&quot;;
+    private static final String ALL_USERS =
+            &quot;SELECT username FROM ofUser ORDER BY username&quot;;
+    private static final String INSERT_USER =
+            &quot;INSERT INTO ofUser (username,name,email,creationDate,modificationDate) &quot; +
+            &quot;VALUES (?,?,?,?,?)&quot;;
+    private static final String DELETE_USER_FLAGS =
+            &quot;DELETE FROM ofUserFlag WHERE username=?&quot;;
+    private static final String DELETE_USER_PROPS =
+            &quot;DELETE FROM ofUserProp WHERE username=?&quot;;
+    private static final String DELETE_USER =
+            &quot;DELETE FROM ofUser WHERE username=?&quot;;
+    private static final String UPDATE_NAME =
+            &quot;UPDATE ofUser SET name=? WHERE username=?&quot;;
+    private static final String UPDATE_EMAIL =
+            &quot;UPDATE ofUser SET email=? WHERE username=?&quot;;
+    private static final String UPDATE_CREATION_DATE =
+            &quot;UPDATE ofUser SET creationDate=? WHERE username=?&quot;;
+    private static final String UPDATE_MODIFICATION_DATE =
+            &quot;UPDATE ofUser SET modificationDate=? WHERE username=?&quot;;
+    private static final boolean IS_READ_ONLY = false;
+    
+    @Override
+    public User loadUser(String username) throws UserNotFoundException {
+<span class="nc bnc" id="L85" title="All 2 branches missed.">        if(username.contains(&quot;@&quot;)) {</span>
+<span class="nc bnc" id="L86" title="All 2 branches missed.">            if (!XMPPServer.getInstance().isLocal(new JID(username))) {</span>
+<span class="nc" id="L87">                throw new UserNotFoundException(&quot;Cannot load user of remote server: &quot; + username);</span>
+            }
+<span class="nc" id="L89">            username = username.substring(0,username.lastIndexOf(&quot;@&quot;));</span>
+        }
+<span class="nc" id="L91">        Connection con = null;</span>
+<span class="nc" id="L92">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L93">        ResultSet rs = null;</span>
+        try {
+<span class="nc" id="L95">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L96">            pstmt = con.prepareStatement(LOAD_USER);</span>
+<span class="nc" id="L97">            pstmt.setString(1, username);</span>
+<span class="nc" id="L98">            rs = pstmt.executeQuery();</span>
+<span class="nc bnc" id="L99" title="All 2 branches missed.">            if (!rs.next()) {</span>
+<span class="nc" id="L100">                throw new UserNotFoundException();</span>
+            }
+<span class="nc" id="L102">            String salt = rs.getString(1);</span>
+<span class="nc" id="L103">            String serverKey = rs.getString(2);</span>
+<span class="nc" id="L104">            String storedKey = rs.getString(3);</span>
+<span class="nc" id="L105">            int iterations = rs.getInt(4);</span>
+<span class="nc" id="L106">            String name = rs.getString(5);</span>
+<span class="nc" id="L107">            String email = rs.getString(6);</span>
+<span class="nc" id="L108">            Date creationDate = new Date(Long.parseLong(rs.getString(7).trim()));</span>
+<span class="nc" id="L109">            Date modificationDate = new Date(Long.parseLong(rs.getString(8).trim()));</span>
+
+<span class="nc" id="L111">            User user = new User(username, name, email, creationDate, modificationDate);</span>
+<span class="nc" id="L112">            user.setSalt(salt);</span>
+<span class="nc" id="L113">            user.setServerKey(serverKey);</span>
+<span class="nc" id="L114">            user.setStoredKey(storedKey);</span>
+<span class="nc" id="L115">            user.setIterations(iterations);</span>
+<span class="nc" id="L116">            return user;</span>
+        }
+<span class="nc" id="L118">        catch (Exception e) {</span>
+<span class="nc" id="L119">            throw new UserNotFoundException(e);</span>
+        }
+        finally {
+<span class="nc" id="L122">            DbConnectionManager.closeConnection(rs, pstmt, con);</span>
+<span class="nc" id="L123">        }</span>
+    }
+
+    @Override
+    public User createUser(String username, String password, String name, String email)
+            throws UserAlreadyExistsException
+    {
+        try {
+<span class="nc" id="L131">            loadUser(username);</span>
+            // The user already exists since no exception, so:
+<span class="nc" id="L133">            throw new UserAlreadyExistsException(&quot;Username &quot; + username + &quot; already exists&quot;);</span>
+        }
+<span class="nc" id="L135">        catch (UserNotFoundException unfe) {</span>
+            // The user doesn't already exist so we can create a new user
+<span class="nc" id="L137">            Date now = new Date();</span>
+<span class="nc" id="L138">            Connection con = null;</span>
+<span class="nc" id="L139">            PreparedStatement pstmt = null;</span>
+            try {
+<span class="nc" id="L141">                con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L142">                pstmt = con.prepareStatement(INSERT_USER);</span>
+<span class="nc" id="L143">                pstmt.setString(1, username);</span>
+<span class="nc bnc" id="L144" title="All 4 branches missed.">                if (name == null || name.matches(&quot;\\s*&quot;)) {</span>
+<span class="nc" id="L145">                    pstmt.setNull(2, Types.VARCHAR);</span>
+                }
+                else {
+<span class="nc" id="L148">                    pstmt.setString(2, name);</span>
+                }
+<span class="nc bnc" id="L150" title="All 4 branches missed.">                if (email == null || email.matches(&quot;\\s*&quot;)) {</span>
+<span class="nc" id="L151">                    pstmt.setNull(3, Types.VARCHAR);</span>
+                }
+                else {
+<span class="nc" id="L154">                    pstmt.setString(3, email);</span>
+                }
+<span class="nc" id="L156">                pstmt.setString(4, StringUtils.dateToMillis(now));</span>
+<span class="nc" id="L157">                pstmt.setString(5, StringUtils.dateToMillis(now));</span>
+<span class="nc" id="L158">                pstmt.execute();</span>
+            }
+<span class="nc" id="L160">            catch (SQLException e) {</span>
+<span class="nc" id="L161">                throw new RuntimeException(e);</span>
+            }
+            finally {
+<span class="nc" id="L164">                DbConnectionManager.closeConnection(pstmt, con);</span>
+<span class="nc" id="L165">            }</span>
+            try {
+<span class="nc" id="L167">                AuthFactory.setPassword(username, password);</span>
+<span class="nc" id="L168">            } catch(Exception e) {</span>
+<span class="nc" id="L169">                Log.error(&quot;User pasword not set&quot;, e);</span>
+<span class="nc" id="L170">            }</span>
+            
+<span class="nc" id="L172">            return new User(username, name, email, now, now);</span>
+        }
+    }
+
+    @Override
+    public void deleteUser(String username) {
+<span class="nc" id="L178">        Connection con = null;</span>
+<span class="nc" id="L179">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L180">        boolean abortTransaction = false;</span>
+        try {
+            // Delete all of the users's extended properties
+<span class="nc" id="L183">            con = DbConnectionManager.getTransactionConnection();</span>
+<span class="nc" id="L184">            pstmt = con.prepareStatement(DELETE_USER_PROPS);</span>
+<span class="nc" id="L185">            pstmt.setString(1, username);</span>
+<span class="nc" id="L186">            pstmt.execute();</span>
+<span class="nc" id="L187">            DbConnectionManager.fastcloseStmt(pstmt);</span>
+
+<span class="nc" id="L189">            pstmt = con.prepareStatement(DELETE_USER_FLAGS);</span>
+<span class="nc" id="L190">            pstmt.setString(1, username);</span>
+<span class="nc" id="L191">            pstmt.execute();</span>
+<span class="nc" id="L192">            DbConnectionManager.fastcloseStmt(pstmt);</span>
+
+            // Delete the actual user entry
+<span class="nc" id="L195">            pstmt = con.prepareStatement(DELETE_USER);</span>
+<span class="nc" id="L196">            pstmt.setString(1, username);</span>
+<span class="nc" id="L197">            pstmt.execute();</span>
+        }
+<span class="nc" id="L199">        catch (Exception e) {</span>
+<span class="nc" id="L200">            Log.error(e.getMessage(), e);</span>
+<span class="nc" id="L201">            abortTransaction = true;</span>
+        }
+        finally {
+<span class="nc" id="L204">            DbConnectionManager.closeStatement(pstmt);</span>
+<span class="nc" id="L205">            DbConnectionManager.closeTransactionConnection(pstmt, con, abortTransaction);</span>
+<span class="nc" id="L206">        }</span>
+<span class="nc" id="L207">    }</span>
+
+    @Override
+    public int getUserCount() {
+<span class="nc" id="L211">        int count = 0;</span>
+<span class="nc" id="L212">        Connection con = null;</span>
+<span class="nc" id="L213">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L214">        ResultSet rs = null;</span>
+        try {
+<span class="nc" id="L216">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L217">            pstmt = con.prepareStatement(USER_COUNT);</span>
+<span class="nc" id="L218">            rs = pstmt.executeQuery();</span>
+<span class="nc bnc" id="L219" title="All 2 branches missed.">            if (rs.next()) {</span>
+<span class="nc" id="L220">                count = rs.getInt(1);</span>
+            }
+        }
+<span class="nc" id="L223">        catch (SQLException e) {</span>
+<span class="nc" id="L224">            Log.error(e.getMessage(), e);</span>
+        }
+        finally {
+<span class="nc" id="L227">            DbConnectionManager.closeConnection(rs, pstmt, con);</span>
+<span class="nc" id="L228">        }</span>
+<span class="nc" id="L229">        return count;</span>
+    }
+
+    @Override
+    public Collection&lt;User&gt; getUsers() {
+<span class="nc" id="L234">        Collection&lt;String&gt; usernames = getUsernames(0, Integer.MAX_VALUE);</span>
+<span class="nc" id="L235">        return new UserCollection(usernames.toArray(new String[usernames.size()]));</span>
+    }
+
+    @Override
+    public Collection&lt;String&gt; getUsernames() {
+<span class="nc" id="L240">        return getUsernames(0, Integer.MAX_VALUE);</span>
+    }
+
+    private Collection&lt;String&gt; getUsernames(int startIndex, int numResults) {
+<span class="nc" id="L244">        List&lt;String&gt; usernames = new ArrayList&lt;&gt;(500);</span>
+<span class="nc" id="L245">        Connection con = null;</span>
+<span class="nc" id="L246">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L247">        ResultSet rs = null;</span>
+        try {
+<span class="nc" id="L249">            con = DbConnectionManager.getConnection();</span>
+<span class="nc bnc" id="L250" title="All 4 branches missed.">            if ((startIndex==0) &amp;&amp; (numResults==Integer.MAX_VALUE))</span>
+            {
+<span class="nc" id="L252">                pstmt = con.prepareStatement(ALL_USERS);</span>
+                // Set the fetch size. This will prevent some JDBC drivers from trying
+                // to load the entire result set into memory.
+<span class="nc" id="L255">                DbConnectionManager.setFetchSize(pstmt, 500);</span>
+<span class="nc" id="L256">                rs = pstmt.executeQuery();</span>
+<span class="nc bnc" id="L257" title="All 2 branches missed.">                while (rs.next()) {</span>
+<span class="nc" id="L258">                    usernames.add(rs.getString(1));</span>
+                }
+            }
+            else {
+<span class="nc" id="L262">                pstmt = DbConnectionManager.createScrollablePreparedStatement(con, ALL_USERS);</span>
+<span class="nc" id="L263">                DbConnectionManager.limitRowsAndFetchSize(pstmt, startIndex, numResults);</span>
+<span class="nc" id="L264">                rs = pstmt.executeQuery();</span>
+<span class="nc" id="L265">                DbConnectionManager.scrollResultSet(rs, startIndex);</span>
+<span class="nc" id="L266">                int count = 0;</span>
+<span class="nc bnc" id="L267" title="All 4 branches missed.">                while (rs.next() &amp;&amp; count &lt; numResults) {</span>
+<span class="nc" id="L268">                    usernames.add(rs.getString(1));</span>
+<span class="nc" id="L269">                    count++;</span>
+                }
+            }
+<span class="nc bnc" id="L272" title="All 2 branches missed.">            if (Log.isDebugEnabled()) {</span>
+<span class="nc" id="L273">                   Log.debug(&quot;Results: &quot; + usernames.size());</span>
+<span class="nc" id="L274">                   LogResults(usernames);</span>
+            }
+        }
+<span class="nc" id="L277">        catch (SQLException e) {</span>
+<span class="nc" id="L278">            Log.error(e.getMessage(), e);</span>
+        }
+        finally {
+<span class="nc" id="L281">            DbConnectionManager.closeConnection(rs, pstmt, con);</span>
+<span class="nc" id="L282">        }</span>
+<span class="nc" id="L283">        return usernames;</span>
+    }
+
+    @Override
+    public Collection&lt;User&gt; getUsers(int startIndex, int numResults) {
+<span class="nc" id="L288">        Collection&lt;String&gt; usernames = getUsernames(startIndex, numResults);</span>
+<span class="nc" id="L289">        return new UserCollection(usernames.toArray(new String[usernames.size()]));</span>
+    }
+
+    @Override
+    public void setName(String username, String name) throws UserNotFoundException {
+<span class="nc" id="L294">        Connection con = null;</span>
+<span class="nc" id="L295">        PreparedStatement pstmt = null;</span>
+        try {
+<span class="nc" id="L297">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L298">            pstmt = con.prepareStatement(UPDATE_NAME);</span>
+<span class="nc bnc" id="L299" title="All 4 branches missed.">            if (name == null || name.matches(&quot;\\s*&quot;)) {</span>
+<span class="nc" id="L300">                pstmt.setNull(1, Types.VARCHAR);</span>
+            } 
+            else {
+<span class="nc" id="L303">                pstmt.setString(1, name);</span>
+            }
+<span class="nc" id="L305">            pstmt.setString(2, username);</span>
+<span class="nc" id="L306">            pstmt.executeUpdate();</span>
+        }
+<span class="nc" id="L308">        catch (SQLException sqle) {</span>
+<span class="nc" id="L309">            throw new UserNotFoundException(sqle);</span>
+        }
+        finally {
+<span class="nc" id="L312">            DbConnectionManager.closeConnection(pstmt, con);</span>
+<span class="nc" id="L313">        }</span>
+<span class="nc" id="L314">    }</span>
+
+    @Override
+    public void setEmail(String username, String email) throws UserNotFoundException {
+<span class="nc" id="L318">        Connection con = null;</span>
+<span class="nc" id="L319">        PreparedStatement pstmt = null;</span>
+        try {
+<span class="nc" id="L321">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L322">            pstmt = con.prepareStatement(UPDATE_EMAIL);</span>
+<span class="nc bnc" id="L323" title="All 4 branches missed.">            if (email == null || email.matches(&quot;\\s*&quot;)) {</span>
+<span class="nc" id="L324">                pstmt.setNull(1, Types.VARCHAR);</span>
+            } 
+            else {
+<span class="nc" id="L327">                pstmt.setString(1, email);</span>
+            }
+<span class="nc" id="L329">            pstmt.setString(2, username);</span>
+<span class="nc" id="L330">            pstmt.executeUpdate();</span>
+        }
+<span class="nc" id="L332">        catch (SQLException sqle) {</span>
+<span class="nc" id="L333">            throw new UserNotFoundException(sqle);</span>
+        }
+        finally {
+<span class="nc" id="L336">            DbConnectionManager.closeConnection(pstmt, con);</span>
+<span class="nc" id="L337">        }</span>
+<span class="nc" id="L338">    }</span>
+
+    @Override
+    public void setCreationDate(String username, Date creationDate) throws UserNotFoundException {
+<span class="nc" id="L342">        Connection con = null;</span>
+<span class="nc" id="L343">        PreparedStatement pstmt = null;</span>
+        try {
+<span class="nc" id="L345">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L346">            pstmt = con.prepareStatement(UPDATE_CREATION_DATE);</span>
+<span class="nc" id="L347">            pstmt.setString(1, StringUtils.dateToMillis(creationDate));</span>
+<span class="nc" id="L348">            pstmt.setString(2, username);</span>
+<span class="nc" id="L349">            pstmt.executeUpdate();</span>
+        }
+<span class="nc" id="L351">        catch (SQLException sqle) {</span>
+<span class="nc" id="L352">            throw new UserNotFoundException(sqle);</span>
+        }
+        finally {
+<span class="nc" id="L355">            DbConnectionManager.closeConnection(pstmt, con);</span>
+<span class="nc" id="L356">        }</span>
+<span class="nc" id="L357">    }</span>
+
+    @Override
+    public void setModificationDate(String username, Date modificationDate) throws UserNotFoundException {
+<span class="nc" id="L361">        Connection con = null;</span>
+<span class="nc" id="L362">        PreparedStatement pstmt = null;</span>
+        try {
+<span class="nc" id="L364">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L365">            pstmt = con.prepareStatement(UPDATE_MODIFICATION_DATE);</span>
+<span class="nc" id="L366">            pstmt.setString(1, StringUtils.dateToMillis(modificationDate));</span>
+<span class="nc" id="L367">            pstmt.setString(2, username);</span>
+<span class="nc" id="L368">            pstmt.executeUpdate();</span>
+        }
+<span class="nc" id="L370">        catch (SQLException sqle) {</span>
+<span class="nc" id="L371">            throw new UserNotFoundException(sqle);</span>
+        }
+        finally {
+<span class="nc" id="L374">            DbConnectionManager.closeConnection(pstmt, con);</span>
+<span class="nc" id="L375">        }</span>
+<span class="nc" id="L376">    }</span>
+
+    @Override
+    public Set&lt;String&gt; getSearchFields() throws UnsupportedOperationException {
+<span class="nc" id="L380">        return new LinkedHashSet&lt;&gt;(Arrays.asList(&quot;Username&quot;, &quot;Name&quot;, &quot;Email&quot;));</span>
+    }
+
+    @Override
+    public Collection&lt;User&gt; findUsers(Set&lt;String&gt; fields, String query) throws UnsupportedOperationException {
+<span class="nc" id="L385">        return findUsers(fields, query, 0, Integer.MAX_VALUE);</span>
+    }
+
+    @Override
+    public Collection&lt;User&gt; findUsers(Set&lt;String&gt; fields, String query, int startIndex,
+            int numResults) throws UnsupportedOperationException
+    {
+<span class="nc bnc" id="L392" title="All 2 branches missed.">        if (fields.isEmpty()) {</span>
+<span class="nc" id="L393">            return Collections.emptyList();</span>
+        }
+<span class="nc bnc" id="L395" title="All 2 branches missed.">        if (!getSearchFields().containsAll(fields)) {</span>
+<span class="nc" id="L396">            throw new IllegalArgumentException(&quot;Search fields &quot; + fields + &quot; are not valid.&quot;);</span>
+        }
+<span class="nc bnc" id="L398" title="All 4 branches missed.">        if (query == null || &quot;&quot;.equals(query)) {</span>
+<span class="nc" id="L399">            return Collections.emptyList();</span>
+        }
+        // SQL LIKE queries don't map directly into a keyword/wildcard search like we want.
+        // Therefore, we do a best approximiation by replacing '*' with '%' and then
+        // surrounding the whole query with two '%'. This will return more data than desired,
+        // but is better than returning less data than desired.
+<span class="nc" id="L405">        query = &quot;%&quot; + query.replace('*', '%') + &quot;%&quot;;</span>
+<span class="nc bnc" id="L406" title="All 2 branches missed.">        if (query.endsWith(&quot;%%&quot;)) {</span>
+<span class="nc" id="L407">            query = query.substring(0, query.length()-1);</span>
+        }
+
+<span class="nc" id="L410">        List&lt;String&gt; usernames = new ArrayList&lt;&gt;(50);</span>
+<span class="nc" id="L411">        Connection con = null;</span>
+<span class="nc" id="L412">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L413">        int queries=0;</span>
+<span class="nc" id="L414">        ResultSet rs = null;</span>
+        try {
+<span class="nc" id="L416">            StringBuilder sql = new StringBuilder(90);</span>
+<span class="nc" id="L417">            sql.append(&quot;SELECT username FROM ofUser WHERE&quot;);</span>
+<span class="nc" id="L418">            boolean first = true;</span>
+<span class="nc bnc" id="L419" title="All 2 branches missed.">            if (fields.contains(&quot;Username&quot;)) {</span>
+<span class="nc" id="L420">                sql.append(&quot; username LIKE ?&quot;);</span>
+<span class="nc" id="L421">                queries++;</span>
+<span class="nc" id="L422">                first = false;</span>
+            }
+<span class="nc bnc" id="L424" title="All 2 branches missed.">            if (fields.contains(&quot;Name&quot;)) {</span>
+<span class="nc bnc" id="L425" title="All 2 branches missed.">                if (!first) {</span>
+<span class="nc" id="L426">                    sql.append(&quot; AND&quot;);</span>
+                }
+<span class="nc" id="L428">                sql.append(&quot; name LIKE ?&quot;);</span>
+<span class="nc" id="L429">                queries++;</span>
+<span class="nc" id="L430">                first = false;</span>
+            }
+<span class="nc bnc" id="L432" title="All 2 branches missed.">            if (fields.contains(&quot;Email&quot;)) {</span>
+<span class="nc bnc" id="L433" title="All 2 branches missed.">                if (!first) {</span>
+<span class="nc" id="L434">                    sql.append(&quot; AND&quot;);</span>
+                }
+<span class="nc" id="L436">                sql.append(&quot; email LIKE ?&quot;);</span>
+<span class="nc" id="L437">                queries++;</span>
+            }
+<span class="nc" id="L439">            con = DbConnectionManager.getConnection();</span>
+<span class="nc bnc" id="L440" title="All 4 branches missed.">            if ((startIndex==0) &amp;&amp; (numResults==Integer.MAX_VALUE))</span>
+            {
+<span class="nc" id="L442">                pstmt = con.prepareStatement(sql.toString());</span>
+<span class="nc bnc" id="L443" title="All 2 branches missed.">                for (int i=1; i&lt;=queries; i++)</span>
+                {
+<span class="nc" id="L445">                    pstmt.setString(i, query);</span>
+                }
+<span class="nc" id="L447">                rs = pstmt.executeQuery();</span>
+<span class="nc bnc" id="L448" title="All 2 branches missed.">                while (rs.next()) {</span>
+<span class="nc" id="L449">                    usernames.add(rs.getString(1));</span>
+                }
+            } else {
+<span class="nc" id="L452">                pstmt = DbConnectionManager.createScrollablePreparedStatement(con, sql.toString());</span>
+<span class="nc" id="L453">                DbConnectionManager.limitRowsAndFetchSize(pstmt, startIndex, numResults);</span>
+<span class="nc bnc" id="L454" title="All 2 branches missed.">                for (int i=1; i&lt;=queries; i++)</span>
+                {
+<span class="nc" id="L456">                    pstmt.setString(i, query);</span>
+                }
+<span class="nc" id="L458">                rs = pstmt.executeQuery();</span>
+                // Scroll to the start index.
+<span class="nc" id="L460">                DbConnectionManager.scrollResultSet(rs, startIndex);</span>
+<span class="nc" id="L461">                int count = 0;</span>
+<span class="nc bnc" id="L462" title="All 4 branches missed.">                while (rs.next() &amp;&amp; count &lt; numResults) {</span>
+<span class="nc" id="L463">                    usernames.add(rs.getString(1));</span>
+<span class="nc" id="L464">                    count++;</span>
+               }
+            }
+<span class="nc bnc" id="L467" title="All 2 branches missed.">            if (Log.isDebugEnabled())</span>
+            {
+<span class="nc" id="L469">                Log.debug(&quot;Results: &quot; + usernames.size());</span>
+<span class="nc" id="L470">                LogResults(usernames);</span>
+            }
+        }
+<span class="nc" id="L473">        catch (SQLException e) {</span>
+<span class="nc" id="L474">            Log.error(e.getMessage(), e);</span>
+        }
+        finally {
+<span class="nc" id="L477">            DbConnectionManager.closeConnection(rs, pstmt, con);</span>
+<span class="nc" id="L478">        }</span>
+<span class="nc" id="L479">        return new UserCollection(usernames.toArray(new String[usernames.size()]));</span>
+    }
+
+    @Override
+    public boolean isReadOnly() {
+<span class="nc" id="L484">        return IS_READ_ONLY;</span>
+    }
+
+    @Override
+    public boolean isNameRequired() {
+<span class="nc" id="L489">        return false;</span>
+    }
+
+    @Override
+    public boolean isEmailRequired() {
+<span class="nc" id="L494">        return false;</span>
+    }
+    /**
+     * Make sure that Log.isDebugEnabled()==true before calling this method.
+     * Twenty elements will be logged in every log line, so for 81-100 elements
+     * five log lines will be generated
+     * @param listElements a list of Strings which will be logged 
+     */
+    private void LogResults(List&lt;String&gt; listElements) {
+<span class="nc" id="L503">        String callingMethod = Thread.currentThread().getStackTrace()[3].getMethodName();</span>
+<span class="nc" id="L504">        StringBuilder sb = new StringBuilder(256);</span>
+<span class="nc" id="L505">        int count = 0;</span>
+<span class="nc bnc" id="L506" title="All 2 branches missed.">        for (String element : listElements)</span>
+        {
+<span class="nc bnc" id="L508" title="All 2 branches missed.">            if (count &gt; 20)</span>
+            {
+<span class="nc" id="L510">                Log.debug(callingMethod + &quot; results: &quot; + sb.toString());</span>
+<span class="nc" id="L511">                sb.delete(0, sb.length());</span>
+<span class="nc" id="L512">                count = 0;</span>
+            }
+<span class="nc" id="L514">            sb.append(element).append(',');</span>
+<span class="nc" id="L515">            count++;</span>
+<span class="nc" id="L516">        }</span>
+<span class="nc" id="L517">        sb.append('.');</span>
+<span class="nc" id="L518">        Log.debug(callingMethod + &quot; results: &quot; + sb.toString());</span>
+<span class="nc" id="L519">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

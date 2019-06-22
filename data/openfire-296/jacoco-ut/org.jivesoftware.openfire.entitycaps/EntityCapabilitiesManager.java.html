@@ -1,0 +1,554 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>EntityCapabilitiesManager.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.entitycaps</a> &gt; <span class="el_source">EntityCapabilitiesManager.java</span></div><h1>EntityCapabilitiesManager.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.entitycaps;
+
+import java.util.*;
+import java.util.stream.Collectors;
+
+import org.dom4j.Element;
+import org.dom4j.QName;
+import org.jivesoftware.openfire.IQRouter;
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.container.BasicModule;
+import org.jivesoftware.openfire.event.UserEventDispatcher;
+import org.jivesoftware.openfire.event.UserEventListener;
+import org.jivesoftware.openfire.user.User;
+import org.jivesoftware.util.StringUtils;
+import org.jivesoftware.util.cache.Cache;
+import org.jivesoftware.util.cache.CacheFactory;
+import org.xmpp.component.IQResultListener;
+import org.xmpp.packet.IQ;
+import org.xmpp.packet.JID;
+import org.xmpp.packet.Presence;
+
+/**
+ * Implements server side mechanics for XEP-0115: &quot;Entity Capabilities&quot;
+ * Version 1.4
+ * 
+ * In particular, EntityCapabilitiesManager is useful for processing
+ * &quot;filtered-notifications&quot; for use with Pubsub (XEP-0060) for contacts that
+ * may not want to receive notifications for all payload types.
+ * 
+ * The server's role in managing Entity Capabilities is to cache previously
+ * encountered entity capabilities for XMPP clients supporting the same
+ * identities and features. If the server has not seen a particular
+ * combination of identities and features, a Discover Information query is
+ * sent to that client and its reply is cached for future use by clients
+ * sharing those same entity capabilities.
+ * 
+ * @author Armando Jagucki
+ *
+ */
+public class EntityCapabilitiesManager extends BasicModule implements IQResultListener, UserEventListener {
+
+    /**
+     * A XEP-0115 described identifier for the Openfire server software,
+     * intended to be used as a value of 'node' attributes.
+     */
+    public static final String OPENFIRE_IDENTIFIER_NODE = &quot;https://www.igniterealtime.org/projects/openfire/&quot;;
+
+    /**
+     * Entity Capabilities cache map. This cache stores entity capabilities
+     * that may be shared among users.
+     * 
+     * When we want to look up the entity capabilities for a user, we first
+     * find their most recently advertised 'ver' hash using the
+     * {@link #entityCapabilitiesUserMap}. Then we use that 'ver' hash as a
+     * key into this map.
+     * 
+     * Key:   The 'ver' hash string that encapsulates identities+features.
+     * Value: EntityCapabilities object representing the encapsulated values.
+     */
+    private Cache&lt;String, EntityCapabilities&gt; entityCapabilitiesMap;
+
+    /**
+     * Entity Capabilities user cache map. This map is used to determine which
+     * entity capabilities are in use for a particular user.
+     * 
+     * When we want to look up the entity capabilities for a user, we first
+     * find their most recently advertised 'ver' hash using this map. Then we
+     * use this 'ver' hash as a key into the {@link #entityCapabilitiesMap}.
+     * 
+     * Key:   The JID of the user.
+     * Value: The 'ver' hash string that encapsulates identities+features.
+     */
+    private Cache&lt;JID, String&gt; entityCapabilitiesUserMap;
+
+    /**
+     * Ver attributes are the hash strings that correspond to a certain
+     * combination of entity capabilities. This hash string, representing a
+     * particular identities+features combination, is found in the 'ver'
+     * attribute of the caps element in a presence packet (caps packet).
+     * 
+     * Each unrecognized caps packet that is encountered has its verAttribute
+     * added to this map. Since results to our disco#info queries can be
+     * received in any order, the map is used by {@link #isValid(IQ)} so the
+     * method can be sure it is comparing its generated 'ver' hash to the
+     * correct 'ver' hash in the map, that was previously encountered in the
+     * caps packet.
+     * 
+     * Key:   Packet ID of our disco#info request.
+     * Value: The 'ver' hash string from the original caps packet.
+     */
+    private Map&lt;String, EntityCapabilities&gt; verAttributes;
+
+    public EntityCapabilitiesManager() {
+<span class="nc" id="L110">        super( &quot;Entity Capabilities Manager&quot; );</span>
+<span class="nc" id="L111">    }</span>
+
+    @Override
+    public void initialize( final XMPPServer server )
+    {
+<span class="nc" id="L116">        super.initialize( server );</span>
+<span class="nc" id="L117">        entityCapabilitiesMap = CacheFactory.createLocalCache(&quot;Entity Capabilities&quot;);</span>
+<span class="nc" id="L118">        entityCapabilitiesUserMap = CacheFactory.createLocalCache(&quot;Entity Capabilities Users&quot;);</span>
+<span class="nc" id="L119">        verAttributes = new HashMap&lt;&gt;();</span>
+<span class="nc" id="L120">        UserEventDispatcher.addListener( this );</span>
+<span class="nc" id="L121">    }</span>
+
+    @Override
+    public void destroy()
+    {
+<span class="nc" id="L126">        UserEventDispatcher.removeListener( this );</span>
+<span class="nc" id="L127">    }</span>
+
+    /**
+     * Returns the unique instance of this class.
+     *
+     * @return the unique instance of this class.
+     * @deprecated Replaced by {@link XMPPServer#getEntityCapabilitiesManager}
+     */
+    @Deprecated
+    public static EntityCapabilitiesManager getInstance() {
+<span class="nc" id="L137">        return XMPPServer.getInstance().getEntityCapabilitiesManager();</span>
+    }
+
+    public void process(Presence packet) {
+        // Ignore unavailable presences
+<span class="nc bnc" id="L142" title="All 2 branches missed.">        if (Presence.Type.unavailable == packet.getType()) {</span>
+<span class="nc" id="L143">            return;</span>
+        }
+
+        // Examine the packet and check if it has caps info,
+        // if not -- do nothing by returning.
+<span class="nc" id="L148">        Element capsElement = packet.getChildElement(&quot;c&quot;, &quot;http://jabber.org/protocol/caps&quot;);</span>
+<span class="nc bnc" id="L149" title="All 2 branches missed.">        if (capsElement == null) {</span>
+<span class="nc" id="L150">            return;</span>
+        }
+
+        // Examine the packet and check if it's in legacy format (pre version 1.4
+        // of XEP-0115). If so, do nothing by returning.
+        // TODO: if this packet is in legacy format, we SHOULD check the 'node',
+        // 'ver', and 'ext' combinations as specified in the archived version
+        // 1.3 of the specification, and cache the results. See JM-1447
+<span class="nc" id="L158">        final String hashAttribute = capsElement.attributeValue(&quot;hash&quot;);</span>
+<span class="nc bnc" id="L159" title="All 4 branches missed.">        if (hashAttribute == null || hashAttribute.trim().length() == 0) {</span>
+<span class="nc" id="L160">            return;</span>
+        }
+        
+        // Examine the packet and check if it has and a 'ver' hash
+        // if not -- do nothing by returning.
+<span class="nc" id="L165">        final String newVerAttribute = capsElement.attributeValue(&quot;ver&quot;);</span>
+<span class="nc bnc" id="L166" title="All 4 branches missed.">        if (newVerAttribute == null || newVerAttribute.trim().length() == 0) {</span>
+<span class="nc" id="L167">            return;</span>
+        }
+
+        // Check to see if the 'ver' hash is already in our cache.
+<span class="nc bnc" id="L171" title="All 2 branches missed.">        if (isInCapsCache(newVerAttribute)) {</span>
+            // The 'ver' hash is in the cache already, so let's update the
+            // entityCapabilitiesUserMap for the user that sent the caps
+            // packet.
+<span class="nc" id="L175">            final String oldVerAttribute = entityCapabilitiesUserMap.put( packet.getFrom(), newVerAttribute );</span>
+
+            // If this replaced another 'ver' hash, purge the capabilities if needed.
+<span class="nc bnc" id="L178" title="All 4 branches missed.">            if ( oldVerAttribute != null &amp;&amp; !oldVerAttribute.equals( newVerAttribute ) )</span>
+            {
+<span class="nc" id="L180">                checkObsolete( oldVerAttribute );</span>
+            }
+<span class="nc" id="L182">        }</span>
+        else {
+            // The 'ver' hash is not in the cache so send out a disco#info query
+            // so that we may begin recognizing this 'ver' hash.
+<span class="nc" id="L186">            IQ iq = new IQ(IQ.Type.get);</span>
+<span class="nc" id="L187">            iq.setTo(packet.getFrom());</span>
+
+<span class="nc" id="L189">            String serverName = XMPPServer.getInstance().getServerInfo().getXMPPDomain();</span>
+<span class="nc" id="L190">            iq.setFrom(serverName);</span>
+
+<span class="nc" id="L192">            iq.setChildElement(&quot;query&quot;, &quot;http://jabber.org/protocol/disco#info&quot;);</span>
+
+<span class="nc" id="L194">            String packetId = iq.getID();</span>
+            
+<span class="nc" id="L196">            final EntityCapabilities caps = new EntityCapabilities();</span>
+<span class="nc" id="L197">            caps.setHashAttribute(hashAttribute);</span>
+<span class="nc" id="L198">            caps.setVerAttribute(newVerAttribute);</span>
+<span class="nc" id="L199">            verAttributes.put(packetId, caps);</span>
+
+<span class="nc" id="L201">            final IQRouter iqRouter = XMPPServer.getInstance().getIQRouter();</span>
+<span class="nc" id="L202">            iqRouter.addIQResultListener(packetId, this);</span>
+<span class="nc" id="L203">            iqRouter.route(iq);</span>
+        }
+<span class="nc" id="L205">    }</span>
+
+    /**
+     * Determines whether or not a particular 'ver' attribute is stored in the
+     * {@link #entityCapabilitiesMap} cache.
+     * 
+     * @param verAttribute the 'ver' hash to check for.
+     * @return true if the caps cache contains the 'ver' hash already, false if not.
+     */
+    private boolean isInCapsCache(String verAttribute) {
+<span class="nc" id="L215">        return entityCapabilitiesMap.containsKey(verAttribute);</span>
+    }
+
+    /**
+     * Determines whether or not the packet received from a disco#info result
+     * was valid by comparing its 'ver' hash (identites+features encapsulated
+     * hash) with the 'ver' hash of the original caps packet that the
+     * disco#info query was sent on behalf of.
+     * 
+     * @param packet the disco#info result packet.
+     * @return true if the packet's generated 'ver' hash matches the 'ver'
+     *         hash of the original caps packet.
+     */
+    private boolean isValid(IQ packet) {
+<span class="nc bnc" id="L229" title="All 2 branches missed.">        if (packet.getType() != IQ.Type.result)</span>
+<span class="nc" id="L230">            return false;</span>
+
+<span class="nc" id="L232">        final EntityCapabilities original = verAttributes.get(packet.getID());</span>
+<span class="nc bnc" id="L233" title="All 2 branches missed.">        if (original == null) {</span>
+<span class="nc" id="L234">            return false;</span>
+        }
+<span class="nc" id="L236">        final String newVerHash = generateVerHash(packet, original.getHashAttribute());</span>
+
+<span class="nc" id="L238">        return newVerHash.equals(original.getVerAttribute());</span>
+    }
+
+    /**
+     * Generates a 'ver' hash attribute used in validation to help prevent
+     * poisoning of entity capabilities information.
+     * 
+     * @see #isValid(IQ)
+     * 
+     * The value of the 'ver' attribute is generated according to the method
+     * outlined in XEP-0115.
+     * 
+     * @param packet IQ reply to the entity cap request.
+     * @param algorithm The hashing algorithm to use (e.g. SHA-1)
+     * @return the generated 'ver' hash
+     */
+    public static String generateVerHash(IQ packet, String algorithm) {
+        // Initialize an empty string S.
+<span class="fc" id="L256">        final StringBuilder s = new StringBuilder();</span>
+
+        // Sort the service discovery identities by category and then by type
+        // (if it exists), formatted as 'category' '/' 'type' / 'lang' / 'name'
+<span class="fc" id="L260">        final List&lt;String&gt; discoIdentities = getIdentitiesFrom(packet);</span>
+<span class="fc" id="L261">        Collections.sort(discoIdentities);</span>
+
+        // For each identity, append the 'category/type/lang/name' to S, 
+        // followed by the '&lt;' character.
+<span class="fc bfc" id="L265" title="All 2 branches covered.">        for (String discoIdentity : discoIdentities) {</span>
+<span class="fc" id="L266">            s.append(discoIdentity);</span>
+<span class="fc" id="L267">            s.append('&lt;');</span>
+<span class="fc" id="L268">        }</span>
+
+        // Sort the supported service discovery features.
+<span class="fc" id="L271">        final List&lt;String&gt; discoFeatures = getFeaturesFrom(packet);</span>
+<span class="fc" id="L272">        Collections.sort(discoFeatures);</span>
+
+        // For each feature, append the feature to S, followed by the '&lt;'
+        // character.
+<span class="fc bfc" id="L276" title="All 2 branches covered.">        for (String discoFeature : discoFeatures) {</span>
+<span class="fc" id="L277">            s.append(discoFeature);</span>
+<span class="fc" id="L278">            s.append('&lt;');</span>
+<span class="fc" id="L279">        }</span>
+        
+        // If the service discovery information response includes XEP-0128 
+        // data forms, sort the forms by the FORM_TYPE (i.e., by the XML
+        // character data of the &lt;value/&gt; element).
+<span class="fc" id="L284">        final List&lt;String&gt; extendedDataForms = getExtendedDataForms(packet);</span>
+<span class="fc" id="L285">        Collections.sort(extendedDataForms);</span>
+        
+<span class="fc bfc" id="L287" title="All 2 branches covered.">        for (String extendedDataForm : extendedDataForms) {</span>
+<span class="fc" id="L288">            s.append(extendedDataForm);</span>
+            // no need to add '&lt;', this is done in #getExtendedDataForms()
+<span class="fc" id="L290">        }</span>
+        
+        // Compute ver by hashing S using the SHA-1 algorithm as specified in
+        // RFC 3174 (with binary output) and encoding the hash using Base64 as
+        // specified in Section 4 of RFC 4648 (note: the Base64 output
+        // MUST NOT include whitespace and MUST set padding bits to zero).
+<span class="fc" id="L296">        final String hashed = StringUtils.hash(s.toString(), &quot;SHA-1&quot;);</span>
+<span class="fc" id="L297">        return StringUtils.encodeBase64(StringUtils.decodeHex(hashed));</span>
+    }
+
+    @Override
+    public void answerTimeout(String packetId) {
+        // If we never received an answer, we can discard the cached
+        // 'ver' attribute.
+<span class="nc" id="L304">        verAttributes.remove(packetId);</span>
+<span class="nc" id="L305">    }</span>
+
+    @Override
+    public void receivedAnswer(IQ packet) {
+<span class="nc" id="L309">        String packetId = packet.getID();</span>
+
+<span class="nc bnc" id="L311" title="All 2 branches missed.">        if (isValid(packet)) {</span>
+            // The packet was validated, so it can be added to the Entity
+            // Capabilities cache map.
+
+            // Add the resolved identities and features to the entity 
+            // EntityCapabilitiesManager.capabilities object and add it 
+            // to the cache map...
+<span class="nc" id="L318">            EntityCapabilities caps = verAttributes.get(packetId);</span>
+
+            // Store identities.
+<span class="nc" id="L321">            List&lt;String&gt; identities = getIdentitiesFrom(packet);</span>
+<span class="nc bnc" id="L322" title="All 2 branches missed.">            for (String identity : identities) {</span>
+<span class="nc" id="L323">                caps.addIdentity(identity);</span>
+<span class="nc" id="L324">            }</span>
+
+            // Store features.
+<span class="nc" id="L327">            List&lt;String&gt; features = getFeaturesFrom(packet);</span>
+<span class="nc bnc" id="L328" title="All 2 branches missed.">            for (String feature : features) {</span>
+<span class="nc" id="L329">                caps.addFeature(feature);</span>
+<span class="nc" id="L330">            }</span>
+
+<span class="nc" id="L332">            entityCapabilitiesMap.put(caps.getVerAttribute(), caps);</span>
+<span class="nc" id="L333">            final String oldVerAttribute = entityCapabilitiesUserMap.put( packet.getFrom(), caps.getVerAttribute() );</span>
+
+            // If this replaced another 'ver' hash, purge the capabilities if needed.
+<span class="nc bnc" id="L336" title="All 4 branches missed.">            if ( oldVerAttribute != null &amp;&amp; !oldVerAttribute.equals( caps.getVerAttribute() ) )</span>
+            {
+<span class="nc" id="L338">                checkObsolete( oldVerAttribute );</span>
+            }
+        }
+
+        // Remove cached 'ver' attribute.
+<span class="nc" id="L343">        verAttributes.remove(packetId);</span>
+<span class="nc" id="L344">    }</span>
+
+    /**
+     * Returns the entity capabilities for a specific JID. The specified JID
+     * should be a full JID that identified the entity's connection.
+     * 
+     * @param jid the full JID of entity
+     * @return the entity capabilities of jid, or null if these are unavailable.
+     */
+    public EntityCapabilities getEntityCapabilities(JID jid) {
+<span class="nc" id="L354">        String verAttribute = entityCapabilitiesUserMap.get(jid);</span>
+<span class="nc bnc" id="L355" title="All 2 branches missed.">        if ( verAttribute == null ) {</span>
+<span class="nc" id="L356">            return null;</span>
+        }
+<span class="nc" id="L358">        return entityCapabilitiesMap.get(verAttribute);</span>
+    }
+
+    /**
+     * Extracts a list of identities from an IQ packet.
+     * 
+     * @param packet the packet
+     * @return a list of identities
+     */
+    private static List&lt;String&gt; getIdentitiesFrom(IQ packet) {
+<span class="fc" id="L368">        List&lt;String&gt; discoIdentities = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L369">        Element query = packet.getChildElement();</span>
+<span class="pc bpc" id="L370" title="1 of 2 branches missed.">        if (query == null) {</span>
+<span class="nc" id="L371">            return discoIdentities;</span>
+        }
+<span class="fc" id="L373">        Iterator&lt;Element&gt; identitiesIterator = query.elementIterator(&quot;identity&quot;);</span>
+<span class="pc bpc" id="L374" title="1 of 2 branches missed.">        if (identitiesIterator != null) {</span>
+<span class="fc bfc" id="L375" title="All 2 branches covered.">            while (identitiesIterator.hasNext()) {</span>
+<span class="fc" id="L376">                Element identityElement = identitiesIterator.next();</span>
+
+<span class="fc" id="L378">                StringBuilder discoIdentity = new StringBuilder();</span>
+
+<span class="fc" id="L380">                String cat = identityElement.attributeValue(&quot;category&quot;);</span>
+<span class="fc" id="L381">                String type = identityElement.attributeValue(&quot;type&quot;);</span>
+<span class="fc" id="L382">                String lang = identityElement.attributeValue(&quot;xml:lang&quot;);</span>
+<span class="fc" id="L383">                String name = identityElement.attributeValue(&quot;name&quot;);</span>
+
+<span class="pc bpc" id="L385" title="1 of 2 branches missed.">                if (cat != null) {</span>
+<span class="fc" id="L386">                    discoIdentity.append(cat);</span>
+                }
+<span class="fc" id="L388">                discoIdentity.append('/');</span>
+
+<span class="pc bpc" id="L390" title="1 of 2 branches missed.">                if (type != null) {</span>
+<span class="fc" id="L391">                    discoIdentity.append(type);</span>
+                }
+<span class="fc" id="L393">                discoIdentity.append('/');</span>
+
+<span class="fc bfc" id="L395" title="All 2 branches covered.">                if (lang != null) {</span>
+<span class="fc" id="L396">                    discoIdentity.append(lang);</span>
+                }
+<span class="fc" id="L398">                discoIdentity.append('/');</span>
+
+<span class="pc bpc" id="L400" title="1 of 2 branches missed.">                if (name != null) {</span>
+<span class="fc" id="L401">                    discoIdentity.append(name);</span>
+                }
+
+<span class="fc" id="L404">                discoIdentities.add(discoIdentity.toString());</span>
+<span class="fc" id="L405">            }</span>
+        }
+<span class="fc" id="L407">        return discoIdentities;</span>
+    }
+
+    /**
+     * Extracts a list of features from an IQ packet.
+     * 
+     * @param packet the packet
+     * @return a list of features
+     */
+    private static List&lt;String&gt; getFeaturesFrom(IQ packet) {
+<span class="fc" id="L417">        List&lt;String&gt; discoFeatures = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L418">        Element query = packet.getChildElement();</span>
+<span class="fc" id="L419">        Iterator&lt;Element&gt; featuresIterator = query.elementIterator(&quot;feature&quot;);</span>
+<span class="pc bpc" id="L420" title="1 of 2 branches missed.">        if (featuresIterator != null) {</span>
+<span class="fc bfc" id="L421" title="All 2 branches covered.">            while (featuresIterator.hasNext()) {</span>
+<span class="fc" id="L422">                Element featureElement = featuresIterator.next();</span>
+<span class="fc" id="L423">                String discoFeature = featureElement.attributeValue(&quot;var&quot;);</span>
+
+<span class="fc" id="L425">                discoFeatures.add(discoFeature);</span>
+<span class="fc" id="L426">            }</span>
+        }
+<span class="fc" id="L428">        return discoFeatures;</span>
+    }
+
+    /**
+     * Extracts a list of extended service discovery information from an IQ
+     * packet.
+     * 
+     * @param packet
+     *            the packet
+     * @return a list of extended service discoverin information features.
+     */
+    private static List&lt;String&gt; getExtendedDataForms(IQ packet) {
+<span class="fc" id="L440">        List&lt;String&gt; results = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L441">        Element query = packet.getChildElement();</span>
+<span class="fc" id="L442">        Iterator&lt;Element&gt; extensionIterator = query.elementIterator(QName.get(</span>
+                &quot;x&quot;, &quot;jabber:x:data&quot;));
+<span class="pc bpc" id="L444" title="1 of 2 branches missed.">        if (extensionIterator != null) {</span>
+<span class="fc bfc" id="L445" title="All 2 branches covered.">            while (extensionIterator.hasNext()) {</span>
+<span class="fc" id="L446">                Element extensionElement = extensionIterator.next();</span>
+<span class="fc" id="L447">                final StringBuilder formType = new StringBuilder();</span>
+
+<span class="fc" id="L449">                Iterator&lt;Element&gt; fieldIterator = extensionElement</span>
+<span class="fc" id="L450">                        .elementIterator(&quot;field&quot;);</span>
+<span class="fc" id="L451">                List&lt;String&gt; vars = new ArrayList&lt;&gt;();</span>
+<span class="pc bpc" id="L452" title="1 of 4 branches missed.">                while (fieldIterator != null &amp;&amp; fieldIterator.hasNext()) {</span>
+<span class="fc" id="L453">                    final Element fieldElement = fieldIterator.next();</span>
+<span class="fc bfc" id="L454" title="All 2 branches covered.">                    if (fieldElement.attributeValue(&quot;var&quot;).equals(&quot;FORM_TYPE&quot;)) {</span>
+<span class="fc" id="L455">                        formType</span>
+<span class="fc" id="L456">                                .append(fieldElement.element(&quot;value&quot;).getText());</span>
+<span class="fc" id="L457">                        formType.append('&lt;');</span>
+                    } else {
+<span class="fc" id="L459">                        final StringBuilder var = new StringBuilder();</span>
+<span class="fc" id="L460">                        var.append(fieldElement.attributeValue(&quot;var&quot;));</span>
+<span class="fc" id="L461">                        var.append('&lt;');</span>
+<span class="fc" id="L462">                        Iterator&lt;Element&gt; valIter = fieldElement</span>
+<span class="fc" id="L463">                                .elementIterator(&quot;value&quot;);</span>
+<span class="fc" id="L464">                        List&lt;String&gt; values = new ArrayList&lt;&gt;();</span>
+<span class="pc bpc" id="L465" title="1 of 4 branches missed.">                        while (valIter != null &amp;&amp; valIter.hasNext()) {</span>
+<span class="fc" id="L466">                            Element value = valIter.next();</span>
+<span class="fc" id="L467">                            values.add(value.getText());</span>
+<span class="fc" id="L468">                        }</span>
+<span class="fc" id="L469">                        Collections.sort(values);</span>
+<span class="fc bfc" id="L470" title="All 2 branches covered.">                        for (String v : values) {</span>
+<span class="fc" id="L471">                            var.append(v);</span>
+<span class="fc" id="L472">                            var.append('&lt;');</span>
+<span class="fc" id="L473">                        }</span>
+<span class="fc" id="L474">                        vars.add(var.toString());</span>
+                    }
+<span class="fc" id="L476">                }</span>
+<span class="fc" id="L477">                Collections.sort(vars);</span>
+<span class="fc bfc" id="L478" title="All 2 branches covered.">                for (String v : vars) {</span>
+<span class="fc" id="L479">                    formType.append(v);</span>
+<span class="fc" id="L480">                }</span>
+
+<span class="fc" id="L482">                results.add(formType.toString());</span>
+<span class="fc" id="L483">            }</span>
+        }
+<span class="fc" id="L485">        return results;</span>
+    }
+    
+    @Override
+    public void userDeleting(User user, Map&lt;String, Object&gt; params) {
+        // Delete this user's association in entityCapabilitiesUserMap.
+<span class="nc" id="L491">        final JID bareJid = XMPPServer.getInstance().createJID(user.getUsername(), null, true);</span>
+
+        // Remember: Cache's are not regular maps. The EntrySet is immutable.
+        // We'll first find the keys, then remove them in a separate call.
+<span class="nc" id="L495">        final Set&lt;JID&gt; jidsToRemove = entityCapabilitiesUserMap.keySet().stream()</span>
+<span class="nc" id="L496">            .filter( jid -&gt; jid.asBareJID().equals( bareJid ) )</span>
+<span class="nc" id="L497">            .collect( Collectors.toSet() );</span>
+
+<span class="nc" id="L499">        final Set&lt;String&gt; deletedUserVerHashes = new HashSet&lt;&gt;();</span>
+<span class="nc bnc" id="L500" title="All 2 branches missed.">        for ( final JID jidToRemove : jidsToRemove )</span>
+        {
+<span class="nc" id="L502">            deletedUserVerHashes.add( entityCapabilitiesUserMap.remove( jidToRemove ) );</span>
+<span class="nc" id="L503">        }</span>
+
+        // If there are no other references to the deleted user's 'ver' hash,
+        // it is safe to remove that 'ver' hash's associated entity
+        // capabilities from the entityCapabilitiesMap cache.
+<span class="nc" id="L508">        deletedUserVerHashes.forEach( this::checkObsolete );</span>
+<span class="nc" id="L509">    }</span>
+
+    /**
+     * Verifies if the provided 'ver' hash is used for any user. If not, the cache entry
+     * containing the entity capabilities are removed from the cache.
+     *
+     * @param verHash an 'ver' hash (cannot be null).
+     */
+    protected void checkObsolete( String verHash ) {
+<span class="nc bnc" id="L518" title="All 2 branches missed.">        if ( entityCapabilitiesUserMap.containsValue( verHash ) )</span>
+        {
+<span class="nc" id="L520">            return;</span>
+        }
+
+<span class="nc" id="L523">        entityCapabilitiesMap.remove( verHash );</span>
+<span class="nc" id="L524">    }</span>
+
+    @Override
+    public void userCreated(User user, Map&lt;String, Object&gt; params) {
+        // Do nothing.
+<span class="nc" id="L529">    }</span>
+
+    @Override
+    public void userModified(User user, Map&lt;String, Object&gt; params) {
+        // Do nothing.
+<span class="nc" id="L534">    }</span>
+
+    /**
+     * Returns the 'ver' hash for this server.
+     *
+     * @return A 'ver' hash, or null if none could be generated.
+     */
+    public static String getLocalDomainVerHash()
+    {
+        // TODO Cache results to increase performance.
+<span class="nc" id="L544">        final IQ discoInfoRequest = new IQ( IQ.Type.get );</span>
+<span class="nc" id="L545">        discoInfoRequest.setChildElement( &quot;query&quot;, &quot;http://jabber.org/protocol/disco#info&quot; );</span>
+<span class="nc" id="L546">        final IQ discoInfoResponse = XMPPServer.getInstance().getIQDiscoInfoHandler().handleIQ( discoInfoRequest );</span>
+<span class="nc bnc" id="L547" title="All 2 branches missed.">        if ( discoInfoResponse.getType() == IQ.Type.result )</span>
+        {
+<span class="nc" id="L549">            return EntityCapabilitiesManager.generateVerHash( discoInfoResponse, &quot;SHA-1&quot; );</span>
+        }
+<span class="nc" id="L551">        return null;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

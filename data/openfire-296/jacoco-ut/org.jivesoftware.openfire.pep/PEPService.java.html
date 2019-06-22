@@ -1,0 +1,532 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>PEPService.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.pep</a> &gt; <span class="el_source">PEPService.java</span></div><h1>PEPService.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.pep;
+
+import java.util.Collection;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+
+import org.dom4j.DocumentHelper;
+import org.dom4j.Element;
+import org.dom4j.QName;
+import org.jivesoftware.openfire.PacketRouter;
+import org.jivesoftware.openfire.SessionManager;
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.commands.AdHocCommandManager;
+import org.jivesoftware.openfire.entitycaps.EntityCapabilities;
+import org.jivesoftware.openfire.entitycaps.EntityCapabilitiesManager;
+import org.jivesoftware.openfire.pubsub.CollectionNode;
+import org.jivesoftware.openfire.pubsub.DefaultNodeConfiguration;
+import org.jivesoftware.openfire.pubsub.Node;
+import org.jivesoftware.openfire.pubsub.NodeSubscription;
+import org.jivesoftware.openfire.pubsub.PendingSubscriptionsCommand;
+import org.jivesoftware.openfire.pubsub.PubSubEngine;
+import org.jivesoftware.openfire.pubsub.PubSubPersistenceManager;
+import org.jivesoftware.openfire.pubsub.PubSubService;
+import org.jivesoftware.openfire.pubsub.PublishedItem;
+import org.jivesoftware.openfire.pubsub.models.AccessModel;
+import org.jivesoftware.openfire.pubsub.models.PublisherModel;
+import org.jivesoftware.openfire.roster.Roster;
+import org.jivesoftware.openfire.roster.RosterItem;
+import org.jivesoftware.openfire.session.ClientSession;
+import org.jivesoftware.openfire.user.UserNotFoundException;
+import org.jivesoftware.util.LocaleUtils;
+import org.jivesoftware.util.StringUtils;
+import org.jivesoftware.util.XMPPDateTimeFormat;
+import org.jivesoftware.util.cache.Cacheable;
+import org.xmpp.packet.JID;
+import org.xmpp.packet.Message;
+import org.xmpp.packet.Packet;
+import org.xmpp.packet.PacketExtension;
+
+/**
+ * A PEPService is a {@link PubSubService} for use with XEP-0163: &quot;Personal Eventing via
+ * Pubsub&quot; Version 1.0
+ * 
+ * Note: Although this class implements {@link Cacheable}, instances should only be 
+ * cached in caches that have time-based (as opposed to size-based) eviction policies.
+ * 
+ * @author Armando Jagucki 
+ */
+public class PEPService implements PubSubService, Cacheable {
+
+    /**
+     * The bare JID that this service is identified by.
+     */
+    private String serviceOwnerJID;
+
+    /**
+     * Collection node that acts as the root node of the entire node hierarchy.
+     */
+<span class="nc" id="L77">    private CollectionNode rootCollectionNode = null;</span>
+
+    /**
+     * Nodes managed by this service, table: key nodeID (String); value Node
+     */
+<span class="nc" id="L82">    private Map&lt;String, Node&gt; nodes = new ConcurrentHashMap&lt;&gt;();</span>
+
+    /**
+     * The packet router for the server.
+     */
+<span class="nc" id="L87">    private PacketRouter router = null;</span>
+
+    /**
+     * Default configuration to use for newly created leaf nodes.
+     */
+    private DefaultNodeConfiguration leafDefaultConfiguration;
+
+    /**
+     * Default configuration to use for newly created collection nodes.
+     */
+    private DefaultNodeConfiguration collectionDefaultConfiguration;
+
+    /**
+     * Returns the permission policy for creating nodes. A true value means that
+     * not anyone can create a node, only the service admin.
+     */
+<span class="nc" id="L103">    private boolean nodeCreationRestricted = true;</span>
+
+    /**
+     * Keep a registry of the presence's show value of users that subscribed to
+     * a node of the pep service and for which the node only delivers
+     * notifications for online users or node subscriptions deliver events based
+     * on the user presence show value. Offline users will not have an entry in
+     * the map. Note: Key-&amp;gt; bare JID and Value-&amp;gt; Map whose key is full JID of
+     * connected resource and value is show value of the last received presence.
+     */
+<span class="nc" id="L113">    private Map&lt;String, Map&lt;String, String&gt;&gt; barePresences = new ConcurrentHashMap&lt;&gt;();</span>
+
+    /**
+     * Manager that keeps the list of ad-hoc commands and processing command
+     * requests.
+     */
+    private AdHocCommandManager adHocCommandManager;
+
+    /**
+     * Used to handle filtered-notifications.
+     */
+<span class="nc" id="L124">    private EntityCapabilitiesManager entityCapsManager = EntityCapabilitiesManager.getInstance();</span>
+
+    /**
+     * Constructs a PEPService.
+     * 
+     * @param server  the XMPP server.
+     * @param bareJID the bare JID (service ID) of the user owning the service.
+     */
+<span class="nc" id="L132">    public PEPService(XMPPServer server, String bareJID) {</span>
+<span class="nc" id="L133">        this.serviceOwnerJID = bareJID;</span>
+<span class="nc" id="L134">        router = server.getPacketRouter();</span>
+
+        // Initialize the ad-hoc commands manager to use for this pep service
+<span class="nc" id="L137">        adHocCommandManager = new AdHocCommandManager();</span>
+<span class="nc" id="L138">        adHocCommandManager.addCommand(new PendingSubscriptionsCommand(this));</span>
+
+        // Load default configuration for leaf nodes
+<span class="nc" id="L141">        leafDefaultConfiguration = PubSubPersistenceManager.loadDefaultConfiguration(this, true);</span>
+<span class="nc bnc" id="L142" title="All 2 branches missed.">        if (leafDefaultConfiguration == null) {</span>
+            // Create and save default configuration for leaf nodes;
+<span class="nc" id="L144">            leafDefaultConfiguration = new DefaultNodeConfiguration(true);</span>
+<span class="nc" id="L145">            leafDefaultConfiguration.setAccessModel(AccessModel.presence);</span>
+<span class="nc" id="L146">            leafDefaultConfiguration.setPublisherModel(PublisherModel.publishers);</span>
+<span class="nc" id="L147">            leafDefaultConfiguration.setDeliverPayloads(true);</span>
+<span class="nc" id="L148">            leafDefaultConfiguration.setLanguage(&quot;English&quot;);</span>
+<span class="nc" id="L149">            leafDefaultConfiguration.setMaxPayloadSize(5120);</span>
+<span class="nc" id="L150">            leafDefaultConfiguration.setNotifyConfigChanges(true);</span>
+<span class="nc" id="L151">            leafDefaultConfiguration.setNotifyDelete(true);</span>
+<span class="nc" id="L152">            leafDefaultConfiguration.setNotifyRetract(true);</span>
+<span class="nc" id="L153">            leafDefaultConfiguration.setPersistPublishedItems(false);</span>
+<span class="nc" id="L154">            leafDefaultConfiguration.setMaxPublishedItems(1);</span>
+<span class="nc" id="L155">            leafDefaultConfiguration.setPresenceBasedDelivery(false);</span>
+<span class="nc" id="L156">            leafDefaultConfiguration.setSendItemSubscribe(true);</span>
+<span class="nc" id="L157">            leafDefaultConfiguration.setSubscriptionEnabled(true);</span>
+<span class="nc" id="L158">            leafDefaultConfiguration.setReplyPolicy(null);</span>
+<span class="nc" id="L159">            PubSubPersistenceManager.createDefaultConfiguration(this, leafDefaultConfiguration);</span>
+        }
+        // Load default configuration for collection nodes
+<span class="nc" id="L162">        collectionDefaultConfiguration = PubSubPersistenceManager.loadDefaultConfiguration(this, false);</span>
+<span class="nc bnc" id="L163" title="All 2 branches missed.">        if (collectionDefaultConfiguration == null) {</span>
+            // Create and save default configuration for collection nodes;
+<span class="nc" id="L165">            collectionDefaultConfiguration = new DefaultNodeConfiguration(false);</span>
+<span class="nc" id="L166">            collectionDefaultConfiguration.setAccessModel(AccessModel.presence);</span>
+<span class="nc" id="L167">            collectionDefaultConfiguration.setPublisherModel(PublisherModel.publishers);</span>
+<span class="nc" id="L168">            collectionDefaultConfiguration.setDeliverPayloads(false);</span>
+<span class="nc" id="L169">            collectionDefaultConfiguration.setLanguage(&quot;English&quot;);</span>
+<span class="nc" id="L170">            collectionDefaultConfiguration.setNotifyConfigChanges(true);</span>
+<span class="nc" id="L171">            collectionDefaultConfiguration.setNotifyDelete(true);</span>
+<span class="nc" id="L172">            collectionDefaultConfiguration.setNotifyRetract(true);</span>
+<span class="nc" id="L173">            collectionDefaultConfiguration.setPresenceBasedDelivery(false);</span>
+<span class="nc" id="L174">            collectionDefaultConfiguration.setSubscriptionEnabled(true);</span>
+<span class="nc" id="L175">            collectionDefaultConfiguration.setReplyPolicy(null);</span>
+<span class="nc" id="L176">            collectionDefaultConfiguration.setAssociationPolicy(CollectionNode.LeafNodeAssociationPolicy.all);</span>
+<span class="nc" id="L177">            collectionDefaultConfiguration.setMaxLeafNodes(-1);</span>
+<span class="nc" id="L178">            PubSubPersistenceManager.createDefaultConfiguration(this, collectionDefaultConfiguration);</span>
+        }
+
+        // Load nodes to memory
+<span class="nc" id="L182">        PubSubPersistenceManager.loadNodes(this);</span>
+        // Ensure that we have a root collection node
+<span class="nc bnc" id="L184" title="All 2 branches missed.">        if (nodes.isEmpty()) {</span>
+            // Create root collection node
+<span class="nc" id="L186">            JID creatorJID = new JID(bareJID);</span>
+<span class="nc" id="L187">            rootCollectionNode = new CollectionNode(this, null, bareJID, creatorJID);</span>
+            // Add the creator as the node owner
+<span class="nc" id="L189">            rootCollectionNode.addOwner(creatorJID);</span>
+            // Save new root node
+<span class="nc" id="L191">            rootCollectionNode.saveToDB();</span>
+<span class="nc" id="L192">        }</span>
+        else {
+<span class="nc" id="L194">            rootCollectionNode = (CollectionNode) getNode(bareJID);</span>
+        }
+<span class="nc" id="L196">    }</span>
+
+    @Override
+    public void addNode(Node node) {
+<span class="nc" id="L200">        nodes.put(node.getNodeID(), node);</span>
+<span class="nc" id="L201">    }</span>
+
+    @Override
+    public void removeNode(String nodeID) {
+<span class="nc" id="L205">        nodes.remove(nodeID);</span>
+<span class="nc" id="L206">    }</span>
+
+    @Override
+    public Node getNode(String nodeID) {
+<span class="nc" id="L210">        return nodes.get(nodeID);</span>
+    }
+
+    @Override
+    public Collection&lt;Node&gt; getNodes() {
+<span class="nc" id="L215">        return nodes.values();</span>
+    }
+
+    @Override
+    public CollectionNode getRootCollectionNode() {
+<span class="nc" id="L220">        return rootCollectionNode;</span>
+    }
+
+    @Override
+    public JID getAddress() {
+<span class="nc" id="L225">        return new JID(serviceOwnerJID);</span>
+    }
+
+    @Override
+    public String getServiceID() {
+        // The bare JID of the user is the service ID for PEP
+<span class="nc" id="L231">        return serviceOwnerJID;</span>
+    }
+
+    @Override
+    public DefaultNodeConfiguration getDefaultNodeConfiguration(boolean leafType) {
+<span class="nc bnc" id="L236" title="All 2 branches missed.">        if (leafType) {</span>
+<span class="nc" id="L237">            return leafDefaultConfiguration;</span>
+        }
+<span class="nc" id="L239">        return collectionDefaultConfiguration;</span>
+    }
+
+    @Override
+    public Collection&lt;String&gt; getShowPresences(JID subscriber) {
+<span class="nc" id="L244">        return PubSubEngine.getShowPresences(this, subscriber);</span>
+    }
+
+    @Override
+    public boolean canCreateNode(JID creator) {
+        // Node creation is always allowed for sysadmin
+<span class="nc bnc" id="L250" title="All 4 branches missed.">        if (isNodeCreationRestricted() &amp;&amp; !isServiceAdmin(creator)) {</span>
+            // The user is not allowed to create nodes
+<span class="nc" id="L252">            return false;</span>
+        }
+<span class="nc" id="L254">        return true;</span>
+    }
+
+    /**
+     * Returns true if the the prober is allowed to see the presence of the probee.
+     *
+     * @param prober the user that is trying to probe the presence of another user.
+     * @param probee the username of the uset that is being probed.
+     * @return true if the the prober is allowed to see the presence of the probee.
+     * @throws UserNotFoundException If the probee does not exist in the local server or the prober
+     *         is not present in the roster of the probee.
+     */
+    private boolean canProbePresence(JID prober, JID probee) throws UserNotFoundException {
+        Roster roster;
+<span class="nc" id="L268">        roster = XMPPServer.getInstance().getRosterManager().getRoster(prober.getNode());</span>
+<span class="nc" id="L269">        RosterItem item = roster.getRosterItem(probee);</span>
+
+<span class="nc bnc" id="L271" title="All 4 branches missed.">        if (item.getSubStatus() == RosterItem.SUB_BOTH || item.getSubStatus() == RosterItem.SUB_FROM) {</span>
+<span class="nc" id="L272">            return true;</span>
+        }
+
+<span class="nc" id="L275">        return false;</span>
+    }
+
+    @Override
+    public boolean isCollectionNodesSupported() {
+<span class="nc" id="L280">        return true;</span>
+    }
+
+    @Override
+    public boolean isInstantNodeSupported() {
+<span class="nc" id="L285">        return true;</span>
+    }
+
+    @Override
+    public boolean isMultipleSubscriptionsEnabled() {
+<span class="nc" id="L290">        return false;</span>
+    }
+
+    @Override
+    public boolean isServiceAdmin(JID user) {
+        // Here we consider a 'service admin' to be the user that this PEPService
+        // is associated with.
+<span class="nc bnc" id="L297" title="All 2 branches missed.">        if (serviceOwnerJID.equals(user.toBareJID())) {</span>
+<span class="nc" id="L298">            return true;</span>
+        }
+        else {
+<span class="nc" id="L301">            return false;</span>
+        }
+    }
+
+    public boolean isNodeCreationRestricted() {
+<span class="nc" id="L306">        return nodeCreationRestricted;</span>
+    }
+
+    @Override
+    public void presenceSubscriptionNotRequired(Node node, JID user) {
+<span class="nc" id="L311">        PubSubEngine.presenceSubscriptionNotRequired(this, node, user);</span>
+<span class="nc" id="L312">    }</span>
+
+    @Override
+    public void presenceSubscriptionRequired(Node node, JID user) {
+<span class="nc" id="L316">        PubSubEngine.presenceSubscriptionRequired(this, node, user);</span>
+<span class="nc" id="L317">    }</span>
+
+    @Override
+    public void send(Packet packet) {
+<span class="nc" id="L321">        router.route(packet);</span>
+<span class="nc" id="L322">    }</span>
+
+    @Override
+    public void broadcast(Node node, Message message, Collection&lt;JID&gt; jids) {
+<span class="nc" id="L326">        message.setFrom(getAddress());</span>
+<span class="nc bnc" id="L327" title="All 2 branches missed.">        for (JID jid : jids) {</span>
+<span class="nc" id="L328">            message.setTo(jid);</span>
+<span class="nc" id="L329">            message.setID(StringUtils.randomString(8));</span>
+<span class="nc" id="L330">            router.route(message);</span>
+<span class="nc" id="L331">        }</span>
+<span class="nc" id="L332">    }</span>
+
+    @Override
+    public void sendNotification(Node node, Message message, JID recipientJID) {
+<span class="nc" id="L336">        message.setTo(recipientJID);</span>
+<span class="nc" id="L337">        message.setFrom(getAddress());</span>
+<span class="nc" id="L338">        message.setID(StringUtils.randomString(8));</span>
+
+        // If the recipient subscribed with a bare JID and this PEPService can retrieve
+        // presence information for the recipient, collect all of their full JIDs and
+        // send the notification to each below.
+<span class="nc" id="L343">        Set&lt;JID&gt; recipientFullJIDs = new HashSet&lt;&gt;();</span>
+<span class="nc bnc" id="L344" title="All 2 branches missed.">        if (XMPPServer.getInstance().isLocal(recipientJID)) {</span>
+<span class="nc bnc" id="L345" title="All 2 branches missed.">            if (recipientJID.getResource() == null) {</span>
+<span class="nc bnc" id="L346" title="All 2 branches missed.">                for (ClientSession clientSession : SessionManager.getInstance().getSessions(recipientJID.getNode())) {</span>
+<span class="nc" id="L347">                    recipientFullJIDs.add(clientSession.getAddress());</span>
+<span class="nc" id="L348">                }</span>
+            }
+        }
+        else {
+            // Since recipientJID is not local, try to get presence info from cached known remote
+            // presences.
+
+            // TODO: OF-605 the old code depends on a cache that would contain presence state on all (?!) JIDS on all (?!)
+            // remote domains. As we cannot depend on this information to be correct (even if we could ensure that this
+            // potentially unlimited amount of data would indeed be manageable in the first place), this code was removed.
+
+<span class="nc" id="L359">            recipientFullJIDs.add(recipientJID);</span>
+        }
+
+<span class="nc bnc" id="L362" title="All 2 branches missed.">        if (recipientFullJIDs.isEmpty()) {</span>
+<span class="nc" id="L363">            router.route(message);</span>
+<span class="nc" id="L364">            return;</span>
+        }
+
+<span class="nc bnc" id="L367" title="All 2 branches missed.">        for (JID recipientFullJID : recipientFullJIDs) {</span>
+            // Include an Extended Stanza Addressing &quot;replyto&quot; extension specifying the publishing
+            // resource. However, only include the extension if the receiver has a presence subscription
+            // to the service owner.
+            try {
+<span class="nc" id="L372">                JID publisher = null;</span>
+
+                // Get the ID of the node that had an item published to or retracted from.
+<span class="nc" id="L375">                Element itemsElement = message.getElement().element(&quot;event&quot;).element(&quot;items&quot;);</span>
+<span class="nc" id="L376">                String nodeID = itemsElement.attributeValue(&quot;node&quot;);</span>
+
+                // Get the ID of the item that was published or retracted.
+<span class="nc" id="L379">                String itemID = null;</span>
+<span class="nc" id="L380">                Element itemElement = itemsElement.element(&quot;item&quot;);</span>
+<span class="nc bnc" id="L381" title="All 2 branches missed.">                if (itemElement == null) {</span>
+<span class="nc" id="L382">                    Element retractElement = itemsElement.element(&quot;retract&quot;);</span>
+<span class="nc bnc" id="L383" title="All 2 branches missed.">                    if (retractElement != null) {</span>
+<span class="nc" id="L384">                        itemID = retractElement.attributeValue(&quot;id&quot;);</span>
+                    }
+<span class="nc" id="L386">                }</span>
+                else {
+<span class="nc" id="L388">                    itemID = itemElement.attributeValue(&quot;id&quot;);</span>
+                }
+
+                // Check if the recipientFullJID is interested in notifications for this node.
+                // If the recipient has not yet requested any notification filtering, continue and send
+                // the notification.
+<span class="nc" id="L394">                EntityCapabilities entityCaps = entityCapsManager.getEntityCapabilities(recipientFullJID);</span>
+<span class="nc bnc" id="L395" title="All 2 branches missed.">                if (entityCaps != null) {</span>
+<span class="nc bnc" id="L396" title="All 2 branches missed.">                    if (!entityCaps.containsFeature(nodeID + &quot;+notify&quot;)) {</span>
+<span class="nc" id="L397">                        return;</span>
+                    }
+                }
+
+                // Get the full JID of the item publisher from the node that was published to.
+                // This full JID will be used as the &quot;replyto&quot; address in the addressing extension.
+<span class="nc bnc" id="L403" title="All 2 branches missed.">                if (node.isCollectionNode()) {</span>
+<span class="nc bnc" id="L404" title="All 2 branches missed.">                    for (Node leafNode : node.getNodes()) {</span>
+<span class="nc bnc" id="L405" title="All 2 branches missed.">                        if (leafNode.getNodeID().equals(nodeID)) {</span>
+<span class="nc" id="L406">                            publisher = leafNode.getPublishedItem(itemID).getPublisher();</span>
+
+                            // Ensure the recipientJID has access to receive notifications for items published to the leaf node.
+<span class="nc" id="L409">                            AccessModel accessModel = leafNode.getAccessModel();</span>
+<span class="nc bnc" id="L410" title="All 2 branches missed.">                            if (!accessModel.canAccessItems(leafNode, recipientFullJID, publisher)) {</span>
+<span class="nc" id="L411">                                return;</span>
+                            }
+
+                            break;
+                        }
+<span class="nc" id="L416">                    }</span>
+                }
+                else {
+<span class="nc" id="L419">                    publisher = node.getPublishedItem(itemID).getPublisher();</span>
+                }
+
+                // Ensure the recipient is subscribed to the service owner's (publisher's) presence.
+<span class="nc bnc" id="L423" title="All 2 branches missed.">                if (canProbePresence(publisher, recipientFullJID)) {</span>
+<span class="nc" id="L424">                    Element addresses = DocumentHelper.createElement(QName.get(&quot;addresses&quot;, &quot;http://jabber.org/protocol/address&quot;));</span>
+<span class="nc" id="L425">                    Element address = addresses.addElement(&quot;address&quot;);</span>
+<span class="nc" id="L426">                    address.addAttribute(&quot;type&quot;, &quot;replyto&quot;);</span>
+<span class="nc" id="L427">                    address.addAttribute(&quot;jid&quot;, publisher.toString());</span>
+
+<span class="nc" id="L429">                    Message extendedMessage = message.createCopy();</span>
+<span class="nc" id="L430">                    extendedMessage.addExtension(new PacketExtension(addresses));</span>
+
+<span class="nc" id="L432">                    extendedMessage.setTo(recipientFullJID);</span>
+<span class="nc" id="L433">                    router.route(extendedMessage);</span>
+                }
+            }
+<span class="nc" id="L436">            catch (IndexOutOfBoundsException e) {</span>
+                // Do not add addressing extension to message.
+            }
+<span class="nc" id="L439">            catch (UserNotFoundException e) {</span>
+                // Do not add addressing extension to message.
+<span class="nc" id="L441">                router.route(message);</span>
+            }
+<span class="nc" id="L443">            catch (NullPointerException e) {</span>
+                try {
+<span class="nc bnc" id="L445" title="All 2 branches missed.">                    if (canProbePresence(getAddress(), recipientFullJID)) {</span>
+<span class="nc" id="L446">                        message.setTo(recipientFullJID);</span>
+                    }
+                }
+<span class="nc" id="L449">                catch (UserNotFoundException e1) {</span>
+                    // Do nothing
+<span class="nc" id="L451">                }</span>
+<span class="nc" id="L452">                router.route(message);</span>
+<span class="nc" id="L453">            }</span>
+<span class="nc" id="L454">        }</span>
+<span class="nc" id="L455">    }</span>
+
+    /**
+     * Sends an event notification for the last published item of each leaf node under the
+     * root collection node to the recipient JID. If the recipient has no subscription to
+     * the root collection node, has not yet been authorized, or is pending to be
+     * configured -- then no notifications are going to be sent.&lt;p&gt;
+     *
+     * Depending on the subscription configuration the event notifications may or may not have
+     * a payload, may not be sent if a keyword (i.e. filter) was defined and it was not matched.
+     *
+     * @param recipientJID the recipient that is to receive the last published item notifications.
+     */
+    public void sendLastPublishedItems(JID recipientJID) {
+        // Ensure the recipient has a subscription to this service's root collection node.
+<span class="nc" id="L470">        NodeSubscription subscription = rootCollectionNode.getSubscription(recipientJID);</span>
+<span class="nc bnc" id="L471" title="All 2 branches missed.">        if (subscription == null) {</span>
+<span class="nc" id="L472">            subscription = rootCollectionNode.getSubscription(new JID(recipientJID.toBareJID()));</span>
+        }
+<span class="nc bnc" id="L474" title="All 2 branches missed.">        if (subscription == null) {</span>
+<span class="nc" id="L475">            return;</span>
+        }
+
+        // Send the last published item of each leaf node to the recipient.
+<span class="nc bnc" id="L479" title="All 2 branches missed.">        for (Node leafNode : rootCollectionNode.getNodes()) {</span>
+            // Retrieve last published item for the leaf node.
+<span class="nc" id="L481">            PublishedItem leafLastPublishedItem = null;</span>
+<span class="nc" id="L482">            leafLastPublishedItem = leafNode.getLastPublishedItem();</span>
+<span class="nc bnc" id="L483" title="All 2 branches missed.">            if (leafLastPublishedItem == null) {</span>
+<span class="nc" id="L484">                continue;</span>
+            }
+
+            // Check if the published item can be sent to the subscriber
+<span class="nc bnc" id="L488" title="All 2 branches missed.">            if (!subscription.canSendPublicationEvent(leafLastPublishedItem.getNode(), leafLastPublishedItem)) {</span>
+<span class="nc" id="L489">                return;</span>
+            }
+
+            // Send event notification to the subscriber
+<span class="nc" id="L493">            Message notification = new Message();</span>
+<span class="nc" id="L494">            Element event = notification.getElement().addElement(&quot;event&quot;, &quot;http://jabber.org/protocol/pubsub#event&quot;);</span>
+<span class="nc" id="L495">            Element items = event.addElement(&quot;items&quot;);</span>
+<span class="nc" id="L496">            items.addAttribute(&quot;node&quot;, leafLastPublishedItem.getNodeID());</span>
+<span class="nc" id="L497">            Element item = items.addElement(&quot;item&quot;);</span>
+<span class="nc bnc" id="L498" title="All 2 branches missed.">            if (leafLastPublishedItem.getNode().isItemRequired()) {</span>
+<span class="nc" id="L499">                item.addAttribute(&quot;id&quot;, leafLastPublishedItem.getID());</span>
+            }
+<span class="nc bnc" id="L501" title="All 4 branches missed.">            if (leafLastPublishedItem.getNode().isPayloadDelivered() &amp;&amp; leafLastPublishedItem.getPayload() != null) {</span>
+<span class="nc" id="L502">                item.add(leafLastPublishedItem.getPayload().createCopy());</span>
+            }
+            // Add a message body (if required)
+<span class="nc bnc" id="L505" title="All 2 branches missed.">            if (subscription.isIncludingBody()) {</span>
+<span class="nc" id="L506">                notification.setBody(LocaleUtils.getLocalizedString(&quot;pubsub.notification.message.body&quot;));</span>
+            }
+            // Include date when published item was created
+<span class="nc" id="L509">            notification.getElement().addElement(&quot;delay&quot;, &quot;urn:xmpp:delay&quot;).addAttribute(&quot;stamp&quot;, XMPPDateTimeFormat.format(leafLastPublishedItem.getCreationDate()));</span>
+            // Send the event notification to the subscriber
+<span class="nc" id="L511">            this.sendNotification(subscription.getNode(), notification, subscription.getJID());</span>
+<span class="nc" id="L512">        }</span>
+<span class="nc" id="L513">    }</span>
+
+    @Override
+    public Map&lt;String, Map&lt;String, String&gt;&gt; getBarePresences() {
+<span class="nc" id="L517">        return barePresences;</span>
+    }
+
+    @Override
+    public AdHocCommandManager getManager() {
+<span class="nc" id="L522">        return adHocCommandManager;</span>
+    }
+
+    @Override
+    public int getCachedSize() {
+        // Rather arbitrary. Don't use this for size-based eviction policies!
+<span class="nc" id="L528">        return 600;</span>
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

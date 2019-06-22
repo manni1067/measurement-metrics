@@ -1,0 +1,612 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>PresenceManagerImpl.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.spi</a> &gt; <span class="el_source">PresenceManagerImpl.java</span></div><h1>PresenceManagerImpl.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2004-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.spi;
+
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Types;
+import java.util.*;
+import java.util.concurrent.locks.Lock;
+
+import org.dom4j.Document;
+import org.dom4j.DocumentException;
+import org.dom4j.DocumentHelper;
+import org.jivesoftware.database.DbConnectionManager;
+import org.jivesoftware.openfire.*;
+import org.jivesoftware.openfire.auth.UnauthorizedException;
+import org.jivesoftware.openfire.component.InternalComponentManager;
+import org.jivesoftware.openfire.container.BasicModule;
+import org.jivesoftware.openfire.event.UserEventDispatcher;
+import org.jivesoftware.openfire.event.UserEventListener;
+import org.jivesoftware.openfire.handler.PresenceUpdateHandler;
+import org.jivesoftware.openfire.privacy.PrivacyList;
+import org.jivesoftware.openfire.privacy.PrivacyListManager;
+import org.jivesoftware.openfire.roster.Roster;
+import org.jivesoftware.openfire.roster.RosterItem;
+import org.jivesoftware.openfire.roster.RosterManager;
+import org.jivesoftware.openfire.session.ClientSession;
+import org.jivesoftware.openfire.user.User;
+import org.jivesoftware.openfire.user.UserManager;
+import org.jivesoftware.openfire.user.UserNotFoundException;
+import org.jivesoftware.util.LocaleUtils;
+import org.jivesoftware.util.StringUtils;
+import org.jivesoftware.util.cache.Cache;
+import org.jivesoftware.util.cache.CacheFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmpp.packet.JID;
+import org.xmpp.packet.PacketError;
+import org.xmpp.packet.Presence;
+
+/**
+ * Simple in memory implementation of the PresenceManager interface.
+ *
+ * @author Iain Shigeoka
+ */
+public class PresenceManagerImpl extends BasicModule implements PresenceManager, UserEventListener, XMPPServerListener {
+
+<span class="nc" id="L64">    private static final Logger Log = LoggerFactory.getLogger(PresenceManagerImpl.class);</span>
+
+    private static final String LOAD_OFFLINE_PRESENCE =
+            &quot;SELECT offlinePresence, offlineDate FROM ofPresence WHERE username=?&quot;;
+    private static final String INSERT_OFFLINE_PRESENCE =
+            &quot;INSERT INTO ofPresence(username, offlinePresence, offlineDate) VALUES(?,?,?)&quot;;
+    private static final String DELETE_OFFLINE_PRESENCE =
+            &quot;DELETE FROM ofPresence WHERE username=?&quot;;
+
+    private static final String NULL_STRING = &quot;NULL&quot;;
+    private static final long NULL_LONG = -1L;
+
+    private RoutingTable routingTable;
+    private SessionManager sessionManager;
+    private UserManager userManager;
+    private RosterManager rosterManager;
+    private XMPPServer server;
+    private PacketDeliverer deliverer;
+    private PresenceUpdateHandler presenceUpdateHandler;
+
+    private InternalComponentManager componentManager;
+
+    private Cache&lt;String, Long&gt; lastActivityCache;
+    private Cache&lt;String, String&gt; offlinePresenceCache;
+
+    public PresenceManagerImpl() {
+<span class="nc" id="L90">        super(&quot;Presence manager&quot;);</span>
+<span class="nc" id="L91">    }</span>
+
+    @Override
+    public boolean isAvailable(User user) {
+<span class="nc bnc" id="L95" title="All 2 branches missed.">        return sessionManager.getActiveSessionCount(user.getUsername()) &gt; 0;</span>
+    }
+
+    @Override
+    public Presence getPresence(User user) {
+<span class="nc bnc" id="L100" title="All 2 branches missed.">        if (user == null) {</span>
+<span class="nc" id="L101">            return null;</span>
+        }
+<span class="nc" id="L103">        Presence presence = null;</span>
+
+<span class="nc bnc" id="L105" title="All 2 branches missed.">        for (ClientSession session : sessionManager.getSessions(user.getUsername())) {</span>
+<span class="nc bnc" id="L106" title="All 2 branches missed.">            if (presence == null) {</span>
+<span class="nc" id="L107">                presence = session.getPresence();</span>
+            }
+            else {
+                // Get the ordinals of the presences to compare. If no ordinal is available then
+                // assume a value of -1
+<span class="nc bnc" id="L112" title="All 2 branches missed.">                int o1 = presence.getShow() != null ? presence.getShow().ordinal() : -1;</span>
+<span class="nc bnc" id="L113" title="All 2 branches missed.">                int o2 = session.getPresence().getShow() != null ?</span>
+<span class="nc" id="L114">                        session.getPresence().getShow().ordinal() : -1;</span>
+                // Compare the presences' show ordinals
+<span class="nc bnc" id="L116" title="All 2 branches missed.">                if (o1 &gt; o2) {</span>
+<span class="nc" id="L117">                    presence = session.getPresence();</span>
+                }
+            }
+<span class="nc" id="L120">        }</span>
+<span class="nc" id="L121">        return presence;</span>
+    }
+
+    @Override
+    public Collection&lt;Presence&gt; getPresences(String username) {
+<span class="nc bnc" id="L126" title="All 2 branches missed.">        if (username == null) {</span>
+<span class="nc" id="L127">            return null;</span>
+        }
+<span class="nc" id="L129">        List&lt;Presence&gt; presences = new ArrayList&lt;&gt;();</span>
+
+<span class="nc bnc" id="L131" title="All 2 branches missed.">        for (ClientSession session : sessionManager.getSessions(username)) {</span>
+<span class="nc" id="L132">            presences.add(session.getPresence());</span>
+<span class="nc" id="L133">        }</span>
+<span class="nc" id="L134">        return Collections.unmodifiableCollection(presences);</span>
+    }
+
+    @Override
+    public String getLastPresenceStatus(User user) {
+<span class="nc" id="L139">        String username = user.getUsername();</span>
+<span class="nc" id="L140">        String presenceStatus = null;</span>
+<span class="nc" id="L141">        String presenceXML = offlinePresenceCache.get(username);</span>
+<span class="nc bnc" id="L142" title="All 2 branches missed.">        if (presenceXML == null) {</span>
+<span class="nc" id="L143">            loadOfflinePresence(username);</span>
+        }
+<span class="nc" id="L145">        presenceXML = offlinePresenceCache.get(username);</span>
+<span class="nc bnc" id="L146" title="All 2 branches missed.">        if (presenceXML != null) {</span>
+            // If the cached answer is no data, return null.
+<span class="nc bnc" id="L148" title="All 2 branches missed.">            if (presenceXML.equals(NULL_STRING)) {</span>
+<span class="nc" id="L149">                return null;</span>
+            }
+            // Otherwise, parse out the status from the XML.
+            try {
+                // Parse the element
+<span class="nc" id="L154">                Document element = DocumentHelper.parseText(presenceXML);</span>
+<span class="nc" id="L155">                presenceStatus = element.getRootElement().elementTextTrim(&quot;status&quot;);</span>
+            }
+<span class="nc" id="L157">            catch (DocumentException e) {</span>
+<span class="nc" id="L158">                Log.error(LocaleUtils.getLocalizedString(&quot;admin.error&quot;), e);</span>
+<span class="nc" id="L159">            }</span>
+        }
+<span class="nc" id="L161">        return presenceStatus;</span>
+    }
+
+    @Override
+    public long getLastActivity(User user) {
+<span class="nc" id="L166">        String username = user.getUsername();</span>
+<span class="nc" id="L167">        long lastActivity = NULL_LONG;</span>
+<span class="nc" id="L168">        Long offlineDate = lastActivityCache.get(username);</span>
+<span class="nc bnc" id="L169" title="All 2 branches missed.">        if (offlineDate == null) {</span>
+<span class="nc" id="L170">            loadOfflinePresence(username);</span>
+        }
+<span class="nc" id="L172">        offlineDate = lastActivityCache.get(username);</span>
+<span class="nc bnc" id="L173" title="All 2 branches missed.">        if (offlineDate != null) {</span>
+            // If the cached answer is no data, return -1.
+<span class="nc bnc" id="L175" title="All 2 branches missed.">            if (offlineDate == NULL_LONG) {</span>
+<span class="nc" id="L176">                return NULL_LONG;</span>
+            }
+            else {
+                try {
+<span class="nc" id="L180">                    lastActivity = (System.currentTimeMillis() - offlineDate);</span>
+                }
+<span class="nc" id="L182">                catch (NumberFormatException e) {</span>
+<span class="nc" id="L183">                    Log.error(LocaleUtils.getLocalizedString(&quot;admin.error&quot;), e);</span>
+<span class="nc" id="L184">                }</span>
+            }
+        }
+<span class="nc" id="L187">        return lastActivity;</span>
+    }
+
+    @Override
+    public void userAvailable(Presence presence) {
+        // Delete the last unavailable presence of this user since the user is now
+        // available. Only perform this operation if this is an available presence sent to
+        // THE SERVER and the presence belongs to a local user.
+<span class="nc bnc" id="L195" title="All 4 branches missed.">        if (presence.getTo() == null &amp;&amp; server.isLocal(presence.getFrom())) {</span>
+<span class="nc" id="L196">            String username = presence.getFrom().getNode();</span>
+<span class="nc bnc" id="L197" title="All 4 branches missed.">            if (username == null || !userManager.isRegisteredUser(username)) {</span>
+                // Ignore anonymous users
+<span class="nc" id="L199">                return;</span>
+            }
+
+            // Optimization: only delete the unavailable presence information if this
+            // is the first session created on the server.
+<span class="nc bnc" id="L204" title="All 2 branches missed.">            if (sessionManager.getSessionCount(username) &gt; 1) {</span>
+<span class="nc" id="L205">                return;</span>
+            }
+
+<span class="nc" id="L208">            deleteOfflinePresenceFromDB(username);</span>
+
+            // Remove data from cache.
+<span class="nc" id="L211">            offlinePresenceCache.remove(username);</span>
+<span class="nc" id="L212">            lastActivityCache.remove(username);</span>
+        }
+<span class="nc" id="L214">    }</span>
+
+    private void deleteOfflinePresenceFromDB(String username) {
+<span class="nc" id="L217">        Connection con = null;</span>
+<span class="nc" id="L218">        PreparedStatement pstmt = null;</span>
+        try {
+<span class="nc" id="L220">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L221">            pstmt = con.prepareStatement(DELETE_OFFLINE_PRESENCE);</span>
+<span class="nc" id="L222">            pstmt.setString(1, username);</span>
+<span class="nc" id="L223">            pstmt.execute();</span>
+        }
+<span class="nc" id="L225">        catch (SQLException sqle) {</span>
+<span class="nc" id="L226">            Log.error(sqle.getMessage(), sqle);</span>
+        }
+        finally {
+<span class="nc" id="L229">            DbConnectionManager.closeConnection(pstmt, con);</span>
+<span class="nc" id="L230">        }</span>
+<span class="nc" id="L231">    }</span>
+
+    @Override
+    public void userUnavailable(Presence presence) {
+        // Only save the last presence status and keep track of the time when the user went
+        // offline if this is an unavailable presence sent to THE SERVER and the presence belongs
+        // to a local user.
+<span class="nc bnc" id="L238" title="All 4 branches missed.">        if (presence.getTo() == null &amp;&amp; server.isLocal(presence.getFrom())) {</span>
+<span class="nc" id="L239">            String username = presence.getFrom().getNode();</span>
+<span class="nc bnc" id="L240" title="All 4 branches missed.">            if (username == null || !userManager.isRegisteredUser(username)) {</span>
+                // Ignore anonymous users
+<span class="nc" id="L242">                return;</span>
+            }
+
+            // If the user has any remaining sessions, don't record the offline info.
+<span class="nc bnc" id="L246" title="All 2 branches missed.">            if (sessionManager.getActiveSessionCount(username) &gt; 0) {</span>
+<span class="nc" id="L247">                return;</span>
+            }
+
+<span class="nc" id="L250">            String offlinePresence = null;</span>
+            // Save the last unavailable presence of this user if the presence contains any
+            // child element such as &lt;status&gt;.
+<span class="nc bnc" id="L253" title="All 2 branches missed.">            if (!presence.getElement().elements().isEmpty()) {</span>
+<span class="nc" id="L254">                offlinePresence = presence.toXML();</span>
+            }
+            // Keep track of the time when the user went offline
+<span class="nc" id="L257">            java.util.Date offlinePresenceDate = new java.util.Date();</span>
+
+            boolean addedToCache;
+<span class="nc bnc" id="L260" title="All 2 branches missed.">            if (offlinePresence == null) {</span>
+<span class="nc bnc" id="L261" title="All 2 branches missed.">                addedToCache = !NULL_STRING.equals(offlinePresenceCache.put(username, NULL_STRING));</span>
+            }
+            else {
+<span class="nc bnc" id="L264" title="All 2 branches missed.">                addedToCache = !offlinePresence.equals(offlinePresenceCache.put(username, offlinePresence));</span>
+            }
+<span class="nc bnc" id="L266" title="All 2 branches missed.">            if (!addedToCache) {</span>
+<span class="nc" id="L267">                return;</span>
+            }
+<span class="nc" id="L269">            Log.debug( &quot;Recording 'last activity' for user '{}'.&quot;, username);</span>
+<span class="nc" id="L270">            lastActivityCache.put(username, offlinePresenceDate.getTime());</span>
+
+<span class="nc" id="L272">            writeToDatabase(username, offlinePresence, offlinePresenceDate);</span>
+        }
+<span class="nc" id="L274">    }</span>
+
+    private void writeToDatabase(String username, String offlinePresence, Date offlinePresenceDate) {
+        // delete existing offline presence (if any)
+<span class="nc" id="L278">        deleteOfflinePresenceFromDB(username);</span>
+
+        // Insert data into the database.
+<span class="nc" id="L281">        Connection con = null;</span>
+<span class="nc" id="L282">        PreparedStatement pstmt = null;</span>
+        try {
+<span class="nc" id="L284">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L285">            pstmt = con.prepareStatement(INSERT_OFFLINE_PRESENCE);</span>
+<span class="nc" id="L286">            pstmt.setString(1, username);</span>
+<span class="nc bnc" id="L287" title="All 2 branches missed.">            if (offlinePresence != null) {</span>
+<span class="nc" id="L288">                DbConnectionManager.setLargeTextField(pstmt, 2, offlinePresence);</span>
+            } else {
+<span class="nc" id="L290">                pstmt.setNull(2, Types.VARCHAR);</span>
+            }
+<span class="nc" id="L292">            pstmt.setString(3, StringUtils.dateToMillis(offlinePresenceDate));</span>
+<span class="nc" id="L293">            pstmt.execute();</span>
+<span class="nc" id="L294">        } catch (SQLException sqle) {</span>
+<span class="nc" id="L295">            Log.error(&quot;Error storing offline presence of user: &quot; + username, sqle);</span>
+        } finally {
+<span class="nc" id="L297">            DbConnectionManager.closeConnection(pstmt, con);</span>
+<span class="nc" id="L298">        }</span>
+<span class="nc" id="L299">    }</span>
+
+    @Override
+    public void handleProbe(Presence packet) throws UnauthorizedException {
+<span class="nc" id="L303">        String username = packet.getTo().getNode();</span>
+        try {
+<span class="nc" id="L305">            Roster roster = rosterManager.getRoster(username);</span>
+<span class="nc" id="L306">            RosterItem item = roster.getRosterItem(packet.getFrom());</span>
+<span class="nc bnc" id="L307" title="All 2 branches missed.">            if (item.getSubStatus() == RosterItem.SUB_FROM</span>
+<span class="nc bnc" id="L308" title="All 2 branches missed.">                    || item.getSubStatus() == RosterItem.SUB_BOTH) {</span>
+<span class="nc" id="L309">                probePresence(packet.getFrom(),  packet.getTo());</span>
+            }
+            else {
+<span class="nc" id="L312">                PacketError.Condition error = PacketError.Condition.not_authorized;</span>
+<span class="nc bnc" id="L313" title="All 2 branches missed.">                if ((item.getSubStatus() == RosterItem.SUB_NONE &amp;&amp;</span>
+<span class="nc bnc" id="L314" title="All 2 branches missed.">                        item.getRecvStatus() != RosterItem.RECV_SUBSCRIBE) ||</span>
+<span class="nc bnc" id="L315" title="All 2 branches missed.">                        (item.getSubStatus() == RosterItem.SUB_TO &amp;&amp;</span>
+<span class="nc bnc" id="L316" title="All 2 branches missed.">                        item.getRecvStatus() != RosterItem.RECV_SUBSCRIBE)) {</span>
+<span class="nc" id="L317">                    error = PacketError.Condition.forbidden;</span>
+                }
+<span class="nc" id="L319">                Presence presenceToSend = new Presence();</span>
+<span class="nc" id="L320">                presenceToSend.setError(error);</span>
+<span class="nc" id="L321">                presenceToSend.setTo(packet.getFrom());</span>
+<span class="nc" id="L322">                presenceToSend.setFrom(packet.getTo());</span>
+<span class="nc" id="L323">                deliverer.deliver(presenceToSend);</span>
+            }
+        }
+<span class="nc" id="L326">        catch (UserNotFoundException e) {</span>
+<span class="nc" id="L327">            Presence presenceToSend = new Presence();</span>
+<span class="nc" id="L328">            presenceToSend.setError(PacketError.Condition.forbidden);</span>
+<span class="nc" id="L329">            presenceToSend.setTo(packet.getFrom());</span>
+<span class="nc" id="L330">            presenceToSend.setFrom(packet.getTo());</span>
+<span class="nc" id="L331">            deliverer.deliver(presenceToSend);</span>
+<span class="nc" id="L332">        }</span>
+<span class="nc" id="L333">    }</span>
+
+    @Override
+    public boolean canProbePresence(JID prober, String probee) throws UserNotFoundException {
+<span class="nc bnc" id="L337" title="All 4 branches missed.">        if (probee.equals(prober.getNode()) &amp;&amp; XMPPServer.getInstance().isLocal(prober)) {</span>
+<span class="nc" id="L338">            return true;</span>
+        }
+<span class="nc" id="L340">        RosterItem item = rosterManager.getRoster(probee).getRosterItem(prober);</span>
+<span class="nc bnc" id="L341" title="All 2 branches missed.">        return item.getSubStatus() == RosterItem.SUB_FROM</span>
+<span class="nc bnc" id="L342" title="All 2 branches missed.">                || item.getSubStatus() == RosterItem.SUB_BOTH;</span>
+    }
+
+    @Override
+    public void probePresence(JID prober, JID probee) {
+        try {
+<span class="nc bnc" id="L348" title="All 2 branches missed.">            if (server.isLocal(probee)) {</span>
+                // Local probers should receive presences of probee in all connected resources
+<span class="nc" id="L350">                Collection&lt;JID&gt; proberFullJIDs = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L351" title="All 4 branches missed.">                if (prober.getResource() == null &amp;&amp; server.isLocal(prober)) {</span>
+<span class="nc bnc" id="L352" title="All 2 branches missed.">                    for (ClientSession session : sessionManager.getSessions(prober.getNode())) {</span>
+<span class="nc" id="L353">                        proberFullJIDs.add(session.getAddress());</span>
+<span class="nc" id="L354">                    }</span>
+                }
+                else {
+<span class="nc" id="L357">                    proberFullJIDs.add(prober);</span>
+                }
+                // If the probee is a local user then don't send a probe to the contact's server.
+                // But instead just send the contact's presence to the prober
+<span class="nc" id="L361">                Collection&lt;ClientSession&gt; sessions = sessionManager.getSessions(probee.getNode());</span>
+<span class="nc bnc" id="L362" title="All 2 branches missed.">                if (sessions.isEmpty()) {</span>
+                    // If the probee is not online then try to retrieve his last unavailable
+                    // presence which may contain particular information and send it to the
+                    // prober
+<span class="nc" id="L366">                    String presenceXML = offlinePresenceCache.get(probee.getNode());</span>
+<span class="nc bnc" id="L367" title="All 2 branches missed.">                    if (presenceXML == null) {</span>
+<span class="nc" id="L368">                        loadOfflinePresence(probee.getNode());</span>
+                    }
+<span class="nc" id="L370">                    presenceXML = offlinePresenceCache.get(probee.getNode());</span>
+<span class="nc bnc" id="L371" title="All 4 branches missed.">                    if (presenceXML != null &amp;&amp; !NULL_STRING.equals(presenceXML)) {</span>
+                        try {
+                            // Parse the element
+<span class="nc" id="L374">                            Document element = DocumentHelper.parseText(presenceXML);</span>
+                            // Create the presence from the parsed element
+<span class="nc" id="L376">                            Presence presencePacket = new Presence(element.getRootElement());</span>
+<span class="nc" id="L377">                            presencePacket.setFrom(probee.toBareJID());</span>
+                            // Check if default privacy list of the probee blocks the
+                            // outgoing presence
+<span class="nc" id="L380">                            PrivacyList list = PrivacyListManager.getInstance()</span>
+<span class="nc" id="L381">                                    .getDefaultPrivacyList(probee.getNode());</span>
+                            // Send presence to all prober's resources
+<span class="nc bnc" id="L383" title="All 2 branches missed.">                            for (JID receipient : proberFullJIDs) {</span>
+<span class="nc" id="L384">                                presencePacket.setTo(receipient);</span>
+<span class="nc bnc" id="L385" title="All 4 branches missed.">                                if (list == null || !list.shouldBlockPacket(presencePacket)) {</span>
+                                    // Send the presence to the prober
+<span class="nc" id="L387">                                    deliverer.deliver(presencePacket);</span>
+                                }
+<span class="nc" id="L389">                            }</span>
+                        }
+<span class="nc" id="L391">                        catch (Exception e) {</span>
+<span class="nc" id="L392">                            Log.error(LocaleUtils.getLocalizedString(&quot;admin.error&quot;), e);</span>
+<span class="nc" id="L393">                        }</span>
+                    }
+<span class="nc" id="L395">                }</span>
+                else {
+                    // The contact is online so send to the prober all the resources where the
+                    // probee is connected
+<span class="nc bnc" id="L399" title="All 2 branches missed.">                    for (ClientSession session : sessions) {</span>
+                        // Create presence to send from probee to prober
+<span class="nc" id="L401">                        Presence presencePacket = session.getPresence().createCopy();</span>
+<span class="nc" id="L402">                        presencePacket.setFrom(session.getAddress());</span>
+                        // Check if a privacy list of the probee blocks the outgoing presence
+<span class="nc" id="L404">                        PrivacyList list = session.getActiveList();</span>
+<span class="nc bnc" id="L405" title="All 2 branches missed.">                        list = list == null ? session.getDefaultList() : list;</span>
+                        // Send presence to all prober's resources
+<span class="nc bnc" id="L407" title="All 2 branches missed.">                        for (JID receipient : proberFullJIDs) {</span>
+<span class="nc" id="L408">                            presencePacket.setTo(receipient);</span>
+<span class="nc bnc" id="L409" title="All 2 branches missed.">                            if (list != null) {</span>
+<span class="nc bnc" id="L410" title="All 2 branches missed.">                                if (list.shouldBlockPacket(presencePacket)) {</span>
+                                    // Default list blocked outgoing presence so skip this session
+<span class="nc" id="L412">                                    continue;</span>
+                                }
+                            }
+                            try {
+<span class="nc" id="L416">                                deliverer.deliver(presencePacket);</span>
+                            }
+<span class="nc" id="L418">                            catch (Exception e) {</span>
+<span class="nc" id="L419">                                Log.error(LocaleUtils.getLocalizedString(&quot;admin.error&quot;), e);</span>
+<span class="nc" id="L420">                            }</span>
+<span class="nc" id="L421">                        }</span>
+<span class="nc" id="L422">                    }</span>
+                }
+<span class="nc" id="L424">            }</span>
+            else {
+<span class="nc bnc" id="L426" title="All 2 branches missed.">                if (routingTable.hasComponentRoute(probee)) {</span>
+                    // If the probee belongs to a component then ask the component to process the
+                    // probe presence
+<span class="nc" id="L429">                    Presence presence = new Presence();</span>
+<span class="nc" id="L430">                    presence.setType(Presence.Type.probe);</span>
+<span class="nc" id="L431">                    presence.setFrom(prober);</span>
+<span class="nc" id="L432">                    presence.setTo(probee);</span>
+<span class="nc" id="L433">                    routingTable.routePacket(probee, presence, true);</span>
+<span class="nc" id="L434">                }</span>
+                else {
+                    // Check if the probee may be hosted by this server
+                    /*String serverDomain = server.getServerInfo().getName();
+                    if (!probee.getDomain().contains(serverDomain)) {*/
+<span class="nc bnc" id="L439" title="All 2 branches missed.">                    if (server.isRemote(probee)) {</span>
+                        // Send the probe presence to the remote server
+<span class="nc" id="L441">                        Presence probePresence = new Presence();</span>
+<span class="nc" id="L442">                        probePresence.setType(Presence.Type.probe);</span>
+<span class="nc" id="L443">                        probePresence.setFrom(prober);</span>
+<span class="nc" id="L444">                        probePresence.setTo(probee.toBareJID());</span>
+                        // Send the probe presence
+<span class="nc" id="L446">                        deliverer.deliver(probePresence);</span>
+<span class="nc" id="L447">                    }</span>
+                    else {
+                        // The probee may be related to a component that has not yet been connected so
+                        // we will keep a registry of this presence probe. The component will answer
+                        // this presence probe when he becomes online
+<span class="nc" id="L452">                        componentManager.addPresenceRequest(prober, probee);</span>
+                    }
+                }
+            }
+        }
+<span class="nc" id="L457">        catch (Exception e) {</span>
+<span class="nc" id="L458">            Log.error(LocaleUtils.getLocalizedString(&quot;admin.error&quot;), e);</span>
+<span class="nc" id="L459">        }</span>
+<span class="nc" id="L460">    }</span>
+
+    @Override
+    public void sendUnavailableFromSessions(JID recipientJID, JID userJID) {
+<span class="nc bnc" id="L464" title="All 4 branches missed.">        if (XMPPServer.getInstance().isLocal(userJID) &amp;&amp; userManager.isRegisteredUser(userJID.getNode())) {</span>
+<span class="nc bnc" id="L465" title="All 2 branches missed.">            for (ClientSession session : sessionManager.getSessions(userJID.getNode())) {</span>
+                // Do not send an unavailable presence if the user sent a direct available presence
+<span class="nc bnc" id="L467" title="All 2 branches missed.">                if (presenceUpdateHandler.hasDirectPresence(session.getAddress(), recipientJID)) {</span>
+<span class="nc" id="L468">                    continue;</span>
+                }
+<span class="nc" id="L470">                Presence presencePacket = new Presence();</span>
+<span class="nc" id="L471">                presencePacket.setType(Presence.Type.unavailable);</span>
+<span class="nc" id="L472">                presencePacket.setFrom(session.getAddress());</span>
+                // Ensure that unavailable presence is sent to all receipient's resources
+<span class="nc" id="L474">                Collection&lt;JID&gt; recipientFullJIDs = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L475" title="All 2 branches missed.">                if (server.isLocal(recipientJID)) {</span>
+<span class="nc bnc" id="L476" title="All 2 branches missed.">                    for (ClientSession targetSession : sessionManager</span>
+<span class="nc" id="L477">                            .getSessions(recipientJID.getNode())) {</span>
+<span class="nc" id="L478">                        recipientFullJIDs.add(targetSession.getAddress());</span>
+<span class="nc" id="L479">                    }</span>
+                }
+                else {
+<span class="nc" id="L482">                    recipientFullJIDs.add(recipientJID);</span>
+                }
+<span class="nc bnc" id="L484" title="All 2 branches missed.">                for (JID jid : recipientFullJIDs) {</span>
+<span class="nc" id="L485">                    presencePacket.setTo(jid);</span>
+                    try {
+<span class="nc" id="L487">                        deliverer.deliver(presencePacket);</span>
+                    }
+<span class="nc" id="L489">                    catch (Exception e) {</span>
+<span class="nc" id="L490">                        Log.error(LocaleUtils.getLocalizedString(&quot;admin.error&quot;), e);</span>
+<span class="nc" id="L491">                    }</span>
+<span class="nc" id="L492">                }</span>
+<span class="nc" id="L493">            }</span>
+        }
+<span class="nc" id="L495">    }</span>
+
+    @Override
+    public void userCreated(User user, Map&lt;String, Object&gt; params) {
+        // Do nothing
+<span class="nc" id="L500">    }</span>
+
+    @Override
+    public void userDeleting(User user, Map&lt;String, Object&gt; params) {
+        // Delete user information
+<span class="nc" id="L505">        deleteOfflinePresenceFromDB(user.getUsername());</span>
+<span class="nc" id="L506">        offlinePresenceCache.remove(user.getUsername());</span>
+<span class="nc" id="L507">        lastActivityCache.remove(user.getUsername());</span>
+<span class="nc" id="L508">    }</span>
+
+    @Override
+    public void userModified(User user, Map&lt;String, Object&gt; params) {
+        // Do nothing
+<span class="nc" id="L513">    }</span>
+
+    // #####################################################################
+    // Module management
+    // #####################################################################
+
+    @Override
+    public void initialize(XMPPServer server) {
+<span class="nc" id="L521">        super.initialize(server);</span>
+<span class="nc" id="L522">        this.server = server;</span>
+
+<span class="nc" id="L524">        offlinePresenceCache = CacheFactory.createCache(&quot;Offline Presence Cache&quot;);</span>
+<span class="nc" id="L525">        lastActivityCache = CacheFactory.createCache(&quot;Last Activity Cache&quot;);</span>
+
+<span class="nc" id="L527">        deliverer = server.getPacketDeliverer();</span>
+<span class="nc" id="L528">        sessionManager = server.getSessionManager();</span>
+<span class="nc" id="L529">        userManager = server.getUserManager();</span>
+<span class="nc" id="L530">        presenceUpdateHandler = server.getPresenceUpdateHandler();</span>
+<span class="nc" id="L531">        rosterManager = server.getRosterManager();</span>
+<span class="nc" id="L532">        routingTable = server.getRoutingTable();</span>
+<span class="nc" id="L533">    }</span>
+
+    @Override
+    public void start() throws IllegalStateException {
+<span class="nc" id="L537">        super.start();</span>
+        // Use component manager for Presence Updates.
+<span class="nc" id="L539">        componentManager = InternalComponentManager.getInstance();</span>
+        // Listen for user deletion events
+<span class="nc" id="L541">        UserEventDispatcher.addListener(this);</span>
+
+<span class="nc" id="L543">    }</span>
+
+    @Override
+    public void stop() {
+        // Clear the caches when stopping the module.
+<span class="nc" id="L548">        offlinePresenceCache.clear();</span>
+<span class="nc" id="L549">        lastActivityCache.clear();</span>
+        // Stop listening for user deletion events
+<span class="nc" id="L551">        UserEventDispatcher.removeListener(this);</span>
+<span class="nc" id="L552">    }</span>
+
+    /**
+     * Loads offline presence data for the user into cache.
+     *
+     * @param username the username.
+     */
+    private void loadOfflinePresence(String username) {
+<span class="nc" id="L560">        Connection con = null;</span>
+<span class="nc" id="L561">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L562">        ResultSet rs = null;</span>
+<span class="nc" id="L563">        Lock lock = CacheFactory.getLock(username, offlinePresenceCache);</span>
+        try {
+<span class="nc" id="L565">            lock.lock();</span>
+<span class="nc bnc" id="L566" title="All 4 branches missed.">            if (!offlinePresenceCache.containsKey(username) || !lastActivityCache.containsKey(username)) {</span>
+<span class="nc" id="L567">                con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L568">                pstmt = con.prepareStatement(LOAD_OFFLINE_PRESENCE);</span>
+<span class="nc" id="L569">                pstmt.setString(1, username);</span>
+<span class="nc" id="L570">                rs = pstmt.executeQuery();</span>
+<span class="nc bnc" id="L571" title="All 2 branches missed.">                if (rs.next()) {</span>
+<span class="nc" id="L572">                    String offlinePresence = DbConnectionManager.getLargeTextField(rs, 1);</span>
+<span class="nc bnc" id="L573" title="All 2 branches missed.">                    if (rs.wasNull()) {</span>
+<span class="nc" id="L574">                        offlinePresence = NULL_STRING;</span>
+                    }
+<span class="nc" id="L576">                    long offlineDate = Long.parseLong(rs.getString(2).trim());</span>
+<span class="nc" id="L577">                    offlinePresenceCache.put(username, offlinePresence);</span>
+<span class="nc" id="L578">                    lastActivityCache.put(username, offlineDate);</span>
+<span class="nc" id="L579">                }</span>
+                else {
+<span class="nc" id="L581">                    offlinePresenceCache.put(username, NULL_STRING);</span>
+<span class="nc" id="L582">                    lastActivityCache.put(username, NULL_LONG);</span>
+                }
+            }
+        }
+<span class="nc" id="L586">        catch (SQLException sqle) {</span>
+<span class="nc" id="L587">            Log.error(sqle.getMessage(), sqle);</span>
+        }
+        finally {
+<span class="nc" id="L590">            DbConnectionManager.closeConnection(rs, pstmt, con);</span>
+<span class="nc" id="L591">            lock.unlock();</span>
+<span class="nc" id="L592">        }</span>
+<span class="nc" id="L593">    }</span>
+
+    @Override
+    public void serverStarted() {
+<span class="nc" id="L597">    }</span>
+
+    @Override
+    public void serverStopping() {
+<span class="nc bnc" id="L601" title="All 2 branches missed.">        for (ClientSession session : XMPPServer.getInstance().getSessionManager().getSessions()) {</span>
+<span class="nc bnc" id="L602" title="All 2 branches missed.">            if (!session.isAnonymousUser()) {</span>
+                try {
+<span class="nc" id="L604">                    writeToDatabase(session.getUsername(), null, new Date());</span>
+<span class="nc" id="L605">                } catch (UserNotFoundException e) {</span>
+<span class="nc" id="L606">                    Log.error(e.getMessage(), e);</span>
+<span class="nc" id="L607">                }</span>
+            }
+<span class="nc" id="L609">        }</span>
+<span class="nc" id="L610">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

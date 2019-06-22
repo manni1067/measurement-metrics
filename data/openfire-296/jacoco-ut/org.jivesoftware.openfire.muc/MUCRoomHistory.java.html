@@ -1,0 +1,246 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>MUCRoomHistory.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.muc</a> &gt; <span class="el_source">MUCRoomHistory.java</span></div><h1>MUCRoomHistory.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2004-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.muc;
+
+import org.dom4j.Attribute;
+import org.dom4j.Element;
+import org.dom4j.Namespace;
+import org.dom4j.io.SAXReader;
+import org.jivesoftware.openfire.user.UserNotFoundException;
+import org.jivesoftware.util.XMPPDateTimeFormat;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmpp.packet.JID;
+import org.xmpp.packet.Message;
+
+import java.io.StringReader;
+import java.util.Date;
+import java.util.Iterator;
+import java.util.List;
+import java.util.ListIterator;
+
+/**
+ * Represent the data model for one &lt;code&gt;MUCRoom&lt;/code&gt; history. Including chat transcript,
+ * joining and leaving times.
+ * 
+ * @author Gaston Dombiak
+ */
+public final class MUCRoomHistory {
+<span class="nc" id="L43">    private static final Logger Log = LoggerFactory.getLogger(MUCRoomHistory.class);</span>
+
+    private MUCRoom room;
+
+    private HistoryStrategy historyStrategy;
+
+    private boolean isNonAnonymousRoom;
+
+<span class="nc" id="L51">    public MUCRoomHistory(MUCRoom mucRoom, HistoryStrategy historyStrategy) {</span>
+<span class="nc" id="L52">        this.room = mucRoom;</span>
+<span class="nc" id="L53">        this.isNonAnonymousRoom = mucRoom.canAnyoneDiscoverJID();</span>
+<span class="nc" id="L54">        this.historyStrategy = historyStrategy;</span>
+<span class="nc" id="L55">    }</span>
+
+    public void addMessage(Message packet) {
+<span class="nc" id="L58">        boolean isSubjectChangeRequest = isSubjectChangeRequest(packet);</span>
+<span class="nc" id="L59">        JID fromJID = packet.getFrom();</span>
+        // Don't keep messages whose sender is the room itself (thus address without resource)
+        // unless the message is changing the room's subject
+<span class="nc bnc" id="L62" title="All 4 branches missed.">        if (!isSubjectChangeRequest &amp;&amp;</span>
+<span class="nc bnc" id="L63" title="All 2 branches missed.">            (fromJID == null || fromJID.toString().length() == 0 ||</span>
+<span class="nc bnc" id="L64" title="All 2 branches missed.">             fromJID.equals(room.getRole().getRoleAddress()))) {</span>
+<span class="nc" id="L65">            return;</span>
+        }
+        // Do not store regular messages if there is no message strategy (keep subject change requests)
+<span class="nc bnc" id="L68" title="All 4 branches missed.">        if (!isSubjectChangeRequest &amp;&amp; !historyStrategy.isHistoryEnabled()) {</span>
+<span class="nc" id="L69">            return;</span>
+        }
+
+        // Ignore empty messages (no subject AND no body)
+<span class="nc bnc" id="L73" title="All 2 branches missed.">        if (!isSubjectChangeRequest &amp;&amp;</span>
+<span class="nc bnc" id="L74" title="All 4 branches missed.">            (packet.getBody() == null || packet.getBody().trim().length() == 0)) {</span>
+<span class="nc" id="L75">            return;</span>
+        }
+
+<span class="nc" id="L78">        Message packetToAdd = packet.createCopy();</span>
+
+        // Check if the room has changed its configuration
+<span class="nc bnc" id="L81" title="All 2 branches missed.">        if (isNonAnonymousRoom != room.canAnyoneDiscoverJID()) {</span>
+<span class="nc" id="L82">            isNonAnonymousRoom = room.canAnyoneDiscoverJID();</span>
+            // Update the &quot;from&quot; attribute of the delay information in the history
+            // TODO Make this update in a separate thread
+<span class="nc bnc" id="L85" title="All 2 branches missed.">            for (Iterator&lt;Message&gt; it = getMessageHistory(); it.hasNext();) {</span>
+<span class="nc" id="L86">                Message message = it.next();</span>
+<span class="nc" id="L87">                Element delayElement = message.getChildElement(&quot;delay&quot;, &quot;urn:xmpp:delay&quot;);</span>
+<span class="nc bnc" id="L88" title="All 2 branches missed.">                if (room.canAnyoneDiscoverJID()) {</span>
+                    // Set the Full JID as the &quot;from&quot; attribute
+                    try {
+<span class="nc" id="L91">                        MUCRole role = room.getOccupant(message.getFrom().getResource());</span>
+<span class="nc" id="L92">                        delayElement.addAttribute(&quot;from&quot;, role.getUserAddress().toString());</span>
+                    }
+<span class="nc" id="L94">                    catch (UserNotFoundException e) {</span>
+                        // Ignore.
+<span class="nc" id="L96">                    }</span>
+                }
+                else {
+                    // Set the Room JID as the &quot;from&quot; attribute
+<span class="nc" id="L100">                    delayElement.addAttribute(&quot;from&quot;, message.getFrom().toString());</span>
+                }
+<span class="nc" id="L102">            }</span>
+
+        }
+
+        // Add the delay information to the message
+<span class="nc" id="L107">        Element delayInformation = packetToAdd.addChildElement(&quot;delay&quot;, &quot;urn:xmpp:delay&quot;);</span>
+<span class="nc" id="L108">        Date current = new Date();</span>
+<span class="nc" id="L109">        delayInformation.addAttribute(&quot;stamp&quot;, XMPPDateTimeFormat.format(current));</span>
+<span class="nc bnc" id="L110" title="All 2 branches missed.">        if (room.canAnyoneDiscoverJID()) {</span>
+            // Set the Full JID as the &quot;from&quot; attribute
+            try {
+<span class="nc" id="L113">                MUCRole role = room.getOccupant(packet.getFrom().getResource());</span>
+<span class="nc" id="L114">                delayInformation.addAttribute(&quot;from&quot;, role.getUserAddress().toString());</span>
+            }
+<span class="nc" id="L116">            catch (UserNotFoundException e) {</span>
+                // Ignore.
+<span class="nc" id="L118">            }</span>
+        }
+        else {
+            // Set the Room JID as the &quot;from&quot; attribute
+<span class="nc" id="L122">            delayInformation.addAttribute(&quot;from&quot;, packet.getFrom().toString());</span>
+        }
+<span class="nc" id="L124">        historyStrategy.addMessage(packetToAdd);</span>
+<span class="nc" id="L125">    }</span>
+
+    public Iterator&lt;Message&gt; getMessageHistory() {
+<span class="nc" id="L128">        return historyStrategy.getMessageHistory();</span>
+    }
+
+    /**
+     * Obtain the current history to be iterated in reverse mode. This means that the returned list
+     * iterator will be positioned at the end of the history so senders of this message must
+     * traverse the list in reverse mode.
+     * 
+     * @return A list iterator of Message objects positioned at the end of the list.
+     */
+    public ListIterator&lt;Message&gt; getReverseMessageHistory() {
+<span class="nc" id="L139">        return historyStrategy.getReverseMessageHistory();</span>
+    }
+
+    /**
+     * Creates a new message and adds it to the history. The new message will be created based on
+     * the provided information. This information will likely come from the database when loading
+     * the room history from the database.
+     *
+     * @param senderJID the sender's JID of the message to add to the history.
+     * @param nickname the sender's nickname of the message to add to the history.
+     * @param sentDate the date when the message was sent to the room.
+     * @param subject the subject included in the message.
+     * @param body the body of the message.
+     * @param stanza the stanza to add
+     */
+    public void addOldMessage(String senderJID, String nickname, Date sentDate, String subject,
+            String body, String stanza)
+    {
+<span class="nc" id="L157">        Message message = new Message();</span>
+<span class="nc" id="L158">        message.setType(Message.Type.groupchat);</span>
+<span class="nc bnc" id="L159" title="All 2 branches missed.">        if (stanza != null) {</span>
+            // payload initialized as XML string from DB
+<span class="nc" id="L161">            SAXReader xmlReader = new SAXReader();</span>
+<span class="nc" id="L162">            xmlReader.setEncoding(&quot;UTF-8&quot;);</span>
+            try {
+<span class="nc" id="L164">                Element element = xmlReader.read(new StringReader(stanza)).getRootElement();</span>
+<span class="nc bnc" id="L165" title="All 2 branches missed.">                for (Element child : (List&lt;Element&gt;)element.elements()) {</span>
+<span class="nc" id="L166">                    Namespace ns = child.getNamespace();</span>
+<span class="nc bnc" id="L167" title="All 6 branches missed.">                    if (ns == null || ns.getURI().equals(&quot;jabber:client&quot;) || ns.getURI().equals(&quot;jabber:server&quot;)) {</span>
+<span class="nc" id="L168">                        continue;</span>
+                    }
+<span class="nc" id="L170">                    Element added = message.addChildElement(child.getName(), child.getNamespaceURI());</span>
+<span class="nc bnc" id="L171" title="All 2 branches missed.">                    if (!child.getText().isEmpty()) {</span>
+<span class="nc" id="L172">                        added.setText(child.getText());</span>
+                    }
+<span class="nc bnc" id="L174" title="All 2 branches missed.">                    for (Attribute attr : (List&lt;Attribute&gt;)child.attributes()) {</span>
+<span class="nc" id="L175">                        added.addAttribute(attr.getQName(), attr.getValue());</span>
+<span class="nc" id="L176">                    }</span>
+<span class="nc bnc" id="L177" title="All 2 branches missed.">                    for (Element el : (List&lt;Element&gt;)child.elements()) {</span>
+<span class="nc" id="L178">                        added.add(el.createCopy());</span>
+<span class="nc" id="L179">                    }</span>
+<span class="nc" id="L180">                }</span>
+<span class="nc bnc" id="L181" title="All 2 branches missed.">                if (element.attribute(&quot;id&quot;) != null) {</span>
+<span class="nc" id="L182">                    message.setID(element.attributeValue(&quot;id&quot;));</span>
+                }
+<span class="nc" id="L184">            } catch (Exception ex) {</span>
+<span class="nc" id="L185">                Log.error(&quot;Failed to parse payload XML&quot;, ex);</span>
+<span class="nc" id="L186">            }</span>
+        }
+<span class="nc" id="L188">        message.setSubject(subject);</span>
+<span class="nc" id="L189">        message.setBody(body);</span>
+        // Set the sender of the message
+<span class="nc bnc" id="L191" title="All 4 branches missed.">        if (nickname != null &amp;&amp; nickname.trim().length() &gt; 0) {</span>
+<span class="nc" id="L192">            JID roomJID = room.getRole().getRoleAddress();</span>
+            // Recreate the sender address based on the nickname and room's JID
+<span class="nc" id="L194">            message.setFrom(new JID(roomJID.getNode(), roomJID.getDomain(), nickname, true));</span>
+<span class="nc" id="L195">        }</span>
+        else {
+            // Set the room as the sender of the message
+<span class="nc" id="L198">            message.setFrom(room.getRole().getRoleAddress());</span>
+        }
+
+        // Add the delay information to the message
+<span class="nc" id="L202">        Element delayInformation = message.addChildElement(&quot;delay&quot;, &quot;urn:xmpp:delay&quot;);</span>
+<span class="nc" id="L203">        delayInformation.addAttribute(&quot;stamp&quot;, XMPPDateTimeFormat.format(sentDate));</span>
+<span class="nc bnc" id="L204" title="All 2 branches missed.">        if (room.canAnyoneDiscoverJID()) {</span>
+            // Set the Full JID as the &quot;from&quot; attribute
+<span class="nc" id="L206">            delayInformation.addAttribute(&quot;from&quot;, senderJID);</span>
+        }
+        else {
+            // Set the Room JID as the &quot;from&quot; attribute
+<span class="nc" id="L210">            delayInformation.addAttribute(&quot;from&quot;, room.getRole().getRoleAddress().toString());</span>
+        }
+<span class="nc" id="L212">        historyStrategy.addMessage(message);</span>
+<span class="nc" id="L213">    }</span>
+
+    /**
+     * Returns true if there is a message within the history of the room that has changed the
+     * room's subject.
+     *
+     * @return true if there is a message within the history of the room that has changed the
+     *         room's subject.
+     */
+    public boolean hasChangedSubject() {
+<span class="nc" id="L223">        return historyStrategy.hasChangedSubject();</span>
+    }
+
+    /**
+     * Returns the message within the history of the room that has changed the
+     * room's subject.
+     * 
+     * @return the latest room subject change or null if none exists yet.
+     */
+    public Message getChangedSubject() {
+<span class="nc" id="L233">        return historyStrategy.getChangedSubject();</span>
+    }
+
+    /**
+     * Returns true if the given message qualifies as a subject change request, per XEP-0045.
+     *
+     * @param message the message to check
+     * @return true if the given packet is a subject change request
+     */
+    public boolean isSubjectChangeRequest(Message message) {
+<span class="nc" id="L243">        return historyStrategy.isSubjectChangeRequest(message);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

@@ -1,0 +1,124 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>VCardModified.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.commands.event</a> &gt; <span class="el_source">VCardModified.java</span></div><h1>VCardModified.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2004-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.jivesoftware.openfire.commands.event;
+
+import org.dom4j.Element;
+import org.jivesoftware.openfire.commands.AdHocCommand;
+import org.jivesoftware.openfire.commands.SessionData;
+import org.jivesoftware.openfire.component.InternalComponentManager;
+import org.jivesoftware.openfire.vcard.VCardEventDispatcher;
+import org.jivesoftware.openfire.vcard.VCardManager;
+import org.xmpp.forms.DataForm;
+import org.xmpp.forms.FormField;
+import org.xmpp.packet.JID;
+
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+
+/**
+ * Notifies the that a vCard was modified. It can be used by user providers to notify Openfire of the
+ * modification of a vCard.
+ *
+ * @author Gabriel Guarincerri
+ */
+<span class="nc" id="L38">public class VCardModified extends AdHocCommand {</span>
+    @Override
+    public String getCode() {
+<span class="nc" id="L41">        return &quot;http://jabber.org/protocol/event#vcard-modified&quot;;</span>
+    }
+
+    @Override
+    public String getDefaultLabel() {
+<span class="nc" id="L46">        return &quot;VCard modified&quot;;</span>
+    }
+
+    @Override
+    public int getMaxStages(SessionData data) {
+<span class="nc" id="L51">        return 1;</span>
+    }
+
+    @Override
+    public void execute(SessionData sessionData, Element command) {
+<span class="nc" id="L56">        Element note = command.addElement(&quot;note&quot;);</span>
+
+<span class="nc" id="L58">        Map&lt;String, List&lt;String&gt;&gt; data = sessionData.getData();</span>
+
+        // Get the username
+        String username;
+        try {
+<span class="nc" id="L63">            username = get(data, &quot;username&quot;, 0);</span>
+        }
+<span class="nc" id="L65">        catch (NullPointerException npe) {</span>
+<span class="nc" id="L66">            note.addAttribute(&quot;type&quot;, &quot;error&quot;);</span>
+<span class="nc" id="L67">            note.setText(&quot;Username required parameter.&quot;);</span>
+<span class="nc" id="L68">            return;</span>
+<span class="nc" id="L69">        }</span>
+
+        // Loads the updated vCard
+<span class="nc" id="L72">        Element vCard = VCardManager.getProvider().loadVCard(username);</span>
+
+<span class="nc bnc" id="L74" title="All 2 branches missed.">        if (vCard == null) {</span>
+<span class="nc" id="L75">            note.addAttribute(&quot;type&quot;, &quot;error&quot;);</span>
+<span class="nc" id="L76">            note.setText(&quot;VCard not found.&quot;);</span>
+<span class="nc" id="L77">            return;</span>
+        }
+
+        // Fire event.
+<span class="nc" id="L81">        VCardEventDispatcher.dispatchVCardUpdated(username, vCard);</span>
+
+        // Answer that the operation was successful
+<span class="nc" id="L84">        note.addAttribute(&quot;type&quot;, &quot;info&quot;);</span>
+<span class="nc" id="L85">        note.setText(&quot;Operation finished successfully&quot;);</span>
+<span class="nc" id="L86">    }</span>
+
+    @Override
+    protected void addStageInformation(SessionData data, Element command) {
+<span class="nc" id="L90">        DataForm form = new DataForm(DataForm.Type.form);</span>
+<span class="nc" id="L91">        form.setTitle(&quot;Dispatching a vCard updated event.&quot;);</span>
+<span class="nc" id="L92">        form.addInstruction(&quot;Fill out this form to dispatch a vCard updated event.&quot;);</span>
+
+<span class="nc" id="L94">        FormField field = form.addField();</span>
+<span class="nc" id="L95">        field.setType(FormField.Type.hidden);</span>
+<span class="nc" id="L96">        field.setVariable(&quot;FORM_TYPE&quot;);</span>
+<span class="nc" id="L97">        field.addValue(&quot;http://jabber.org/protocol/admin&quot;);</span>
+
+<span class="nc" id="L99">        field = form.addField();</span>
+<span class="nc" id="L100">        field.setType(FormField.Type.text_single);</span>
+<span class="nc" id="L101">        field.setLabel(&quot;The username of the user who's vCard was updated&quot;);</span>
+<span class="nc" id="L102">        field.setVariable(&quot;username&quot;);</span>
+<span class="nc" id="L103">        field.setRequired(true);</span>
+
+        // Add the form to the command
+<span class="nc" id="L106">        command.add(form.getElement());</span>
+<span class="nc" id="L107">    }</span>
+
+    @Override
+    protected List&lt;Action&gt; getActions(SessionData data) {
+<span class="nc" id="L111">        return Collections.singletonList(Action.complete);</span>
+    }
+
+    @Override
+    protected Action getExecuteAction(SessionData data) {
+<span class="nc" id="L116">        return Action.complete;</span>
+    }
+
+    @Override
+    public boolean hasPermission(JID requester) {
+<span class="nc bnc" id="L121" title="All 4 branches missed.">        return super.hasPermission(requester) || InternalComponentManager.getInstance().hasComponent(requester);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

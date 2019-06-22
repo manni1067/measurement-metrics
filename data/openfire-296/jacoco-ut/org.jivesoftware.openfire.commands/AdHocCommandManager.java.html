@@ -1,0 +1,321 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>AdHocCommandManager.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.commands</a> &gt; <span class="el_source">AdHocCommandManager.java</span></div><h1>AdHocCommandManager.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.commands;
+
+import org.dom4j.Element;
+import org.dom4j.QName;
+import org.jivesoftware.util.JiveGlobals;
+import org.jivesoftware.util.StringUtils;
+import org.xmpp.forms.DataForm;
+import org.xmpp.forms.FormField;
+import org.xmpp.packet.IQ;
+import org.xmpp.packet.PacketError;
+
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
+
+/**
+ * An AdHocCommandManager is responsible for keeping the list of available commands offered
+ * by a service and for processing commands requests. Typically, instances of this class
+ * are private to the service offering ad-hoc commands.
+ *
+ * @author Gaston Dombiak
+ */
+<span class="nc" id="L42">public class AdHocCommandManager {</span>
+
+    private static final String NAMESPACE = &quot;http://jabber.org/protocol/commands&quot;;
+
+    /**
+     * Map that holds the offered commands by this service. Note: Key=commandCode, Value=command.
+     * commandCode matches the node attribute sent by command requesters.
+     */
+<span class="nc" id="L50">    private Map&lt;String, AdHocCommand&gt; commands = new ConcurrentHashMap&lt;&gt;();</span>
+    /**
+     * Map that holds the number of command sessions of each requester.
+     * Note: Key=requester full's JID, Value=number of sessions
+     */
+<span class="nc" id="L55">    private Map&lt;String, AtomicInteger&gt; sessionsCounter = new ConcurrentHashMap&lt;&gt;();</span>
+    /**
+     * Map that holds the command sessions. Used mainly to quickly locate a SessionData.
+     * Note: Key=sessionID, Value=SessionData
+     */
+<span class="nc" id="L60">    private Map&lt;String, SessionData&gt; sessions = new ConcurrentHashMap&lt;&gt;();</span>
+
+    /**
+     * Adds a new command to the list of supported ad-hoc commands by this server. The new
+     * command will appear in the discoverable items list and will be executed for those users
+     * with enough permission.
+     *
+     * @param command the new ad-hoc command to add.
+     */
+    public void addCommand(AdHocCommand command) {
+<span class="nc" id="L70">        commands.put(command.getCode(), command);</span>
+<span class="nc" id="L71">    }</span>
+
+    /**
+     * Removes the command from the list of ad-hoc commands supported by this server. The command
+     * will no longer appear in the discoverable items list.
+     *
+     * @param command the ad-hoc command to remove.
+     * @return true if the requested command was removed from the list of available commands.
+     */
+    public boolean removeCommand(AdHocCommand command) {
+<span class="nc bnc" id="L81" title="All 2 branches missed.">        return commands.remove(command.getCode()) != null;</span>
+    }
+
+    /**
+     * Returns a list with the available commands in this command manager.
+     *
+     * @return a list with the available commands in this command manager.
+     */
+    public Collection&lt;AdHocCommand&gt; getCommands() {
+<span class="nc" id="L90">        return commands.values();</span>
+    }
+
+    /**
+     * Returns the command whose code matches the specified code or {@code null} if none
+     * was found.
+     *
+     * @param code the code of the command to find.
+     * @return the command whose code matches the specified code or null if none
+     *         was found.
+     */
+    public AdHocCommand getCommand(String code) {
+<span class="nc" id="L102">        return commands.get(code);</span>
+    }
+
+    public IQ process(IQ packet) {
+<span class="nc" id="L106">        IQ reply = IQ.createResultIQ(packet);</span>
+<span class="nc" id="L107">        Element iqCommand = packet.getChildElement();</span>
+
+        // Only packets of type SET can be processed
+<span class="nc bnc" id="L110" title="All 2 branches missed.">        if (!IQ.Type.set.equals(packet.getType())) {</span>
+            // Answer a bad_request error
+<span class="nc" id="L112">            reply.setChildElement(iqCommand.createCopy());</span>
+<span class="nc" id="L113">            reply.setError(PacketError.Condition.bad_request);</span>
+<span class="nc" id="L114">            return reply;</span>
+        }
+
+<span class="nc" id="L117">        String sessionid = iqCommand.attributeValue(&quot;sessionid&quot;);</span>
+<span class="nc" id="L118">        String commandCode = iqCommand.attributeValue(&quot;node&quot;);</span>
+<span class="nc" id="L119">        String from = packet.getFrom().toString();</span>
+<span class="nc" id="L120">        AdHocCommand command = commands.get(commandCode);</span>
+<span class="nc bnc" id="L121" title="All 2 branches missed.">        if (sessionid == null) {</span>
+            // A new execution request has been received. Check that the command exists
+<span class="nc bnc" id="L123" title="All 2 branches missed.">            if (command == null) {</span>
+                // Requested command does not exist so return item_not_found error.
+<span class="nc" id="L125">                reply.setChildElement(iqCommand.createCopy());</span>
+<span class="nc" id="L126">                reply.setError(PacketError.Condition.item_not_found);</span>
+            }
+            else {
+                // Check that the requester has enough permission. Answer forbidden error if
+                // requester permissions are not enough to execute the requested command
+<span class="nc bnc" id="L131" title="All 2 branches missed.">                if (!command.hasPermission(packet.getFrom())) {</span>
+<span class="nc" id="L132">                    reply.setChildElement(iqCommand.createCopy());</span>
+<span class="nc" id="L133">                    reply.setError(PacketError.Condition.forbidden);</span>
+<span class="nc" id="L134">                    return reply;</span>
+                }
+
+                // Create new session ID
+<span class="nc" id="L138">                sessionid = StringUtils.randomString(15);</span>
+
+<span class="nc" id="L140">                Element childElement = reply.setChildElement(&quot;command&quot;, NAMESPACE);</span>
+
+<span class="nc bnc" id="L142" title="All 2 branches missed.">                if (command.getMaxStages(null) == 0) {</span>
+                    // The command does not require any user interaction (returns results only)
+                    // Execute the command and return the execution result which may be a
+                    // data form (i.e. report data) or a note element
+<span class="nc" id="L146">                    command.execute(null, childElement);</span>
+<span class="nc" id="L147">                    childElement.addAttribute(&quot;sessionid&quot;, sessionid);</span>
+<span class="nc" id="L148">                    childElement.addAttribute(&quot;node&quot;, commandCode);</span>
+<span class="nc" id="L149">                    childElement.addAttribute(&quot;status&quot;, AdHocCommand.Status.completed.name());</span>
+                }
+                else {
+                    // The command requires user interactions (ie. has stages)
+                    // Check that the user has not excedded the limit of allowed simultaneous
+                    // command sessions.
+<span class="nc" id="L155">                    AtomicInteger counter = sessionsCounter.get(from);</span>
+<span class="nc bnc" id="L156" title="All 2 branches missed.">                    if (counter == null) {</span>
+<span class="nc" id="L157">                        synchronized (from.intern()) {</span>
+<span class="nc" id="L158">                            counter = sessionsCounter.get(from);</span>
+<span class="nc bnc" id="L159" title="All 2 branches missed.">                            if (counter == null) {</span>
+<span class="nc" id="L160">                                counter = new AtomicInteger(0);</span>
+<span class="nc" id="L161">                                sessionsCounter.put(from, counter);</span>
+                            }
+<span class="nc" id="L163">                        }</span>
+                    }
+<span class="nc" id="L165">                    int limit = JiveGlobals.getIntProperty(&quot;xmpp.command.limit&quot;, 100);</span>
+<span class="nc bnc" id="L166" title="All 2 branches missed.">                    if (counter.incrementAndGet() &gt; limit) {</span>
+<span class="nc" id="L167">                        counter.decrementAndGet();</span>
+                        // Answer a not_allowed error since the user has exceeded limit. This
+                        // checking prevents bad users from consuming all the system memory by not
+                        // allowing them to create infinite simultaneous command sessions.
+<span class="nc" id="L171">                        reply.setChildElement(iqCommand.createCopy());</span>
+<span class="nc" id="L172">                        reply.setError(PacketError.Condition.not_allowed);</span>
+<span class="nc" id="L173">                        return reply;</span>
+                    }
+                    // Originate a new command session.
+<span class="nc" id="L176">                    SessionData session = new SessionData(sessionid, packet.getFrom());</span>
+<span class="nc" id="L177">                    sessions.put(sessionid, session);</span>
+
+<span class="nc" id="L179">                    childElement.addAttribute(&quot;sessionid&quot;, sessionid);</span>
+<span class="nc" id="L180">                    childElement.addAttribute(&quot;node&quot;, commandCode);</span>
+<span class="nc" id="L181">                    childElement.addAttribute(&quot;status&quot;, AdHocCommand.Status.executing.name());</span>
+
+                    // Add to the child element the data form the user must complete and
+                    // the allowed actions
+<span class="nc" id="L185">                    command.addNextStageInformation(session, childElement);</span>
+                }
+<span class="nc" id="L187">            }</span>
+
+        }
+        else {
+            // An execution session already exists and the user has requested to perform a
+            // certain action.
+<span class="nc" id="L193">            String action = iqCommand.attributeValue(&quot;action&quot;);</span>
+<span class="nc" id="L194">            SessionData session = sessions.get(sessionid);</span>
+            // Check that a Session exists for the specified sessionID
+<span class="nc bnc" id="L196" title="All 2 branches missed.">            if (session == null) {</span>
+                // Answer a bad_request error (bad-sessionid)
+<span class="nc" id="L198">                reply.setChildElement(iqCommand.createCopy());</span>
+<span class="nc" id="L199">                reply.setError(PacketError.Condition.bad_request);</span>
+<span class="nc" id="L200">                return reply;</span>
+            }
+
+            // Check if the Session data has expired (default is 10 minutes)
+<span class="nc" id="L204">            int timeout = JiveGlobals.getIntProperty(&quot;xmpp.command.timeout&quot;, 10 * 60 * 1000);</span>
+<span class="nc bnc" id="L205" title="All 2 branches missed.">            if (System.currentTimeMillis() - session.getCreationStamp() &gt; timeout) {</span>
+                // TODO Check all sessions that might have timed out (use another thread?)
+                // Remove the old session
+<span class="nc" id="L208">                removeSessionData(sessionid, from);</span>
+                // Answer a not_allowed error (session-expired)
+<span class="nc" id="L210">                reply.setChildElement(iqCommand.createCopy());</span>
+<span class="nc" id="L211">                reply.setError(PacketError.Condition.not_allowed);</span>
+<span class="nc" id="L212">                return reply;</span>
+            }
+
+<span class="nc" id="L215">            synchronized (sessionid.intern()) {</span>
+                // Check if the user is requesting to cancel the command
+<span class="nc bnc" id="L217" title="All 2 branches missed.">                if (AdHocCommand.Action.cancel.name().equals(action)) {</span>
+                    // User requested to cancel command execution so remove the session data
+<span class="nc" id="L219">                    removeSessionData(sessionid, from);</span>
+                    // Generate a canceled confirmation response
+<span class="nc" id="L221">                    Element childElement = reply.setChildElement(&quot;command&quot;, NAMESPACE);</span>
+<span class="nc" id="L222">                    childElement.addAttribute(&quot;sessionid&quot;, sessionid);</span>
+<span class="nc" id="L223">                    childElement.addAttribute(&quot;node&quot;, commandCode);</span>
+<span class="nc" id="L224">                    childElement.addAttribute(&quot;status&quot;, AdHocCommand.Status.canceled.name());</span>
+                }
+
+                // If the user didn't specify an action then follow the default execute action
+<span class="nc bnc" id="L228" title="All 4 branches missed.">                if (action == null || AdHocCommand.Action.execute.name().equals(action)) {</span>
+<span class="nc" id="L229">                    action = session.getExecuteAction().name();</span>
+                }
+
+                // Check that the specified action was previously offered
+<span class="nc bnc" id="L233" title="All 2 branches missed.">                if (!session.isValidAction(action)) {</span>
+                    // Answer a bad_request error (bad-action)
+<span class="nc" id="L235">                    reply.setChildElement(iqCommand.createCopy());</span>
+<span class="nc" id="L236">                    reply.setError(PacketError.Condition.bad_request);</span>
+<span class="nc" id="L237">                    return reply;</span>
+                }
+<span class="nc bnc" id="L239" title="All 2 branches missed.">                else if (AdHocCommand.Action.prev.name().equals(action)) {</span>
+                    // Move to the previous stage and add to the child element the data form
+                    // the user must complete and the allowed actions of the previous stage
+<span class="nc" id="L242">                    Element childElement = reply.setChildElement(&quot;command&quot;, NAMESPACE);</span>
+<span class="nc" id="L243">                    childElement.addAttribute(&quot;sessionid&quot;, sessionid);</span>
+<span class="nc" id="L244">                    childElement.addAttribute(&quot;node&quot;, commandCode);</span>
+<span class="nc" id="L245">                    childElement.addAttribute(&quot;status&quot;, AdHocCommand.Status.executing.name());</span>
+<span class="nc" id="L246">                    command.addPreviousStageInformation(session, childElement);</span>
+<span class="nc" id="L247">                }</span>
+<span class="nc bnc" id="L248" title="All 2 branches missed.">                else if (AdHocCommand.Action.next.name().equals(action)) {</span>
+                    // Store the completed form in the session data
+<span class="nc" id="L250">                    saveCompletedForm(iqCommand, session);</span>
+                    // Move to the next stage and add to the child element the new data form
+                    // the user must complete and the new allowed actions
+<span class="nc" id="L253">                    Element childElement = reply.setChildElement(&quot;command&quot;, NAMESPACE);</span>
+<span class="nc" id="L254">                    childElement.addAttribute(&quot;sessionid&quot;, sessionid);</span>
+<span class="nc" id="L255">                    childElement.addAttribute(&quot;node&quot;, commandCode);</span>
+<span class="nc" id="L256">                    childElement.addAttribute(&quot;status&quot;, AdHocCommand.Status.executing.name());</span>
+<span class="nc" id="L257">                    command.addNextStageInformation(session, childElement);</span>
+<span class="nc" id="L258">                }</span>
+<span class="nc bnc" id="L259" title="All 2 branches missed.">                else if (AdHocCommand.Action.complete.name().equals(action)) {</span>
+                    // Store the completed form in the session data
+<span class="nc" id="L261">                    saveCompletedForm(iqCommand, session);</span>
+                    // Execute the command and return the execution result which may be a
+                    // data form (i.e. report data) or a note element
+<span class="nc" id="L264">                    Element childElement = reply.setChildElement(&quot;command&quot;, NAMESPACE);</span>
+<span class="nc" id="L265">                    command.execute(session, childElement);</span>
+<span class="nc" id="L266">                    childElement.addAttribute(&quot;sessionid&quot;, sessionid);</span>
+<span class="nc" id="L267">                    childElement.addAttribute(&quot;node&quot;, commandCode);</span>
+<span class="nc" id="L268">                    childElement.addAttribute(&quot;status&quot;, AdHocCommand.Status.completed.name());</span>
+
+                    // Command has been executed so remove the session data
+<span class="nc" id="L271">                    removeSessionData(sessionid, from);</span>
+                }
+<span class="nc" id="L273">            }</span>
+        }
+<span class="nc" id="L275">        return reply;</span>
+    }
+
+    /**
+     * Stores in the SessionData the fields and their values as specified in the completed
+     * data form by the user.
+     *
+     * @param iqCommand the command element containing the data form element.
+     * @param session the SessionData for this command execution.
+     */
+    private void saveCompletedForm(Element iqCommand, SessionData session) {
+<span class="nc" id="L286">        Element formElement = iqCommand.element(QName.get(&quot;x&quot;, &quot;jabber:x:data&quot;));</span>
+<span class="nc bnc" id="L287" title="All 2 branches missed.">        if (formElement != null) {</span>
+            // Generate a Map with the variable names and variables values
+<span class="nc" id="L289">            Map&lt;String, List&lt;String&gt;&gt; data = new HashMap&lt;&gt;();</span>
+<span class="nc" id="L290">            DataForm dataForm = new DataForm(formElement);</span>
+<span class="nc bnc" id="L291" title="All 2 branches missed.">            for (FormField field : dataForm.getFields()) {</span>
+<span class="nc" id="L292">                data.put(field.getVariable(), field.getValues());</span>
+<span class="nc" id="L293">            }</span>
+            // Store the variables and their values in the session data
+<span class="nc" id="L295">            session.addStageForm(data);</span>
+        }
+<span class="nc" id="L297">    }</span>
+
+    /**
+     * Releases the data kept for the command execution whose id is sessionid. The number of
+     * commands executions currently being executed by the user (full JID) will be decreased.
+     *
+     * @param sessionid id of the session that identifies this command execution.
+     * @param from the full JID of the command requester.
+     */
+    private void removeSessionData(String sessionid, String from) {
+<span class="nc" id="L307">        sessions.remove(sessionid);</span>
+<span class="nc bnc" id="L308" title="All 2 branches missed.">        if (sessionsCounter.get(from).decrementAndGet() &lt;= 0) {</span>
+            // Remove the AtomicInteger when no commands are being executed
+<span class="nc" id="L310">            sessionsCounter.remove(from);</span>
+        }
+<span class="nc" id="L312">    }</span>
+
+    public void stop() {
+        // Cancel executions of running commands
+<span class="nc" id="L316">        sessions.clear();</span>
+<span class="nc" id="L317">        sessionsCounter.clear();</span>
+<span class="nc" id="L318">    }</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

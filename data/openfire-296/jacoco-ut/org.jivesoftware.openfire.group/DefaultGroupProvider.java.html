@@ -1,0 +1,484 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>DefaultGroupProvider.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.group</a> &gt; <span class="el_source">DefaultGroupProvider.java</span></div><h1>DefaultGroupProvider.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2004-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.group;
+
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.List;
+
+import org.jivesoftware.database.DbConnectionManager;
+import org.jivesoftware.openfire.XMPPServer;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmpp.packet.JID;
+
+/**
+ * Database implementation of the GroupManager interface.
+ *
+ * @author Matt Tucker
+ */
+<span class="nc" id="L39">public class DefaultGroupProvider extends AbstractGroupProvider {</span>
+
+<span class="nc" id="L41">    private static final Logger Log = LoggerFactory.getLogger(DefaultGroupProvider.class);</span>
+
+    private static final String INSERT_GROUP =
+        &quot;INSERT INTO ofGroup (groupName, description) VALUES (?, ?)&quot;;
+    private static final String SAVE_GROUP =
+        &quot;UPDATE ofGroup SET description=? WHERE groupName=?&quot;;
+    private static final String SET_GROUP_NAME_1 =
+        &quot;UPDATE ofGroup SET groupName=? WHERE groupName=?&quot;;
+    private static final String SET_GROUP_NAME_2 =
+        &quot;UPDATE ofGroupProp SET groupName=? WHERE groupName=?&quot;;
+    private static final String SET_GROUP_NAME_3 =
+        &quot;UPDATE ofGroupUser SET groupName=? WHERE groupName=?&quot;;
+    private static final String DELETE_GROUP_USERS =
+        &quot;DELETE FROM ofGroupUser WHERE groupName=?&quot;;
+    private static final String DELETE_PROPERTIES =
+        &quot;DELETE FROM ofGroupProp WHERE groupName=?&quot;;
+    private static final String DELETE_GROUP =
+        &quot;DELETE FROM ofGroup WHERE groupName=?&quot;;
+    private static final String GROUP_COUNT = &quot;SELECT count(*) FROM ofGroup&quot;;
+     private static final String LOAD_ADMINS =
+        &quot;SELECT username FROM ofGroupUser WHERE administrator=1 AND groupName=? ORDER BY username&quot;;
+    private static final String LOAD_MEMBERS =
+        &quot;SELECT username FROM ofGroupUser WHERE administrator=0 AND groupName=? ORDER BY username&quot;;
+    private static final String LOAD_GROUP =
+        &quot;SELECT description FROM ofGroup WHERE groupName=?&quot;;
+    private static final String REMOVE_USER =
+        &quot;DELETE FROM ofGroupUser WHERE groupName=? AND username=?&quot;;
+    private static final String ADD_USER =
+        &quot;INSERT INTO ofGroupUser (groupName, username, administrator) VALUES (?, ?, ?)&quot;;
+    private static final String UPDATE_USER =
+        &quot;UPDATE ofGroupUser SET administrator=? WHERE groupName=? AND username=?&quot;;
+    private static final String USER_GROUPS =
+        &quot;SELECT groupName FROM ofGroupUser WHERE username=?&quot;;
+    private static final String ALL_GROUPS = &quot;SELECT groupName FROM ofGroup ORDER BY groupName&quot;;
+    private static final String SEARCH_GROUP_NAME = &quot;SELECT groupName FROM ofGroup WHERE groupName LIKE ? ORDER BY groupName&quot;;
+
+<span class="nc" id="L77">    private XMPPServer server = XMPPServer.getInstance();</span>
+
+    @Override
+    public Group createGroup(String name) {
+<span class="nc" id="L81">        Connection con = null;</span>
+<span class="nc" id="L82">        PreparedStatement pstmt = null;</span>
+        try {
+<span class="nc" id="L84">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L85">            pstmt = con.prepareStatement(INSERT_GROUP);</span>
+<span class="nc" id="L86">            pstmt.setString(1, name);</span>
+<span class="nc" id="L87">            pstmt.setString(2, &quot;&quot;);</span>
+<span class="nc" id="L88">            pstmt.executeUpdate();</span>
+        }
+<span class="nc" id="L90">        catch (SQLException e) {</span>
+<span class="nc" id="L91">            Log.error(e.getMessage(), e);</span>
+        }
+        finally {
+<span class="nc" id="L94">            DbConnectionManager.closeConnection(pstmt, con);</span>
+<span class="nc" id="L95">        }</span>
+<span class="nc" id="L96">        Collection&lt;JID&gt; members = getMembers(name, false);</span>
+<span class="nc" id="L97">        Collection&lt;JID&gt; administrators = getMembers(name, true);</span>
+<span class="nc" id="L98">        return new Group(name, &quot;&quot;, members, administrators);</span>
+    }
+
+    @Override
+    public Group getGroup(String name) throws GroupNotFoundException {
+<span class="nc" id="L103">        String description = null;</span>
+
+<span class="nc" id="L105">        Connection con = null;</span>
+<span class="nc" id="L106">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L107">        ResultSet rs = null;</span>
+        try {
+<span class="nc" id="L109">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L110">            pstmt = con.prepareStatement(LOAD_GROUP);</span>
+<span class="nc" id="L111">            pstmt.setString(1, name);</span>
+<span class="nc" id="L112">            rs = pstmt.executeQuery();</span>
+<span class="nc bnc" id="L113" title="All 2 branches missed.">            if (!rs.next()) {</span>
+<span class="nc" id="L114">                throw new GroupNotFoundException(&quot;Group with name &quot;</span>
+                    + name + &quot; not found.&quot;);
+            }
+<span class="nc" id="L117">            description = rs.getString(1);</span>
+        }
+<span class="nc" id="L119">        catch (SQLException e) {</span>
+<span class="nc" id="L120">            Log.error(e.getMessage(), e);</span>
+        }
+        finally {
+<span class="nc" id="L123">            DbConnectionManager.closeConnection(rs, pstmt, con);</span>
+<span class="nc" id="L124">        }</span>
+<span class="nc" id="L125">        Collection&lt;JID&gt; members = getMembers(name, false);</span>
+<span class="nc" id="L126">        Collection&lt;JID&gt; administrators = getMembers(name, true);</span>
+<span class="nc" id="L127">        return new Group(name, description, members, administrators);</span>
+    }
+
+    @Override
+    public void setDescription(String name, String description) throws GroupNotFoundException {
+<span class="nc" id="L132">        Connection con = null;</span>
+<span class="nc" id="L133">        PreparedStatement pstmt = null;</span>
+        try {
+<span class="nc" id="L135">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L136">            pstmt = con.prepareStatement(SAVE_GROUP);</span>
+<span class="nc" id="L137">            pstmt.setString(1, description);</span>
+<span class="nc" id="L138">            pstmt.setString(2, name);</span>
+<span class="nc" id="L139">            pstmt.executeUpdate();</span>
+        }
+<span class="nc" id="L141">        catch (SQLException e) {</span>
+<span class="nc" id="L142">            Log.error(e.getMessage(), e);</span>
+<span class="nc" id="L143">            throw new GroupNotFoundException();</span>
+        }
+        finally {
+<span class="nc" id="L146">            DbConnectionManager.closeConnection(pstmt, con);</span>
+<span class="nc" id="L147">        }</span>
+<span class="nc" id="L148">    }</span>
+
+    @Override
+    public void setName(String oldName, String newName) throws GroupAlreadyExistsException
+    {
+<span class="nc" id="L153">        Connection con = null;</span>
+<span class="nc" id="L154">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L155">        boolean abortTransaction = false;</span>
+        try {
+<span class="nc" id="L157">            con = DbConnectionManager.getTransactionConnection();</span>
+<span class="nc" id="L158">            pstmt = con.prepareStatement(SET_GROUP_NAME_1);</span>
+<span class="nc" id="L159">            pstmt.setString(1, newName);</span>
+<span class="nc" id="L160">            pstmt.setString(2, oldName);</span>
+<span class="nc" id="L161">            pstmt.executeUpdate();</span>
+<span class="nc" id="L162">            DbConnectionManager.fastcloseStmt(pstmt);</span>
+            
+<span class="nc" id="L164">            pstmt = con.prepareStatement(SET_GROUP_NAME_2);</span>
+<span class="nc" id="L165">            pstmt.setString(1, newName);</span>
+<span class="nc" id="L166">            pstmt.setString(2, oldName);</span>
+<span class="nc" id="L167">            pstmt.executeUpdate();</span>
+<span class="nc" id="L168">            DbConnectionManager.fastcloseStmt(pstmt);</span>
+            
+<span class="nc" id="L170">            pstmt = con.prepareStatement(SET_GROUP_NAME_3);</span>
+<span class="nc" id="L171">            pstmt.setString(1, newName);</span>
+<span class="nc" id="L172">            pstmt.setString(2, oldName);</span>
+<span class="nc" id="L173">            pstmt.executeUpdate();</span>
+        }
+<span class="nc" id="L175">        catch (SQLException e) {</span>
+<span class="nc" id="L176">            Log.error(e.getMessage(), e);</span>
+<span class="nc" id="L177">            abortTransaction = true;</span>
+        }
+        finally {
+<span class="nc" id="L180">            DbConnectionManager.closeStatement(pstmt);</span>
+<span class="nc" id="L181">            DbConnectionManager.closeTransactionConnection(con, abortTransaction);</span>
+<span class="nc" id="L182">        }</span>
+<span class="nc" id="L183">    }</span>
+
+    @Override
+    public void deleteGroup(String groupName) {
+<span class="nc" id="L187">        Connection con = null;</span>
+<span class="nc" id="L188">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L189">        boolean abortTransaction = false;</span>
+        try {
+<span class="nc" id="L191">            con = DbConnectionManager.getTransactionConnection();</span>
+            // Remove all users in the group.
+<span class="nc" id="L193">            pstmt = con.prepareStatement(DELETE_GROUP_USERS);</span>
+<span class="nc" id="L194">            pstmt.setString(1, groupName);</span>
+<span class="nc" id="L195">            pstmt.executeUpdate();</span>
+<span class="nc" id="L196">            DbConnectionManager.fastcloseStmt(pstmt);</span>
+            
+            // Remove all properties of the group.
+<span class="nc" id="L199">            pstmt = con.prepareStatement(DELETE_PROPERTIES);</span>
+<span class="nc" id="L200">            pstmt.setString(1, groupName);</span>
+<span class="nc" id="L201">            pstmt.executeUpdate();</span>
+<span class="nc" id="L202">            DbConnectionManager.fastcloseStmt(pstmt);</span>
+            
+            // Remove the group entry.
+<span class="nc" id="L205">            pstmt = con.prepareStatement(DELETE_GROUP);</span>
+<span class="nc" id="L206">            pstmt.setString(1, groupName);</span>
+<span class="nc" id="L207">            pstmt.executeUpdate();</span>
+        }
+<span class="nc" id="L209">        catch (SQLException e) {</span>
+<span class="nc" id="L210">            Log.error(e.getMessage(), e);</span>
+<span class="nc" id="L211">            abortTransaction = true;</span>
+        }
+        finally {
+<span class="nc" id="L214">            DbConnectionManager.closeStatement(pstmt);</span>
+<span class="nc" id="L215">            DbConnectionManager.closeTransactionConnection(con, abortTransaction);</span>
+<span class="nc" id="L216">        }</span>
+<span class="nc" id="L217">    }</span>
+
+    @Override
+    public int getGroupCount() {
+<span class="nc" id="L221">        int count = 0;</span>
+<span class="nc" id="L222">        Connection con = null;</span>
+<span class="nc" id="L223">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L224">        ResultSet rs = null;</span>
+        try {
+<span class="nc" id="L226">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L227">            pstmt = con.prepareStatement(GROUP_COUNT);</span>
+<span class="nc" id="L228">            rs = pstmt.executeQuery();</span>
+<span class="nc bnc" id="L229" title="All 2 branches missed.">            if (rs.next()) {</span>
+<span class="nc" id="L230">                count = rs.getInt(1);</span>
+            }
+        }
+<span class="nc" id="L233">        catch (SQLException e) {</span>
+<span class="nc" id="L234">            Log.error(e.getMessage(), e);</span>
+        }
+        finally {
+<span class="nc" id="L237">            DbConnectionManager.closeConnection(rs, pstmt, con);</span>
+<span class="nc" id="L238">        }</span>
+<span class="nc" id="L239">        return count;</span>
+    }
+
+    @Override
+    public Collection&lt;String&gt; getGroupNames() {
+<span class="nc" id="L244">        List&lt;String&gt; groupNames = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L245">        Connection con = null;</span>
+<span class="nc" id="L246">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L247">        ResultSet rs = null;</span>
+        try {
+<span class="nc" id="L249">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L250">            pstmt = con.prepareStatement(ALL_GROUPS);</span>
+<span class="nc" id="L251">            rs = pstmt.executeQuery();</span>
+<span class="nc bnc" id="L252" title="All 2 branches missed.">            while (rs.next()) {</span>
+<span class="nc" id="L253">                groupNames.add(rs.getString(1));</span>
+            }
+        }
+<span class="nc" id="L256">        catch (SQLException e) {</span>
+<span class="nc" id="L257">            Log.error(e.getMessage(), e);</span>
+        }
+        finally {
+<span class="nc" id="L260">            DbConnectionManager.closeConnection(rs, pstmt, con);       }</span>
+<span class="nc" id="L261">        return groupNames;</span>
+    }
+
+    @Override
+    public Collection&lt;String&gt; getGroupNames(int startIndex, int numResults) {
+<span class="nc" id="L266">        List&lt;String&gt; groupNames = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L267">        Connection con = null;</span>
+<span class="nc" id="L268">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L269">        ResultSet rs = null;</span>
+        try {
+<span class="nc" id="L271">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L272">            pstmt = DbConnectionManager.createScrollablePreparedStatement(con, ALL_GROUPS);</span>
+<span class="nc" id="L273">            rs = pstmt.executeQuery();</span>
+<span class="nc" id="L274">            DbConnectionManager.scrollResultSet(rs, startIndex);</span>
+<span class="nc" id="L275">            int count = 0;</span>
+<span class="nc bnc" id="L276" title="All 4 branches missed.">            while (rs.next() &amp;&amp; count &lt; numResults) {</span>
+<span class="nc" id="L277">                groupNames.add(rs.getString(1));</span>
+<span class="nc" id="L278">                count++;</span>
+            }
+        }
+<span class="nc" id="L281">        catch (SQLException e) {</span>
+<span class="nc" id="L282">            Log.error(e.getMessage(), e);</span>
+        }
+        finally {
+<span class="nc" id="L285">            DbConnectionManager.closeConnection(rs, pstmt, con);</span>
+<span class="nc" id="L286">        }</span>
+<span class="nc" id="L287">        return groupNames;</span>
+    }
+
+    @Override
+    public Collection&lt;String&gt; getGroupNames(JID user) {
+<span class="nc" id="L292">        List&lt;String&gt; groupNames = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L293">        Connection con = null;</span>
+<span class="nc" id="L294">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L295">        ResultSet rs = null;</span>
+        try {
+<span class="nc" id="L297">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L298">            pstmt = con.prepareStatement(USER_GROUPS);</span>
+<span class="nc bnc" id="L299" title="All 2 branches missed.">            pstmt.setString(1, server.isLocal(user) ? user.getNode() : user.toString());</span>
+<span class="nc" id="L300">            rs = pstmt.executeQuery();</span>
+<span class="nc bnc" id="L301" title="All 2 branches missed.">            while (rs.next()) {</span>
+<span class="nc" id="L302">                groupNames.add(rs.getString(1));</span>
+            }
+        }
+<span class="nc" id="L305">        catch (SQLException e) {</span>
+<span class="nc" id="L306">            Log.error(e.getMessage(), e);</span>
+        }
+        finally {
+<span class="nc" id="L309">            DbConnectionManager.closeConnection(rs, pstmt, con);</span>
+<span class="nc" id="L310">        }</span>
+<span class="nc" id="L311">        return groupNames;</span>
+    }
+
+    @Override
+    public void addMember(String groupName, JID user, boolean administrator) {
+<span class="nc" id="L316">        Connection con = null;</span>
+<span class="nc" id="L317">        PreparedStatement pstmt = null;</span>
+        try {
+<span class="nc" id="L319">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L320">            pstmt = con.prepareStatement(ADD_USER);</span>
+<span class="nc" id="L321">            pstmt.setString(1, groupName);</span>
+<span class="nc bnc" id="L322" title="All 2 branches missed.">            pstmt.setString(2, server.isLocal(user) ? user.getNode() : user.toString());</span>
+<span class="nc bnc" id="L323" title="All 2 branches missed.">            pstmt.setInt(3, administrator ? 1 : 0);</span>
+<span class="nc" id="L324">            pstmt.executeUpdate();</span>
+        }
+<span class="nc" id="L326">        catch (SQLException e) {</span>
+<span class="nc" id="L327">            Log.error(e.getMessage(), e);</span>
+        }
+        finally {
+<span class="nc" id="L330">            DbConnectionManager.closeConnection(pstmt, con);</span>
+<span class="nc" id="L331">        }</span>
+<span class="nc" id="L332">    }</span>
+
+    @Override
+    public void updateMember(String groupName, JID user, boolean administrator) {
+<span class="nc" id="L336">        Connection con = null;</span>
+<span class="nc" id="L337">        PreparedStatement pstmt = null;</span>
+        try {
+<span class="nc" id="L339">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L340">            pstmt = con.prepareStatement(UPDATE_USER);</span>
+<span class="nc bnc" id="L341" title="All 2 branches missed.">            pstmt.setInt(1, administrator ? 1 : 0);</span>
+<span class="nc" id="L342">            pstmt.setString(2, groupName);</span>
+<span class="nc bnc" id="L343" title="All 2 branches missed.">            pstmt.setString(3, server.isLocal(user) ? user.getNode() : user.toString());</span>
+<span class="nc" id="L344">            pstmt.executeUpdate();</span>
+        }
+<span class="nc" id="L346">        catch (SQLException e) {</span>
+<span class="nc" id="L347">            Log.error(e.getMessage(), e);</span>
+        }
+        finally {
+<span class="nc" id="L350">            DbConnectionManager.closeConnection(pstmt, con);</span>
+<span class="nc" id="L351">        }</span>
+<span class="nc" id="L352">    }</span>
+
+    @Override
+    public void deleteMember(String groupName, JID user) {
+<span class="nc" id="L356">        Connection con = null;</span>
+<span class="nc" id="L357">        PreparedStatement pstmt = null;</span>
+        try {
+<span class="nc" id="L359">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L360">            pstmt = con.prepareStatement(REMOVE_USER);</span>
+<span class="nc" id="L361">            pstmt.setString(1, groupName);</span>
+<span class="nc bnc" id="L362" title="All 2 branches missed.">            pstmt.setString(2, server.isLocal(user) ? user.getNode() : user.toString());</span>
+<span class="nc" id="L363">            pstmt.executeUpdate();</span>
+        }
+<span class="nc" id="L365">        catch (SQLException e) {</span>
+<span class="nc" id="L366">            Log.error(e.getMessage(), e);</span>
+        }
+        finally {
+<span class="nc" id="L369">            DbConnectionManager.closeConnection(pstmt, con);</span>
+<span class="nc" id="L370">        }</span>
+<span class="nc" id="L371">    }</span>
+
+    @Override
+    public boolean isReadOnly() {
+<span class="nc" id="L375">        return false;</span>
+    }
+
+    @Override
+    public Collection&lt;String&gt; search(String query) {
+<span class="nc" id="L380">        return search(query, 0, Integer.MAX_VALUE);</span>
+    }
+
+    @Override
+    public Collection&lt;String&gt; search(String query, int startIndex, int numResults) {
+<span class="nc bnc" id="L385" title="All 4 branches missed.">        if (query == null || &quot;&quot;.equals(query)) {</span>
+<span class="nc" id="L386">            return Collections.emptyList();</span>
+        }
+        // SQL LIKE queries don't map directly into a keyword/wildcard search like we want.
+        // Therefore, we do a best approximiation by replacing '*' with '%' and then
+        // surrounding the whole query with two '%'. This will return more data than desired,
+        // but is better than returning less data than desired.
+<span class="nc" id="L392">        query = &quot;%&quot; + query.replace('*', '%') + &quot;%&quot;;</span>
+<span class="nc bnc" id="L393" title="All 2 branches missed.">        if (query.endsWith(&quot;%%&quot;)) {</span>
+<span class="nc" id="L394">            query = query.substring(0, query.length()-1);</span>
+        }
+
+<span class="nc" id="L397">        List&lt;String&gt; groupNames = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L398">        Connection con = null;</span>
+<span class="nc" id="L399">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L400">        ResultSet rs = null;</span>
+        try {
+<span class="nc" id="L402">            con = DbConnectionManager.getConnection();</span>
+<span class="nc bnc" id="L403" title="All 4 branches missed.">            if ((startIndex==0) &amp;&amp; (numResults==Integer.MAX_VALUE))</span>
+            {
+<span class="nc" id="L405">               pstmt = con.prepareStatement(SEARCH_GROUP_NAME);</span>
+<span class="nc" id="L406">               pstmt.setString(1, query);</span>
+<span class="nc" id="L407">               rs = pstmt.executeQuery();</span>
+<span class="nc bnc" id="L408" title="All 2 branches missed.">               while (rs.next()) {</span>
+<span class="nc" id="L409">                   groupNames.add(rs.getString(1));</span>
+               }
+            } else {
+<span class="nc" id="L412">               pstmt = DbConnectionManager.createScrollablePreparedStatement(con, SEARCH_GROUP_NAME);</span>
+<span class="nc" id="L413">               DbConnectionManager.limitRowsAndFetchSize(pstmt, startIndex, numResults);</span>
+<span class="nc" id="L414">               pstmt.setString(1, query);</span>
+<span class="nc" id="L415">               rs = pstmt.executeQuery();</span>
+               // Scroll to the start index.
+<span class="nc" id="L417">               DbConnectionManager.scrollResultSet(rs, startIndex);</span>
+<span class="nc" id="L418">               int count = 0;</span>
+<span class="nc bnc" id="L419" title="All 4 branches missed.">               while (rs.next() &amp;&amp; count &lt; numResults) {</span>
+<span class="nc" id="L420">                   groupNames.add(rs.getString(1));</span>
+<span class="nc" id="L421">                   count++;</span>
+               }	
+            }
+        }
+<span class="nc" id="L425">        catch (SQLException e) {</span>
+<span class="nc" id="L426">            Log.error(e.getMessage(), e);</span>
+        }
+        finally {
+<span class="nc" id="L429">            DbConnectionManager.closeConnection(rs, pstmt, con);</span>
+<span class="nc" id="L430">        }</span>
+<span class="nc" id="L431">        return groupNames;</span>
+    }
+
+    @Override
+    public boolean isSearchSupported() {
+<span class="nc" id="L436">        return true;</span>
+    }
+
+    @Override
+    public boolean isSharingSupported() {
+<span class="nc" id="L441">        return true;</span>
+    }
+
+    private Collection&lt;JID&gt; getMembers(String groupName, boolean adminsOnly) {
+<span class="nc" id="L445">        List&lt;JID&gt; members = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L446">        Connection con = null;</span>
+<span class="nc" id="L447">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L448">        ResultSet rs = null;</span>
+        try {
+<span class="nc" id="L450">            con = DbConnectionManager.getConnection();</span>
+<span class="nc bnc" id="L451" title="All 2 branches missed.">            if (adminsOnly) {</span>
+<span class="nc" id="L452">                pstmt = con.prepareStatement(LOAD_ADMINS);</span>
+            }
+            else {
+<span class="nc" id="L455">                pstmt = con.prepareStatement(LOAD_MEMBERS);</span>
+            }
+<span class="nc" id="L457">            pstmt.setString(1, groupName);</span>
+<span class="nc" id="L458">            rs = pstmt.executeQuery();</span>
+<span class="nc bnc" id="L459" title="All 2 branches missed.">            while (rs.next()) {</span>
+<span class="nc" id="L460">                String user = rs.getString(1);</span>
+<span class="nc" id="L461">                JID userJID = null;</span>
+<span class="nc bnc" id="L462" title="All 2 branches missed.">                if (user.indexOf('@') == -1) {</span>
+                    // Create JID of local user if JID does not match a component's JID
+<span class="nc bnc" id="L464" title="All 2 branches missed.">                    if (!server.matchesComponent(userJID)) {</span>
+<span class="nc" id="L465">                        userJID = server.createJID(user, null);</span>
+                    }
+                }
+                else {
+<span class="nc" id="L469">                    userJID = new JID(user);</span>
+                }
+<span class="nc" id="L471">                members.add(userJID);</span>
+<span class="nc" id="L472">            }</span>
+        }
+<span class="nc" id="L474">        catch (SQLException e) {</span>
+<span class="nc" id="L475">            Log.error(e.getMessage(), e);</span>
+        }
+        finally {
+<span class="nc" id="L478">            DbConnectionManager.closeConnection(rs, pstmt, con);</span>
+<span class="nc" id="L479">        }</span>
+<span class="nc" id="L480">        return members;</span>
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

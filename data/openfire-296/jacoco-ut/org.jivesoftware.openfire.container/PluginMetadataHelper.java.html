@@ -1,0 +1,570 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>PluginMetadataHelper.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.container</a> &gt; <span class="el_source">PluginMetadataHelper.java</span></div><h1>PluginMetadataHelper.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2016 IgniteRealtime.org
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.container;
+
+import org.dom4j.Document;
+import org.dom4j.Element;
+import org.dom4j.io.SAXReader;
+import org.jivesoftware.admin.AdminConsole;
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.util.JavaSpecVersion;
+import org.jivesoftware.util.Version;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xml.sax.EntityResolver;
+import org.xml.sax.InputSource;
+import org.xml.sax.SAXException;
+
+import java.io.IOException;
+import java.net.MalformedURLException;
+import java.net.URL;
+import java.nio.file.Files;
+import java.nio.file.Path;
+
+/**
+ * Various helper methods to retrieve plugin metadat from plugin.xml files.
+ *
+ * @author Guus der Kinderen, guus.der.kinderen@gmail.com
+ */
+<span class="nc" id="L43">public class PluginMetadataHelper</span>
+{
+<span class="nc" id="L45">    private static final Logger Log = LoggerFactory.getLogger( PluginMetadataHelper.class );</span>
+
+    /**
+     * Returns the name of the directory of the parent for this plugin. The value is retrieved from the plugin.xml file
+     * of the plugin (which is casted down to lower-case). If the value could not be found, {@code null} will be returned.
+     *
+     * @param plugin The plugin (cannot be null)
+     * @return the parent plugin's directory name
+     */
+    public static String getParentPlugin( Plugin plugin )
+    {
+<span class="nc" id="L56">        return getParentPlugin( XMPPServer.getInstance().getPluginManager().getPluginPath( plugin ) );</span>
+    }
+
+    /**
+     * Returns the name of the directory of the parent for this plugin. The value is retrieved from the plugin.xml file
+     * of the plugin (which is casted down to lower-case). If the value could not be found, {@code null} will be returned.
+     *
+     * @param pluginDir the path of the plugin directory.
+     * @return the parent plugin's directory name
+     */
+    public static String getParentPlugin( Path pluginDir )
+    {
+<span class="nc" id="L68">        final String name = getElementValue( pluginDir, &quot;/plugin/parentPlugin&quot; );</span>
+<span class="nc bnc" id="L69" title="All 4 branches missed.">        if ( name != null &amp;&amp; !name.isEmpty() )</span>
+        {
+<span class="nc" id="L71">            return name.toLowerCase();</span>
+        }
+<span class="nc" id="L73">        return null;</span>
+    }
+
+    /**
+     * Returns the canonical name for the plugin, derived from the plugin archive file name.
+     *
+     * Note that this value can be different from the 'human readable' plugin name, as returned by {@link #getName(Path)}.
+     *
+     * Note that this method will return data only for plugins that have successfully been installed. To obtain data
+     * from plugin (directories) that have not (yet) been  installed, refer to the overloaded method that takes a Path
+     * argument.
+     *
+     * @param plugin The plugin (cannot be null)
+     * @return the plugin's canonical name.
+     */
+    public static String getCanonicalName( Plugin plugin )
+    {
+<span class="nc" id="L90">        return XMPPServer.getInstance().getPluginManager().getCanonicalName( plugin );</span>
+    }
+
+    /**
+     * Returns the canonical name for the plugin, derived from the plugin directory or archive file name.
+     *
+     * The provided path can refer to either the plugin archive file, or the directory in which the archive was
+     * extracted.
+     *
+     * Note that this value can be different from the 'human readable' plugin name, as returned by {@link #getName(Path)}.
+     *
+     * @param pluginPath the path of the plugin directory, or plugin archive file.
+     * @return the plugin's canonical name.
+     */
+    public static String getCanonicalName( Path pluginPath )
+    {
+<span class="nc" id="L106">        final String pathFileName = pluginPath.getFileName().toString().toLowerCase();</span>
+<span class="nc bnc" id="L107" title="All 2 branches missed.">        if ( pluginPath.toFile().isDirectory() )</span>
+        {
+<span class="nc" id="L109">            return pathFileName;</span>
+        }
+        else
+        {
+            // Strip file extension
+<span class="nc" id="L114">            return pathFileName.substring( 0, pathFileName.lastIndexOf( '.' ) );</span>
+        }
+    }
+
+    /**
+     * Returns the name of a plugin. The value is retrieved from the plugin.xml file of the plugin. If the value could not
+     * be found, {@code null} will be returned. Note that this value is a 'human readable' name, which can be distinct
+     * from the name of the plugin directory as returned by {@link #getCanonicalName(Path)}.
+     *
+     * Note that this method will return data only for plugins that have successfully been installed. To obtain data
+     * from plugin (directories) that have not (yet) been  installed, refer to the overloaded method that takes a Path
+     * argument.
+     *
+     * @param plugin The plugin (cannot be null)
+     * @return the plugin's human-readable name.
+     */
+    public static String getName( Plugin plugin )
+    {
+<span class="nc" id="L132">        return getName( XMPPServer.getInstance().getPluginManager().getPluginPath( plugin ) );</span>
+    }
+
+    /**
+     * Returns the name of a plugin. The value is retrieved from the plugin.xml file of the plugin. If the value could not
+     * be found, {@code null} will be returned. Note that this value is a 'human readable' name, which can be distinct
+     * from the name of the plugin directory as returned by {@link #getCanonicalName(Path)}.
+     *
+     * @param pluginDir the path of the plugin directory.
+     * @return the plugin's human-readable name.
+     */
+    public static String getName( Path pluginDir )
+    {
+<span class="nc" id="L145">        final String name = getElementValue( pluginDir, &quot;/plugin/name&quot; );</span>
+<span class="nc" id="L146">        final String pluginName = getCanonicalName( pluginDir );</span>
+<span class="nc bnc" id="L147" title="All 2 branches missed.">        if ( name != null ) {</span>
+            try {
+<span class="nc" id="L149">                return AdminConsole.getAdminText(name, pluginName);</span>
+<span class="nc" id="L150">            } catch (final Exception e) {</span>
+<span class="nc" id="L151">                Log.warn(&quot;Unexpected exception attempting to retrieve admin text&quot;, e);</span>
+                // Default to non-internationalised name
+<span class="nc" id="L153">                return name;</span>
+            }
+        }
+<span class="nc" id="L156">        return pluginName;</span>
+    }
+
+    /**
+     * Returns the description of a plugin. The value is retrieved from the plugin.xml file of the plugin. If the value
+     * could not be found, {@code null} will be returned.
+     *
+     * Note that this method will return data only for plugins that have successfully been installed. To obtain data
+     * from plugin (directories) that have not (yet) been  installed, refer to the overloaded method that takes a Path
+     * argument.
+     *
+     * @param plugin The plugin (cannot be null)
+     * @return the plugin's description.
+     */
+    public static String getDescription( Plugin plugin )
+    {
+<span class="nc" id="L172">        return getDescription( XMPPServer.getInstance().getPluginManager().getPluginPath( plugin ) );</span>
+    }
+
+    /**
+     * Returns the description of a plugin. The value is retrieved from the plugin.xml file of the plugin. If the value
+     * could not be found, {@code null} will be returned.
+     *
+     * @param pluginDir the path of the plugin directory.
+     * @return the plugin's description.
+     */
+    public static String getDescription( Path pluginDir )
+    {
+<span class="nc" id="L184">        final String name = getCanonicalName( pluginDir );</span>
+<span class="nc" id="L185">        final String description = getElementValue( pluginDir, &quot;/plugin/description&quot; );</span>
+<span class="nc" id="L186">        return AdminConsole.getAdminText( description, name );</span>
+    }
+
+    /**
+     * Returns the author of a plugin. The value is retrieved from the plugin.xml file of the plugin. If the value could
+     * not be found, {@code null} will be returned.
+     *
+     * Note that this method will return data only for plugins that have successfully been installed. To obtain data
+     * from plugin (directories) that have not (yet) been  installed, refer to the overloaded method that takes a Path
+     * argument.
+     *
+     * @param plugin The plugin (cannot be null)
+     * @return the plugin's author.
+     */
+    public static String getAuthor( Plugin plugin )
+    {
+<span class="nc" id="L202">        return getAuthor( XMPPServer.getInstance().getPluginManager().getPluginPath( plugin ) );</span>
+    }
+
+    /**
+     * Returns the author of a plugin. The value is retrieved from the plugin.xml file of the plugin. If the value could
+     * not be found, {@code null} will be returned.
+     *
+     * @param pluginDir the path of the plugin directory.
+     * @return the plugin's author.
+     */
+    public static String getAuthor( Path pluginDir )
+    {
+<span class="nc" id="L214">        return getElementValue( pluginDir, &quot;/plugin/author&quot; );</span>
+    }
+
+    /**
+     * Returns the version of a plugin. The value is retrieved from the plugin.xml file of the plugin. If the value
+     * could not be found, {@code null} will be returned.
+     *
+     * Note that this method will return data only for plugins that have successfully been installed. To obtain data
+     * from plugin (directories) that have not (yet) been  installed, refer to the overloaded method that takes a Path
+     * argument.
+     *
+     * @param plugin The plugin (cannot be null)
+     * @return the plugin's version.
+     */
+    public static Version getVersion( Plugin plugin )
+    {
+<span class="nc" id="L230">        return getVersion( XMPPServer.getInstance().getPluginManager().getPluginPath( plugin ) );</span>
+    }
+
+    /**
+     * Returns the version of a plugin. The value is retrieved from the plugin.xml file of the plugin. If the value
+     * could not be found, {@code null} will be returned.
+     *
+     * @param pluginDir the path of the plugin directory.
+     * @return the plugin's version.
+     */
+    public static Version getVersion( Path pluginDir )
+    {
+<span class="nc" id="L242">        final String value = getElementValue( pluginDir, &quot;/plugin/version&quot; );</span>
+
+<span class="nc bnc" id="L244" title="All 4 branches missed.">        if ( value == null || value.trim().isEmpty() )</span>
+        {
+<span class="nc" id="L246">            return null;</span>
+        }
+
+<span class="nc" id="L249">        return new Version( value );</span>
+    }
+
+    /**
+     * Returns the minimum server version this plugin can run within. The value is retrieved from the plugin.xml file
+     * of the plugin. If the value could not be found, {@code null} will be returned.
+     *
+     * Note that this method will return data only for plugins that have successfully been installed. To obtain data
+     * from plugin (directories) that have not (yet) been  installed, refer to the overloaded method that takes a Path
+     * argument.
+     *
+     * @param plugin The plugin (cannot be null)
+     * @return the plugin's minimum server version (possibly null).
+     */
+    public static Version getMinServerVersion( Plugin plugin )
+    {
+<span class="nc" id="L265">        return getMinServerVersion( XMPPServer.getInstance().getPluginManager().getPluginPath( plugin ) );</span>
+    }
+
+    /**
+     * Returns the minimum server version this plugin can run within. The value is retrieved from the plugin.xml file
+     * of the plugin. If the value could not be found, {@code null} will be returned.
+     *
+     * @param pluginDir the path of the plugin directory.
+     * @return the plugin's minimum server version (possibly null).
+     */
+    public static Version getMinServerVersion( Path pluginDir )
+    {
+<span class="nc" id="L277">        final String value = getElementValue( pluginDir, &quot;/plugin/minServerVersion&quot; );</span>
+
+<span class="nc bnc" id="L279" title="All 4 branches missed.">        if ( value == null || value.trim().isEmpty() )</span>
+        {
+<span class="nc" id="L281">            return null;</span>
+        }
+
+<span class="nc" id="L284">        return new Version( value );</span>
+    }
+
+    /**
+     * Returns the server version up, but not including, in which this plugin can run within. The value is retrieved from
+     * the plugin.xml file of the plugin. If the value could not be found, {@code null} will be returned.
+     *
+     * Note that this method will return data only for plugins that have successfully been installed. To obtain data
+     * from plugin (directories) that have not (yet) been  installed, refer to the overloaded method that takes a Path
+     * argument.
+     *
+     * @param plugin The plugin (cannot be null)
+     * @return the plugin's maximum server version (possibly null).
+     */
+    public static Version getPriorToServerVersion( Plugin plugin )
+    {
+<span class="nc" id="L300">        return getPriorToServerVersion( XMPPServer.getInstance().getPluginManager().getPluginPath( plugin ) );</span>
+    }
+
+    /**
+     * Returns the server version up, but not including, in which this plugin can run within. The value is retrieved from
+     * the plugin.xml file of the plugin. If the value could not be found, {@code null} will be returned.
+     *
+     * @param pluginDir the path of the plugin directory.
+     * @return the plugin's maximum server version (possibly null).
+     */
+    public static Version getPriorToServerVersion( Path pluginDir )
+    {
+<span class="nc" id="L312">        final String value = getElementValue( pluginDir, &quot;/plugin/priorToServerVersion&quot; );</span>
+<span class="nc bnc" id="L313" title="All 4 branches missed.">        if ( value == null || value.trim().isEmpty() )</span>
+        {
+<span class="nc" id="L315">            return null;</span>
+        }
+
+<span class="nc" id="L318">        return new Version( value );</span>
+    }
+
+    /**
+     * Returns the minimum Java specification version this plugin needs to run. The value is retrieved from the
+     * plugin.xml file of the plugin. If the value could not be found, {@code null} will be returned.
+     *
+     * Note that this method will return data only for plugins that have successfully been installed. To obtain data
+     * from plugin (directories) that have not (yet) been  installed, refer to the overloaded method that takes a Path
+     * argument.
+     *
+     * @param plugin The plugin (cannot be null)
+     * @return the plugin's minimum Java version (possibly null).
+     */
+    public static JavaSpecVersion getMinJavaVersion( Plugin plugin )
+    {
+<span class="nc" id="L334">        return getMinJavaVersion( XMPPServer.getInstance().getPluginManager().getPluginPath( plugin ) );</span>
+    }
+
+    /**
+     * Returns the minimum Java specification version this plugin needs to run. The value is retrieved from the
+     * plugin.xml file of the plugin. If the value could not be found, {@code null} will be returned.
+     *
+     * @param pluginDir the path of the plugin directory.
+     * @return the plugin's minimum Java version (possibly null).
+     */
+    public static JavaSpecVersion getMinJavaVersion( Path pluginDir )
+    {
+<span class="nc" id="L346">        final String value = getElementValue( pluginDir, &quot;/plugin/minJavaVersion&quot; );</span>
+
+<span class="nc bnc" id="L348" title="All 4 branches missed.">        if ( value == null || value.trim().isEmpty() )</span>
+        {
+<span class="nc" id="L350">            return null;</span>
+        }
+
+<span class="nc" id="L353">        return new JavaSpecVersion( value );</span>
+    }
+
+    /**
+     * Returns the database schema key of a plugin, if it exists. The value is retrieved from the plugin.xml file of the
+     * plugin. If the value could not be found, {@code null} will be returned.
+     *
+     * Note that this method will return data only for plugins that have successfully been installed. To obtain data
+     * from plugin (directories) that have not (yet) been  installed, refer to the overloaded method that takes a Path
+     * argument.
+     *
+     * @param plugin The plugin (cannot be null)
+     * @return the plugin's database schema key or {@code null} if it doesn't exist.
+     */
+    public static String getDatabaseKey( Plugin plugin )
+    {
+<span class="nc" id="L369">        return getDatabaseKey( XMPPServer.getInstance().getPluginManager().getPluginPath( plugin ) );</span>
+    }
+
+    /**
+     * Returns the database schema key of a plugin, if it exists. The value is retrieved from the plugin.xml file of the
+     * plugin. If the value could not be found, {@code null} will be returned.
+     *
+     * @param pluginDir the path of the plugin directory.
+     * @return the plugin's database schema key or {@code null} if it doesn't exist.
+     */
+    public static String getDatabaseKey( Path pluginDir )
+    {
+<span class="nc" id="L381">        return getElementValue( pluginDir, &quot;/plugin/databaseKey&quot; );</span>
+    }
+
+    /**
+     * Returns the database schema version of a plugin, if it exists. The value is retrieved from the plugin.xml file of
+     * the plugin. If the value could not be found, {@code -1} will be returned.
+     *
+     * Note that this method will return data only for plugins that have successfully been installed. To obtain data
+     * from plugin (directories) that have not (yet) been  installed, refer to the overloaded method that takes a Path
+     * argument.
+     *
+     * @param plugin The plugin (cannot be null)
+     * @return the plugin's database schema version or {@code -1} if it doesn't exist.
+     */
+    public static int getDatabaseVersion( Plugin plugin )
+    {
+<span class="nc" id="L397">        return getDatabaseVersion( XMPPServer.getInstance().getPluginManager().getPluginPath( plugin ) );</span>
+    }
+
+    /**
+     * Returns the database schema version of a plugin, if it exists. The value is retrieved from the plugin.xml file of
+     * the plugin. If the value could not be found, {@code -1} will be returned.
+     *
+     * @param pluginDir the path of the plugin directory.
+     * @return the plugin's database schema version or {@code -1} if it doesn't exist.
+     */
+    public static int getDatabaseVersion( Path pluginDir )
+    {
+<span class="nc" id="L409">        String versionString = getElementValue( pluginDir, &quot;/plugin/databaseVersion&quot; );</span>
+<span class="nc bnc" id="L410" title="All 2 branches missed.">        if ( versionString != null )</span>
+        {
+            try
+            {
+<span class="nc" id="L414">                return Integer.parseInt( versionString.trim() );</span>
+            }
+<span class="nc" id="L416">            catch ( NumberFormatException nfe )</span>
+            {
+<span class="nc" id="L418">                Log.error( &quot;Unable to parse the database version for plugin '{}'.&quot;, getCanonicalName( pluginDir ), nfe );</span>
+            }
+        }
+<span class="nc" id="L421">        return -1;</span>
+    }
+
+    /**
+     * Returns the license agreement type that the plugin is governed by. The value is retrieved from the plugin.xml
+     * file of the plugin.
+     *
+     * Note that this method will return data only for plugins that have successfully been installed. To obtain data
+     * from plugin (directories) that have not (yet) been  installed, refer to the overloaded method that takes a Path
+     * argument.
+     *
+     * @param plugin The plugin (cannot be null)
+     * @return the plugin's license agreement.
+     */
+    public static String getLicense( Plugin plugin )
+    {
+<span class="nc" id="L437">        return getLicense( XMPPServer.getInstance().getPluginManager().getPluginPath( plugin ) );</span>
+    }
+
+    /**
+     * Returns the license agreement type that the plugin is governed by. The value is retrieved from the plugin.xml
+     * file of the plugin.
+     *
+     * @param pluginDir the path of the plugin directory.
+     * @return the plugin's license agreement.
+     */
+    public static String getLicense( Path pluginDir )
+    {
+<span class="nc" id="L449">        return getElementValue( pluginDir, &quot;/plugin/licenseType&quot; );</span>
+    }
+
+    public static URL getIcon( Plugin plugin )
+    {
+<span class="nc" id="L454">        return getIcon( XMPPServer.getInstance().getPluginManager().getPluginPath( plugin ) );</span>
+    }
+
+    public static URL getIcon( Path pluginDir )
+    {
+<span class="nc" id="L459">        Path icon = pluginDir.resolve( &quot;logo_small.png&quot; );</span>
+<span class="nc bnc" id="L460" title="All 2 branches missed.">        if ( !icon.toFile().exists() )</span>
+        {
+<span class="nc" id="L462">            icon = pluginDir.resolve( &quot;logo_small.gif&quot; );</span>
+        }
+<span class="nc bnc" id="L464" title="All 2 branches missed.">        if ( !icon.toFile().exists() )</span>
+        {
+<span class="nc" id="L466">            return null;</span>
+        }
+
+        try
+        {
+<span class="nc" id="L471">            return icon.toUri().toURL();</span>
+        }
+<span class="nc" id="L473">        catch ( MalformedURLException e )</span>
+        {
+<span class="nc" id="L475">            Log.warn( &quot;Unable to parse URL for icon of plugin '{}'.&quot;, getCanonicalName( pluginDir ), e );</span>
+<span class="nc" id="L476">            return null;</span>
+        }
+    }
+
+    public static URL getReadme( Plugin plugin )
+    {
+<span class="nc" id="L482">        return getReadme( XMPPServer.getInstance().getPluginManager().getPluginPath( plugin ) );</span>
+    }
+
+    public static URL getReadme( Path pluginDir )
+    {
+<span class="nc" id="L487">        final Path file = pluginDir.resolve( &quot;readme.html&quot; );</span>
+<span class="nc bnc" id="L488" title="All 2 branches missed.">        if ( !file.toFile().exists() )</span>
+        {
+<span class="nc" id="L490">            return null;</span>
+        }
+
+        try
+        {
+<span class="nc" id="L495">            return file.toUri().toURL();</span>
+        }
+<span class="nc" id="L497">        catch ( MalformedURLException e )</span>
+        {
+<span class="nc" id="L499">            Log.warn( &quot;Unable to parse URL for readme of plugin '{}'.&quot;, getCanonicalName( pluginDir ), e );</span>
+<span class="nc" id="L500">            return null;</span>
+        }
+    }
+
+    public static URL getChangelog( Plugin plugin )
+    {
+<span class="nc" id="L506">        return getChangelog( XMPPServer.getInstance().getPluginManager().getPluginPath( plugin ) );</span>
+    }
+
+    public static URL getChangelog( Path pluginDir )
+    {
+<span class="nc" id="L511">        final Path file = pluginDir.resolve( &quot;changelog.html&quot; );</span>
+<span class="nc bnc" id="L512" title="All 2 branches missed.">        if ( !file.toFile().exists() )</span>
+        {
+<span class="nc" id="L514">            return null;</span>
+        }
+
+        try
+        {
+<span class="nc" id="L519">            return file.toUri().toURL();</span>
+        }
+<span class="nc" id="L521">        catch ( MalformedURLException e )</span>
+        {
+<span class="nc" id="L523">            Log.warn( &quot;Unable to parse URL for changelog of plugin '{}'.&quot;, getCanonicalName( pluginDir ), e );</span>
+<span class="nc" id="L524">            return null;</span>
+        }
+    }
+
+    /**
+     * Returns the value of an element selected via an xpath expression from
+     * a Plugin's plugin.xml file.
+     *
+     * @param pluginDir the path of the plugin directory.
+     * @param xpath     the xpath expression.
+     * @return the value of the element selected by the xpath expression.
+     */
+    static String getElementValue( Path pluginDir, String xpath )
+    {
+<span class="nc bnc" id="L538" title="All 2 branches missed.">        if ( pluginDir == null )</span>
+        {
+<span class="nc" id="L540">            return null;</span>
+        }
+        try
+        {
+<span class="nc" id="L544">            final Path pluginConfig = pluginDir.resolve( &quot;plugin.xml&quot; );</span>
+<span class="nc bnc" id="L545" title="All 2 branches missed.">            if ( Files.exists( pluginConfig ) )</span>
+            {
+<span class="nc" id="L547">                final SAXReader saxReader = new SAXReader();</span>
+<span class="nc" id="L548">                saxReader.setEntityResolver(new EntityResolver() {</span>
+                    @Override
+                    public InputSource resolveEntity(String publicId, String systemId) throws SAXException, IOException {
+<span class="nc" id="L551">                        throw new IOException(&quot;External entity denied: &quot; + publicId + &quot; // &quot; + systemId);</span>
+                    }
+                });
+<span class="nc" id="L554">                saxReader.setEncoding( &quot;UTF-8&quot; );</span>
+<span class="nc" id="L555">                final Document pluginXML = saxReader.read( pluginConfig.toFile() );</span>
+<span class="nc" id="L556">                final Element element = (Element) pluginXML.selectSingleNode( xpath );</span>
+<span class="nc bnc" id="L557" title="All 2 branches missed.">                if ( element != null )</span>
+                {
+<span class="nc" id="L559">                    return element.getTextTrim();</span>
+                }
+            }
+        }
+<span class="nc" id="L563">        catch ( Exception e )</span>
+        {
+<span class="nc" id="L565">            Log.error( &quot;Unable to get element value '{}' from plugin.xml of plugin in '{}':&quot;, xpath, pluginDir, e );</span>
+<span class="nc" id="L566">        }</span>
+<span class="nc" id="L567">        return null;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

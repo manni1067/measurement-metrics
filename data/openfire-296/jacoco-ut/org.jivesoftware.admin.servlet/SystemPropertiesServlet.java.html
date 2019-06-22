@@ -1,0 +1,351 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>SystemPropertiesServlet.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.admin.servlet</a> &gt; <span class="el_source">SystemPropertiesServlet.java</span></div><h1>SystemPropertiesServlet.java</h1><pre class="source lang-java linenums">package org.jivesoftware.admin.servlet;
+
+import java.io.IOException;
+import java.util.Collection;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Set;
+import java.util.function.Predicate;
+import java.util.stream.Collectors;
+
+import javax.servlet.ServletException;
+import javax.servlet.http.Cookie;
+import javax.servlet.http.HttpServlet;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
+import javax.servlet.http.HttpSession;
+
+import org.jivesoftware.util.CookieUtils;
+import org.jivesoftware.util.JiveGlobals;
+import org.jivesoftware.util.ListPager;
+import org.jivesoftware.util.ParamUtils;
+import org.jivesoftware.util.StringUtils;
+import org.jivesoftware.util.SystemProperty;
+import org.jivesoftware.util.WebManager;
+
+@SuppressWarnings(&quot;serial&quot;)
+<span class="nc" id="L27">public class SystemPropertiesServlet extends HttpServlet {</span>
+
+<span class="nc" id="L29">    private static final String[] SEARCH_FIELDS = {&quot;searchName&quot;, &quot;searchValue&quot;, &quot;searchDefaultValue&quot;, &quot;searchPlugin&quot;, &quot;searchDescription&quot;, &quot;searchDynamic&quot;};</span>
+
+    @Override
+    protected void doGet(final HttpServletRequest request, final HttpServletResponse response) throws ServletException, IOException {
+
+<span class="nc" id="L34">        final Collection&lt;SystemProperty&gt; systemProperties = SystemProperty.getProperties();</span>
+<span class="nc" id="L35">        final Set&lt;String&gt; systemPropertyKeys = systemProperties.stream().map(SystemProperty::getKey).collect(Collectors.toSet());</span>
+        // Get all the SystemProperties
+<span class="nc" id="L37">        final List&lt;CompoundProperty&gt; compoundProperties = systemProperties.stream().map(CompoundProperty::new).collect(Collectors.toList());</span>
+        // Now add any missing JiveGlobals properties
+<span class="nc bnc" id="L39" title="All 2 branches missed.">        JiveGlobals.getPropertyNames().stream().filter(key -&gt; !systemPropertyKeys.contains(key)).forEach(key -&gt; compoundProperties.add(new CompoundProperty(key)));</span>
+        // And sort by key
+<span class="nc" id="L41">        compoundProperties.sort(Comparator.comparing(o -&gt; o.key));</span>
+
+        // Find what we're searching for
+<span class="nc" id="L44">        final Search search = new Search(request);</span>
+
+<span class="nc" id="L46">        final Predicate&lt;CompoundProperty&gt; predicate = getSearchPredicate(search);</span>
+
+        // Finally, create a list pager
+<span class="nc" id="L49">        final ListPager&lt;CompoundProperty&gt; listPager = new ListPager&lt;&gt;(request, response, compoundProperties, predicate, SEARCH_FIELDS);</span>
+
+<span class="nc" id="L51">        final List&lt;String&gt; plugins = compoundProperties.stream()</span>
+<span class="nc" id="L52">            .map(compoundProperty -&gt; compoundProperty.plugin)</span>
+<span class="nc" id="L53">            .distinct()</span>
+<span class="nc bnc" id="L54" title="All 2 branches missed.">            .filter(plugin -&gt; !plugin.isEmpty())</span>
+            // Ensure Openfire comes first in the list
+<span class="nc" id="L56">            .sorted((o1, o2) -&gt; {</span>
+<span class="nc bnc" id="L57" title="All 2 branches missed.">                if (o1.equalsIgnoreCase(&quot;Openfire&quot;)) {</span>
+<span class="nc" id="L58">                    return -1;</span>
+<span class="nc bnc" id="L59" title="All 2 branches missed.">                } else if (o2.equalsIgnoreCase(&quot;Openfire&quot;)) {</span>
+<span class="nc" id="L60">                    return 1;</span>
+                } else {
+<span class="nc" id="L62">                    return o1.compareTo(o2);</span>
+                }
+            })
+<span class="nc" id="L65">            .collect(Collectors.toList());</span>
+
+<span class="nc" id="L67">        addSessionFlashes(request, &quot;errorMessage&quot;, &quot;warningMessage&quot;, &quot;successMessage&quot;);</span>
+<span class="nc" id="L68">        final String csrf = StringUtils.randomString(16);</span>
+<span class="nc" id="L69">        CookieUtils.setCookie(request, response, &quot;csrf&quot;, csrf, -1);</span>
+<span class="nc" id="L70">        request.setAttribute(&quot;csrf&quot;, csrf);</span>
+<span class="nc" id="L71">        request.setAttribute(&quot;listPager&quot;, listPager);</span>
+<span class="nc" id="L72">        request.setAttribute(&quot;search&quot;, search);</span>
+<span class="nc" id="L73">        request.setAttribute(&quot;plugins&quot;, plugins);</span>
+
+<span class="nc" id="L75">        request.getRequestDispatcher(&quot;system-properties.jsp&quot;).forward(request, response);</span>
+<span class="nc" id="L76">    }</span>
+
+    private static void addSessionFlashes(final HttpServletRequest request, final String... flashes) {
+<span class="nc" id="L79">        final HttpSession session = request.getSession();</span>
+<span class="nc bnc" id="L80" title="All 2 branches missed.">        for (final String flash : flashes) {</span>
+<span class="nc" id="L81">            final Object flashValue = session.getAttribute(flash);</span>
+<span class="nc bnc" id="L82" title="All 2 branches missed.">            if (flashValue != null) {</span>
+<span class="nc" id="L83">                request.setAttribute(flash, flashValue);</span>
+<span class="nc" id="L84">                session.setAttribute(flash, null);</span>
+            }
+        }
+<span class="nc" id="L87">    }</span>
+
+    @Override
+    protected void doPost(final HttpServletRequest request, final HttpServletResponse response) throws IOException {
+<span class="nc" id="L91">        final HttpSession session = request.getSession();</span>
+<span class="nc" id="L92">        final Cookie csrfCookie = CookieUtils.getCookie(request, &quot;csrf&quot;);</span>
+<span class="nc bnc" id="L93" title="All 4 branches missed.">        if (csrfCookie == null || !csrfCookie.getValue().equals(request.getParameter(&quot;csrf&quot;))) {</span>
+<span class="nc" id="L94">            session.setAttribute(&quot;errorMessage&quot;, &quot;CSRF Failure!&quot;);</span>
+        } else {
+<span class="nc" id="L96">            final WebManager webManager = new WebManager();</span>
+<span class="nc" id="L97">            webManager.init(request, response, session, session.getServletContext());</span>
+<span class="nc" id="L98">            final String action = ParamUtils.getStringParameter(request, &quot;action&quot;, &quot;&quot;);</span>
+<span class="nc bnc" id="L99" title="All 18 branches missed.">            switch (action) {</span>
+                case &quot;save&quot;:
+<span class="nc" id="L101">                    saveProperty(request);</span>
+<span class="nc" id="L102">                    break;</span>
+                case &quot;cancel&quot;:
+<span class="nc" id="L104">                    session.setAttribute(&quot;warningMessage&quot;, String.format(&quot;No changes were made to the property %s&quot;, request.getParameter(&quot;key&quot;)));</span>
+<span class="nc" id="L105">                    break;</span>
+                case &quot;encrypt&quot;:
+<span class="nc" id="L107">                    encryptProperty(request, webManager);</span>
+<span class="nc" id="L108">                    break;</span>
+                case &quot;delete&quot;:
+<span class="nc" id="L110">                    deleteProperty(request, webManager);</span>
+<span class="nc" id="L111">                    break;</span>
+                default:
+<span class="nc" id="L113">                    session.setAttribute(&quot;warningMessage&quot;, String.format(&quot;Unexpected request action '%s'&quot;, action));</span>
+                    break;
+            }
+        }
+<span class="nc" id="L117">        response.sendRedirect(request.getRequestURI() + ListPager.getQueryString(request, '?', SEARCH_FIELDS));</span>
+<span class="nc" id="L118">    }</span>
+
+    private void saveProperty(final HttpServletRequest request) {
+<span class="nc" id="L121">        final String key = request.getParameter(&quot;key&quot;);</span>
+<span class="nc" id="L122">        final String value = request.getParameter(&quot;value&quot;);</span>
+<span class="nc" id="L123">        final boolean encrypt = ParamUtils.getBooleanAttribute(request, &quot;encrypt&quot;);</span>
+<span class="nc bnc" id="L124" title="All 2 branches missed.">        final boolean alreadyExists = JiveGlobals.getProperty(key) != null;</span>
+<span class="nc" id="L125">        JiveGlobals.setProperty(key, value, encrypt);</span>
+<span class="nc bnc" id="L126" title="All 2 branches missed.">        request.getSession().setAttribute(&quot;successMessage&quot;, String.format(&quot;The property %s was %s&quot;, key, alreadyExists ? &quot;updated&quot; : &quot;created&quot;));</span>
+<span class="nc" id="L127">    }</span>
+
+    @SuppressWarnings(&quot;unchecked&quot;)
+    private void encryptProperty(final HttpServletRequest request, final WebManager webManager) {
+<span class="nc" id="L131">        final String key = request.getParameter(&quot;key&quot;);</span>
+<span class="nc bnc" id="L132" title="All 2 branches missed.">        if (JiveGlobals.getProperty(key) == null) {</span>
+            // We can't encrypt a property that doesn't yet exist
+<span class="nc" id="L134">            SystemProperty.getProperty(key).ifPresent(property -&gt; property.setValue(property.getDefaultValue()));</span>
+        }
+<span class="nc" id="L136">        JiveGlobals.setPropertyEncrypted(key, true);</span>
+<span class="nc" id="L137">        webManager.logEvent(&quot;Encrypted server property &quot; + key, null);</span>
+<span class="nc" id="L138">        request.getSession().setAttribute(&quot;successMessage&quot;, String.format(&quot;The property %s was encrypted&quot;, key));</span>
+<span class="nc" id="L139">    }</span>
+
+    private void deleteProperty(final HttpServletRequest request, final WebManager webManager) {
+<span class="nc" id="L142">        final String key = request.getParameter(&quot;key&quot;);</span>
+<span class="nc" id="L143">        JiveGlobals.deleteProperty(key);</span>
+<span class="nc" id="L144">        webManager.logEvent(&quot;deleted server property &quot; + key, null);</span>
+<span class="nc" id="L145">        request.getSession().setAttribute(&quot;successMessage&quot;, String.format(&quot;The property %s was deleted&quot;, key));</span>
+<span class="nc" id="L146">    }</span>
+
+    private Predicate&lt;CompoundProperty&gt; getSearchPredicate(final Search search) {
+<span class="nc" id="L149">        Predicate&lt;CompoundProperty&gt; predicate = compoundProperty -&gt; true;</span>
+
+<span class="nc bnc" id="L151" title="All 2 branches missed.">        if (!search.name.isEmpty()) {</span>
+<span class="nc" id="L152">            predicate = predicate.and(compoundProperty -&gt; StringUtils.containsIgnoringCase(compoundProperty.key, search.name));</span>
+        }
+
+<span class="nc bnc" id="L155" title="All 2 branches missed.">        if (!search.value.isEmpty()) {</span>
+<span class="nc bnc" id="L156" title="All 6 branches missed.">            predicate = predicate.and(compoundProperty -&gt; !compoundProperty.isEncrypted() &amp;&amp; (StringUtils.containsIgnoringCase(compoundProperty.valueAsSaved, search.value) || StringUtils.containsIgnoringCase(compoundProperty.displayValue, search.value)));</span>
+        }
+
+<span class="nc bnc" id="L159" title="All 14 branches missed.">        switch (search.defaultValue) {</span>
+            case &quot;changed&quot;:
+<span class="nc bnc" id="L161" title="All 6 branches missed.">                predicate = predicate.and(compoundProperty -&gt; !compoundProperty.hidden &amp;&amp; compoundProperty.systemProperty &amp;&amp; compoundProperty.valueChanged);</span>
+<span class="nc" id="L162">                break;</span>
+            case &quot;unchanged&quot;:
+<span class="nc bnc" id="L164" title="All 6 branches missed.">                predicate = predicate.and(compoundProperty -&gt; !compoundProperty.hidden &amp;&amp; compoundProperty.systemProperty &amp;&amp; !compoundProperty.valueChanged);</span>
+<span class="nc" id="L165">                break;</span>
+            case &quot;unknown&quot;:
+<span class="nc bnc" id="L167" title="All 4 branches missed.">                predicate = predicate.and(compoundProperty -&gt; compoundProperty.hidden || !compoundProperty.systemProperty);</span>
+<span class="nc" id="L168">                break;</span>
+            default:
+                // Do nothing
+        }
+
+<span class="nc bnc" id="L173" title="All 10 branches missed.">        switch (search.plugin) {</span>
+            case &quot;&quot;:
+                // All plugins, no filter required
+<span class="nc" id="L176">                break;</span>
+            case &quot;none&quot;:
+<span class="nc" id="L178">                predicate = predicate.and(compoundProperty -&gt; compoundProperty.plugin.isEmpty());</span>
+<span class="nc" id="L179">                break;</span>
+            default:
+<span class="nc" id="L181">                predicate = predicate.and(compoundProperty -&gt; search.plugin.equals(compoundProperty.plugin));</span>
+        }
+
+<span class="nc bnc" id="L184" title="All 2 branches missed.">        if (!search.description.isEmpty()) {</span>
+<span class="nc" id="L185">            predicate = predicate.and(compoundProperty -&gt; StringUtils.containsIgnoringCase(compoundProperty.description, search.description));</span>
+        }
+
+<span class="nc bnc" id="L188" title="All 18 branches missed.">        switch (search.dynamic) {</span>
+            case &quot;true&quot;:
+<span class="nc" id="L190">                predicate = predicate.and(compoundProperty -&gt; compoundProperty.dynamic);</span>
+<span class="nc" id="L191">                break;</span>
+            case &quot;false&quot;:
+<span class="nc bnc" id="L193" title="All 6 branches missed.">                predicate = predicate.and(compoundProperty -&gt; compoundProperty.systemProperty &amp;&amp; !compoundProperty.dynamic &amp;&amp; !compoundProperty.restartRequired);</span>
+<span class="nc" id="L194">                break;</span>
+            case &quot;restart&quot;:
+<span class="nc bnc" id="L196" title="All 4 branches missed.">                predicate = predicate.and(compoundProperty -&gt; compoundProperty.systemProperty &amp;&amp; compoundProperty.restartRequired);</span>
+<span class="nc" id="L197">                break;</span>
+            case &quot;unknown&quot;:
+<span class="nc bnc" id="L199" title="All 2 branches missed.">                predicate = predicate.and(compoundProperty -&gt; !compoundProperty.systemProperty);</span>
+            default:
+                // Do nothing
+        }
+
+<span class="nc" id="L204">        return predicate;</span>
+    }
+
+    /**
+     * Not every entry in the ofProperty table will have a matching {@link SystemProperty} - so this class exists so
+     * that the admin UI can display either
+     */
+    public static final class CompoundProperty {
+
+        private final boolean systemProperty;
+        private final String key;
+        private final Object value;
+        private final String valueAsSaved;
+        private final String displayValue;
+        private final String defaultDisplayValue;
+        private final boolean valueChanged;
+        private final String description;
+        private final String plugin;
+        private final boolean dynamic;
+        private final boolean restartRequired;
+        private final boolean encrypted;
+        private final boolean hidden;
+
+<span class="nc" id="L227">        private CompoundProperty(final String key) {</span>
+<span class="nc" id="L228">            this.systemProperty = false;</span>
+<span class="nc" id="L229">            this.key = key;</span>
+<span class="nc" id="L230">            this.value = JiveGlobals.getProperty(key);</span>
+<span class="nc" id="L231">            this.valueAsSaved = (String) value;</span>
+<span class="nc" id="L232">            this.displayValue = valueAsSaved;</span>
+<span class="nc" id="L233">            this.defaultDisplayValue = null;</span>
+<span class="nc" id="L234">            this.valueChanged = false;</span>
+<span class="nc" id="L235">            this.description = &quot;&quot;;</span>
+<span class="nc" id="L236">            this.plugin = &quot;&quot;;</span>
+<span class="nc" id="L237">            this.dynamic = false;</span>
+<span class="nc" id="L238">            this.restartRequired = false;</span>
+<span class="nc" id="L239">            this.encrypted = JiveGlobals.isPropertyEncrypted(key);</span>
+<span class="nc bnc" id="L240" title="All 4 branches missed.">            this.hidden = encrypted || JiveGlobals.isPropertySensitive(key);</span>
+<span class="nc" id="L241">        }</span>
+
+<span class="nc" id="L243">        private CompoundProperty(final SystemProperty&lt;?&gt; systemProperty) {</span>
+<span class="nc" id="L244">            this.systemProperty = true;</span>
+<span class="nc" id="L245">            this.key = systemProperty.getKey();</span>
+<span class="nc" id="L246">            this.value = systemProperty.getValue();</span>
+<span class="nc" id="L247">            this.valueAsSaved = systemProperty.getValueAsSaved();</span>
+<span class="nc" id="L248">            this.displayValue = systemProperty.getDisplayValue();</span>
+<span class="nc" id="L249">            this.defaultDisplayValue = systemProperty.getDefaultDisplayValue();</span>
+<span class="nc" id="L250">            this.valueChanged = systemProperty.hasValueChanged();</span>
+<span class="nc" id="L251">            this.description = systemProperty.getDescription();</span>
+<span class="nc" id="L252">            this.plugin = systemProperty.getPlugin();</span>
+<span class="nc" id="L253">            this.dynamic = systemProperty.isDynamic();</span>
+<span class="nc" id="L254">            this.restartRequired = systemProperty.isRestartRequired();</span>
+<span class="nc" id="L255">            this.encrypted = systemProperty.isEncrypted();</span>
+<span class="nc bnc" id="L256" title="All 4 branches missed.">            this.hidden = encrypted || JiveGlobals.isPropertySensitive(key);</span>
+<span class="nc" id="L257">        }</span>
+
+        public String getKey() {
+<span class="nc" id="L260">            return key;</span>
+        }
+
+        public String getValueAsSaved() {
+<span class="nc" id="L264">            return valueAsSaved;</span>
+        }
+
+        public String getDisplayValue() {
+<span class="nc" id="L268">            return displayValue;</span>
+        }
+
+        public String getDefaultDisplayValue() {
+<span class="nc" id="L272">            return defaultDisplayValue;</span>
+        }
+
+        public boolean isSystemProperty() {
+<span class="nc" id="L276">            return systemProperty;</span>
+        }
+
+        public String getPlugin() {
+<span class="nc" id="L280">            return plugin;</span>
+        }
+
+        public String getDescription() {
+<span class="nc" id="L284">            return description;</span>
+        }
+
+        public boolean isDynamic() {
+<span class="nc" id="L288">            return dynamic;</span>
+        }
+
+        public boolean isRestartRequired() {
+<span class="nc" id="L292">            return restartRequired;</span>
+        }
+
+        public boolean isHidden() {
+<span class="nc" id="L296">            return hidden;</span>
+        }
+
+        public boolean isEncrypted() {
+<span class="nc" id="L300">            return encrypted;</span>
+        }
+    }
+
+    /**
+     * Represents the properties being searched for
+     */
+    public static final class Search {
+
+        private final String name;
+        private final String value;
+        private final String defaultValue;
+        private final String plugin;
+        private final String description;
+        private final String dynamic;
+
+<span class="nc" id="L316">        public Search(final HttpServletRequest request) {</span>
+<span class="nc" id="L317">            this.name = ParamUtils.getStringParameter(request, &quot;searchName&quot;, &quot;&quot;).trim();</span>
+<span class="nc" id="L318">            this.value = ParamUtils.getStringParameter(request, &quot;searchValue&quot;, &quot;&quot;).trim();</span>
+<span class="nc" id="L319">            this.defaultValue = ParamUtils.getStringParameter(request, &quot;searchDefaultValue&quot;, &quot;&quot;).trim();</span>
+<span class="nc" id="L320">            this.plugin = ParamUtils.getStringParameter(request, &quot;searchPlugin&quot;, &quot;&quot;).trim();</span>
+<span class="nc" id="L321">            this.description = ParamUtils.getStringParameter(request, &quot;searchDescription&quot;, &quot;&quot;).trim();</span>
+<span class="nc" id="L322">            this.dynamic = ParamUtils.getStringParameter(request, &quot;searchDynamic&quot;, &quot;&quot;).trim();</span>
+<span class="nc" id="L323">        }</span>
+
+        public String getName() {
+<span class="nc" id="L326">            return name;</span>
+        }
+
+        public String getValue() {
+<span class="nc" id="L330">            return value;</span>
+        }
+
+        public String getDefaultValue() {
+<span class="nc" id="L334">            return defaultValue;</span>
+        }
+
+        public String getPlugin() {
+<span class="nc" id="L338">            return plugin;</span>
+        }
+
+        public String getDescription() {
+<span class="nc" id="L342">            return description;</span>
+        }
+
+        public String getDynamic() {
+<span class="nc" id="L346">            return dynamic;</span>
+        }
+
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

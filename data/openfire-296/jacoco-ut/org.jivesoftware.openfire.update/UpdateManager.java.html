@@ -1,0 +1,884 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>UpdateManager.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.update</a> &gt; <span class="el_source">UpdateManager.java</span></div><h1>UpdateManager.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.update;
+
+import java.io.BufferedWriter;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.FileReader;
+import java.io.IOException;
+import java.io.OutputStreamWriter;
+import java.io.StringReader;
+import java.io.Writer;
+import java.net.MalformedURLException;
+import java.net.URL;
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+
+import org.apache.commons.lang3.StringUtils;
+import org.apache.http.HttpHost;
+import org.apache.http.HttpStatus;
+import org.apache.http.client.methods.CloseableHttpResponse;
+import org.apache.http.client.methods.HttpGet;
+import org.apache.http.client.methods.HttpUriRequest;
+import org.apache.http.client.methods.RequestBuilder;
+import org.apache.http.conn.routing.HttpRoutePlanner;
+import org.apache.http.impl.client.CloseableHttpClient;
+import org.apache.http.impl.client.HttpClients;
+import org.apache.http.impl.conn.DefaultProxyRoutePlanner;
+import org.apache.http.impl.conn.DefaultRoutePlanner;
+import org.apache.http.util.EntityUtils;
+import org.dom4j.Document;
+import org.dom4j.DocumentException;
+import org.dom4j.DocumentFactory;
+import org.dom4j.Element;
+import org.dom4j.io.OutputFormat;
+import org.dom4j.io.SAXReader;
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.container.BasicModule;
+import org.jivesoftware.openfire.container.PluginManager;
+import org.jivesoftware.openfire.container.PluginMetadata;
+import org.jivesoftware.util.JiveGlobals;
+import org.jivesoftware.util.LocaleUtils;
+import org.jivesoftware.util.SystemProperty;
+import org.jivesoftware.util.Version;
+import org.jivesoftware.util.XMLWriter;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Service that frequently checks for new server or plugins releases. By default the service
+ * will check every 48 hours for updates. Use the system property {@code update.frequency}
+ * to set new values.
+ * &lt;p&gt;
+ * New versions of plugins can be downloaded and installed. However, new server releases
+ * should be manually installed.&lt;/p&gt;
+ *
+ * @author Gaston Dombiak
+ */
+public class UpdateManager extends BasicModule {
+
+<span class="nc" id="L84">    private static final SystemProperty&lt;Boolean&gt; ENABLED = SystemProperty.Builder.ofType(Boolean.class)</span>
+<span class="nc" id="L85">        .setKey(&quot;update.service-enabled&quot;)</span>
+<span class="nc" id="L86">        .setDynamic(true)</span>
+<span class="nc" id="L87">        .setDefaultValue(true)</span>
+<span class="nc" id="L88">        .build();</span>
+<span class="nc" id="L89">    private static final SystemProperty&lt;Boolean&gt; NOTIFY_ADMINS = SystemProperty.Builder.ofType(Boolean.class)</span>
+<span class="nc" id="L90">        .setKey(&quot;update.notify-admins&quot;)</span>
+<span class="nc" id="L91">        .setDynamic(true)</span>
+<span class="nc" id="L92">        .setDefaultValue(true)</span>
+<span class="nc" id="L93">        .build();</span>
+<span class="nc" id="L94">    static final SystemProperty&lt;Instant&gt; LAST_UPDATE_CHECK = SystemProperty.Builder.ofType(Instant.class)</span>
+<span class="nc" id="L95">        .setKey(&quot;update.lastCheck&quot;)</span>
+<span class="nc" id="L96">        .setDynamic(true)</span>
+<span class="nc" id="L97">        .build();</span>
+<span class="nc" id="L98">    private static final SystemProperty&lt;Duration&gt; UPDATE_FREQUENCY = SystemProperty.Builder.ofType(Duration.class)</span>
+<span class="nc" id="L99">        .setKey(&quot;update.frequency&quot;)</span>
+<span class="nc" id="L100">        .setDynamic(false)</span>
+<span class="nc" id="L101">        .setChronoUnit(ChronoUnit.HOURS)</span>
+<span class="nc" id="L102">        .setDefaultValue(Duration.ofHours(48))</span>
+<span class="nc" id="L103">        .setMinValue(Duration.ofHours(12))</span>
+<span class="nc" id="L104">        .build();</span>
+<span class="nc" id="L105">    private static final SystemProperty&lt;String&gt; PROXY_HOST = SystemProperty.Builder.ofType(String.class)</span>
+<span class="nc" id="L106">        .setKey(&quot;update.proxy.host&quot;)</span>
+<span class="nc" id="L107">        .setDynamic(true)</span>
+<span class="nc" id="L108">        .build();</span>
+<span class="nc" id="L109">    private static final SystemProperty&lt;Integer&gt; PROXY_PORT = SystemProperty.Builder.ofType(Integer.class)</span>
+<span class="nc" id="L110">        .setKey(&quot;update.proxy.port&quot;)</span>
+<span class="nc" id="L111">        .setDynamic(true)</span>
+<span class="nc" id="L112">        .setDefaultValue(-1)</span>
+<span class="nc" id="L113">        .setMinValue(-1)</span>
+<span class="nc" id="L114">        .setMaxValue(65535)</span>
+<span class="nc" id="L115">        .build();</span>
+
+<span class="nc" id="L117">    private static final Logger Log = LoggerFactory.getLogger(UpdateManager.class);</span>
+
+<span class="nc" id="L119">    private static final DocumentFactory docFactory = DocumentFactory.getInstance();</span>
+
+    /**
+     * URL of the servlet (JSP) that provides the &quot;check for update&quot; service.
+     */
+    private static final String updateServiceURL = &quot;https://www.igniterealtime.org/projects/openfire/versions.jsp&quot;;
+
+    /**
+     * Information about the available server update.
+     */
+    private Update serverUpdate;
+
+    /**
+     * List of plugins that need to be updated.
+     */
+<span class="nc" id="L134">    private Collection&lt;Update&gt; pluginUpdates = new ArrayList&lt;&gt;();</span>
+
+    /**
+     * List of plugins available at igniterealtime.org.
+     */
+<span class="nc" id="L139">    private Map&lt;String, AvailablePlugin&gt; availablePlugins = new HashMap&lt;&gt;();</span>
+
+    /**
+     * Thread that performs the periodic checks for updates.
+     */
+    private Thread thread;
+
+    public UpdateManager() {
+<span class="nc" id="L147">        super(&quot;Update manager&quot;);</span>
+<span class="nc" id="L148">        ENABLED.addListener(this::enableService);</span>
+<span class="nc" id="L149">    }</span>
+
+    @Override
+    public void start() throws IllegalStateException {
+<span class="nc" id="L153">        super.start();</span>
+<span class="nc" id="L154">        startService();</span>
+<span class="nc" id="L155">    }</span>
+
+    /**
+     * Starts sevice that checks for new updates.
+     */
+    private void startService() {
+        // Thread that performs the periodic checks for updates
+<span class="nc" id="L162">        thread = new Thread(&quot;Update Manager&quot;) {</span>
+            @Override
+            public void run() {
+                try {
+                    // Sleep for 5 seconds before starting to work. This is required because
+                    // this module has a dependency on the PluginManager, which is loaded
+                    // after all other modules.
+<span class="nc" id="L169">                    Thread.sleep(5000);</span>
+                    // Load last saved information (if any)
+<span class="nc" id="L171">                    loadSavedInfo();</span>
+<span class="nc bnc" id="L172" title="All 2 branches missed.">                    while (isServiceEnabled()) {</span>
+<span class="nc" id="L173">                        waitForNextCheck();</span>
+                        // Check if the service is still enabled
+<span class="nc bnc" id="L175" title="All 2 branches missed.">                        if (isServiceEnabled()) {</span>
+                            try {
+                                // Check for server updates
+<span class="nc" id="L178">                                checkForServerUpdate(true);</span>
+                                // Refresh list of available plugins and check for plugin updates
+<span class="nc" id="L180">                                checkForPluginsUpdates(true);</span>
+                            }
+<span class="nc" id="L182">                            catch (Exception e) {</span>
+<span class="nc" id="L183">                                Log.error(&quot;Error checking for updates&quot;, e);</span>
+<span class="nc" id="L184">                            }</span>
+                            // Keep track of the last time we checked for updates.
+<span class="nc" id="L186">                            final Instant lastUpdate = Instant.now();</span>
+<span class="nc" id="L187">                            LAST_UPDATE_CHECK.setValue(lastUpdate);</span>
+                            // As an extra precaution, make sure that that the value
+                            // we just set is saved. If not, return to make sure that
+                            // no additional update checks are performed until Openfire
+                            // is restarted.
+<span class="nc bnc" id="L192" title="All 2 branches missed.">                            if(!lastUpdate.equals(LAST_UPDATE_CHECK.getValue())) {</span>
+<span class="nc" id="L193">                                Log.error(&quot;Error: update service check did not save correctly. &quot; +</span>
+                                        &quot;Stopping update service.&quot;);
+<span class="nc" id="L195">                                return;</span>
+                            }
+<span class="nc" id="L197">                        }</span>
+                    }
+                }
+<span class="nc" id="L200">                catch (InterruptedException e) {</span>
+<span class="nc" id="L201">                    Log.error(e.getMessage(), e);</span>
+                }
+                finally {
+                    // Clean up reference to this thread
+<span class="nc" id="L205">                    thread = null;</span>
+<span class="nc" id="L206">                }</span>
+<span class="nc" id="L207">            }</span>
+
+            private void waitForNextCheck() throws InterruptedException {
+<span class="nc" id="L210">                final Instant lastCheck = LAST_UPDATE_CHECK.getValue();</span>
+<span class="nc bnc" id="L211" title="All 2 branches missed.">                if (lastCheck == null) {</span>
+                    // This is the first time the server is used (since we added this feature)
+<span class="nc" id="L213">                    Thread.sleep(30000);</span>
+                }
+                else {
+<span class="nc" id="L216">                    final Duration updateFrequency = UPDATE_FREQUENCY.getValue();</span>
+                    // This check is necessary just in case the thread woke up early.
+<span class="nc bnc" id="L218" title="All 2 branches missed.">                    while (lastCheck.plus(updateFrequency).isAfter(Instant.now())) {</span>
+<span class="nc" id="L219">                        Thread.sleep(Duration.between(Instant.now(), lastCheck.plus(updateFrequency)).toMillis());</span>
+                    }
+                }
+<span class="nc" id="L222">            }</span>
+        };
+<span class="nc" id="L224">        thread.setDaemon(true);</span>
+<span class="nc" id="L225">        thread.start();</span>
+<span class="nc" id="L226">    }</span>
+
+    private void stopService() {
+<span class="nc bnc" id="L229" title="All 2 branches missed.">        if (thread != null) {</span>
+<span class="nc" id="L230">            thread.interrupt();</span>
+<span class="nc" id="L231">            thread = null;</span>
+        }
+<span class="nc" id="L233">    }</span>
+
+    @Override
+    public void initialize(XMPPServer server) {
+<span class="nc" id="L237">        super.initialize(server);</span>
+
+<span class="nc" id="L239">        JiveGlobals.migrateProperty(ENABLED.getKey());</span>
+<span class="nc" id="L240">        JiveGlobals.migrateProperty(NOTIFY_ADMINS.getKey());</span>
+<span class="nc" id="L241">    }</span>
+
+    /**
+     * Queries the igniterealtime.org server with a request that contains the currently installed
+     * server version. It's response indicates if a server update (a newer version of Openfire) is
+     * available.
+     *
+     * @param notificationsEnabled true if admins will be notified when new updates are found.
+     * @throws Exception if some error happens during the query.
+     */
+    public synchronized void checkForServerUpdate(boolean notificationsEnabled) throws Exception {
+<span class="nc" id="L252">        final Optional&lt;String&gt; response = getResponse(&quot;update&quot;, getServerUpdateRequest());</span>
+<span class="nc bnc" id="L253" title="All 2 branches missed.">        if (response.isPresent()) {</span>
+<span class="nc" id="L254">            processServerUpdateResponse(response.get(), notificationsEnabled);</span>
+        }
+<span class="nc" id="L256">    }</span>
+
+    /**
+     * Queries the igniterealtime.org server. It's response is expected to include a list of
+     * plugins that are available on the server / for download.
+     *
+     * @param notificationsEnabled true if admins will be notified when new updates are found.
+     * @throws Exception if some error happens during the query.
+     */
+    public synchronized void checkForPluginsUpdates(boolean notificationsEnabled) throws Exception {
+<span class="nc" id="L266">        final Optional&lt;String&gt; response = getResponse(&quot;available&quot;, getAvailablePluginsUpdateRequest());</span>
+<span class="nc bnc" id="L267" title="All 2 branches missed.">        if (response.isPresent()) {</span>
+<span class="nc" id="L268">            processAvailablePluginsResponse(response.get(), notificationsEnabled);</span>
+        }
+<span class="nc" id="L270">    }</span>
+
+    private Optional&lt;String&gt; getResponse(final String requestType, final String requestXML) throws IOException {
+<span class="nc" id="L273">        final HttpUriRequest postRequest = RequestBuilder.post(updateServiceURL)</span>
+<span class="nc" id="L274">            .addParameter(&quot;type&quot;, requestType)</span>
+<span class="nc" id="L275">            .addParameter(&quot;query&quot;, requestXML)</span>
+<span class="nc" id="L276">            .build();</span>
+
+<span class="nc" id="L278">        try (final CloseableHttpClient httpClient = HttpClients.custom().setRoutePlanner(getRoutePlanner()).build();</span>
+<span class="nc" id="L279">             final CloseableHttpResponse response = httpClient.execute(postRequest)) {</span>
+<span class="nc" id="L280">            final int statusCode = response.getStatusLine().getStatusCode();</span>
+<span class="nc bnc" id="L281" title="All 2 branches missed.">            if (statusCode == HttpStatus.SC_OK) {</span>
+<span class="nc" id="L282">                return Optional.of(EntityUtils.toString(response.getEntity()));</span>
+            } else {
+<span class="nc" id="L284">                return Optional.empty();</span>
+            }
+<span class="nc bnc" id="L286" title="All 24 branches missed.">        }</span>
+    }
+
+    private HttpRoutePlanner getRoutePlanner() {
+<span class="nc bnc" id="L290" title="All 2 branches missed.">        if (isUsingProxy()) {</span>
+<span class="nc" id="L291">            return new DefaultProxyRoutePlanner(new HttpHost(getProxyHost(), getProxyPort()));</span>
+        } else {
+<span class="nc" id="L293">            return new DefaultRoutePlanner(null);</span>
+        }
+    }
+
+    /**
+     * Download and install latest version of plugin.
+     *
+     * @param url the URL of the latest version of the plugin.
+     * @return true if the plugin was successfully downloaded and installed.
+     */
+    public boolean downloadPlugin(String url) {
+<span class="nc" id="L304">        boolean installed = false;</span>
+        // Download and install new version of plugin
+<span class="nc bnc" id="L306" title="All 2 branches missed.">        if (isKnownPlugin(url)) {</span>
+<span class="nc" id="L307">            final HttpGet httpGet = new HttpGet(url);</span>
+
+<span class="nc" id="L309">            try (final CloseableHttpClient httpClient = HttpClients.custom().setRoutePlanner(getRoutePlanner()).build();</span>
+<span class="nc" id="L310">                 final CloseableHttpResponse response = httpClient.execute(httpGet)) {</span>
+<span class="nc" id="L311">                final int statusCode = response.getStatusLine().getStatusCode();</span>
+<span class="nc bnc" id="L312" title="All 2 branches missed.">                if (statusCode == HttpStatus.SC_OK) {</span>
+<span class="nc" id="L313">                    String pluginFilename = url.substring(url.lastIndexOf(&quot;/&quot;) + 1);</span>
+<span class="nc" id="L314">                    installed = XMPPServer.getInstance().getPluginManager()</span>
+<span class="nc" id="L315">                        .installPlugin(response.getEntity().getContent(), pluginFilename);</span>
+<span class="nc bnc" id="L316" title="All 2 branches missed.">                    if (installed) {</span>
+                        // Remove the plugin from the list of plugins to update
+<span class="nc bnc" id="L318" title="All 2 branches missed.">                        for (Update update : pluginUpdates) {</span>
+<span class="nc bnc" id="L319" title="All 2 branches missed.">                            if (update.getURL().equals(url)) {</span>
+<span class="nc" id="L320">                                update.setDownloaded(true);</span>
+                            }
+<span class="nc" id="L322">                        }</span>
+                        // Save response in a file for later retrieval
+<span class="nc" id="L324">                        saveLatestServerInfo();</span>
+                    }
+                }
+<span class="nc bnc" id="L327" title="All 16 branches missed.">            } catch (IOException e) {</span>
+<span class="nc" id="L328">                Log.warn(&quot;Error downloading new plugin version&quot;, e);</span>
+<span class="nc" id="L329">            }</span>
+<span class="nc" id="L330">        } else {</span>
+<span class="nc" id="L331">            Log.error(&quot;Invalid plugin download URL: &quot; +url);</span>
+        }
+<span class="nc" id="L333">        return installed;</span>
+    }
+    
+    /**
+     * Check if the plugin URL is in the known list of available plugins.
+     * 
+     * i.e. that it's an approved download source.
+     * 
+     * @param url The URL of the plugin to download.
+     * @return true if the URL is in the list. Otherwise false.
+     */
+    private boolean isKnownPlugin(String url) {
+<span class="nc bnc" id="L345" title="All 2 branches missed.">        for (String pluginName : availablePlugins.keySet()) {</span>
+<span class="nc bnc" id="L346" title="All 2 branches missed.">            if (availablePlugins.get(pluginName).getDownloadURL().toString().equals(url)) {</span>
+<span class="nc" id="L347">                return true;</span>
+            }
+<span class="nc" id="L349">        }</span>
+        
+<span class="nc" id="L351">        return false;</span>
+    }
+
+    /**
+     * Returns true if the plugin downloaded from the specified URL has been downloaded. Plugins
+     * may be downloaded but not installed. The install process may take like 30 seconds to
+     * detect new plugins to install.
+     *
+     * @param url the URL of the latest version of the plugin.
+     * @return true if the plugin downloaded from the specified URL has been downloaded.
+     */
+    public boolean isPluginDownloaded(String url) {
+<span class="nc" id="L363">        String pluginFilename = url.substring(url.lastIndexOf(&quot;/&quot;) + 1);</span>
+<span class="nc" id="L364">        return XMPPServer.getInstance().getPluginManager().isInstalled( pluginFilename);</span>
+    }
+
+    /**
+     * Returns the list of available plugins, sorted alphabetically, to install as reported by igniterealtime.org.
+     *
+     * Currently downloaded plugins will not be included, nor will plugins that require a newer or older server version.
+     *
+     * @return the list of available plugins to install as reported by igniterealtime.org.
+     */
+    public List&lt;AvailablePlugin&gt; getNotInstalledPlugins()
+    {
+<span class="nc" id="L376">        final List&lt;AvailablePlugin&gt; result = new ArrayList&lt;&gt;( availablePlugins.values() );</span>
+<span class="nc" id="L377">        final PluginManager pluginManager = XMPPServer.getInstance().getPluginManager();</span>
+<span class="nc" id="L378">        final Version currentServerVersion = XMPPServer.getInstance().getServerInfo().getVersion();</span>
+
+        // Iterate over the plugins, remove those that are of no interest.
+<span class="nc" id="L381">        final Iterator&lt;AvailablePlugin&gt; iterator = result.iterator();</span>
+<span class="nc bnc" id="L382" title="All 2 branches missed.">        while ( iterator.hasNext() )</span>
+        {
+<span class="nc" id="L384">            final AvailablePlugin availablePlugin = iterator.next();</span>
+
+            // Remove plugins that are already downloaded from the list of available plugins.
+<span class="nc bnc" id="L387" title="All 2 branches missed.">            if ( pluginManager.isInstalled( availablePlugin.getCanonicalName() ) )</span>
+            {
+<span class="nc" id="L389">                iterator.remove();</span>
+<span class="nc" id="L390">                continue;</span>
+            }
+
+            // Remove plugins that require a newer server version.
+<span class="nc bnc" id="L394" title="All 4 branches missed.">            if ( availablePlugin.getMinServerVersion() != null &amp;&amp; availablePlugin.getMinServerVersion().isNewerThan( currentServerVersion ) )</span>
+            {
+<span class="nc" id="L396">                iterator.remove();</span>
+            }
+
+            // Remove plugins that require an older server version.
+<span class="nc bnc" id="L400" title="All 4 branches missed.">            if ( availablePlugin.getPriorToServerVersion() != null &amp;&amp; !availablePlugin.getPriorToServerVersion().isNewerThan( currentServerVersion ) )</span>
+            {
+<span class="nc" id="L402">                iterator.remove();</span>
+            }
+<span class="nc" id="L404">        }</span>
+
+        // Sort alphabetically.
+<span class="nc" id="L407">        result.sort((o1, o2) -&gt; o1.getName().compareToIgnoreCase(o2.getName()));</span>
+
+<span class="nc" id="L409">        return result;</span>
+    }
+
+    /**
+     * Returns the message to send to admins when new updates are available. When sending
+     * this message information about the new updates avaiable will be appended.
+     *
+     * @return the message to send to admins when new updates are available.
+     */
+    public String getNotificationMessage() {
+<span class="nc" id="L419">        return LocaleUtils.getLocalizedString(&quot;update.notification-message&quot;);</span>
+    }
+
+    /**
+     * Returns true if the check for updates service is enabled.
+     *
+     * @return true if the check for updates service is enabled.
+     */
+    public boolean isServiceEnabled() {
+<span class="nc" id="L428">        return ENABLED.getValue();</span>
+    }
+
+    /**
+     * Sets if the check for updates service is enabled.
+     *
+     * @param enabled true if the check for updates service is enabled.
+     */
+    public void setServiceEnabled(final boolean enabled) {
+<span class="nc" id="L437">        ENABLED.setValue(enabled);</span>
+<span class="nc" id="L438">    }</span>
+
+    private void enableService(final boolean enabled) {
+<span class="nc bnc" id="L441" title="All 4 branches missed.">        if (enabled &amp;&amp; thread == null) {</span>
+<span class="nc" id="L442">            startService();</span>
+<span class="nc bnc" id="L443" title="All 4 branches missed.">        } else if (!enabled &amp;&amp; thread != null) {</span>
+<span class="nc" id="L444">            stopService();</span>
+        }
+<span class="nc" id="L446">    }</span>
+
+    /**
+     * Returns true if admins should be notified by IM when new updates are available.
+     *
+     * @return true if admins should be notified by IM when new updates are available.
+     */
+    public boolean isNotificationEnabled() {
+<span class="nc" id="L454">        return NOTIFY_ADMINS.getValue();</span>
+    }
+
+    /**
+     * Sets if admins should be notified by IM when new updates are available.
+     *
+     * @param enabled true if admins should be notified by IM when new updates are available.
+     */
+    public void setNotificationEnabled(final boolean enabled) {
+<span class="nc" id="L463">        NOTIFY_ADMINS.setValue(enabled);</span>
+<span class="nc" id="L464">    }</span>
+
+    /**
+     * Returns true if a proxy is being used to connect to igniterealtime.org or false if
+     * a direct connection should be attempted.
+     *
+     * @return true if a proxy is being used to connect to igniterealtime.org.
+     */
+    public boolean isUsingProxy() {
+<span class="nc bnc" id="L473" title="All 4 branches missed.">        return !StringUtils.isBlank(getProxyHost()) &amp;&amp; getProxyPort() &gt; 0;</span>
+    }
+
+    /**
+     * Returns the host of the proxy to use to connect to igniterealtime.org or {@code null}
+     * if no proxy is used.
+     *
+     * @return the host of the proxy or null if no proxy is used.
+     */
+    public String getProxyHost() {
+<span class="nc" id="L483">        return PROXY_HOST.getValue();</span>
+    }
+
+    /**
+     * Sets the host of the proxy to use to connect to igniterealtime.org or {@code null}
+     * if no proxy is used.
+     *
+     * @param host the host of the proxy or null if no proxy is used.
+     */
+    public void setProxyHost(String host) {
+<span class="nc" id="L493">        PROXY_HOST.setValue(host);</span>
+<span class="nc" id="L494">    }</span>
+
+    /**
+     * Returns the port of the proxy to use to connect to igniterealtime.org or -1 if no
+     * proxy is being used.
+     *
+     * @return the port of the proxy to use to connect to igniterealtime.org or -1 if no
+     *         proxy is being used.
+     */
+    public int getProxyPort() {
+<span class="nc" id="L504">        return PROXY_PORT.getValue();</span>
+    }
+
+    /**
+     * Sets the port of the proxy to use to connect to igniterealtime.org or -1 if no
+     * proxy is being used.
+     *
+     * @param port the port of the proxy to use to connect to igniterealtime.org or -1 if no
+     *        proxy is being used.
+     */
+    public void setProxyPort(int port) {
+<span class="nc" id="L515">        PROXY_PORT.setValue(port);</span>
+<span class="nc" id="L516">    }</span>
+
+    /**
+     * Returns the server update or {@code null} if the server is up to date.
+     *
+     * @return the server update or null if the server is up to date.
+     */
+    public Update getServerUpdate() {
+<span class="nc" id="L524">        return serverUpdate;</span>
+    }
+
+    /**
+     * Returns the plugin update or {@code null} if the plugin is up to date.
+     *
+     * @param pluginName     the name of the plugin (as described in the meta-data).
+     * @param currentVersion current version of the plugin that is installed.
+     * @return the plugin update or null if the plugin is up to date.
+     */
+    public Update getPluginUpdate(String pluginName, Version currentVersion) {
+<span class="nc bnc" id="L535" title="All 2 branches missed.">        for (Update update : pluginUpdates) {</span>
+            // Check if this is the requested plugin
+<span class="nc bnc" id="L537" title="All 2 branches missed.">            if (update.getComponentName().equals(pluginName)) {</span>
+                // Check if the plugin version is right
+<span class="nc bnc" id="L539" title="All 2 branches missed.">                if (new Version(update.getLatestVersion()).isNewerThan( currentVersion ) ) {</span>
+<span class="nc" id="L540">                    return update;</span>
+                }
+            }
+<span class="nc" id="L543">        }</span>
+<span class="nc" id="L544">        return null;</span>
+    }
+
+    private String getServerUpdateRequest() {
+<span class="nc" id="L548">        XMPPServer server = XMPPServer.getInstance();</span>
+<span class="nc" id="L549">        Element xmlRequest = docFactory.createDocument().addElement(&quot;version&quot;);</span>
+        // Add current openfire version
+<span class="nc" id="L551">        Element openfire = xmlRequest.addElement(&quot;openfire&quot;);</span>
+<span class="nc" id="L552">        openfire.addAttribute(&quot;current&quot;, server.getServerInfo().getVersion().getVersionString());</span>
+<span class="nc" id="L553">        return xmlRequest.asXML();</span>
+    }
+
+    private String getAvailablePluginsUpdateRequest() {
+<span class="nc" id="L557">        Element xmlRequest = docFactory.createDocument().addElement(&quot;available&quot;);</span>
+        // Add locale so we can get current name and description of plugins
+<span class="nc" id="L559">        Element locale = xmlRequest.addElement(&quot;locale&quot;);</span>
+<span class="nc" id="L560">        locale.addText(JiveGlobals.getLocale().toString());</span>
+<span class="nc" id="L561">        return xmlRequest.asXML();</span>
+    }
+
+    private void processServerUpdateResponse(String response, boolean notificationsEnabled)
+            throws DocumentException {
+        // Reset last known update information
+<span class="nc" id="L567">        serverUpdate = null;</span>
+<span class="nc" id="L568">        SAXReader xmlReader = new SAXReader();</span>
+<span class="nc" id="L569">        xmlReader.setEncoding(&quot;UTF-8&quot;);</span>
+<span class="nc" id="L570">        Element xmlResponse = xmlReader.read(new StringReader(response)).getRootElement();</span>
+        // Parse response and keep info as Update objects
+<span class="nc" id="L572">        Element openfire = xmlResponse.element(&quot;openfire&quot;);</span>
+<span class="nc bnc" id="L573" title="All 2 branches missed.">        if (openfire != null) {</span>
+            // A new version of openfire was found
+<span class="nc" id="L575">            Version latestVersion = new Version(openfire.attributeValue(&quot;latest&quot;));</span>
+<span class="nc bnc" id="L576" title="All 2 branches missed.">            if (latestVersion.isNewerThan(XMPPServer.getInstance().getServerInfo().getVersion())) {</span>
+<span class="nc" id="L577">                URL changelog = null;</span>
+                try
+                {
+<span class="nc" id="L580">                    changelog = new URL( openfire.attributeValue(&quot;changelog&quot;) );</span>
+                }
+<span class="nc" id="L582">                catch ( MalformedURLException e )</span>
+                {
+<span class="nc" id="L584">                    Log.warn( &quot;Unable to parse URL from openfire changelog value '{}'.&quot;, openfire.attributeValue(&quot;changelog&quot;), e );</span>
+<span class="nc" id="L585">                }</span>
+
+<span class="nc" id="L587">                URL url = null;</span>
+                try
+                {
+<span class="nc" id="L590">                    url = new URL( openfire.attributeValue(&quot;url&quot;) );</span>
+                }
+<span class="nc" id="L592">                catch ( MalformedURLException e )</span>
+                {
+<span class="nc" id="L594">                    Log.warn( &quot;Unable to parse URL from openfire download url value '{}'.&quot;, openfire.attributeValue(&quot;url&quot;), e );</span>
+<span class="nc" id="L595">                }</span>
+                // Keep information about the available server update
+<span class="nc" id="L597">                serverUpdate = new Update(&quot;Openfire&quot;, latestVersion.getVersionString(), String.valueOf(changelog), String.valueOf(url));</span>
+            }
+        }
+        // Check if we need to send notifications to admins
+<span class="nc bnc" id="L601" title="All 6 branches missed.">        if (notificationsEnabled &amp;&amp; isNotificationEnabled() &amp;&amp; serverUpdate != null) {</span>
+<span class="nc" id="L602">            XMPPServer.getInstance().sendMessageToAdmins(getNotificationMessage() +</span>
+<span class="nc" id="L603">                &quot; &quot; + serverUpdate.getComponentName() +</span>
+<span class="nc" id="L604">                &quot; &quot; + serverUpdate.getLatestVersion());</span>
+        }
+        // Save response in a file for later retrieval
+<span class="nc" id="L607">        saveLatestServerInfo();</span>
+<span class="nc" id="L608">    }</span>
+
+    private void processAvailablePluginsResponse(String response, boolean notificationsEnabled)
+            throws DocumentException {
+        // Reset last known list of available plugins
+<span class="nc" id="L613">        availablePlugins = new HashMap&lt;&gt;();</span>
+
+        // Parse response and keep info as AvailablePlugin objects
+<span class="nc" id="L616">        SAXReader xmlReader = new SAXReader();</span>
+<span class="nc" id="L617">        xmlReader.setEncoding(&quot;UTF-8&quot;);</span>
+<span class="nc" id="L618">        Element xmlResponse = xmlReader.read(new StringReader(response)).getRootElement();</span>
+<span class="nc" id="L619">        Iterator plugins = xmlResponse.elementIterator(&quot;plugin&quot;);</span>
+<span class="nc bnc" id="L620" title="All 2 branches missed.">        while (plugins.hasNext()) {</span>
+<span class="nc" id="L621">            Element plugin = (Element) plugins.next();</span>
+<span class="nc" id="L622">            AvailablePlugin available = AvailablePlugin.getInstance( plugin );</span>
+            // Add plugin to the list of available plugins at js.org
+<span class="nc" id="L624">            availablePlugins.put(available.getName(), available);</span>
+<span class="nc" id="L625">        }</span>
+
+        // Figure out local plugins that need to be updated
+<span class="nc" id="L628">        buildPluginsUpdateList();</span>
+
+        // Check if we need to send notifications to admins
+<span class="nc bnc" id="L631" title="All 6 branches missed.">        if (notificationsEnabled &amp;&amp; isNotificationEnabled() &amp;&amp; !pluginUpdates.isEmpty()) {</span>
+<span class="nc bnc" id="L632" title="All 2 branches missed.">            for (Update update : pluginUpdates) {</span>
+<span class="nc" id="L633">                XMPPServer.getInstance().sendMessageToAdmins(getNotificationMessage() +</span>
+<span class="nc" id="L634">                    &quot; &quot; + update.getComponentName() +</span>
+<span class="nc" id="L635">                    &quot; &quot; + update.getLatestVersion());</span>
+<span class="nc" id="L636">            }</span>
+        }
+
+        // Save information of available plugins
+<span class="nc" id="L640">        saveAvailablePluginsInfo();</span>
+<span class="nc" id="L641">    }</span>
+
+    /**
+     * Recreate the list of plugins that need to be updated based on the list of
+     * available plugins at igniterealtime.org.
+     */
+    private void buildPluginsUpdateList() {
+        // Reset list of plugins that need to be updated
+<span class="nc" id="L649">        pluginUpdates = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L650">        XMPPServer server = XMPPServer.getInstance();</span>
+<span class="nc" id="L651">        Version currentServerVersion = XMPPServer.getInstance().getServerInfo().getVersion();</span>
+        // Compare local plugins versions with latest ones
+<span class="nc bnc" id="L653" title="All 2 branches missed.">        for ( final PluginMetadata plugin : server.getPluginManager().getMetadataExtractedPlugins().values() )</span>
+        {
+<span class="nc" id="L655">            final AvailablePlugin latestPlugin = availablePlugins.get( plugin.getName() );</span>
+
+<span class="nc bnc" id="L657" title="All 2 branches missed.">            if (latestPlugin == null)</span>
+            {
+<span class="nc" id="L659">                continue;</span>
+            }
+
+<span class="nc" id="L662">            final Version latestPluginVersion = latestPlugin.getVersion();</span>
+
+<span class="nc bnc" id="L664" title="All 2 branches missed.">            if ( latestPluginVersion.isNewerThan( plugin.getVersion() ) )</span>
+            {
+                // Check if the update can run in the current version of the server
+<span class="nc" id="L667">                final Version pluginMinServerVersion = latestPlugin.getMinServerVersion();</span>
+<span class="nc bnc" id="L668" title="All 4 branches missed.">                if ( pluginMinServerVersion != null &amp;&amp; pluginMinServerVersion.isNewerThan( currentServerVersion ))</span>
+                {
+<span class="nc" id="L670">                    continue;</span>
+                }
+
+<span class="nc" id="L673">                final Version pluginPriorToServerVersion = latestPlugin.getPriorToServerVersion();</span>
+<span class="nc bnc" id="L674" title="All 4 branches missed.">                if ( pluginPriorToServerVersion != null &amp;&amp; !pluginPriorToServerVersion.isNewerThan( currentServerVersion ))</span>
+                {
+<span class="nc" id="L676">                    continue;</span>
+                }
+
+<span class="nc" id="L679">                final Update update = new Update( plugin.getName(), latestPlugin.getVersion().getVersionString(), latestPlugin.getChangelog().toExternalForm(), latestPlugin.getDownloadURL().toExternalForm() );</span>
+<span class="nc" id="L680">                pluginUpdates.add(update);</span>
+            }
+<span class="nc" id="L682">        }</span>
+<span class="nc" id="L683">    }</span>
+
+    /**
+     * Saves to conf/server-update.xml information about the latest Openfire release that is
+     * available for download.
+     */
+    private void saveLatestServerInfo() {
+<span class="nc" id="L690">        Element xmlResponse = docFactory.createDocument().addElement(&quot;version&quot;);</span>
+<span class="nc bnc" id="L691" title="All 2 branches missed.">        if (serverUpdate != null) {</span>
+<span class="nc" id="L692">            Element component = xmlResponse.addElement(&quot;openfire&quot;);</span>
+<span class="nc" id="L693">            component.addAttribute(&quot;latest&quot;, serverUpdate.getLatestVersion());</span>
+<span class="nc" id="L694">            component.addAttribute( &quot;changelog&quot;, serverUpdate.getChangelog() );</span>
+<span class="nc" id="L695">            component.addAttribute( &quot;url&quot;, serverUpdate.getURL() );</span>
+        }
+        // Write data out to conf/server-update.xml file.
+        try {
+            // Create the conf folder if required
+<span class="nc" id="L700">            File file = new File(JiveGlobals.getHomeDirectory(), &quot;conf&quot;);</span>
+<span class="nc bnc" id="L701" title="All 2 branches missed.">            if (!file.exists()) {</span>
+<span class="nc" id="L702">                file.mkdir();</span>
+            }
+<span class="nc" id="L704">            file = new File(JiveGlobals.getHomeDirectory() + File.separator + &quot;conf&quot;,</span>
+                    &quot;server-update.xml&quot;);
+            // Delete the old server-update.xml file if it exists
+<span class="nc bnc" id="L707" title="All 2 branches missed.">            if (file.exists()) {</span>
+<span class="nc" id="L708">                file.delete();</span>
+            }
+            // Create new version.xml with returned data
+<span class="nc" id="L711">            try (Writer writer = new BufferedWriter(new OutputStreamWriter(new FileOutputStream(file), StandardCharsets.UTF_8))) {</span>
+<span class="nc" id="L712">                OutputFormat prettyPrinter = OutputFormat.createPrettyPrint();</span>
+<span class="nc" id="L713">                XMLWriter xmlWriter = new XMLWriter(writer, prettyPrinter);</span>
+<span class="nc" id="L714">                xmlWriter.write(xmlResponse);</span>
+<span class="nc bnc" id="L715" title="All 8 branches missed.">            }</span>
+        }
+<span class="nc" id="L717">        catch (Exception e) {</span>
+<span class="nc" id="L718">            Log.error(e.getMessage(), e);</span>
+<span class="nc" id="L719">        }</span>
+<span class="nc" id="L720">    }</span>
+
+    /**
+     * Saves to conf/available-plugins.xml the list of plugins that are available
+     * at igniterealtime.org.
+     */
+    private void saveAvailablePluginsInfo() {
+        //  XML to store in the file
+<span class="nc" id="L728">        Element xml = docFactory.createDocument().addElement(&quot;available&quot;);</span>
+<span class="nc bnc" id="L729" title="All 2 branches missed.">        for (AvailablePlugin plugin : availablePlugins.values()) {</span>
+<span class="nc" id="L730">            Element component = xml.addElement(&quot;plugin&quot;);</span>
+<span class="nc" id="L731">            component.addAttribute(&quot;name&quot;, plugin.getName());</span>
+<span class="nc bnc" id="L732" title="All 2 branches missed.">            component.addAttribute(&quot;latest&quot;, plugin.getVersion() != null ? plugin.getVersion().getVersionString() : null);</span>
+<span class="nc bnc" id="L733" title="All 2 branches missed.">            component.addAttribute(&quot;changelog&quot;, plugin.getChangelog() != null ? plugin.getChangelog().toExternalForm() : null );</span>
+<span class="nc bnc" id="L734" title="All 2 branches missed.">            component.addAttribute(&quot;url&quot;, plugin.getDownloadURL() != null ? plugin.getDownloadURL().toExternalForm() : null );</span>
+<span class="nc" id="L735">            component.addAttribute(&quot;author&quot;, plugin.getAuthor());</span>
+<span class="nc" id="L736">            component.addAttribute(&quot;description&quot;, plugin.getDescription());</span>
+<span class="nc bnc" id="L737" title="All 2 branches missed.">            component.addAttribute(&quot;icon&quot;, plugin.getIcon() != null ? plugin.getIcon().toExternalForm() : null );</span>
+<span class="nc bnc" id="L738" title="All 2 branches missed.">            component.addAttribute(&quot;minServerVersion&quot;, plugin.getMinServerVersion() != null ? plugin.getMinServerVersion().getVersionString() : null);</span>
+<span class="nc bnc" id="L739" title="All 2 branches missed.">            component.addAttribute(&quot;priorToServerVersion&quot;, plugin.getPriorToServerVersion() != null ? plugin.getPriorToServerVersion().getVersionString() : null);</span>
+<span class="nc bnc" id="L740" title="All 2 branches missed.">            component.addAttribute(&quot;readme&quot;, plugin.getReadme() != null ? plugin.getReadme().toExternalForm() : null );</span>
+<span class="nc" id="L741">            component.addAttribute( &quot;licenseType&quot;, plugin.getLicense() );</span>
+<span class="nc" id="L742">            component.addAttribute(&quot;fileSize&quot;, Long.toString(plugin.getFileSize()));</span>
+<span class="nc" id="L743">        }</span>
+        // Write data out to conf/available-plugins.xml file.
+<span class="nc" id="L745">        Writer writer = null;</span>
+        try {
+            // Create the conf folder if required
+<span class="nc" id="L748">            File file = new File(JiveGlobals.getHomeDirectory(), &quot;conf&quot;);</span>
+<span class="nc bnc" id="L749" title="All 2 branches missed.">            if (!file.exists()) {</span>
+<span class="nc" id="L750">                file.mkdir();</span>
+            }
+<span class="nc" id="L752">            file = new File(JiveGlobals.getHomeDirectory() + File.separator + &quot;conf&quot;,</span>
+                    &quot;available-plugins.xml&quot;);
+            // Delete the old version.xml file if it exists
+<span class="nc bnc" id="L755" title="All 2 branches missed.">            if (file.exists()) {</span>
+<span class="nc" id="L756">                file.delete();</span>
+            }
+            // Create new version.xml with returned data
+<span class="nc" id="L759">            writer = new BufferedWriter(new OutputStreamWriter(new FileOutputStream(file), StandardCharsets.UTF_8));</span>
+<span class="nc" id="L760">            OutputFormat prettyPrinter = OutputFormat.createPrettyPrint();</span>
+<span class="nc" id="L761">            XMLWriter xmlWriter = new XMLWriter(writer, prettyPrinter);</span>
+<span class="nc" id="L762">            xmlWriter.write(xml);</span>
+        }
+<span class="nc" id="L764">        catch (Exception e) {</span>
+<span class="nc" id="L765">            Log.error(e.getMessage(), e);</span>
+        }
+        finally {
+<span class="nc bnc" id="L768" title="All 6 branches missed.">            if (writer != null) {</span>
+                try {
+<span class="nc" id="L770">                    writer.close();</span>
+                }
+<span class="nc" id="L772">                catch (IOException e1) {</span>
+<span class="nc" id="L773">                    Log.error(e1.getMessage(), e1);</span>
+<span class="nc" id="L774">                }</span>
+            }
+<span class="nc" id="L776">        }</span>
+<span class="nc" id="L777">    }</span>
+
+    /**
+     * Loads list of available plugins and latest available server version from
+     * conf/available-plugins.xml and conf/server-update.xml respectively.
+     */
+    private void loadSavedInfo() {
+        // Load server update information
+<span class="nc" id="L785">        loadLatestServerInfo();</span>
+        // Load available plugins information
+<span class="nc" id="L787">        loadAvailablePluginsInfo();</span>
+        // Recreate list of plugins to update
+<span class="nc" id="L789">        buildPluginsUpdateList();</span>
+<span class="nc" id="L790">    }</span>
+
+    private void loadLatestServerInfo() {
+        Document xmlResponse;
+<span class="nc" id="L794">        File file = new File(JiveGlobals.getHomeDirectory() + File.separator + &quot;conf&quot;,</span>
+                &quot;server-update.xml&quot;);
+<span class="nc bnc" id="L796" title="All 2 branches missed.">        if (!file.exists()) {</span>
+<span class="nc" id="L797">            return;</span>
+        }
+        // Check read privs.
+<span class="nc bnc" id="L800" title="All 2 branches missed.">        if (!file.canRead()) {</span>
+<span class="nc" id="L801">            Log.warn(&quot;Cannot retrieve server updates. File must be readable: &quot; + file.getName());</span>
+<span class="nc" id="L802">            return;</span>
+        }
+<span class="nc" id="L804">        try (FileReader reader = new FileReader(file)){</span>
+<span class="nc" id="L805">            SAXReader xmlReader = new SAXReader();</span>
+<span class="nc" id="L806">            xmlReader.setEncoding(&quot;UTF-8&quot;);</span>
+<span class="nc" id="L807">            xmlResponse = xmlReader.read(reader);</span>
+<span class="nc bnc" id="L808" title="All 8 branches missed.">        } catch (Exception e) {</span>
+<span class="nc" id="L809">            Log.error(&quot;Error reading server-update.xml&quot;, e);</span>
+<span class="nc" id="L810">            return;</span>
+<span class="nc" id="L811">        }</span>
+
+        // Parse info and recreate update information (if still required)
+<span class="nc" id="L814">        Element openfire = xmlResponse.getRootElement().element(&quot;openfire&quot;);</span>
+<span class="nc bnc" id="L815" title="All 2 branches missed.">        if (openfire != null) {</span>
+<span class="nc" id="L816">            Version latestVersion = new Version(openfire.attributeValue(&quot;latest&quot;));</span>
+<span class="nc" id="L817">            URL changelog = null;</span>
+            try
+            {
+<span class="nc" id="L820">                changelog = new URL( openfire.attributeValue(&quot;changelog&quot;) );</span>
+            }
+<span class="nc" id="L822">            catch ( MalformedURLException e )</span>
+            {
+<span class="nc" id="L824">                Log.warn( &quot;Unable to parse URL from openfire changelog value '{}'.&quot;, openfire.attributeValue(&quot;changelog&quot;), e );</span>
+<span class="nc" id="L825">            }</span>
+
+<span class="nc" id="L827">            URL url = null;</span>
+            try
+            {
+<span class="nc" id="L830">                url = new URL( openfire.attributeValue(&quot;url&quot;) );</span>
+            }
+<span class="nc" id="L832">            catch ( MalformedURLException e )</span>
+            {
+<span class="nc" id="L834">                Log.warn( &quot;Unable to parse URL from openfire download url value '{}'.&quot;, openfire.attributeValue(&quot;url&quot;), e );</span>
+<span class="nc" id="L835">            }</span>
+            // Check if current server version is correct
+<span class="nc" id="L837">            Version currentServerVersion = XMPPServer.getInstance().getServerInfo().getVersion();</span>
+<span class="nc bnc" id="L838" title="All 2 branches missed.">            if (latestVersion.isNewerThan(currentServerVersion)) {</span>
+<span class="nc" id="L839">                serverUpdate = new Update(&quot;Openfire&quot;, latestVersion.getVersionString(), String.valueOf(changelog), String.valueOf(url) );</span>
+            }
+        }
+<span class="nc" id="L842">    }</span>
+
+    private void loadAvailablePluginsInfo() {
+        Document xmlResponse;
+<span class="nc" id="L846">        File file = new File(JiveGlobals.getHomeDirectory() + File.separator + &quot;conf&quot;,</span>
+                &quot;available-plugins.xml&quot;);
+<span class="nc bnc" id="L848" title="All 2 branches missed.">        if (!file.exists()) {</span>
+<span class="nc" id="L849">            return;</span>
+        }
+        // Check read privs.
+<span class="nc bnc" id="L852" title="All 2 branches missed.">        if (!file.canRead()) {</span>
+<span class="nc" id="L853">            Log.warn(&quot;Cannot retrieve available plugins. File must be readable: &quot; + file.getName());</span>
+<span class="nc" id="L854">            return;</span>
+        }
+<span class="nc" id="L856">        try (FileReader reader = new FileReader(file)) {</span>
+<span class="nc" id="L857">            SAXReader xmlReader = new SAXReader();</span>
+<span class="nc" id="L858">            xmlReader.setEncoding(&quot;UTF-8&quot;);</span>
+<span class="nc" id="L859">            xmlResponse = xmlReader.read(reader);</span>
+<span class="nc bnc" id="L860" title="All 8 branches missed.">        } catch (Exception e) {</span>
+<span class="nc" id="L861">            Log.error(&quot;Error reading available-plugins.xml&quot;, e);</span>
+<span class="nc" id="L862">            return;</span>
+<span class="nc" id="L863">        }</span>
+
+        // Parse info and recreate available plugins
+<span class="nc" id="L866">        Iterator it = xmlResponse.getRootElement().elementIterator(&quot;plugin&quot;);</span>
+<span class="nc bnc" id="L867" title="All 2 branches missed.">        while (it.hasNext()) {</span>
+<span class="nc" id="L868">            Element plugin = (Element) it.next();</span>
+<span class="nc" id="L869">            final AvailablePlugin instance = AvailablePlugin.getInstance( plugin );</span>
+            // Add plugin to the list of available plugins at js.org
+<span class="nc" id="L871">            availablePlugins.put(instance.getName(), instance);</span>
+<span class="nc" id="L872">        }</span>
+<span class="nc" id="L873">    }</span>
+
+    /**
+     * Returns a previously fetched list of updates.
+     *
+     * @return a previously fetched list of updates.
+     */
+    public Collection&lt;Update&gt; getPluginUpdates() {
+<span class="nc" id="L881">        return pluginUpdates;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

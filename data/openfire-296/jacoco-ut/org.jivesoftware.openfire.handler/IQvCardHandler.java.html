@@ -1,0 +1,187 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>IQvCardHandler.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.handler</a> &gt; <span class="el_source">IQvCardHandler.java</span></div><h1>IQvCardHandler.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2004-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.handler;
+
+import java.util.Iterator;
+import java.util.Locale;
+
+import org.dom4j.Element;
+import org.dom4j.QName;
+import org.jivesoftware.openfire.IQHandlerInfo;
+import org.jivesoftware.openfire.PacketException;
+import org.jivesoftware.openfire.SessionManager;
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.auth.UnauthorizedException;
+import org.jivesoftware.openfire.session.Session;
+import org.jivesoftware.openfire.user.User;
+import org.jivesoftware.openfire.user.UserManager;
+import org.jivesoftware.openfire.user.UserNotFoundException;
+import org.jivesoftware.openfire.vcard.VCardManager;
+import org.jivesoftware.util.JiveGlobals;
+import org.jivesoftware.util.LocaleUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmpp.packet.IQ;
+import org.xmpp.packet.JID;
+import org.xmpp.packet.PacketError;
+
+/**
+ * Implements the TYPE_IQ vcard-temp protocol. Clients
+ * use this protocol to set and retrieve the vCard information
+ * associated with someone's account.
+ * &lt;p&gt;
+ * A 'get' query retrieves the vcard for the addressee.
+ * A 'set' query sets the vcard information for the sender's account.
+ * &lt;/p&gt;
+ * &lt;p&gt;
+ * Currently an empty implementation to allow usage with normal
+ * clients. Future implementation needed.
+ * &lt;/p&gt;
+ * &lt;h2&gt;Assumptions&lt;/h2&gt;
+ * This handler assumes that the request is addressed to the server.
+ * An appropriate TYPE_IQ tag matcher should be placed in front of this
+ * one to route TYPE_IQ requests not addressed to the server to
+ * another channel (probably for direct delivery to the recipient).
+ * &lt;h2&gt;Warning&lt;/h2&gt;
+ * There should be a way of determining whether a session has
+ * authorization to access this feature. I'm not sure it is a good
+ * idea to do authorization in each handler. It would be nice if
+ * the framework could assert authorization policies across channels.
+ * &lt;h2&gt;Warning&lt;/h2&gt;
+ * I have noticed incompatibility between vCard XML used by Exodus and Psi.
+ * There is a new vCard standard going through the JSF JEP process. We might
+ * want to start either standardizing on clients (probably the most practical),
+ * sending notices for non-conformance (useful),
+ * or attempting to translate between client versions (not likely).
+ *
+ * @author Iain Shigeoka
+ */
+public class IQvCardHandler extends IQHandler {
+
+<span class="nc" id="L75">    private static final Logger Log = LoggerFactory.getLogger(IQvCardHandler.class);</span>
+
+    private IQHandlerInfo info;
+    private XMPPServer server;
+    private UserManager userManager;
+
+    public IQvCardHandler() {
+<span class="nc" id="L82">        super(&quot;XMPP vCard Handler&quot;);</span>
+<span class="nc" id="L83">        info = new IQHandlerInfo(&quot;vCard&quot;, &quot;vcard-temp&quot;);</span>
+<span class="nc" id="L84">    }</span>
+
+    @Override
+    public IQ handleIQ(IQ packet) throws UnauthorizedException, PacketException {
+<span class="nc" id="L88">        IQ result = IQ.createResultIQ(packet);</span>
+<span class="nc" id="L89">        IQ.Type type = packet.getType();</span>
+<span class="nc bnc" id="L90" title="All 2 branches missed.">        if (type.equals(IQ.Type.set)) {</span>
+            try {
+<span class="nc" id="L92">                User user = userManager.getUser(packet.getFrom().getNode());</span>
+<span class="nc" id="L93">                Element vcard = packet.getChildElement();</span>
+<span class="nc bnc" id="L94" title="All 2 branches missed.">                if (vcard != null) {</span>
+                    try {
+<span class="nc" id="L96">                        VCardManager.getInstance().setVCard( user.getUsername(), vcard );</span>
+<span class="nc" id="L97">                    } catch ( UnsupportedOperationException e ) {</span>
+<span class="nc" id="L98">                        Log.debug( &quot;Entity '{}' tried to set VCard, but the configured VCard provider is read-only. An IQ error will be returned to sender.&quot;, packet.getFrom() );</span>
+                        // VCards can include binary data. Let's not echo that back in the error.
+                        // result.setChildElement( packet.getChildElement().createCopy() );
+
+<span class="nc" id="L102">                        result.setError( PacketError.Condition.not_allowed );</span>
+
+<span class="nc" id="L104">                        Locale locale = JiveGlobals.getLocale(); // default to server locale.</span>
+<span class="nc" id="L105">                        final Session session = SessionManager.getInstance().getSession( result.getTo() );</span>
+<span class="nc bnc" id="L106" title="All 4 branches missed.">                        if ( session != null &amp;&amp; session.getLanguage() != null ) {</span>
+<span class="nc" id="L107">                            locale = session.getLanguage(); // use client locale if one is available.</span>
+                        }
+<span class="nc" id="L109">                        result.getError().setText( LocaleUtils.getLocalizedString( &quot;vcard.read_only&quot;, locale ), locale.getLanguage() );</span>
+<span class="nc" id="L110">                    }</span>
+                }
+            }
+<span class="nc" id="L113">            catch (UserNotFoundException e) {</span>
+                // VCards can include binary data. Let's not echo that back in the error.
+                // result.setChildElement( packet.getChildElement().createCopy() );
+
+<span class="nc" id="L117">                result.setError(PacketError.Condition.item_not_found);</span>
+            }
+<span class="nc" id="L119">            catch (Exception e) {</span>
+<span class="nc" id="L120">                Log.error(e.getMessage(), e);</span>
+<span class="nc" id="L121">                result.setError(PacketError.Condition.internal_server_error);</span>
+<span class="nc" id="L122">            }</span>
+        }
+<span class="nc bnc" id="L124" title="All 2 branches missed.">        else if (type.equals(IQ.Type.get)) {</span>
+<span class="nc" id="L125">            JID recipient = packet.getTo();</span>
+            // If no TO was specified then get the vCard of the sender of the packet
+<span class="nc bnc" id="L127" title="All 2 branches missed.">            if (recipient == null) {</span>
+<span class="nc" id="L128">                recipient = packet.getFrom();</span>
+            }
+            // By default return an empty vCard
+<span class="nc" id="L131">            result.setChildElement(&quot;vCard&quot;, &quot;vcard-temp&quot;);</span>
+            // Only try to get the vCard values of non-anonymous users
+<span class="nc bnc" id="L133" title="All 2 branches missed.">            if (recipient != null) {</span>
+<span class="nc bnc" id="L134" title="All 4 branches missed.">                if (recipient.getNode() != null &amp;&amp; server.isLocal(recipient)) {</span>
+<span class="nc" id="L135">                    VCardManager vManager = VCardManager.getInstance();</span>
+<span class="nc" id="L136">                    Element userVCard = vManager.getVCard(recipient.getNode());</span>
+<span class="nc bnc" id="L137" title="All 2 branches missed.">                    if (userVCard != null) {</span>
+                        // Check if the requester wants to ignore some vCard's fields
+<span class="nc" id="L139">                        Element filter = packet.getChildElement()</span>
+<span class="nc" id="L140">                                .element(QName.get(&quot;filter&quot;, &quot;vcard-temp-filter&quot;));</span>
+<span class="nc bnc" id="L141" title="All 2 branches missed.">                        if (filter != null) {</span>
+                            // Create a copy so we don't modify the original vCard
+<span class="nc" id="L143">                            userVCard = userVCard.createCopy();</span>
+                            // Ignore fields requested by the user
+<span class="nc bnc" id="L145" title="All 2 branches missed.">                            for (Iterator toFilter = filter.elementIterator(); toFilter.hasNext();)</span>
+                            {
+<span class="nc" id="L147">                                Element field = (Element) toFilter.next();</span>
+<span class="nc" id="L148">                                Element fieldToRemove = userVCard.element(field.getName());</span>
+<span class="nc bnc" id="L149" title="All 2 branches missed.">                                if (fieldToRemove != null) {</span>
+<span class="nc" id="L150">                                    fieldToRemove.detach();</span>
+                                }
+<span class="nc" id="L152">                            }</span>
+                        }
+<span class="nc" id="L154">                        result.setChildElement(userVCard);</span>
+                    }
+<span class="nc" id="L156">                }</span>
+                else {
+<span class="nc" id="L158">                    result = IQ.createResultIQ(packet);</span>
+<span class="nc" id="L159">                    result.setChildElement(packet.getChildElement().createCopy());</span>
+<span class="nc" id="L160">                    result.setError(PacketError.Condition.item_not_found);</span>
+                }
+            } else {
+<span class="nc" id="L163">                result = IQ.createResultIQ(packet);</span>
+<span class="nc" id="L164">                result.setChildElement(packet.getChildElement().createCopy());</span>
+<span class="nc" id="L165">                result.setError(PacketError.Condition.item_not_found);</span>
+            }
+<span class="nc" id="L167">        }</span>
+        else {
+<span class="nc" id="L169">            result.setChildElement(packet.getChildElement().createCopy());</span>
+<span class="nc" id="L170">            result.setError(PacketError.Condition.not_acceptable);</span>
+        }
+<span class="nc" id="L172">        return result;</span>
+    }
+
+    @Override
+    public void initialize(XMPPServer server) {
+<span class="nc" id="L177">        super.initialize(server);</span>
+<span class="nc" id="L178">        this.server = server;</span>
+<span class="nc" id="L179">        userManager = server.getUserManager();</span>
+<span class="nc" id="L180">    }</span>
+
+    @Override
+    public IQHandlerInfo getInfo() {
+<span class="nc" id="L184">        return info;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

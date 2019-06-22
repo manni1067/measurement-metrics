@@ -1,0 +1,586 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>ExternalComponentManager.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.component</a> &gt; <span class="el_source">ExternalComponentManager.java</span></div><h1>ExternalComponentManager.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.component;
+
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
+
+import org.jivesoftware.database.DbConnectionManager;
+import org.jivesoftware.openfire.ConnectionManager;
+import org.jivesoftware.openfire.SessionManager;
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.component.ExternalComponentConfiguration.Permission;
+import org.jivesoftware.openfire.session.ComponentSession;
+import org.jivesoftware.openfire.session.Session;
+import org.jivesoftware.util.JiveGlobals;
+import org.jivesoftware.util.ModificationNotAllowedException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Manages the connection permissions for external components. When an external component is
+ * allowed to connect to this server then a special configuration for the component will be kept.
+ * The configuration holds information such as the shared secret that the component should use
+ * when authenticating with the server.
+ *
+ * @author Gaston Dombiak
+ */
+<span class="nc" id="L48">public class ExternalComponentManager {</span>
+
+<span class="nc" id="L50">    private static final Logger Log = LoggerFactory.getLogger(ExternalComponentManager.class);</span>
+
+    private static final String ADD_CONFIGURATION =
+        &quot;INSERT INTO ofExtComponentConf (subdomain,wildcard,secret,permission) VALUES (?,?,?,?)&quot;;
+    private static final String DELETE_CONFIGURATION =
+        &quot;DELETE FROM ofExtComponentConf WHERE subdomain=? and wildcard=?&quot;;
+    private static final String LOAD_CONFIGURATION =
+        &quot;SELECT secret,permission FROM ofExtComponentConf where subdomain=? AND wildcard=0&quot;;
+    private static final String LOAD_WILDCARD_CONFIGURATION =
+        &quot;SELECT secret,permission FROM ofExtComponentConf where ? like subdomain AND wildcard=1&quot;;
+    private static final String LOAD_CONFIGURATIONS =
+        &quot;SELECT subdomain,wildcard,secret FROM ofExtComponentConf where permission=?&quot;;
+
+    /**
+     * List of listeners that will be notified when vCards are created, updated or deleted.
+     */
+<span class="nc" id="L66">    private static List&lt;ExternalComponentManagerListener&gt; listeners =</span>
+            new CopyOnWriteArrayList&lt;&gt;();
+
+    /**
+     * @param enabled enables or disables the service
+     * @deprecated Obtain and use the corresponding {@link org.jivesoftware.openfire.spi.ConnectionListener} instead.
+     * @throws ModificationNotAllowedException if the status of the service cannot be changed
+     */
+    @Deprecated
+    public static void setServiceEnabled(boolean enabled) throws ModificationNotAllowedException {
+        // Alert listeners about this event
+<span class="nc bnc" id="L77" title="All 2 branches missed.">        for (ExternalComponentManagerListener listener : listeners) {</span>
+            try {
+<span class="nc" id="L79">                listener.serviceEnabled(enabled);</span>
+<span class="nc" id="L80">            } catch (Exception e) {</span>
+<span class="nc" id="L81">                Log.warn(&quot;An exception occurred while dispatching a 'serviceEnabled' event!&quot;, e);</span>
+<span class="nc" id="L82">            }</span>
+<span class="nc" id="L83">        }</span>
+<span class="nc" id="L84">        ConnectionManager connectionManager = XMPPServer.getInstance().getConnectionManager();</span>
+<span class="nc" id="L85">        connectionManager.enableComponentListener(enabled);</span>
+<span class="nc" id="L86">    }</span>
+
+    /**
+     * @deprecated Obtain and use the corresponding {@link org.jivesoftware.openfire.spi.ConnectionListener} instead.
+     * @return {@code true} if the service is enabled, otherwise {@code false}
+     */
+    @Deprecated
+    public static boolean isServiceEnabled() {
+<span class="nc" id="L94">        ConnectionManager connectionManager = XMPPServer.getInstance().getConnectionManager();</span>
+<span class="nc" id="L95">        return connectionManager.isComponentListenerEnabled();</span>
+    }
+
+    /**
+     * @param port The port to use
+     * @deprecated Obtain and use the corresponding {@link org.jivesoftware.openfire.spi.ConnectionListener} instead.
+     * @throws ModificationNotAllowedException if the server cannot be modified
+     */
+    @Deprecated
+    public static void setServicePort(int port) throws ModificationNotAllowedException {
+        // Alert listeners about this event
+<span class="nc bnc" id="L106" title="All 2 branches missed.">        for (ExternalComponentManagerListener listener : listeners) {</span>
+            try {
+<span class="nc" id="L108">                listener.portChanged(port);  </span>
+<span class="nc" id="L109">            } catch (Exception e) {</span>
+<span class="nc" id="L110">                Log.warn(&quot;An exception occurred while dispatching a 'portChanged' event!&quot;, e);</span>
+<span class="nc" id="L111">            }</span>
+<span class="nc" id="L112">        }</span>
+<span class="nc" id="L113">        ConnectionManager connectionManager = XMPPServer.getInstance().getConnectionManager();</span>
+<span class="nc" id="L114">        connectionManager.setComponentListenerPort(port);</span>
+<span class="nc" id="L115">    }</span>
+
+    /**
+     * @deprecated Obtain and use the corresponding {@link org.jivesoftware.openfire.spi.ConnectionListener} instead.
+     * @return the port number
+     */
+    @Deprecated
+    public static int getServicePort() {
+<span class="nc" id="L123">        ConnectionManager connectionManager = XMPPServer.getInstance().getConnectionManager();</span>
+<span class="nc" id="L124">        return connectionManager.getComponentListenerPort();</span>
+    }
+
+    /**
+     * Allows an external component to connect to the local server with the specified configuration.
+     *
+     * @param configuration the configuration for the external component.
+     * @throws ModificationNotAllowedException if the operation was denied.
+     */
+    public static void allowAccess(ExternalComponentConfiguration configuration) throws ModificationNotAllowedException {
+        // Alert listeners about this event
+<span class="nc bnc" id="L135" title="All 2 branches missed.">        for (ExternalComponentManagerListener listener : listeners) {</span>
+            try {
+<span class="nc" id="L137">                listener.componentAllowed(configuration.getSubdomain(), configuration); </span>
+<span class="nc" id="L138">            } catch (Exception e) {</span>
+<span class="nc" id="L139">                Log.warn(&quot;An exception occurred while dispatching a 'componentAllowed' event!&quot;, e);</span>
+<span class="nc" id="L140">            }</span>
+<span class="nc" id="L141">        }</span>
+        // Remove any previous configuration for this external component
+<span class="nc" id="L143">        deleteConfigurationFromDB(configuration);</span>
+        // Update the database with the new granted permission and configuration
+<span class="nc" id="L145">        configuration.setPermission(Permission.allowed);</span>
+<span class="nc" id="L146">        addConfiguration(configuration);</span>
+<span class="nc" id="L147">    }</span>
+
+    /**
+     * Blocks an external component from connecting to the local server. If the component was
+     * connected when the permission was revoked then the connection of the entity will be closed.
+     *
+     * @param subdomain the subdomain of the external component that is not allowed to connect.
+     * @throws ModificationNotAllowedException if the operation was denied.
+     */
+    public static void blockAccess(String subdomain) throws ModificationNotAllowedException {
+        // Alert listeners about this event
+<span class="nc bnc" id="L158" title="All 2 branches missed.">        for (ExternalComponentManagerListener listener : listeners) {</span>
+            try {
+<span class="nc" id="L160">                listener.componentBlocked(subdomain);</span>
+<span class="nc" id="L161">            } catch (Exception e) {</span>
+<span class="nc" id="L162">                Log.warn(&quot;An exception occurred while dispatching a 'componentBlocked' event!&quot;, e);</span>
+<span class="nc" id="L163">            }</span>
+<span class="nc" id="L164">        }</span>
+        // Remove any previous configuration for this external component
+<span class="nc" id="L166">        deleteConfigurationFromDB(getConfiguration(subdomain, false));</span>
+        // Update the database with the new revoked permission
+<span class="nc" id="L168">        ExternalComponentConfiguration config = new ExternalComponentConfiguration(subdomain, false, Permission.blocked, null);</span>
+<span class="nc" id="L169">        addConfiguration(config);</span>
+        // Check if the component was connected and proceed to close the connection
+<span class="nc" id="L171">        String domain = subdomain + &quot;.&quot; + XMPPServer.getInstance().getServerInfo().getXMPPDomain();</span>
+<span class="nc" id="L172">        Session session = SessionManager.getInstance().getComponentSession(domain);</span>
+<span class="nc bnc" id="L173" title="All 2 branches missed.">        if (session != null) {</span>
+<span class="nc" id="L174">            Log.debug( &quot;Closing session for external component '{}' as the domain is being blocked. Affected session: {}&quot;, domain, session );</span>
+<span class="nc" id="L175">            session.close();</span>
+        }
+<span class="nc" id="L177">    }</span>
+
+    /**
+     * Returns true if the external component with the specified subdomain can connect to the
+     * local server.
+     *
+     * @param subdomain the subdomain of the external component.
+     * @return true if the external component with the specified subdomain can connect to the
+     *         local server.
+     */
+    public static boolean canAccess(String subdomain) {
+        // By default there is no permission defined for the XMPP entity
+<span class="nc" id="L189">        Permission permission = null;</span>
+
+<span class="nc" id="L191">        ExternalComponentConfiguration config = getConfiguration(subdomain, true);</span>
+<span class="nc bnc" id="L192" title="All 2 branches missed.">        if (config != null) {</span>
+<span class="nc" id="L193">            permission = config.getPermission();</span>
+        }
+
+<span class="nc bnc" id="L196" title="All 2 branches missed.">        if (PermissionPolicy.blacklist == getPermissionPolicy()) {</span>
+            // Anyone can access except those entities listed in the blacklist
+<span class="nc bnc" id="L198" title="All 2 branches missed.">            return Permission.blocked != permission;</span>
+        }
+        else {
+            // Access is limited to those present in the whitelist
+<span class="nc bnc" id="L202" title="All 2 branches missed.">            return Permission.allowed == permission;</span>
+        }
+    }
+
+    /**
+     * Returns true if there is a configuration for the specified subdomain. This
+     * checking can be used as an indirect way of checking that the specified
+     * subdomain belongs to an external component.
+     *
+     * @param subdomain the subdomain of the external component.
+     * @return true if there is a configuration for the specified subdomain.
+     */
+    public static boolean hasConfiguration(String subdomain) {
+<span class="nc bnc" id="L215" title="All 2 branches missed.">        return getConfiguration(subdomain, true) != null;</span>
+    }
+
+    /**
+     * Returns the list of registered external components that are allowed to connect to this
+     * server when using a whitelist policy. However, when using a blacklist policy (i.e. anyone
+     * may connect to the server) the returned list of configurations will be used for obtaining
+     * the shared secret specific for each component.
+     *
+     * @return the configuration of the registered external components.
+     */
+    public static Collection&lt;ExternalComponentConfiguration&gt; getAllowedComponents() {
+<span class="nc" id="L227">        return getConfigurations(Permission.allowed);</span>
+    }
+
+    /**
+     * Returns the list of external components that are NOT allowed to connect to this
+     * server.
+     *
+     * @return the configuration of the blocked external components.
+     */
+    public static Collection&lt;ExternalComponentConfiguration&gt; getBlockedComponents() {
+<span class="nc" id="L237">        return getConfigurations(Permission.blocked);</span>
+    }
+
+    public static void updateComponentSecret(String subdomain, String secret) throws ModificationNotAllowedException {
+        // Alert listeners about this event
+<span class="nc bnc" id="L242" title="All 2 branches missed.">        for (ExternalComponentManagerListener listener : listeners) {</span>
+            try {
+<span class="nc" id="L244">                listener.componentSecretUpdated(subdomain, secret);</span>
+<span class="nc" id="L245">            } catch (Exception e) {</span>
+<span class="nc" id="L246">                Log.warn(&quot;An exception occurred while dispatching a 'componentSecretUpdated' event!&quot;, e);</span>
+<span class="nc" id="L247">            }</span>
+<span class="nc" id="L248">        }</span>
+<span class="nc" id="L249">        ExternalComponentConfiguration configuration = getConfiguration(subdomain, false);</span>
+<span class="nc bnc" id="L250" title="All 2 branches missed.">        if (configuration != null) {</span>
+<span class="nc" id="L251">            configuration.setPermission(Permission.allowed);</span>
+<span class="nc" id="L252">            configuration.setSecret(secret);</span>
+            // Remove any previous configuration for this external component
+<span class="nc" id="L254">            deleteConfigurationFromDB(configuration);</span>
+        }
+        else {
+<span class="nc" id="L257">            configuration = new ExternalComponentConfiguration(subdomain, false, Permission.allowed, secret);</span>
+        }
+<span class="nc" id="L259">        addConfiguration(configuration);</span>
+<span class="nc" id="L260">    }</span>
+
+    /**
+     * Removes any existing defined permission and configuration for the specified
+     * external component.
+     *
+     * @param subdomain the subdomain of the external component.
+     * @throws ModificationNotAllowedException if the operation was denied.
+     */
+    public static void deleteConfiguration(String subdomain) throws ModificationNotAllowedException {
+        // Alert listeners about this event
+<span class="nc bnc" id="L271" title="All 2 branches missed.">        for (ExternalComponentManagerListener listener : listeners) {</span>
+            try {
+<span class="nc" id="L273">                listener.componentConfigurationDeleted(subdomain);</span>
+<span class="nc" id="L274">            } catch (Exception e) {</span>
+<span class="nc" id="L275">                Log.warn(&quot;An exception occurred while dispatching a 'componentConfigurationDeleted' event!&quot;, e);</span>
+<span class="nc" id="L276">            }</span>
+<span class="nc" id="L277">        }</span>
+
+        // Proceed to delete the configuration of the component
+<span class="nc" id="L280">        deleteConfigurationFromDB(getConfiguration(subdomain, false));</span>
+<span class="nc" id="L281">    }</span>
+
+    /**
+     * Removes any existing defined permission and configuration for the specified
+     * external component from the database.
+     *
+     * @param configuration the external component configuration to delete.
+     */
+    private static void deleteConfigurationFromDB(ExternalComponentConfiguration configuration) {
+<span class="nc bnc" id="L290" title="All 2 branches missed.">        if (configuration == null) {</span>
+            // Do nothing
+<span class="nc" id="L292">            return;</span>
+        }
+        // Remove the permission for the entity from the database
+<span class="nc" id="L295">        Connection con = null;</span>
+<span class="nc" id="L296">        PreparedStatement pstmt = null;</span>
+        try {
+<span class="nc" id="L298">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L299">            pstmt = con.prepareStatement(DELETE_CONFIGURATION);</span>
+<span class="nc bnc" id="L300" title="All 2 branches missed.">            pstmt.setString(1, configuration.getSubdomain() + (configuration.isWildcard() ? &quot;%&quot; : &quot;&quot;));</span>
+<span class="nc bnc" id="L301" title="All 2 branches missed.">            pstmt.setInt(2, configuration.isWildcard() ? 1 : 0);</span>
+<span class="nc" id="L302">            pstmt.executeUpdate();</span>
+        }
+<span class="nc" id="L304">        catch (SQLException sqle) {</span>
+<span class="nc" id="L305">            Log.error(sqle.getMessage(), sqle);</span>
+        }
+        finally {
+<span class="nc" id="L308">            DbConnectionManager.closeConnection(pstmt, con);</span>
+<span class="nc" id="L309">        }</span>
+<span class="nc" id="L310">    }</span>
+
+    /**
+     * Adds a new permission for the specified external component.
+     *
+     * @param configuration the new configuration for a component.
+     */
+    private static void addConfiguration(ExternalComponentConfiguration configuration) {
+        // Remove the permission for the entity from the database
+<span class="nc" id="L319">        Connection con = null;</span>
+<span class="nc" id="L320">        PreparedStatement pstmt = null;</span>
+        try {
+<span class="nc" id="L322">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L323">            pstmt = con.prepareStatement(ADD_CONFIGURATION);</span>
+<span class="nc bnc" id="L324" title="All 2 branches missed.">            pstmt.setString(1, configuration.getSubdomain() + (configuration.isWildcard() ? &quot;%&quot; : &quot;&quot;));</span>
+<span class="nc bnc" id="L325" title="All 2 branches missed.">            pstmt.setInt(2, configuration.isWildcard() ? 1 : 0);</span>
+<span class="nc" id="L326">            pstmt.setString(3, configuration.getSecret());</span>
+<span class="nc" id="L327">            pstmt.setString(4, configuration.getPermission().toString());</span>
+<span class="nc" id="L328">            pstmt.executeUpdate();</span>
+        }
+<span class="nc" id="L330">        catch (SQLException sqle) {</span>
+<span class="nc" id="L331">            Log.error(sqle.getMessage(), sqle);</span>
+        }
+        finally {
+<span class="nc" id="L334">            DbConnectionManager.closeConnection(pstmt, con);</span>
+<span class="nc" id="L335">        }</span>
+<span class="nc" id="L336">    }</span>
+
+    /**
+     * Returns the configuration for an external component. A query for the exact requested
+     * subdomain will be made. If nothing was found and using wildcards is requested then
+     * another query will be made but this time using wildcards.
+     *
+     * @param subdomain the subdomain of the external component.
+     * @param useWildcard true if an attempt to find a subdomain with wildcards should be attempted.
+     * @return the configuration for an external component.
+     */
+    private static ExternalComponentConfiguration getConfiguration(String subdomain, boolean useWildcard) {
+<span class="nc" id="L348">        ExternalComponentConfiguration configuration = null;</span>
+<span class="nc" id="L349">        Connection con = null;</span>
+<span class="nc" id="L350">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L351">        ResultSet rs = null;</span>
+        try {
+            // Check if there is a configuration for the subdomain
+<span class="nc" id="L354">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L355">            pstmt = con.prepareStatement(LOAD_CONFIGURATION);</span>
+<span class="nc" id="L356">            pstmt.setString(1, subdomain);</span>
+<span class="nc" id="L357">            rs = pstmt.executeQuery();</span>
+
+<span class="nc bnc" id="L359" title="All 2 branches missed.">            while (rs.next()) {</span>
+<span class="nc" id="L360">                configuration = new ExternalComponentConfiguration(subdomain, false, Permission.valueOf(rs.getString(2)),</span>
+<span class="nc" id="L361">                        rs.getString(1));</span>
+            }
+        }
+<span class="nc" id="L364">        catch (SQLException sqle) {</span>
+<span class="nc" id="L365">            Log.error(sqle.getMessage(), sqle);</span>
+        }
+        finally {
+<span class="nc" id="L368">            DbConnectionManager.closeConnection(rs, pstmt, con);</span>
+<span class="nc" id="L369">        }</span>
+
+<span class="nc bnc" id="L371" title="All 4 branches missed.">        if (configuration == null &amp;&amp; useWildcard) {</span>
+            // Check if there is a configuration that is using wildcards for domains
+            try {
+                // Check if there is a configuration for the subdomain
+<span class="nc" id="L375">                con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L376">                pstmt = con.prepareStatement(LOAD_WILDCARD_CONFIGURATION);</span>
+<span class="nc" id="L377">                pstmt.setString(1, subdomain);</span>
+<span class="nc" id="L378">                rs = pstmt.executeQuery();</span>
+
+<span class="nc bnc" id="L380" title="All 2 branches missed.">                while (rs.next()) {</span>
+<span class="nc" id="L381">                    configuration = new ExternalComponentConfiguration(subdomain, true, Permission.valueOf(rs.getString(2)),</span>
+<span class="nc" id="L382">                            rs.getString(1));</span>
+                }
+            }
+<span class="nc" id="L385">            catch (SQLException sqle) {</span>
+<span class="nc" id="L386">                Log.error(sqle.getMessage(), sqle);</span>
+            }
+            finally {
+<span class="nc" id="L389">                DbConnectionManager.closeConnection(rs, pstmt, con);</span>
+<span class="nc" id="L390">           }</span>
+        }
+<span class="nc" id="L392">        return configuration;</span>
+    }
+
+    private static Collection&lt;ExternalComponentConfiguration&gt; getConfigurations(
+            Permission permission) {
+<span class="nc" id="L397">        Collection&lt;ExternalComponentConfiguration&gt; answer =</span>
+                new ArrayList&lt;&gt;();
+<span class="nc" id="L399">        Connection con = null;</span>
+<span class="nc" id="L400">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L401">        ResultSet rs = null;</span>
+        try {
+<span class="nc" id="L403">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L404">            pstmt = con.prepareStatement(LOAD_CONFIGURATIONS);</span>
+<span class="nc" id="L405">            pstmt.setString(1, permission.toString());</span>
+<span class="nc" id="L406">            rs = pstmt.executeQuery();</span>
+            ExternalComponentConfiguration configuration;
+<span class="nc bnc" id="L408" title="All 2 branches missed.">            while (rs.next()) {</span>
+<span class="nc" id="L409">                String subdomain = rs.getString(1);</span>
+<span class="nc bnc" id="L410" title="All 2 branches missed.">                boolean wildcard = rs.getInt(2) == 1;</span>
+                // Remove the trailing % if using wildcards
+<span class="nc bnc" id="L412" title="All 2 branches missed.">                subdomain = wildcard ? subdomain.substring(0, subdomain.length()-1) : subdomain;</span>
+<span class="nc" id="L413">                configuration = new ExternalComponentConfiguration(subdomain, wildcard, permission,</span>
+<span class="nc" id="L414">                        rs.getString(3));</span>
+<span class="nc" id="L415">                answer.add(configuration);</span>
+<span class="nc" id="L416">            }</span>
+        }
+<span class="nc" id="L418">        catch (SQLException sqle) {</span>
+<span class="nc" id="L419">            Log.error(sqle.getMessage(), sqle);</span>
+        }
+        finally {
+<span class="nc" id="L422">            DbConnectionManager.closeConnection(rs, pstmt, con);</span>
+<span class="nc" id="L423">        }</span>
+<span class="nc" id="L424">        return answer;</span>
+    }
+
+    /**
+     * Returns the default secret key to use for those external components that don't have an
+     * individual configuration.
+     *
+     * @return the default secret key to use for those external components that don't have an
+     *         individual configuration.
+     */
+    public static String getDefaultSecret() {
+<span class="nc" id="L435">        return JiveGlobals.getProperty(&quot;xmpp.component.defaultSecret&quot;);</span>
+    }
+
+    /**
+     * Sets the default secret key to use for those external components that don't have an
+     * individual configuration.
+     *
+     * @param defaultSecret the default secret key to use for those external components that
+     *         don't have an individual configuration.
+     * @throws ModificationNotAllowedException if the operation was denied.
+     */
+    public static void setDefaultSecret(String defaultSecret) throws ModificationNotAllowedException {
+        // Alert listeners about this event
+<span class="nc bnc" id="L448" title="All 2 branches missed.">        for (ExternalComponentManagerListener listener : listeners) {</span>
+            try {
+<span class="nc" id="L450">                listener.defaultSecretChanged(defaultSecret);</span>
+<span class="nc" id="L451">            } catch (Exception e) {</span>
+<span class="nc" id="L452">                Log.warn(&quot;An exception occurred while dispatching a 'defaultSecretChanged' event!&quot;, e);</span>
+<span class="nc" id="L453">            }</span>
+<span class="nc" id="L454">        }</span>
+<span class="nc" id="L455">        JiveGlobals.setProperty(&quot;xmpp.component.defaultSecret&quot;, defaultSecret);</span>
+<span class="nc" id="L456">    }</span>
+
+    /**
+     * Returns the shared secret with the specified external component. If no shared secret was
+     * defined then use the default shared secret.
+     *
+     * @param subdomain the subdomain of the external component to get his shared secret.
+     *        (e.g. conference)
+     * @return the shared secret with the specified external component or the default shared secret.
+     */
+    public static String getSecretForComponent(String subdomain) {
+        // By default there is no shared secret defined for the XMPP entity
+<span class="nc" id="L468">        String secret = null;</span>
+
+<span class="nc" id="L470">        ExternalComponentConfiguration config = getConfiguration(subdomain, true);</span>
+<span class="nc bnc" id="L471" title="All 2 branches missed.">        if (config != null) {</span>
+<span class="nc" id="L472">            secret = config.getSecret();</span>
+        }
+
+<span class="nc bnc" id="L475" title="All 2 branches missed.">        secret = (secret == null ? getDefaultSecret() : secret);</span>
+<span class="nc bnc" id="L476" title="All 2 branches missed.">        if (secret == null) {</span>
+<span class="nc" id="L477">            Log.error(&quot;Setup for external components is incomplete. Property &quot; +</span>
+                    &quot;xmpp.component.defaultSecret does not exist.&quot;);
+        }
+<span class="nc" id="L480">        return secret;</span>
+    }
+
+    /**
+     * Returns the permission policy being used for new XMPP entities that are trying to
+     * connect to the server. There are two types of policies: 1) blacklist: where any entity
+     * is allowed to connect to the server except for those listed in the black list and
+     * 2) whitelist: where only the entities listed in the white list are allowed to connect to
+     * the server.
+     *
+     * @return the permission policy being used for new XMPP entities that are trying to
+     *         connect to the server.
+     */
+    public static PermissionPolicy getPermissionPolicy() {
+        try {
+<span class="nc" id="L495">            return PermissionPolicy.valueOf(JiveGlobals.getProperty(&quot;xmpp.component.permission&quot;,</span>
+<span class="nc" id="L496">                    PermissionPolicy.blacklist.toString()));</span>
+        }
+<span class="nc" id="L498">        catch (Exception e) {</span>
+<span class="nc" id="L499">            Log.error(e.getMessage(), e);</span>
+<span class="nc" id="L500">            return PermissionPolicy.blacklist;</span>
+        }
+    }
+
+    /**
+     * Sets the permission policy being used for new XMPP entities that are trying to
+     * connect to the server. There are two types of policies: 1) blacklist: where any entity
+     * is allowed to connect to the server except for those listed in the black list and
+     * 2) whitelist: where only the entities listed in the white list are allowed to connect to
+     * the server.
+     *
+     * @param policy the new PermissionPolicy to use.
+     * @throws ModificationNotAllowedException if the operation was denied.
+     */
+    public static void setPermissionPolicy(PermissionPolicy policy) throws ModificationNotAllowedException {
+        // Alert listeners about this event
+<span class="nc bnc" id="L516" title="All 2 branches missed.">        for (ExternalComponentManagerListener listener : listeners) {</span>
+            try {
+<span class="nc" id="L518">                listener.permissionPolicyChanged(policy);</span>
+<span class="nc" id="L519">            } catch (Exception e) {</span>
+<span class="nc" id="L520">                Log.warn(&quot;An exception occurred while dispatching a 'permissionPolicyChanged' event!&quot;, e);</span>
+<span class="nc" id="L521">            }</span>
+<span class="nc" id="L522">        }</span>
+<span class="nc" id="L523">        JiveGlobals.setProperty(&quot;xmpp.component.permission&quot;, policy.toString());</span>
+        // Check if connected components can remain connected to the server
+<span class="nc bnc" id="L525" title="All 2 branches missed.">        for (ComponentSession session : SessionManager.getInstance().getComponentSessions()) {</span>
+<span class="nc bnc" id="L526" title="All 2 branches missed.">            for (String domain : session.getExternalComponent().getSubdomains()) {</span>
+<span class="nc bnc" id="L527" title="All 2 branches missed.">                if (!canAccess(domain)) {</span>
+<span class="nc" id="L528">                    Log.debug( &quot;Closing session for external component '{}' as a changed permission policy is taken into effect. Affected session: {}&quot;, domain, session );</span>
+<span class="nc" id="L529">                    session.close();</span>
+<span class="nc" id="L530">                    break;</span>
+                }
+<span class="nc" id="L532">            }</span>
+<span class="nc" id="L533">        }</span>
+<span class="nc" id="L534">    }</span>
+
+    /**
+     * Sets the permission policy being used for new XMPP entities that are trying to
+     * connect to the server. There are two types of policies: 1) blacklist: where any entity
+     * is allowed to connect to the server except for those listed in the black list and
+     * 2) whitelist: where only the entities listed in the white list are allowed to connect to
+     * the server.
+     *
+     * @param policy the new policy to use.
+     * @throws ModificationNotAllowedException if the operation was denied.
+     */
+    public static void setPermissionPolicy(String policy) throws ModificationNotAllowedException {
+<span class="nc" id="L547">        setPermissionPolicy(PermissionPolicy.valueOf(policy));</span>
+<span class="nc" id="L548">    }</span>
+
+    /**
+     * Registers a listener to receive events when a configuration change happens. Listeners
+     * have the chance to deny the operation from happening.
+     *
+     * @param listener the listener.
+     */
+    public static void addListener(ExternalComponentManagerListener listener) {
+<span class="nc bnc" id="L557" title="All 2 branches missed.">        if (listener == null) {</span>
+<span class="nc" id="L558">            throw new NullPointerException();</span>
+        }
+<span class="nc" id="L560">        listeners.add(listener);</span>
+<span class="nc" id="L561">    }</span>
+
+    /**
+     * Unregisters a listener to receive events.
+     *
+     * @param listener the listener.
+     */
+    public static void removeListener(ExternalComponentManagerListener listener) {
+<span class="nc" id="L569">        listeners.remove(listener);</span>
+<span class="nc" id="L570">    }</span>
+
+<span class="nc" id="L572">    public enum PermissionPolicy {</span>
+        /**
+         * Any XMPP entity is allowed to connect to the server except for those listed in
+         * the &lt;b&gt;not allowed list&lt;/b&gt;.
+         */
+<span class="nc" id="L577">        blacklist,</span>
+
+        /**
+         * Only the XMPP entities listed in the &lt;b&gt;allowed list&lt;/b&gt; are able to connect to
+         * the server.
+         */
+<span class="nc" id="L583">        whitelist</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

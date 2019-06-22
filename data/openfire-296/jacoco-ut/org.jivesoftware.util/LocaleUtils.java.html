@@ -1,0 +1,676 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>LocaleUtils.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.util</a> &gt; <span class="el_source">LocaleUtils.java</span></div><h1>LocaleUtils.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2004-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.util;
+
+import java.text.DateFormat;
+import java.text.Format;
+import java.text.MessageFormat;
+import java.text.NumberFormat;
+import java.text.ParseException;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.MissingResourceException;
+import java.util.ResourceBundle;
+import java.util.StringTokenizer;
+import java.util.TimeZone;
+import java.util.concurrent.ConcurrentHashMap;
+
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.container.Plugin;
+import org.jivesoftware.openfire.container.PluginManager;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * A set of methods for retrieving and converting locale specific strings and numbers.
+ *
+ * @author Jive Software
+ */
+public class LocaleUtils {
+
+<span class="fc" id="L48">    private static final Logger Log = LoggerFactory.getLogger(LocaleUtils.class);</span>
+
+<span class="fc" id="L50">    private static final Map&lt;Locale, String[][]&gt; timeZoneLists =</span>
+            new ConcurrentHashMap&lt;&gt;();
+
+    // The basename to use for looking up the appropriate resource bundles
+    // TODO - extract this out into a test that grabs the resource name from JiveGlobals
+    // TODO and defaults to openfire_i18n if nothing set.
+    private static final String resourceBaseName = &quot;openfire_i18n&quot;;
+
+<span class="nc" id="L58">    private LocaleUtils() {</span>
+<span class="nc" id="L59">    }</span>
+
+    /**
+     * Converts a locale string like &quot;en&quot;, &quot;en_US&quot; or &quot;en_US_win&quot; to a Java
+     * locale object. If the conversion fails, null is returned.
+     *
+     * @param localeCode the locale code for a Java locale. See the {@link java.util.Locale}
+     *                   class for more details.
+     * @return The Java Locale that matches the locale code, or {@code null}.
+     */
+    public static Locale localeCodeToLocale(String localeCode) {
+<span class="nc" id="L70">        Locale locale = null;</span>
+<span class="nc bnc" id="L71" title="All 2 branches missed.">        if (localeCode != null) {</span>
+<span class="nc" id="L72">            String language = null;</span>
+<span class="nc" id="L73">            String country = null;</span>
+<span class="nc" id="L74">            String variant = null;</span>
+<span class="nc" id="L75">            StringTokenizer tokenizer = new StringTokenizer(localeCode, &quot;_&quot;);</span>
+<span class="nc bnc" id="L76" title="All 2 branches missed.">            if (tokenizer.hasMoreTokens()) {</span>
+<span class="nc" id="L77">                language = tokenizer.nextToken();</span>
+<span class="nc bnc" id="L78" title="All 2 branches missed.">                if (tokenizer.hasMoreTokens()) {</span>
+<span class="nc" id="L79">                    country = tokenizer.nextToken();</span>
+<span class="nc bnc" id="L80" title="All 2 branches missed.">                    if (tokenizer.hasMoreTokens()) {</span>
+<span class="nc" id="L81">                        variant = tokenizer.nextToken();</span>
+                    }
+                }
+            }
+<span class="nc bnc" id="L85" title="All 4 branches missed.">            locale = new Locale(language,</span>
+                    ((country != null) ? country : &quot;&quot;),
+                    ((variant != null) ? variant : &quot;&quot;));
+        }
+<span class="nc" id="L89">        return locale;</span>
+    }
+
+    // The list of supported timezone ids. The list tries to include all of the relevant
+    // time zones for the world without any extraneous zones.
+<span class="fc" id="L94">    private static String[] timeZoneIds = new String[]{&quot;GMT&quot;,</span>
+            &quot;Pacific/Apia&quot;,
+            &quot;HST&quot;,
+            &quot;AST&quot;,
+            &quot;America/Los_Angeles&quot;,
+            &quot;America/Phoenix&quot;,
+            &quot;America/Mazatlan&quot;,
+            &quot;America/Denver&quot;,
+            &quot;America/Belize&quot;,
+            &quot;America/Chicago&quot;,
+            &quot;America/Mexico_City&quot;,
+            &quot;America/Regina&quot;,
+            &quot;America/Bogota&quot;,
+            &quot;America/New_York&quot;,
+            &quot;America/Indianapolis&quot;,
+            &quot;America/Halifax&quot;,
+            &quot;America/Caracas&quot;,
+            &quot;America/Santiago&quot;,
+            &quot;America/St_Johns&quot;,
+            &quot;America/Sao_Paulo&quot;,
+            &quot;America/Buenos_Aires&quot;,
+            &quot;America/Godthab&quot;,
+            &quot;Atlantic/South_Georgia&quot;,
+            &quot;Atlantic/Azores&quot;,
+            &quot;Atlantic/Cape_Verde&quot;,
+            &quot;Africa/Casablanca&quot;,
+            &quot;Europe/Dublin&quot;,
+            &quot;Europe/Berlin&quot;,
+            &quot;Europe/Belgrade&quot;,
+            &quot;Europe/Paris&quot;,
+            &quot;Europe/Warsaw&quot;,
+            &quot;ECT&quot;,
+            &quot;Europe/Athens&quot;,
+            &quot;Europe/Bucharest&quot;,
+            &quot;Africa/Cairo&quot;,
+            &quot;Africa/Harare&quot;,
+            &quot;Europe/Helsinki&quot;,
+            &quot;Asia/Jerusalem&quot;,
+            &quot;Asia/Baghdad&quot;,
+            &quot;Asia/Kuwait&quot;,
+            &quot;Europe/Moscow&quot;,
+            &quot;Africa/Nairobi&quot;,
+            &quot;Asia/Tehran&quot;,
+            &quot;Asia/Muscat&quot;,
+            &quot;Asia/Baku&quot;,
+            &quot;Asia/Kabul&quot;,
+            &quot;Asia/Yekaterinburg&quot;,
+            &quot;Asia/Karachi&quot;,
+            &quot;Asia/Calcutta&quot;,
+            &quot;Asia/Katmandu&quot;,
+            &quot;Asia/Almaty&quot;,
+            &quot;Asia/Dhaka&quot;,
+            &quot;Asia/Colombo&quot;,
+            &quot;Asia/Rangoon&quot;,
+            &quot;Asia/Bangkok&quot;,
+            &quot;Asia/Krasnoyarsk&quot;,
+            &quot;Asia/Hong_Kong&quot;,
+            &quot;Asia/Irkutsk&quot;,
+            &quot;Asia/Kuala_Lumpur&quot;,
+            &quot;Australia/Perth&quot;,
+            &quot;Asia/Taipei&quot;,
+            &quot;Asia/Tokyo&quot;,
+            &quot;Asia/Seoul&quot;,
+            &quot;Asia/Yakutsk&quot;,
+            &quot;Australia/Adelaide&quot;,
+            &quot;Australia/Darwin&quot;,
+            &quot;Australia/Brisbane&quot;,
+            &quot;Australia/Sydney&quot;,
+            &quot;Pacific/Guam&quot;,
+            &quot;Australia/Hobart&quot;,
+            &quot;Asia/Vladivostok&quot;,
+            &quot;Pacific/Noumea&quot;,
+            &quot;Pacific/Auckland&quot;,
+            &quot;Pacific/Fiji&quot;,
+            &quot;Pacific/Tongatapu&quot;
+    };
+
+    // A mapping from the supported timezone ids to friendly english names.
+<span class="fc" id="L172">    private static final Map&lt;String, String&gt; nameMap = new HashMap&lt;&gt;();</span>
+
+    static {
+<span class="fc" id="L175">        nameMap.put(timeZoneIds[0], &quot;International Date Line West&quot;);</span>
+<span class="fc" id="L176">        nameMap.put(timeZoneIds[1], &quot;Midway Island, Samoa&quot;);</span>
+<span class="fc" id="L177">        nameMap.put(timeZoneIds[2], &quot;Hawaii&quot;);</span>
+<span class="fc" id="L178">        nameMap.put(timeZoneIds[3], &quot;Alaska&quot;);</span>
+<span class="fc" id="L179">        nameMap.put(timeZoneIds[4], &quot;Pacific Time (US &amp; Canada); Tijuana&quot;);</span>
+<span class="fc" id="L180">        nameMap.put(timeZoneIds[5], &quot;Arizona&quot;);</span>
+<span class="fc" id="L181">        nameMap.put(timeZoneIds[6], &quot;Chihuahua, La Pax, Mazatlan&quot;);</span>
+<span class="fc" id="L182">        nameMap.put(timeZoneIds[7], &quot;Mountain Time (US &amp; Canada)&quot;);</span>
+<span class="fc" id="L183">        nameMap.put(timeZoneIds[8], &quot;Central America&quot;);</span>
+<span class="fc" id="L184">        nameMap.put(timeZoneIds[9], &quot;Central Time (US &amp; Canada)&quot;);</span>
+<span class="fc" id="L185">        nameMap.put(timeZoneIds[10], &quot;Guadalajara, Mexico City, Monterrey&quot;);</span>
+<span class="fc" id="L186">        nameMap.put(timeZoneIds[11], &quot;Saskatchewan&quot;);</span>
+<span class="fc" id="L187">        nameMap.put(timeZoneIds[12], &quot;Bogota, Lima, Quito&quot;);</span>
+<span class="fc" id="L188">        nameMap.put(timeZoneIds[13], &quot;Eastern Time (US &amp; Canada)&quot;);</span>
+<span class="fc" id="L189">        nameMap.put(timeZoneIds[14], &quot;Indiana (East)&quot;);</span>
+<span class="fc" id="L190">        nameMap.put(timeZoneIds[15], &quot;Atlantic Time (Canada)&quot;);</span>
+<span class="fc" id="L191">        nameMap.put(timeZoneIds[16], &quot;Caracas, La Paz&quot;);</span>
+<span class="fc" id="L192">        nameMap.put(timeZoneIds[17], &quot;Santiago&quot;);</span>
+<span class="fc" id="L193">        nameMap.put(timeZoneIds[18], &quot;Newfoundland&quot;);</span>
+<span class="fc" id="L194">        nameMap.put(timeZoneIds[19], &quot;Brasilia&quot;);</span>
+<span class="fc" id="L195">        nameMap.put(timeZoneIds[20], &quot;Buenos Aires, Georgetown&quot;);</span>
+<span class="fc" id="L196">        nameMap.put(timeZoneIds[21], &quot;Greenland&quot;);</span>
+<span class="fc" id="L197">        nameMap.put(timeZoneIds[22], &quot;Mid-Atlantic&quot;);</span>
+<span class="fc" id="L198">        nameMap.put(timeZoneIds[23], &quot;Azores&quot;);</span>
+<span class="fc" id="L199">        nameMap.put(timeZoneIds[24], &quot;Cape Verde Is.&quot;);</span>
+<span class="fc" id="L200">        nameMap.put(timeZoneIds[25], &quot;Casablanca, Monrovia&quot;);</span>
+<span class="fc" id="L201">        nameMap.put(timeZoneIds[26], &quot;Greenwich Mean Time : Dublin, Edinburgh, Lisbon, London&quot;);</span>
+<span class="fc" id="L202">        nameMap.put(timeZoneIds[27], &quot;Amsterdam, Berlin, Bern, Rome, Stockholm, Vienna&quot;);</span>
+<span class="fc" id="L203">        nameMap.put(timeZoneIds[28], &quot;Belgrade, Bratislava, Budapest, Ljubljana, Prague&quot;);</span>
+<span class="fc" id="L204">        nameMap.put(timeZoneIds[29], &quot;Brussels, Copenhagen, Madrid, Paris&quot;);</span>
+<span class="fc" id="L205">        nameMap.put(timeZoneIds[30], &quot;Sarajevo, Skopje, Warsaw, Zagreb&quot;);</span>
+<span class="fc" id="L206">        nameMap.put(timeZoneIds[31], &quot;West Central Africa&quot;);</span>
+<span class="fc" id="L207">        nameMap.put(timeZoneIds[32], &quot;Athens, Istanbul, Minsk&quot;);</span>
+<span class="fc" id="L208">        nameMap.put(timeZoneIds[33], &quot;Bucharest&quot;);</span>
+<span class="fc" id="L209">        nameMap.put(timeZoneIds[34], &quot;Cairo&quot;);</span>
+<span class="fc" id="L210">        nameMap.put(timeZoneIds[35], &quot;Harare, Pretoria&quot;);</span>
+<span class="fc" id="L211">        nameMap.put(timeZoneIds[36], &quot;Helsinki, Kyiv, Riga, Sofia, Tallinn, Vilnius&quot;);</span>
+<span class="fc" id="L212">        nameMap.put(timeZoneIds[37], &quot;Jerusalem&quot;);</span>
+<span class="fc" id="L213">        nameMap.put(timeZoneIds[38], &quot;Baghdad&quot;);</span>
+<span class="fc" id="L214">        nameMap.put(timeZoneIds[39], &quot;Kuwait, Riyadh&quot;);</span>
+<span class="fc" id="L215">        nameMap.put(timeZoneIds[40], &quot;Moscow, St. Petersburg, Volgograd&quot;);</span>
+<span class="fc" id="L216">        nameMap.put(timeZoneIds[41], &quot;Nairobi&quot;);</span>
+<span class="fc" id="L217">        nameMap.put(timeZoneIds[42], &quot;Tehran&quot;);</span>
+<span class="fc" id="L218">        nameMap.put(timeZoneIds[43], &quot;Abu Dhabi, Muscat&quot;);</span>
+<span class="fc" id="L219">        nameMap.put(timeZoneIds[44], &quot;Baku, Tbilisi, Muscat&quot;);</span>
+<span class="fc" id="L220">        nameMap.put(timeZoneIds[45], &quot;Kabul&quot;);</span>
+<span class="fc" id="L221">        nameMap.put(timeZoneIds[46], &quot;Ekaterinburg&quot;);</span>
+<span class="fc" id="L222">        nameMap.put(timeZoneIds[47], &quot;Islamabad, Karachi, Tashkent&quot;);</span>
+<span class="fc" id="L223">        nameMap.put(timeZoneIds[48], &quot;Chennai, Kolkata, Mumbai, New Dehli&quot;);</span>
+<span class="fc" id="L224">        nameMap.put(timeZoneIds[49], &quot;Kathmandu&quot;);</span>
+<span class="fc" id="L225">        nameMap.put(timeZoneIds[50], &quot;Almaty, Novosibirsk&quot;);</span>
+<span class="fc" id="L226">        nameMap.put(timeZoneIds[51], &quot;Astana, Dhaka&quot;);</span>
+<span class="fc" id="L227">        nameMap.put(timeZoneIds[52], &quot;Sri Jayawardenepura&quot;);</span>
+<span class="fc" id="L228">        nameMap.put(timeZoneIds[53], &quot;Rangoon&quot;);</span>
+<span class="fc" id="L229">        nameMap.put(timeZoneIds[54], &quot;Bangkok, Hanoi, Jakarta&quot;);</span>
+<span class="fc" id="L230">        nameMap.put(timeZoneIds[55], &quot;Krasnoyarsk&quot;);</span>
+<span class="fc" id="L231">        nameMap.put(timeZoneIds[56], &quot;Beijing, Chongqing, Hong Kong, Urumqi&quot;);</span>
+<span class="fc" id="L232">        nameMap.put(timeZoneIds[57], &quot;Irkutsk, Ulaan Bataar&quot;);</span>
+<span class="fc" id="L233">        nameMap.put(timeZoneIds[58], &quot;Kuala Lumpur, Singapore&quot;);</span>
+<span class="fc" id="L234">        nameMap.put(timeZoneIds[59], &quot;Perth&quot;);</span>
+<span class="fc" id="L235">        nameMap.put(timeZoneIds[60], &quot;Taipei&quot;);</span>
+<span class="fc" id="L236">        nameMap.put(timeZoneIds[61], &quot;Osaka, Sapporo, Tokyo&quot;);</span>
+<span class="fc" id="L237">        nameMap.put(timeZoneIds[62], &quot;Seoul&quot;);</span>
+<span class="fc" id="L238">        nameMap.put(timeZoneIds[63], &quot;Yakutsk&quot;);</span>
+<span class="fc" id="L239">        nameMap.put(timeZoneIds[64], &quot;Adelaide&quot;);</span>
+<span class="fc" id="L240">        nameMap.put(timeZoneIds[65], &quot;Darwin&quot;);</span>
+<span class="fc" id="L241">        nameMap.put(timeZoneIds[66], &quot;Brisbane&quot;);</span>
+<span class="fc" id="L242">        nameMap.put(timeZoneIds[67], &quot;Canberra, Melbourne, Sydney&quot;);</span>
+<span class="fc" id="L243">        nameMap.put(timeZoneIds[68], &quot;Guam, Port Moresby&quot;);</span>
+<span class="fc" id="L244">        nameMap.put(timeZoneIds[69], &quot;Hobart&quot;);</span>
+<span class="fc" id="L245">        nameMap.put(timeZoneIds[70], &quot;Vladivostok&quot;);</span>
+<span class="fc" id="L246">        nameMap.put(timeZoneIds[71], &quot;Magadan, Solomon Is., New Caledonia&quot;);</span>
+<span class="fc" id="L247">        nameMap.put(timeZoneIds[72], &quot;Auckland, Wellington&quot;);</span>
+<span class="fc" id="L248">        nameMap.put(timeZoneIds[73], &quot;Fiji, Kamchatka, Marshall Is.&quot;);</span>
+<span class="fc" id="L249">        nameMap.put(timeZoneIds[74], &quot;Nuku'alofa&quot;);</span>
+<span class="fc" id="L250">    }</span>
+
+    /**
+     * Returns a list of all available time zone's as a String [][]. The first
+     * entry in each list item is the timeZoneID, and the second is the
+     * display name.
+     * &lt;p&gt;
+     * The list of time zones attempts to be inclusive of all of the worlds
+     * zones while being as concise as possible. For &quot;en&quot; language locales
+     * the name is a friendly english name. For non-&quot;en&quot; language locales
+     * the standard JDK name is used for the given Locale. The GMT+/- time
+     * is also included for readability.&lt;/p&gt;
+     *
+     * @return a list of time zones, as a tuple of the zime zone ID, and its
+     *         display name.
+     */
+    public static String[][] getTimeZoneList() {
+<span class="nc" id="L267">        Locale jiveLocale = JiveGlobals.getLocale();</span>
+
+<span class="nc" id="L269">        String[][] timeZoneList = timeZoneLists.get(jiveLocale);</span>
+<span class="nc bnc" id="L270" title="All 2 branches missed.">        if (timeZoneList == null) {</span>
+<span class="nc" id="L271">            String[] timeZoneIDs = timeZoneIds;</span>
+            // Now, create String[][] using the unique zones.
+<span class="nc" id="L273">            timeZoneList = new String[timeZoneIDs.length][2];</span>
+<span class="nc bnc" id="L274" title="All 2 branches missed.">            for (int i = 0; i &lt; timeZoneList.length; i++) {</span>
+<span class="nc" id="L275">                String zoneID = timeZoneIDs[i];</span>
+<span class="nc" id="L276">                timeZoneList[i][0] = zoneID;</span>
+<span class="nc" id="L277">                timeZoneList[i][1] = getTimeZoneName(zoneID, jiveLocale);</span>
+            }
+
+            // Add the new list to the map of locales to lists
+<span class="nc" id="L281">            timeZoneLists.put(jiveLocale, timeZoneList);</span>
+        }
+
+<span class="nc" id="L284">        return timeZoneList;</span>
+    }
+
+    /**
+     * Returns the display name for a time zone. The display name is the name
+     * specified by the Java TimeZone class for non-&quot;en&quot; locales or a friendly english
+     * name for &quot;en&quot;, with the addition of the GMT offset
+     * for human readability.
+     *
+     * @param zoneID the time zone to get the name for.
+     * @param locale the locale to use.
+     * @return the display name for the time zone.
+     */
+    public static String getTimeZoneName(String zoneID, Locale locale) {
+<span class="nc" id="L298">        TimeZone zone = TimeZone.getTimeZone(zoneID);</span>
+<span class="nc" id="L299">        StringBuilder buf = new StringBuilder();</span>
+        // Add in the GMT part to the name. First, figure out the offset.
+<span class="nc" id="L301">        int offset = zone.getRawOffset();</span>
+<span class="nc bnc" id="L302" title="All 4 branches missed.">        if (zone.inDaylightTime(new Date()) &amp;&amp; zone.useDaylightTime()) {</span>
+<span class="nc" id="L303">            offset += (int)JiveConstants.HOUR;</span>
+        }
+
+<span class="nc" id="L306">        buf.append('(');</span>
+<span class="nc bnc" id="L307" title="All 2 branches missed.">        if (offset &lt; 0) {</span>
+<span class="nc" id="L308">            buf.append(&quot;GMT-&quot;);</span>
+        }
+        else {
+<span class="nc" id="L311">            buf.append(&quot;GMT+&quot;);</span>
+        }
+<span class="nc" id="L313">        offset = Math.abs(offset);</span>
+<span class="nc" id="L314">        int hours = offset / (int)JiveConstants.HOUR;</span>
+<span class="nc" id="L315">        int minutes = (offset % (int)JiveConstants.HOUR) / (int)JiveConstants.MINUTE;</span>
+<span class="nc" id="L316">        buf.append(hours).append(':');</span>
+<span class="nc bnc" id="L317" title="All 2 branches missed.">        if (minutes &lt; 10) {</span>
+<span class="nc" id="L318">            buf.append('0').append(minutes);</span>
+        }
+        else {
+<span class="nc" id="L321">            buf.append(minutes);</span>
+        }
+<span class="nc" id="L323">        buf.append(&quot;) &quot;);</span>
+
+        // Use a friendly english timezone name if the locale is en, otherwise use the timezone id
+<span class="nc bnc" id="L326" title="All 2 branches missed.">        if (&quot;en&quot;.equals(locale.getLanguage())) {</span>
+<span class="nc" id="L327">            String name = nameMap.get(zoneID);</span>
+<span class="nc bnc" id="L328" title="All 2 branches missed.">            if (name == null) {</span>
+<span class="nc" id="L329">                name = zoneID;</span>
+            }
+
+<span class="nc" id="L332">            buf.append(name);</span>
+<span class="nc" id="L333">        }</span>
+        else {
+<span class="nc" id="L335">            buf.append(</span>
+<span class="nc" id="L336">                    zone.getDisplayName(true, TimeZone.LONG, locale).replace('_', ' ').replace('/',</span>
+                            ' '));
+        }
+
+<span class="nc" id="L340">        return buf.toString();</span>
+    }
+
+    /**
+     * Returns the specified resource bundle, which is a properties file
+     * that aids in localization of skins. This method is handy since it
+     * uses the class loader that other Jive classes are loaded from (hence,
+     * it can load bundles that are stored in jive.jar).
+     *
+     * @param baseName the name of the resource bundle to load.
+     * @param locale the desired Locale.
+     * @return the specified resource bundle, if it exists.
+     */
+    public static ResourceBundle getResourceBundle(String baseName,
+                                                   Locale locale) {
+<span class="nc" id="L355">        return ResourceBundle.getBundle(baseName, locale);</span>
+    }
+
+    /**
+     * Returns an internationalized string loaded from a resource bundle.
+     * The locale used will be the locale specified by JiveGlobals.getLocale().
+     *
+     * @param key the key to use for retrieving the string from the
+     *      appropriate resource bundle.
+     * @return the localized string.
+     */
+    public static String getLocalizedString(String key) {
+<span class="fc" id="L367">        Locale locale = JiveGlobals.getLocale();</span>
+
+        try {
+<span class="fc" id="L370">            ResourceBundle bundle = ResourceBundle.getBundle(resourceBaseName, locale);</span>
+<span class="fc" id="L371">            return getLocalizedString(key, locale, null, bundle);</span>
+<span class="nc" id="L372">        } catch (MissingResourceException mre) {</span>
+<span class="nc" id="L373">            Log.error(mre.getMessage());</span>
+<span class="nc" id="L374">            return key;</span>
+        }
+    }
+
+    /**
+     * Returns an internationalized string loaded from a resource bundle using
+     * the passed in Locale.
+     *
+     * @param key the key to use for retrieving the string from the
+     *      appropriate resource bundle.
+     * @param locale the locale to use for retrieving the appropriate
+     *      locale-specific string.
+     * @return the localized string.
+     */
+    public static String getLocalizedString(String key, Locale locale) {
+<span class="nc" id="L389">        ResourceBundle bundle = ResourceBundle.getBundle(resourceBaseName, locale);</span>
+
+<span class="nc" id="L391">        return getLocalizedString(key, locale, null, bundle);</span>
+    }
+
+    /**
+     * Returns an internationalized string loaded from a resource bundle using
+     * the locale specified by JiveGlobals.getLocale() substituting the passed
+     * in arguments. Substitution is handled using the
+     * {@link java.text.MessageFormat} class.
+     *
+     * @param key the key to use for retrieving the string from the
+     *      appropriate resource bundle.
+     * @param arguments a list of objects to use which are formatted, then
+     *      inserted into the pattern at the appropriate places.
+     * @return the localized string.
+     */
+    public static String getLocalizedString(String key, List&lt;?&gt; arguments) {
+<span class="nc" id="L407">        Locale locale = JiveGlobals.getLocale();</span>
+
+<span class="nc" id="L409">        ResourceBundle bundle = ResourceBundle.getBundle(resourceBaseName, locale);</span>
+<span class="nc" id="L410">        return getLocalizedString(key, locale, arguments, bundle);</span>
+    }
+
+    /**
+     * Returns an internationalized string loaded from a resource bundle from the passed
+     * in plugin. If the plugin name is {@code null}, the key will be looked up using
+     * the standard resource bundle.
+     *
+     * @param key the key to use for retrieving the string from the
+     *      appropriate resource bundle.
+     * @param pluginName the name of the plugin to load the require resource bundle from.
+     * @return the localized string.
+     */
+    public static String getLocalizedString(String key, String pluginName) {
+<span class="nc" id="L424">        return getLocalizedString(key, pluginName, null);</span>
+    }
+
+    /**
+     * Returns an internationalized string loaded from a resource bundle from the passed
+     * in plugin. If the plugin name is {@code null}, the key will be looked up using
+     * the standard resource bundle.
+     *
+     * @param key the key to use for retrieving the string from the
+     *      appropriate resource bundle.
+     * @param pluginName the name of the plugin to load the require resource bundle from.
+     * @param arguments a list of objects to use which are formatted, then
+     *      inserted into the pattern at the appropriate places.
+     * @return the localized string.
+     */
+    public static String getLocalizedString(String key, String pluginName, List arguments) {
+<span class="nc" id="L440">        return getLocalizedString(key, pluginName, arguments, null, false);</span>
+    }
+
+    /**
+     * Returns an internationalized string loaded from a resource bundle from
+     * the passed in plugin, using the passed in Locale.
+     * 
+     * If the plugin name is {@code null}, the key will be looked up using the
+     * standard resource bundle.
+     * 
+     * If the locale is {@code null}, the Jive Global locale will be used.
+     * 
+     * @param key
+     *            the key to use for retrieving the string from the appropriate
+     *            resource bundle.
+     * @param pluginName
+     *            the name of the plugin to load the require resource bundle
+     *            from.
+     * @param arguments
+     *            a list of objects to use which are formatted, then inserted
+     *            into the pattern at the appropriate places.
+     * @param locale
+     *            the locale to use for retrieving the appropriate
+     *            locale-specific string.
+     * @param fallback
+     *            if {@code true}, the global locale used by Openfire will be
+     *            used if the requested locale is not available)
+     * @return the localized string.
+     */
+    public static String getLocalizedString(String key, String pluginName, List&lt;?&gt; arguments, Locale locale, boolean fallback) {
+<span class="nc bnc" id="L470" title="All 2 branches missed.">        if (pluginName == null) {</span>
+<span class="nc" id="L471">            return getLocalizedString(key, arguments);</span>
+        }
+
+<span class="nc bnc" id="L474" title="All 2 branches missed.">        if (locale == null) {</span>
+<span class="nc" id="L475">            locale = JiveGlobals.getLocale();</span>
+        }
+<span class="nc" id="L477">        String i18nFile = getI18nFile(pluginName);</span>
+
+        // Retrieve classloader from pluginName.
+<span class="nc" id="L480">        final XMPPServer xmppServer = XMPPServer.getInstance();</span>
+<span class="nc" id="L481">        PluginManager pluginManager = xmppServer.getPluginManager();</span>
+<span class="nc" id="L482">        Plugin plugin = pluginManager.getPlugin(pluginName);</span>
+<span class="nc bnc" id="L483" title="All 2 branches missed.">        if (plugin == null) {</span>
+<span class="nc" id="L484">            throw new NullPointerException(&quot;Plugin could not be located: &quot; + pluginName);</span>
+        }
+
+<span class="nc" id="L487">        ClassLoader pluginClassLoader = pluginManager.getPluginClassloader(plugin);</span>
+        try {
+<span class="nc" id="L489">            ResourceBundle bundle = ResourceBundle.getBundle(i18nFile, locale, pluginClassLoader);</span>
+<span class="nc" id="L490">            return getLocalizedString(key, locale, arguments, bundle);</span>
+        }
+<span class="nc" id="L492">        catch (MissingResourceException mre) {</span>
+<span class="nc" id="L493">            Locale jivesLocale = JiveGlobals.getLocale();</span>
+<span class="nc bnc" id="L494" title="All 4 branches missed.">            if (fallback &amp;&amp; !jivesLocale.equals(locale)) {</span>
+<span class="nc" id="L495">                Log.info(&quot;Could not find the requested locale. Falling back to default locale.&quot;, mre);</span>
+<span class="nc" id="L496">                return getLocalizedString(key, pluginName, arguments, jivesLocale, false);</span>
+            }
+            
+<span class="nc" id="L499">            Log.error(mre.getMessage(), mre);</span>
+<span class="nc" id="L500">            return key;</span>
+        }
+    }
+
+    /**
+     * Retrieve the &lt;code&gt;ResourceBundle&lt;/code&gt; that is used with this plugin.
+     *
+     * @param pluginName the name of the plugin.
+     * @return the ResourceBundle used with this plugin.
+     * @throws Exception thrown if an exception occurs.
+     */
+    public static ResourceBundle getPluginResourceBundle(String pluginName) throws Exception {
+<span class="nc" id="L512">        final Locale locale = JiveGlobals.getLocale();</span>
+
+<span class="nc" id="L514">        String i18nFile = getI18nFile(pluginName);</span>
+
+        // Retrieve classloader from pluginName.
+<span class="nc" id="L517">        final XMPPServer xmppServer = XMPPServer.getInstance();</span>
+<span class="nc" id="L518">        PluginManager pluginManager = xmppServer.getPluginManager();</span>
+<span class="nc" id="L519">        Plugin plugin = pluginManager.getPlugin(pluginName);</span>
+<span class="nc bnc" id="L520" title="All 2 branches missed.">        if (plugin == null) {</span>
+<span class="nc" id="L521">            throw new NullPointerException(&quot;Plugin could not be located.&quot;);</span>
+        }
+
+<span class="nc" id="L524">        ClassLoader pluginClassLoader = pluginManager.getPluginClassloader(plugin);</span>
+<span class="nc" id="L525">        return ResourceBundle.getBundle(i18nFile, locale, pluginClassLoader);</span>
+    }
+
+    private static String getI18nFile(String pluginName) {
+<span class="nc" id="L529">        return pluginName.replace('.', '_') + &quot;_i18n&quot;;</span>
+    }
+
+    /**
+     * Returns an internationalized string loaded from a resource bundle using
+     * the passed in Locale substituting the passed in arguments. Substitution
+     * is handled using the {@link MessageFormat} class.
+     *
+     * @param key the key to use for retrieving the string from the
+     *      appropriate resource bundle.
+     * @param locale the locale to use for retrieving the appropriate
+     *      locale-specific string.
+     * @param arguments a list of objects to use which are formatted, then
+     *      inserted into the pattern at the appropriate places.
+     * @param bundle The resource bundle from which to return the localized 
+     *      string.
+     * @return the localized string.
+     */
+    public static String getLocalizedString(String key, Locale locale, List arguments,
+            ResourceBundle bundle)
+    {
+<span class="pc bpc" id="L550" title="1 of 2 branches missed.">        if (key == null) {</span>
+<span class="nc" id="L551">            throw new NullPointerException(&quot;Key cannot be null&quot;);</span>
+        }
+<span class="pc bpc" id="L553" title="1 of 2 branches missed.">        if (locale == null) {</span>
+<span class="nc" id="L554">            locale = JiveGlobals.getLocale();</span>
+        }
+
+<span class="fc" id="L557">        String value = getDefaultLocalizedString(key);</span>
+
+        // See if the bundle has a value
+        try {
+            // The jdk caches resource bundles on it's own, so we won't bother.
+<span class="fc" id="L562">            value = bundle.getString(key);</span>
+            // perform argument substitutions
+<span class="pc bpc" id="L564" title="1 of 2 branches missed.">            if (arguments != null) {</span>
+<span class="nc" id="L565">                MessageFormat messageFormat = new MessageFormat(&quot;&quot;);</span>
+<span class="nc" id="L566">                messageFormat.setLocale(bundle.getLocale());</span>
+<span class="nc" id="L567">                messageFormat.applyPattern(value);</span>
+                try {
+                    // This isn't fool-proof, but it's better than nothing
+                    // The idea is to try and convert strings into the
+                    // types of objects that the formatters expects
+                    // i.e. Numbers and Dates
+<span class="nc" id="L573">                    Format[] formats = messageFormat.getFormats();</span>
+<span class="nc bnc" id="L574" title="All 2 branches missed.">                    for (int i = 0; i &lt; formats.length; i++) {</span>
+<span class="nc" id="L575">                        Format format = formats[i];</span>
+<span class="nc bnc" id="L576" title="All 2 branches missed.">                        if (format != null) {</span>
+<span class="nc bnc" id="L577" title="All 2 branches missed.">                            if (format instanceof DateFormat) {</span>
+<span class="nc bnc" id="L578" title="All 2 branches missed.">                                if (arguments.size() &gt; i) {</span>
+<span class="nc" id="L579">                                    Object val = arguments.get(i);</span>
+<span class="nc bnc" id="L580" title="All 2 branches missed.">                                    if (val instanceof String) {</span>
+<span class="nc" id="L581">                                        DateFormat dateFmt = (DateFormat)format;</span>
+                                        try {
+<span class="nc" id="L583">                                            val = dateFmt.parse((String)val);</span>
+<span class="nc" id="L584">                                            arguments.set(i, val);</span>
+                                        }
+<span class="nc" id="L586">                                        catch (ParseException e) {</span>
+<span class="nc" id="L587">                                            Log.error(e.getMessage(), e);</span>
+<span class="nc" id="L588">                                        }</span>
+                                    }
+<span class="nc" id="L590">                                }</span>
+                            }
+<span class="nc bnc" id="L592" title="All 2 branches missed.">                            else if (format instanceof NumberFormat) {</span>
+<span class="nc bnc" id="L593" title="All 2 branches missed.">                                if (arguments.size() &gt; i) {</span>
+<span class="nc" id="L594">                                    Object val = arguments.get(i);</span>
+<span class="nc bnc" id="L595" title="All 2 branches missed.">                                    if (val instanceof String) {</span>
+<span class="nc" id="L596">                                        NumberFormat nbrFmt = (NumberFormat)format;</span>
+                                        try {
+<span class="nc" id="L598">                                            val = nbrFmt.parse((String)val);</span>
+<span class="nc" id="L599">                                            arguments.set(i, val);</span>
+                                        }
+<span class="nc" id="L601">                                        catch (ParseException e) {</span>
+<span class="nc" id="L602">                                            Log.error(e.getMessage(), e);</span>
+<span class="nc" id="L603">                                        }</span>
+                                    }
+                                }
+                            }
+                        }
+                    }
+<span class="nc" id="L609">                    value = messageFormat.format(arguments.toArray());</span>
+                }
+<span class="nc" id="L611">                catch (IllegalArgumentException e) {</span>
+<span class="nc" id="L612">                    Log.error(&quot;Unable to format resource string for key: &quot;</span>
+                            + key + &quot;, argument type not supported&quot;);
+<span class="nc" id="L614">                }</span>
+            }
+        }
+<span class="fc" id="L617">        catch (java.util.MissingResourceException mre) {</span>
+<span class="fc" id="L618">            Log.warn(&quot;Missing resource for key: &quot; + key</span>
+<span class="fc" id="L619">                    + &quot; in locale &quot; + locale.toString());</span>
+<span class="fc" id="L620">        }</span>
+
+<span class="fc" id="L622">        return value;</span>
+    }
+
+    /**
+     * Returns an internationalized String representation of the number using
+     * the default locale.
+     *
+     * @param number the number to format.
+     * @return an internationalized String representation of the number.
+     */
+    public static String getLocalizedNumber(long number) {
+<span class="nc" id="L633">        return NumberFormat.getInstance().format(number);</span>
+    }
+
+    /**
+     * Returns an internationalized String representation of the number using
+     * the specified locale.
+     *
+     * @param number the number to format.
+     * @param locale the locale to use for formatting.
+     * @return an internationalized String representation of the number.
+     */
+    public static String getLocalizedNumber(long number, Locale locale) {
+<span class="nc" id="L645">        return NumberFormat.getInstance(locale).format(number);</span>
+    }
+
+    /**
+     * Returns an internationalized String representation of the number using
+     * the default locale.
+     *
+     * @param number the number to format.
+     * @return an internationalized String representation of the number.
+     */
+    public static String getLocalizedNumber(double number) {
+<span class="nc" id="L656">        return NumberFormat.getInstance().format(number);</span>
+    }
+
+    /**
+     * Returns an internationalized String representation of the number using
+     * the specified locale.
+     *
+     * @param number the number to format.
+     * @param locale the locale to use for formatting.
+     * @return an internationalized String representation of the number.
+     */
+    public static String getLocalizedNumber(double number, Locale locale) {
+<span class="nc" id="L668">        return NumberFormat.getInstance(locale).format(number);</span>
+    }
+
+    // This is consistent with fmt:message from JSTL
+    private static String getDefaultLocalizedString(final String key) {
+<span class="fc" id="L673">        return &quot;???&quot; + key + &quot;???&quot;;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

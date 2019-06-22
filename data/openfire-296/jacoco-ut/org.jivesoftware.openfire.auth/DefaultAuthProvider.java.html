@@ -1,0 +1,407 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>DefaultAuthProvider.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.auth</a> &gt; <span class="el_source">DefaultAuthProvider.java</span></div><h1>DefaultAuthProvider.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2004-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.auth;
+
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.security.SecureRandom;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Types;
+
+import javax.security.sasl.SaslException;
+import javax.xml.bind.DatatypeConverter;
+
+import org.jivesoftware.database.DbConnectionManager;
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.sasl.ScramSha1SaslServer;
+import org.jivesoftware.openfire.user.UserNotFoundException;
+import org.jivesoftware.util.JiveGlobals;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Default AuthProvider implementation. It authenticates against the {@code ofUser}
+ * database table and supports plain text and digest authentication.
+ *
+ * Because each call to authenticate() makes a database connection, the
+ * results of authentication should be cached whenever possible.
+ *
+ * @author Matt Tucker
+ */
+public class DefaultAuthProvider implements AuthProvider {
+
+<span class="fc" id="L50">    private static final Logger Log = LoggerFactory.getLogger(DefaultAuthProvider.class);</span>
+
+        private static final String LOAD_PASSWORD =
+                &quot;SELECT plainPassword,encryptedPassword FROM ofUser WHERE username=?&quot;;
+        private static final String TEST_PASSWORD =
+                &quot;SELECT plainPassword,encryptedPassword,iterations,salt,storedKey,serverKey FROM ofUser WHERE username=?&quot;;
+    private static final String UPDATE_PASSWORD =
+            &quot;UPDATE ofUser SET plainPassword=?, encryptedPassword=?, storedKey=?, serverKey=?, salt=?, iterations=? WHERE username=?&quot;;
+    
+<span class="fc" id="L59">    private static final SecureRandom random = new SecureRandom();</span>
+
+    /**
+     * Constructs a new DefaultAuthProvider.
+     */
+<span class="fc" id="L64">    public DefaultAuthProvider() {</span>
+
+<span class="fc" id="L66">    }</span>
+
+<span class="nc" id="L68">    private class UserInfo {</span>
+        String plainText;
+        String encrypted;
+        int iterations;
+        String salt;
+        String storedKey;
+        String serverKey;
+    }
+
+    private UserInfo getUserInfo(String username) throws UnsupportedOperationException, UserNotFoundException {
+<span class="nc" id="L78">        return getUserInfo(username, false);</span>
+    }
+    private UserInfo getUserInfo(String username, boolean recurse) throws UnsupportedOperationException, UserNotFoundException {
+<span class="nc bnc" id="L81" title="All 2 branches missed.">        if (!isScramSupported()) {</span>
+            // Reject the operation since the provider  does not support SCRAM
+<span class="nc" id="L83">            throw new UnsupportedOperationException();</span>
+        }
+<span class="nc" id="L85">        Connection con = null;</span>
+<span class="nc" id="L86">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L87">        ResultSet rs = null;</span>
+        try {
+<span class="nc" id="L89">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L90">            pstmt = con.prepareStatement(TEST_PASSWORD);</span>
+<span class="nc" id="L91">            pstmt.setString(1, username);</span>
+<span class="nc" id="L92">            rs = pstmt.executeQuery();</span>
+<span class="nc bnc" id="L93" title="All 2 branches missed.">            if (!rs.next()) {</span>
+<span class="nc" id="L94">                throw new UserNotFoundException(username);</span>
+            }
+<span class="nc" id="L96">            UserInfo userInfo = new UserInfo();</span>
+<span class="nc" id="L97">            userInfo.plainText = rs.getString(1);</span>
+<span class="nc" id="L98">            userInfo.encrypted = rs.getString(2);</span>
+<span class="nc" id="L99">            userInfo.iterations = rs.getInt(3);</span>
+<span class="nc" id="L100">            userInfo.salt = rs.getString(4);</span>
+<span class="nc" id="L101">            userInfo.storedKey = rs.getString(5);</span>
+<span class="nc" id="L102">            userInfo.serverKey = rs.getString(6);</span>
+<span class="nc bnc" id="L103" title="All 2 branches missed.">            if (userInfo.encrypted != null) {</span>
+                try {
+<span class="nc" id="L105">                    userInfo.plainText = AuthFactory.decryptPassword(userInfo.encrypted);</span>
+                }
+<span class="nc" id="L107">                catch (UnsupportedOperationException uoe) {</span>
+                    // Ignore and return plain password instead.
+<span class="nc" id="L109">                }</span>
+            }
+<span class="nc bnc" id="L111" title="All 2 branches missed.">            if (!recurse) {</span>
+<span class="nc bnc" id="L112" title="All 2 branches missed.">                if (userInfo.plainText != null) {</span>
+<span class="nc" id="L113">                    boolean scramOnly = JiveGlobals.getBooleanProperty(&quot;user.scramHashedPasswordOnly&quot;);</span>
+<span class="nc bnc" id="L114" title="All 4 branches missed.">                    if (scramOnly || userInfo.salt == null) {</span>
+                        // If we have a password here, but we're meant to be scramOnly, we should reset it.
+<span class="nc" id="L116">                        setPassword(username, userInfo.plainText);</span>
+                        // RECURSE
+<span class="nc" id="L118">                        return getUserInfo(username, true);</span>
+                    }
+                }
+            }
+            // Good to go.
+<span class="nc" id="L123">            return userInfo;</span>
+        }
+<span class="nc" id="L125">        catch (SQLException sqle) {</span>
+<span class="nc" id="L126">            Log.error(&quot;User SQL failure:&quot;, sqle);</span>
+<span class="nc" id="L127">            throw new UserNotFoundException(sqle);</span>
+        }
+        finally {
+<span class="nc" id="L130">            DbConnectionManager.closeConnection(rs, pstmt, con);</span>
+<span class="nc" id="L131">        }</span>
+    }
+
+    @Override
+    public String getSalt(String username) throws UserNotFoundException {
+<span class="nc" id="L136">        return getUserInfo(username).salt;</span>
+    }
+
+    @Override
+    public int getIterations(String username) throws UserNotFoundException {
+<span class="nc" id="L141">        return getUserInfo(username).iterations;</span>
+    }
+
+    @Override
+    public String getStoredKey(String username) throws UserNotFoundException {
+<span class="nc" id="L146">        return getUserInfo(username).storedKey;</span>
+    }
+
+    @Override
+    public String getServerKey(String username) throws UserNotFoundException {
+<span class="nc" id="L151">        return getUserInfo(username).serverKey;</span>
+    }
+
+    @Override
+    public void authenticate(String username, String password) throws UnauthorizedException {
+<span class="nc bnc" id="L156" title="All 4 branches missed.">        if (username == null || password == null) {</span>
+<span class="nc" id="L157">            throw new UnauthorizedException();</span>
+        }
+<span class="nc" id="L159">        username = username.trim().toLowerCase();</span>
+<span class="nc bnc" id="L160" title="All 2 branches missed.">        if (username.contains(&quot;@&quot;)) {</span>
+            // Check that the specified domain matches the server's domain
+<span class="nc" id="L162">            int index = username.indexOf(&quot;@&quot;);</span>
+<span class="nc" id="L163">            String domain = username.substring(index + 1);</span>
+<span class="nc bnc" id="L164" title="All 2 branches missed.">            if (domain.equals(XMPPServer.getInstance().getServerInfo().getXMPPDomain())) {</span>
+<span class="nc" id="L165">                username = username.substring(0, index);</span>
+            } else {
+                // Unknown domain. Return authentication failed.
+<span class="nc" id="L168">                throw new UnauthorizedException();</span>
+            }
+        }
+        try {
+<span class="nc bnc" id="L172" title="All 2 branches missed.">            if (!checkPassword(username, password)) {</span>
+<span class="nc" id="L173">                throw new UnauthorizedException();</span>
+            }
+        }
+<span class="nc" id="L176">        catch (UserNotFoundException unfe) {</span>
+<span class="nc" id="L177">            throw new UnauthorizedException();</span>
+<span class="nc" id="L178">        }</span>
+        // Got this far, so the user must be authorized.
+<span class="nc" id="L180">    }</span>
+
+    @Override
+    public String getPassword(String username) throws UserNotFoundException {
+<span class="nc bnc" id="L184" title="All 2 branches missed.">        if (!supportsPasswordRetrieval()) {</span>
+            // Reject the operation since the provider is read-only
+<span class="nc" id="L186">            throw new UnsupportedOperationException();</span>
+        }
+<span class="nc" id="L188">        Connection con = null;</span>
+<span class="nc" id="L189">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L190">        ResultSet rs = null;</span>
+<span class="nc bnc" id="L191" title="All 2 branches missed.">        if (username.contains(&quot;@&quot;)) {</span>
+            // Check that the specified domain matches the server's domain
+<span class="nc" id="L193">            int index = username.indexOf(&quot;@&quot;);</span>
+<span class="nc" id="L194">            String domain = username.substring(index + 1);</span>
+<span class="nc bnc" id="L195" title="All 2 branches missed.">            if (domain.equals(XMPPServer.getInstance().getServerInfo().getXMPPDomain())) {</span>
+<span class="nc" id="L196">                username = username.substring(0, index);</span>
+            } else {
+                // Unknown domain.
+<span class="nc" id="L199">                throw new UserNotFoundException();</span>
+            }
+        }
+        try {
+<span class="nc" id="L203">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L204">            pstmt = con.prepareStatement(LOAD_PASSWORD);</span>
+<span class="nc" id="L205">            pstmt.setString(1, username);</span>
+<span class="nc" id="L206">            rs = pstmt.executeQuery();</span>
+<span class="nc bnc" id="L207" title="All 2 branches missed.">            if (!rs.next()) {</span>
+<span class="nc" id="L208">                throw new UserNotFoundException(username);</span>
+            }
+<span class="nc" id="L210">            String plainText = rs.getString(1);</span>
+<span class="nc" id="L211">            String encrypted = rs.getString(2);</span>
+<span class="nc bnc" id="L212" title="All 2 branches missed.">            if (encrypted != null) {</span>
+                try {
+<span class="nc" id="L214">                    return AuthFactory.decryptPassword(encrypted);</span>
+                }
+<span class="nc" id="L216">                catch (UnsupportedOperationException uoe) {</span>
+                    // Ignore and return plain password instead.
+                }
+            }
+<span class="nc bnc" id="L220" title="All 2 branches missed.">            if (plainText == null) {</span>
+<span class="nc" id="L221">                throw new UnsupportedOperationException();</span>
+            }
+<span class="nc" id="L223">            return plainText;</span>
+        }
+<span class="nc" id="L225">        catch (SQLException sqle) {</span>
+<span class="nc" id="L226">            throw new UserNotFoundException(sqle);</span>
+        }
+        finally {
+<span class="nc" id="L229">            DbConnectionManager.closeConnection(rs, pstmt, con);</span>
+<span class="nc" id="L230">        }</span>
+    }
+
+    public boolean checkPassword(String username, String testPassword) throws UserNotFoundException {
+<span class="nc" id="L234">        Connection con = null;</span>
+<span class="nc" id="L235">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L236">        ResultSet rs = null;</span>
+<span class="nc bnc" id="L237" title="All 2 branches missed.">        if (username.contains(&quot;@&quot;)) {</span>
+            // Check that the specified domain matches the server's domain
+<span class="nc" id="L239">            int index = username.indexOf(&quot;@&quot;);</span>
+<span class="nc" id="L240">            String domain = username.substring(index + 1);</span>
+<span class="nc bnc" id="L241" title="All 2 branches missed.">            if (domain.equals(XMPPServer.getInstance().getServerInfo().getXMPPDomain())) {</span>
+<span class="nc" id="L242">                username = username.substring(0, index);</span>
+            } else {
+                // Unknown domain.
+<span class="nc" id="L245">                throw new UserNotFoundException();</span>
+            }
+        }
+        try {
+<span class="nc" id="L249">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L250">            pstmt = con.prepareStatement(TEST_PASSWORD);</span>
+<span class="nc" id="L251">            pstmt.setString(1, username);</span>
+<span class="nc" id="L252">            rs = pstmt.executeQuery();</span>
+<span class="nc bnc" id="L253" title="All 2 branches missed.">            if (!rs.next()) {</span>
+<span class="nc" id="L254">                throw new UserNotFoundException(username);</span>
+            }
+<span class="nc" id="L256">            String plainText = rs.getString(1);</span>
+<span class="nc" id="L257">            String encrypted = rs.getString(2);</span>
+<span class="nc" id="L258">            int iterations = rs.getInt(3);</span>
+<span class="nc" id="L259">            String salt = rs.getString(4);</span>
+<span class="nc" id="L260">            String storedKey = rs.getString(5);</span>
+<span class="nc bnc" id="L261" title="All 2 branches missed.">            if (encrypted != null) {</span>
+                try {
+<span class="nc" id="L263">                    plainText = AuthFactory.decryptPassword(encrypted);</span>
+                }
+<span class="nc" id="L265">                catch (UnsupportedOperationException uoe) {</span>
+                    // Ignore and return plain password instead.
+<span class="nc" id="L267">                }</span>
+            }
+<span class="nc bnc" id="L269" title="All 2 branches missed.">            if (plainText != null) {</span>
+<span class="nc" id="L270">                boolean scramOnly = JiveGlobals.getBooleanProperty(&quot;user.scramHashedPasswordOnly&quot;);</span>
+<span class="nc bnc" id="L271" title="All 2 branches missed.">                if (scramOnly) {</span>
+                    // If we have a password here, but we're meant to be scramOnly, we should reset it.
+<span class="nc" id="L273">                    setPassword(username, plainText);</span>
+                }
+<span class="nc" id="L275">                return testPassword.equals(plainText);</span>
+            }
+            // Don't have either plain or encrypted, so test SCRAM hash.
+<span class="nc bnc" id="L278" title="All 6 branches missed.">            if (salt == null || iterations == 0 || storedKey == null) {</span>
+<span class="nc" id="L279">                Log.warn(&quot;No available credentials for checkPassword.&quot;);</span>
+<span class="nc" id="L280">                return false;</span>
+            }
+<span class="nc" id="L282">            byte[] saltShaker = DatatypeConverter.parseBase64Binary(salt);</span>
+<span class="nc" id="L283">            byte[] saltedPassword = null, clientKey = null, testStoredKey = null;</span>
+            try {
+<span class="nc" id="L285">                   saltedPassword = ScramUtils.createSaltedPassword(saltShaker, testPassword, iterations);</span>
+<span class="nc" id="L286">                   clientKey = ScramUtils.computeHmac(saltedPassword, &quot;Client Key&quot;);</span>
+<span class="nc" id="L287">                   testStoredKey = MessageDigest.getInstance(&quot;SHA-1&quot;).digest(clientKey);</span>
+<span class="nc" id="L288">            } catch(SaslException | NoSuchAlgorithmException e) {</span>
+<span class="nc" id="L289">                Log.warn(&quot;Unable to check SCRAM values for PLAIN authentication.&quot;);</span>
+<span class="nc" id="L290">                return false;</span>
+<span class="nc" id="L291">            }</span>
+<span class="nc" id="L292">            return DatatypeConverter.printBase64Binary(testStoredKey).equals(storedKey);</span>
+        }
+<span class="nc" id="L294">        catch (SQLException sqle) {</span>
+<span class="nc" id="L295">            Log.error(&quot;User SQL failure:&quot;, sqle);</span>
+<span class="nc" id="L296">            throw new UserNotFoundException(sqle);</span>
+        }
+        finally {
+<span class="nc" id="L299">            DbConnectionManager.closeConnection(rs, pstmt, con);</span>
+<span class="nc" id="L300">        }</span>
+    }
+
+    @Override
+    public void setPassword(String username, String password) throws UserNotFoundException {
+        // Determine if the password should be stored as plain text or encrypted.
+<span class="nc" id="L306">        boolean usePlainPassword = JiveGlobals.getBooleanProperty(&quot;user.usePlainPassword&quot;);</span>
+<span class="nc" id="L307">        boolean scramOnly = JiveGlobals.getBooleanProperty(&quot;user.scramHashedPasswordOnly&quot;);</span>
+<span class="nc" id="L308">        String encryptedPassword = null;</span>
+<span class="nc bnc" id="L309" title="All 2 branches missed.">        if (username.contains(&quot;@&quot;)) {</span>
+            // Check that the specified domain matches the server's domain
+<span class="nc" id="L311">            int index = username.indexOf(&quot;@&quot;);</span>
+<span class="nc" id="L312">            String domain = username.substring(index + 1);</span>
+<span class="nc bnc" id="L313" title="All 2 branches missed.">            if (domain.equals(XMPPServer.getInstance().getServerInfo().getXMPPDomain())) {</span>
+<span class="nc" id="L314">                username = username.substring(0, index);</span>
+            } else {
+                // Unknown domain.
+<span class="nc" id="L317">                throw new UserNotFoundException();</span>
+            }
+        }
+        
+        // Store the salt and salted password so SCRAM-SHA-1 SASL auth can be used later.
+<span class="nc" id="L322">        byte[] saltShaker = new byte[24];</span>
+<span class="nc" id="L323">        random.nextBytes(saltShaker);</span>
+<span class="nc" id="L324">        String salt = DatatypeConverter.printBase64Binary(saltShaker);</span>
+
+        
+<span class="nc" id="L327">        final int iterations = ScramSha1SaslServer.ITERATION_COUNT.getValue();</span>
+<span class="nc" id="L328">        byte[] saltedPassword = null, clientKey = null, storedKey = null, serverKey = null;</span>
+    try {
+<span class="nc" id="L330">           saltedPassword = ScramUtils.createSaltedPassword(saltShaker, password, iterations);</span>
+<span class="nc" id="L331">               clientKey = ScramUtils.computeHmac(saltedPassword, &quot;Client Key&quot;);</span>
+<span class="nc" id="L332">               storedKey = MessageDigest.getInstance(&quot;SHA-1&quot;).digest(clientKey);</span>
+<span class="nc" id="L333">               serverKey = ScramUtils.computeHmac(saltedPassword, &quot;Server Key&quot;);</span>
+<span class="nc" id="L334">       } catch (SaslException | NoSuchAlgorithmException e) {</span>
+<span class="nc" id="L335">           Log.warn(&quot;Unable to persist values for SCRAM authentication.&quot;);</span>
+<span class="nc" id="L336">       }</span>
+   
+<span class="nc bnc" id="L338" title="All 4 branches missed.">        if (!scramOnly &amp;&amp; !usePlainPassword) {</span>
+            try {
+<span class="nc" id="L340">                encryptedPassword = AuthFactory.encryptPassword(password);</span>
+                // Set password to null so that it's inserted that way.
+<span class="nc" id="L342">                password = null;</span>
+            }
+<span class="nc" id="L344">            catch (UnsupportedOperationException uoe) {</span>
+                // Encryption may fail. In that case, ignore the error and
+                // the plain password will be stored.
+<span class="nc" id="L347">            }</span>
+        }
+<span class="nc bnc" id="L349" title="All 2 branches missed.">        if (scramOnly) {</span>
+<span class="nc" id="L350">            encryptedPassword = null;</span>
+<span class="nc" id="L351">            password = null;</span>
+        }
+
+<span class="nc" id="L354">        Connection con = null;</span>
+<span class="nc" id="L355">        PreparedStatement pstmt = null;</span>
+        try {
+<span class="nc" id="L357">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L358">            pstmt = con.prepareStatement(UPDATE_PASSWORD);</span>
+<span class="nc bnc" id="L359" title="All 2 branches missed.">            if (password == null) {</span>
+<span class="nc" id="L360">                pstmt.setNull(1, Types.VARCHAR);</span>
+            }
+            else {
+<span class="nc" id="L363">                pstmt.setString(1, password);</span>
+            }
+<span class="nc bnc" id="L365" title="All 2 branches missed.">            if (encryptedPassword == null) {</span>
+<span class="nc" id="L366">                pstmt.setNull(2, Types.VARCHAR);</span>
+            }
+            else {
+<span class="nc" id="L369">                pstmt.setString(2, encryptedPassword);</span>
+            }
+<span class="nc bnc" id="L371" title="All 2 branches missed.">            if (storedKey == null) {</span>
+<span class="nc" id="L372">                pstmt.setNull(3, Types.VARCHAR);</span>
+            }
+            else {
+<span class="nc" id="L375">                pstmt.setString(3, DatatypeConverter.printBase64Binary(storedKey));</span>
+            }
+<span class="nc bnc" id="L377" title="All 2 branches missed.">            if (serverKey == null) {</span>
+<span class="nc" id="L378">                pstmt.setNull(4, Types.VARCHAR);</span>
+            }
+            else {
+<span class="nc" id="L381">                pstmt.setString(4, DatatypeConverter.printBase64Binary(serverKey));</span>
+            }
+<span class="nc" id="L383">            pstmt.setString(5, salt);</span>
+<span class="nc" id="L384">            pstmt.setInt(6, iterations);</span>
+<span class="nc" id="L385">            pstmt.setString(7, username);</span>
+<span class="nc" id="L386">            pstmt.executeUpdate();</span>
+        }
+<span class="nc" id="L388">        catch (SQLException sqle) {</span>
+<span class="nc" id="L389">            throw new UserNotFoundException(sqle);</span>
+        }
+        finally {
+<span class="nc" id="L392">            DbConnectionManager.closeConnection(pstmt, con);</span>
+<span class="nc" id="L393">        }</span>
+<span class="nc" id="L394">    }</span>
+
+    @Override
+    public boolean supportsPasswordRetrieval() {
+<span class="nc" id="L398">        boolean scramOnly = JiveGlobals.getBooleanProperty(&quot;user.scramHashedPasswordOnly&quot;);</span>
+<span class="nc bnc" id="L399" title="All 2 branches missed.">        return !scramOnly;</span>
+    }
+
+    @Override
+    public boolean isScramSupported() {
+<span class="nc" id="L404">        return true;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

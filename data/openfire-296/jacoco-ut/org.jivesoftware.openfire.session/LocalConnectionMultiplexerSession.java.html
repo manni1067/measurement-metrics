@@ -1,0 +1,303 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>LocalConnectionMultiplexerSession.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.session</a> &gt; <span class="el_source">LocalConnectionMultiplexerSession.java</span></div><h1>LocalConnectionMultiplexerSession.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2004-2009 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.session;
+
+import java.util.Collection;
+import java.util.Locale;
+
+import org.dom4j.Element;
+import org.jivesoftware.openfire.Connection;
+import org.jivesoftware.openfire.SessionManager;
+import org.jivesoftware.openfire.StreamID;
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.auth.AuthFactory;
+import org.jivesoftware.openfire.auth.UnauthorizedException;
+import org.jivesoftware.openfire.multiplex.ConnectionMultiplexerManager;
+import org.jivesoftware.openfire.multiplex.MultiplexerPacketDeliverer;
+import org.jivesoftware.openfire.net.SASLAuthentication;
+import org.jivesoftware.openfire.spi.ConnectionConfiguration;
+import org.jivesoftware.openfire.spi.ConnectionManagerImpl;
+import org.jivesoftware.openfire.spi.ConnectionType;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmlpull.v1.XmlPullParser;
+import org.xmlpull.v1.XmlPullParserException;
+import org.xmpp.packet.IQ;
+import org.xmpp.packet.JID;
+import org.xmpp.packet.Packet;
+import org.xmpp.packet.StreamError;
+
+/**
+ * Represents a session between the server and a connection manager.&lt;p&gt;
+ *
+ * Each Connection Manager has its own domain. Each connection from the same connection manager
+ * uses a different resource. Unlike any other session, connection manager sessions are not
+ * present in the routing table. This means that connection managers are not reachable entities.
+ * In other words, entities cannot send packets to connection managers but clients being hosted
+ * by them. The main reason behind this design decision is that connection managers are private
+ * components of the server so they can only be contacted by the server. Connection Manager
+ * sessions are present in {@link SessionManager} but not in {@link org.jivesoftware.openfire.RoutingTable}. Use
+ * {@link SessionManager#getConnectionMultiplexerSessions(String)} to get all sessions or
+ * {@link org.jivesoftware.openfire.multiplex.ConnectionMultiplexerManager#getMultiplexerSession(String)}
+ * to get a random session to a given connection manager.
+ *
+ * @author Gaston Dombiak
+ */
+public class LocalConnectionMultiplexerSession extends LocalSession implements ConnectionMultiplexerSession {
+
+<span class="nc" id="L62">    private static final Logger Log = LoggerFactory.getLogger(LocalConnectionMultiplexerSession.class);</span>
+
+    public static LocalConnectionMultiplexerSession createSession(String serverName, XmlPullParser xpp, Connection connection)
+            throws XmlPullParserException {
+<span class="nc" id="L66">        String domain = xpp.getAttributeValue(&quot;&quot;, &quot;to&quot;);</span>
+
+<span class="nc" id="L68">        Log.debug(&quot;LocalConnectionMultiplexerSession: [ConMng] Starting registration of new connection manager for domain: &quot; + domain);</span>
+
+        // Default answer header in case of an error
+<span class="nc" id="L71">        StringBuilder sb = new StringBuilder();</span>
+<span class="nc" id="L72">        sb.append(&quot;&lt;?xml version='1.0' encoding='&quot;);</span>
+<span class="nc" id="L73">        sb.append(CHARSET);</span>
+<span class="nc" id="L74">        sb.append(&quot;'?&gt;&quot;);</span>
+<span class="nc" id="L75">        sb.append(&quot;&lt;stream:stream &quot;);</span>
+<span class="nc" id="L76">        sb.append(&quot;xmlns:stream=\&quot;http://etherx.jabber.org/streams\&quot; &quot;);</span>
+<span class="nc" id="L77">        sb.append(&quot;xmlns=\&quot;jabber:connectionmanager\&quot; from=\&quot;&quot;);</span>
+<span class="nc" id="L78">        sb.append(domain);</span>
+<span class="nc" id="L79">        sb.append(&quot;\&quot; version=\&quot;1.0\&quot;&gt;&quot;);</span>
+
+        // Check that a domain was provided in the stream header
+<span class="nc bnc" id="L82" title="All 2 branches missed.">        if (domain == null) {</span>
+<span class="nc" id="L83">            Log.debug(&quot;LocalConnectionMultiplexerSession: [ConMng] Domain not specified in stanza: &quot; + xpp.getText());</span>
+            // Include the bad-format in the response
+<span class="nc" id="L85">            StreamError error = new StreamError(StreamError.Condition.bad_format);</span>
+<span class="nc" id="L86">            sb.append(error.toXML());</span>
+<span class="nc" id="L87">            connection.deliverRawText(sb.toString());</span>
+            // Close the underlying connection
+<span class="nc" id="L89">            connection.close();</span>
+<span class="nc" id="L90">            return null;</span>
+        }
+
+        // Get the requested domain
+<span class="nc" id="L94">        JID address = new JID(domain);</span>
+        // Check that a secret key was configured in the server
+<span class="nc" id="L96">        String secretKey = ConnectionMultiplexerManager.getDefaultSecret();</span>
+<span class="nc bnc" id="L97" title="All 2 branches missed.">        if (secretKey == null) {</span>
+<span class="nc" id="L98">            Log.debug(&quot;LocalConnectionMultiplexerSession: [ConMng] A shared secret for connection manager was not found.&quot;);</span>
+            // Include the internal-server-error in the response
+<span class="nc" id="L100">            StreamError error = new StreamError(StreamError.Condition.internal_server_error);</span>
+<span class="nc" id="L101">            sb.append(error.toXML());</span>
+<span class="nc" id="L102">            connection.deliverRawText(sb.toString());</span>
+            // Close the underlying connection
+<span class="nc" id="L104">            connection.close();</span>
+<span class="nc" id="L105">            return null;</span>
+        }
+        // Check that the requested subdomain is not already in use
+<span class="nc bnc" id="L108" title="All 2 branches missed.">        if (SessionManager.getInstance().getConnectionMultiplexerSession(address) != null) {</span>
+<span class="nc" id="L109">            Log.debug(&quot;LocalConnectionMultiplexerSession: [ConMng] Another connection manager is already using domain: &quot; + domain);</span>
+            // Domain already occupied so return a conflict error and close the connection
+            // Include the conflict error in the response
+<span class="nc" id="L112">            StreamError error = new StreamError(StreamError.Condition.conflict);</span>
+<span class="nc" id="L113">            sb.append(error.toXML());</span>
+<span class="nc" id="L114">            connection.deliverRawText(sb.toString());</span>
+            // Close the underlying connection
+<span class="nc" id="L116">            connection.close();</span>
+<span class="nc" id="L117">            return null;</span>
+        }
+
+        // Indicate the TLS policy to use for this connection
+<span class="nc" id="L121">        connection.setTlsPolicy( connection.getConfiguration().getTlsPolicy() );</span>
+
+        // Indicate the compression policy to use for this connection
+<span class="nc" id="L124">        connection.setCompressionPolicy( connection.getConfiguration().getCompressionPolicy() );</span>
+
+        // Set the connection manager domain to use delivering a packet fails
+<span class="nc" id="L127">        ((MultiplexerPacketDeliverer) connection.getPacketDeliverer())</span>
+<span class="nc" id="L128">                .setConnectionManagerDomain(address.getDomain());</span>
+
+        // Create a ConnectionMultiplexerSession for the new session originated
+        // from the connection manager
+        LocalConnectionMultiplexerSession session =
+<span class="nc" id="L133">                SessionManager.getInstance().createMultiplexerSession(connection, address);</span>
+        // Set the address of the new session
+<span class="nc" id="L135">        session.setAddress(address);</span>
+<span class="nc" id="L136">        connection.init(session);</span>
+
+        try {
+<span class="nc" id="L139">            Log.debug(&quot;LocalConnectionMultiplexerSession: [ConMng] Send stream header with ID: &quot; + session.getStreamID() +</span>
+                    &quot; for connection manager with domain: &quot; +
+                    domain);
+            // Build the start packet response
+<span class="nc" id="L143">            sb = new StringBuilder();</span>
+<span class="nc" id="L144">            sb.append(&quot;&lt;?xml version='1.0' encoding='&quot;);</span>
+<span class="nc" id="L145">            sb.append(CHARSET);</span>
+<span class="nc" id="L146">            sb.append(&quot;'?&gt;&quot;);</span>
+<span class="nc" id="L147">            sb.append(&quot;&lt;stream:stream &quot;);</span>
+<span class="nc" id="L148">            sb.append(&quot;xmlns:stream=\&quot;http://etherx.jabber.org/streams\&quot; &quot;);</span>
+<span class="nc" id="L149">            sb.append(&quot;xmlns=\&quot;jabber:connectionmanager\&quot; from=\&quot;&quot;);</span>
+<span class="nc" id="L150">            sb.append(domain);</span>
+<span class="nc" id="L151">            sb.append(&quot;\&quot; id=\&quot;&quot;);</span>
+<span class="nc" id="L152">            sb.append(session.getStreamID().toString());</span>
+<span class="nc" id="L153">            sb.append(&quot;\&quot; version=\&quot;1.0\&quot; &gt;&quot;);</span>
+<span class="nc" id="L154">            connection.deliverRawText(sb.toString());</span>
+
+            // Announce stream features.
+
+<span class="nc" id="L158">            sb = new StringBuilder(490);</span>
+<span class="nc" id="L159">            sb.append(&quot;&lt;stream:features&gt;&quot;);</span>
+<span class="nc bnc" id="L160" title="All 2 branches missed.">            if (connection.getTlsPolicy() != Connection.TLSPolicy.disabled) {</span>
+<span class="nc" id="L161">                sb.append(&quot;&lt;starttls xmlns=\&quot;urn:ietf:params:xml:ns:xmpp-tls\&quot;&gt;&quot;);</span>
+<span class="nc bnc" id="L162" title="All 2 branches missed.">                if (connection.getTlsPolicy() == Connection.TLSPolicy.required) {</span>
+<span class="nc" id="L163">                    sb.append(&quot;&lt;required/&gt;&quot;);</span>
+                }
+<span class="nc" id="L165">                sb.append(&quot;&lt;/starttls&gt;&quot;);</span>
+            }
+            // Include Stream features
+<span class="nc" id="L168">            String specificFeatures = session.getAvailableStreamFeatures();</span>
+<span class="nc bnc" id="L169" title="All 2 branches missed.">            if (specificFeatures != null) {</span>
+<span class="nc" id="L170">                sb.append(specificFeatures);</span>
+            }
+<span class="nc" id="L172">            sb.append(&quot;&lt;/stream:features&gt;&quot;);</span>
+
+<span class="nc" id="L174">            connection.deliverRawText(sb.toString());</span>
+
+<span class="nc" id="L176">            return session;</span>
+        }
+<span class="nc" id="L178">        catch (Exception e) {</span>
+<span class="nc" id="L179">            Log.error(&quot;An error occured while creating a Connection Manager Session&quot;, e);</span>
+            // Close the underlying connection
+<span class="nc" id="L181">            connection.close();</span>
+<span class="nc" id="L182">            return null;</span>
+        }
+    }
+
+    public LocalConnectionMultiplexerSession(String serverName, Connection connection, StreamID streamID) {
+<span class="nc" id="L187">        super(serverName, connection, streamID, Locale.getDefault());</span>
+<span class="nc" id="L188">    }</span>
+
+    @Override
+    public String getAvailableStreamFeatures() {
+<span class="nc bnc" id="L192" title="All 4 branches missed.">        if (conn.getTlsPolicy() == Connection.TLSPolicy.required &amp;&amp; !conn.isSecure()) {</span>
+<span class="nc" id="L193">            return null;</span>
+        }
+
+        // Include Stream Compression Mechanism
+<span class="nc bnc" id="L197" title="All 2 branches missed.">        if (conn.getCompressionPolicy() != Connection.CompressionPolicy.disabled &amp;&amp;</span>
+<span class="nc bnc" id="L198" title="All 2 branches missed.">                !conn.isCompressed()) {</span>
+<span class="nc" id="L199">            return &quot;&lt;compression xmlns=\&quot;http://jabber.org/features/compress\&quot;&gt;&lt;method&gt;zlib&lt;/method&gt;&lt;/compression&gt;&quot;;</span>
+        }
+<span class="nc" id="L201">        return null;</span>
+    }
+
+    /**
+     * Authenticates the connection manager. Shared secret is validated with the one provided
+     * by the connection manager. If everything went fine then the session will have a status
+     * of &quot;authenticated&quot; and the connection manager will receive the client configuration
+     * options.
+     *
+     * @param digest the digest provided by the connection manager with the handshake stanza.
+     * @return true if the connection manager was sucessfully authenticated.
+     */
+    public boolean authenticate(String digest) {
+        // Perform authentication. Wait for the handshake (with the secret key)
+<span class="nc" id="L215">        String anticipatedDigest = AuthFactory.createDigest(getStreamID().getID(),</span>
+<span class="nc" id="L216">                ConnectionMultiplexerManager.getDefaultSecret());</span>
+        // Check that the provided handshake (secret key + sessionID) is correct
+<span class="nc bnc" id="L218" title="All 2 branches missed.">        if (!anticipatedDigest.equalsIgnoreCase(digest)) {</span>
+<span class="nc" id="L219">            Log.debug(&quot;LocalConnectionMultiplexerSession: [ConMng] Incorrect handshake for connection manager with domain: &quot; +</span>
+<span class="nc" id="L220">                    getAddress().getDomain());</span>
+            //  The credentials supplied by the initiator are not valid (answer an error
+            // and close the connection)
+<span class="nc" id="L223">            conn.deliverRawText(new StreamError(StreamError.Condition.not_authorized).toXML());</span>
+            // Close the underlying connection
+<span class="nc" id="L225">            conn.close();</span>
+<span class="nc" id="L226">            return false;</span>
+        }
+        else {
+            // Component has authenticated fine
+<span class="nc" id="L230">            setStatus(STATUS_AUTHENTICATED);</span>
+            // Send empty handshake element to acknowledge success
+<span class="nc" id="L232">            conn.deliverRawText(&quot;&lt;handshake&gt;&lt;/handshake&gt;&quot;);</span>
+<span class="nc" id="L233">            Log.debug(&quot;LocalConnectionMultiplexerSession: [ConMng] Connection manager was AUTHENTICATED with domain: &quot; + getAddress());</span>
+<span class="nc" id="L234">            sendClientOptions();</span>
+<span class="nc" id="L235">            return true;</span>
+        }
+    }
+
+    /**
+     * Send to the Connection Manager the connection options available for clients. The info
+     * to send includes:
+     * &lt;ul&gt;
+     *  &lt;li&gt;if TLS is available, optional or required
+     *  &lt;li&gt;SASL mechanisms available before TLS is negotiated
+     *  &lt;li&gt;if compression is available
+     *  &lt;li&gt;if Non-SASL authentication is available
+     *  &lt;li&gt;if In-Band Registration is available
+     * &lt;/ul
+     */
+    private void sendClientOptions() {
+
+<span class="nc" id="L252">        final ConnectionManagerImpl connectionManager = ((ConnectionManagerImpl) XMPPServer.getInstance().getConnectionManager());</span>
+<span class="nc" id="L253">        final ConnectionConfiguration configuration = connectionManager.getListener( ConnectionType.SOCKET_C2S, false ).generateConnectionConfiguration();</span>
+
+<span class="nc" id="L255">        IQ options = new IQ(IQ.Type.set);</span>
+<span class="nc" id="L256">        Element child = options.setChildElement(&quot;configuration&quot;,</span>
+                &quot;http://jabber.org/protocol/connectionmanager&quot;);
+        // Add info about TLS
+<span class="nc bnc" id="L259" title="All 2 branches missed.">        if (configuration.getTlsPolicy() != Connection.TLSPolicy.disabled) {</span>
+<span class="nc" id="L260">            Element tls = child.addElement(&quot;starttls&quot;, &quot;urn:ietf:params:xml:ns:xmpp-tls&quot;);</span>
+<span class="nc bnc" id="L261" title="All 2 branches missed.">            if (configuration.getTlsPolicy() == Connection.TLSPolicy.required) {</span>
+<span class="nc" id="L262">                tls.addElement(&quot;required&quot;);</span>
+            }
+
+        }
+        // Add info about SASL mechanisms
+<span class="nc" id="L267">        Collection&lt;String&gt; mechanisms = SASLAuthentication.getSupportedMechanisms();</span>
+<span class="nc bnc" id="L268" title="All 2 branches missed.">        if (!mechanisms.isEmpty()) {</span>
+<span class="nc" id="L269">            Element sasl = child.addElement(&quot;mechanisms&quot;, &quot;urn:ietf:params:xml:ns:xmpp-sasl&quot;);</span>
+<span class="nc bnc" id="L270" title="All 2 branches missed.">            for (String mechanism : mechanisms) {</span>
+<span class="nc" id="L271">                sasl.addElement(&quot;mechanism&quot;).setText(mechanism);</span>
+<span class="nc" id="L272">            }</span>
+        }
+        // Add info about Stream Compression
+<span class="nc bnc" id="L275" title="All 2 branches missed.">        if (configuration.getCompressionPolicy() == Connection.CompressionPolicy.optional) {</span>
+<span class="nc" id="L276">            Element comp = child.addElement(&quot;compression&quot;, &quot;http://jabber.org/features/compress&quot;);</span>
+<span class="nc" id="L277">            comp.addElement(&quot;method&quot;).setText(&quot;zlib&quot;);</span>
+        }
+        // Add info about Non-SASL authentication
+<span class="nc bnc" id="L280" title="All 2 branches missed.">        if (XMPPServer.getInstance().getIQRouter().supports(&quot;jabber:iq:auth&quot;)) {</span>
+<span class="nc" id="L281">            child.addElement(&quot;auth&quot;, &quot;http://jabber.org/features/iq-auth&quot;);</span>
+        }
+        // Add info about In-Band Registration
+<span class="nc bnc" id="L284" title="All 2 branches missed.">        if (XMPPServer.getInstance().getIQRegisterHandler().isInbandRegEnabled()) {</span>
+<span class="nc" id="L285">            child.addElement(&quot;register&quot;, &quot;http://jabber.org/features/iq-register&quot;);</span>
+        }
+        // Send the options
+<span class="nc" id="L288">        process(options);</span>
+<span class="nc" id="L289">    }</span>
+
+    @Override
+    boolean canProcess(Packet packet) {
+<span class="nc" id="L293">        return true;</span>
+    }
+
+    @Override
+    void deliver(Packet packet) throws UnauthorizedException {
+<span class="nc bnc" id="L298" title="All 2 branches missed.">        if (!conn.isClosed()) {</span>
+<span class="nc" id="L299">            conn.deliver(packet);</span>
+        }
+<span class="nc" id="L301">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

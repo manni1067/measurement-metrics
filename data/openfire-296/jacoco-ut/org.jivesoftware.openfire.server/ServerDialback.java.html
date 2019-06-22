@@ -1,0 +1,910 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>ServerDialback.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.server</a> &gt; <span class="el_source">ServerDialback.java</span></div><h1>ServerDialback.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.server;
+
+import java.io.*;
+import java.net.Socket;
+import java.net.SocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.Map;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.Lock;
+
+import org.dom4j.Document;
+import org.dom4j.DocumentException;
+import org.dom4j.Element;
+import org.dom4j.io.XMPPPacketReader;
+import org.jivesoftware.openfire.*;
+import org.jivesoftware.openfire.auth.AuthFactory;
+import org.jivesoftware.openfire.net.*;
+import org.jivesoftware.openfire.session.ConnectionSettings;
+import org.jivesoftware.openfire.session.IncomingServerSession;
+import org.jivesoftware.openfire.session.LocalIncomingServerSession;
+import org.jivesoftware.openfire.session.LocalOutgoingServerSession;
+import org.jivesoftware.openfire.spi.BasicStreamIDFactory;
+import org.jivesoftware.openfire.spi.ConnectionManagerImpl;
+import org.jivesoftware.openfire.spi.ConnectionType;
+import org.jivesoftware.util.JiveGlobals;
+import org.jivesoftware.util.StringUtils;
+import org.jivesoftware.util.cache.Cache;
+import org.jivesoftware.util.cache.CacheFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmlpull.v1.XmlPullParser;
+import org.xmlpull.v1.XmlPullParserException;
+import org.xmlpull.v1.XmlPullParserFactory;
+import org.xmpp.packet.JID;
+import org.xmpp.packet.PacketError;
+import org.xmpp.packet.StreamError;
+
+import javax.net.ssl.SSLHandshakeException;
+
+/**
+ * Implementation of the Server Dialback method as defined by the RFC3920.
+ *
+ * The dialback method follows the following logic to validate the remote server:
+ * &lt;ol&gt;
+ *  &lt;li&gt;The Originating Server establishes a connection to the Receiving Server.&lt;/li&gt;
+ *  &lt;li&gt;The Originating Server sends a 'key' value over the connection to the Receiving
+ *  Server.&lt;/li&gt;
+ *  &lt;li&gt;The Receiving Server establishes a connection to the Authoritative Server.&lt;/li&gt;
+ *  &lt;li&gt;The Receiving Server sends the same 'key' value to the Authoritative Server.&lt;/li&gt;
+ *  &lt;li&gt;The Authoritative Server replies that key is valid or invalid.&lt;/li&gt;
+ *  &lt;li&gt;The Receiving Server informs the Originating Server whether it is authenticated or
+ *  not.&lt;/li&gt;
+ * &lt;/ol&gt;
+ *
+ * By default a timeout of 20 seconds will be used for reading packets from remote servers. Use
+ * the property &lt;b&gt;xmpp.server.read.timeout&lt;/b&gt; to change that value. The value should be in
+ * milliseconds.
+ *
+ * @author Gaston Dombiak
+ */
+public class ServerDialback {
+<span class="nc" id="L78">    private enum VerifyResult {</span>
+<span class="nc" id="L79">        decline, // For some reason, we declined to do the verify.</span>
+<span class="nc" id="L80">        error,   // Remote error from the authoritative server.</span>
+<span class="nc" id="L81">        valid,   // Explicitly valid.</span>
+<span class="nc" id="L82">        invalid  // Invalid.</span>
+    }
+<span class="nc" id="L84">    private static final Logger Log = LoggerFactory.getLogger(ServerDialback.class);</span>
+
+    /**
+     * The utf-8 charset for decoding and encoding Jabber packet streams.
+     */
+<span class="nc" id="L89">    protected static String CHARSET = &quot;UTF-8&quot;;</span>
+    /**
+     * Cache (unlimited, never expire) that holds the secret key to be used for
+     * encoding and decoding keys used for authentication.
+     * Key: constant hard coded value, Value: random generated string
+     */
+    private static Cache&lt;String, String&gt; secretKeyCache;
+
+<span class="nc" id="L97">    private static XmlPullParserFactory FACTORY = null;</span>
+
+    static {
+        try {
+<span class="nc" id="L101">            FACTORY = XmlPullParserFactory.newInstance(MXParser.class.getName(), null);</span>
+        }
+<span class="nc" id="L103">        catch (XmlPullParserException e) {</span>
+<span class="nc" id="L104">            Log.error(&quot;Error creating a parser factory&quot;, e);</span>
+<span class="nc" id="L105">        }</span>
+<span class="nc" id="L106">        secretKeyCache = CacheFactory.createCache(&quot;Secret Keys Cache&quot;);</span>
+<span class="nc" id="L107">    }</span>
+
+    private Connection connection;
+    private String serverName;
+<span class="nc" id="L111">    private SessionManager sessionManager = SessionManager.getInstance();</span>
+<span class="nc" id="L112">    private RoutingTable routingTable = XMPPServer.getInstance().getRoutingTable();</span>
+
+    /**
+     * Returns true if server dialback is enabled. When enabled remote servers may connect to this
+     * server using the server dialback method and this server may try the server dialback method
+     * to connect to remote servers.&lt;p&gt;
+     *
+     * When TLS is enabled between servers and server dialback method is enabled then TLS is going
+     * to be tried first, when connecting to a remote server, and if TLS fails then server dialback
+     * is going to be used as a last resort. If enabled and the remote server offered server-dialback
+     * after TLS and no SASL EXTERNAL then server dialback will be used.
+     *
+     * @return true if server dialback is enabled.
+     */
+    public static boolean isEnabled() {
+<span class="nc" id="L127">        return JiveGlobals.getBooleanProperty(ConnectionSettings.Server.DIALBACK_ENABLED, true);</span>
+    }
+
+    /**
+     * Returns true if server dialback can be used when the remote server presented a self-signed
+     * certificate. During TLS the remote server can present a self-signed certificate, if this
+     * setting is enabled then the self-signed certificate will be accepted and if SASL EXTERNAL
+     * is not offered then server dialback will be used for verifying the remote server.&lt;p&gt;
+     *
+     * If self-signed certificates are accepted then server dialback over TLS is enabled.
+     *
+     * @return true if server dialback can be used when the remote server presented a self-signed
+     * certificate.
+     */
+    public static boolean isEnabledForSelfSigned() {
+<span class="nc" id="L142">        return JiveGlobals.getBooleanProperty(ConnectionSettings.Server.TLS_ACCEPT_SELFSIGNED_CERTS, false);</span>
+    }
+
+    /**
+     * Sets if server dialback can be used when the remote server presented a self-signed
+     * certificate. During TLS the remote server can present a self-signed certificate, if this
+     * setting is enabled then the self-signed certificate will be accepted and if SASL EXTERNAL
+     * is not offered then server dialback will be used for verifying the remote server.&lt;p&gt;
+     *
+     * If self-signed certificates are accepted then server dialback over TLS is enabled.
+     *
+     * @param enabled if server dialback can be used when the remote server presented a self-signed
+     * certificate.
+     */
+    public static void setEnabledForSelfSigned(boolean enabled) {
+<span class="nc" id="L157">        JiveGlobals.setProperty(ConnectionSettings.Server.TLS_ACCEPT_SELFSIGNED_CERTS, Boolean.toString(enabled));</span>
+<span class="nc" id="L158">    }</span>
+
+    /**
+     * Creates a new instance that will be used for creating {@link IncomingServerSession},
+     * validating subsequent domains or authenticatig new domains. Use
+     * {@link #createIncomingSession(org.dom4j.io.XMPPPacketReader)} for creating a new server
+     * session used for receiving packets from the remote server. Use
+     * {@link #validateRemoteDomain(org.dom4j.Element, org.jivesoftware.openfire.StreamID)} for
+     * validating subsequent domains and use
+     * {@link #authenticateDomain(OutgoingServerSocketReader, String, String, String)} for
+     * registering new domains that are allowed to send packets to the remote server.&lt;p&gt;
+     *
+     * For validating domains a new TCP connection will be established to the Authoritative Server.
+     * The Authoritative Server may be the same Originating Server or some other machine in the
+     * Originating Server's network. Once the remote domain gets validated the Originating Server
+     * will be allowed for sending packets to this server. However, this server will need to
+     * validate its domain/s with the Originating Server if this server needs to send packets to
+     * the Originating Server. Another TCP connection will be established for validation this
+     * server domain/s and for sending packets to the Originating Server.
+     *
+     * @param connection the connection created by the remote server.
+     * @param serverName the name of the local server.
+     */
+<span class="nc" id="L181">    public ServerDialback(Connection connection, String serverName) {</span>
+<span class="nc" id="L182">        this.connection = connection;</span>
+<span class="nc" id="L183">        this.serverName = serverName;</span>
+<span class="nc" id="L184">    }</span>
+
+<span class="nc" id="L186">    public ServerDialback() {</span>
+<span class="nc" id="L187">    }</span>
+
+    /**
+     * Creates a new connection from the Originating Server to the Receiving Server for
+     * authenticating the specified domain.
+     *
+     * @param localDomain domain of the Originating Server to authenticate with the Receiving Server.
+     * @param remoteDomain IP address or hostname of the Receiving Server.
+     * @param port port of the Receiving Server.
+     * @return an OutgoingServerSession if the domain was authenticated or {@code null} if none.
+     */
+    public LocalOutgoingServerSession createOutgoingSession(String localDomain, String remoteDomain, int port) {
+<span class="nc" id="L199">        final Logger log = LoggerFactory.getLogger( Log.getName() + &quot;[Acting as Originating Server: Create Outgoing Session from: &quot; + localDomain + &quot; to RS at: &quot; + remoteDomain + &quot; (port: &quot; + port+ &quot;)]&quot; );</span>
+
+<span class="nc" id="L201">        log.debug( &quot;Creating new outgoing session...&quot; );</span>
+
+<span class="nc" id="L203">        String hostname = null;</span>
+<span class="nc" id="L204">        int realPort = port;</span>
+        try {
+            // Establish a TCP connection to the Receiving Server
+<span class="nc" id="L207">            final Map.Entry&lt;Socket, Boolean&gt; socketToXmppDomain = SocketUtil.createSocketToXmppDomain( remoteDomain, port );</span>
+<span class="nc bnc" id="L208" title="All 2 branches missed.">            if ( socketToXmppDomain  == null ) {</span>
+<span class="nc" id="L209">                log.info( &quot;Unable to create new outgoing session: Cannot create a plain socket connection with any applicable remote host.&quot; );</span>
+<span class="nc" id="L210">                return null;</span>
+            }
+
+<span class="nc" id="L213">            final Socket socket = socketToXmppDomain.getKey();</span>
+<span class="nc" id="L214">            final boolean directTLS = socketToXmppDomain.getValue();</span>
+<span class="nc" id="L215">            connection = new SocketConnection(XMPPServer.getInstance().getPacketDeliverer(), socket, false);</span>
+<span class="nc bnc" id="L216" title="All 2 branches missed.">            if (directTLS) {</span>
+<span class="nc" id="L217">                connection.startTLS( false, directTLS );</span>
+            }
+
+<span class="nc" id="L220">            log.debug( &quot;Send the stream header and wait for response...&quot; );</span>
+<span class="nc" id="L221">            StringBuilder stream = new StringBuilder();</span>
+<span class="nc" id="L222">            stream.append(&quot;&lt;stream:stream&quot;);</span>
+<span class="nc" id="L223">            stream.append(&quot; xmlns:stream=\&quot;http://etherx.jabber.org/streams\&quot;&quot;);</span>
+<span class="nc" id="L224">            stream.append(&quot; xmlns=\&quot;jabber:server\&quot;&quot;);</span>
+<span class="nc" id="L225">            stream.append(&quot; to=\&quot;&quot;).append(remoteDomain).append(&quot;\&quot;&quot;);</span>
+<span class="nc" id="L226">            stream.append(&quot; from=\&quot;&quot;).append(localDomain).append(&quot;\&quot;&quot;);</span>
+<span class="nc" id="L227">            stream.append(&quot; xmlns:db=\&quot;jabber:server:dialback\&quot;&quot;);</span>
+<span class="nc" id="L228">            stream.append(&quot;&gt;&quot;);</span>
+<span class="nc" id="L229">            connection.deliverRawText(stream.toString());</span>
+
+            // Set a read timeout (of 5 seconds) so we don't keep waiting forever
+<span class="nc" id="L232">            int soTimeout = socket.getSoTimeout();</span>
+<span class="nc" id="L233">            socket.setSoTimeout(RemoteServerManager.getSocketTimeout());</span>
+
+<span class="nc" id="L235">            XMPPPacketReader reader = new XMPPPacketReader();</span>
+<span class="nc" id="L236">            reader.setXPPFactory(FACTORY);</span>
+
+            final InputStream input;
+<span class="nc bnc" id="L239" title="All 2 branches missed.">            if (directTLS) {</span>
+<span class="nc" id="L240">                input = ((SocketConnection)connection).getTLSStreamHandler().getInputStream();</span>
+            } else {
+<span class="nc" id="L242">                input = socket.getInputStream();</span>
+            }
+<span class="nc" id="L244">            reader.getXPPParser().setInput(new InputStreamReader(</span>
+<span class="nc" id="L245">                    ServerTrafficCounter.wrapInputStream(input), CHARSET));</span>
+            // Get the answer from the Receiving Server
+<span class="nc" id="L247">            XmlPullParser xpp = reader.getXPPParser();</span>
+<span class="nc bnc" id="L248" title="All 2 branches missed.">            for (int eventType = xpp.getEventType(); eventType != XmlPullParser.START_TAG;) {</span>
+<span class="nc" id="L249">                eventType = xpp.next();</span>
+            }
+<span class="nc" id="L251">            log.debug( &quot;Got a response. Check if the remote server supports dialback...&quot; );</span>
+
+<span class="nc bnc" id="L253" title="All 2 branches missed.">            if (&quot;jabber:server:dialback&quot;.equals(xpp.getNamespace(&quot;db&quot;))) {</span>
+<span class="nc" id="L254">                log.debug( &quot;Dialback seems to be supported by the remote server.&quot; );</span>
+
+                // Restore default timeout
+<span class="nc" id="L257">                socket.setSoTimeout(soTimeout);</span>
+<span class="nc" id="L258">                String id = xpp.getAttributeValue(&quot;&quot;, &quot;id&quot;);</span>
+<span class="nc" id="L259">                OutgoingServerSocketReader socketReader = new OutgoingServerSocketReader(reader);</span>
+<span class="nc bnc" id="L260" title="All 2 branches missed.">                if (authenticateDomain(socketReader, localDomain, remoteDomain, id)) {</span>
+<span class="nc" id="L261">                    log.debug( &quot;Successfully authenticated the connection with dialback.&quot; );</span>
+                    // Domain was validated so create a new OutgoingServerSession
+<span class="nc" id="L263">                    StreamID streamID = BasicStreamIDFactory.createStreamID(id);</span>
+<span class="nc" id="L264">                    LocalOutgoingServerSession session = new LocalOutgoingServerSession(localDomain, connection, socketReader, streamID);</span>
+<span class="nc" id="L265">                    connection.init(session);</span>
+                    // Set the hostname as the address of the session
+<span class="nc" id="L267">                    session.setAddress(new JID(null, remoteDomain, null));</span>
+<span class="nc" id="L268">                    log.debug( &quot;Successfully created new outgoing session!&quot; );</span>
+<span class="nc" id="L269">                    return session;</span>
+                }
+                else {
+<span class="nc" id="L272">                    log.debug( &quot;Failed to authenticate the connection with dialback.&quot; );</span>
+                    // Close the connection
+<span class="nc" id="L274">                    connection.close();</span>
+                }
+<span class="nc" id="L276">            }</span>
+            else {
+<span class="nc" id="L278">                log.debug(&quot;Error! Invalid namespace in packet: '{}'. Closing connection.&quot;, xpp.getText() );</span>
+                // Send an invalid-namespace stream error condition in the response
+<span class="nc" id="L280">                connection.deliverRawText(</span>
+<span class="nc" id="L281">                        new StreamError(StreamError.Condition.invalid_namespace).toXML());</span>
+                // Close the connection
+<span class="nc" id="L283">                connection.close();</span>
+            }
+        }
+<span class="nc" id="L286">        catch (Exception e) {</span>
+<span class="nc" id="L287">            log.error( &quot;An exception occurred while creating outgoing session to remote server:&quot;, e );</span>
+            // Close the connection
+<span class="nc bnc" id="L289" title="All 2 branches missed.">            if (connection != null) {</span>
+<span class="nc" id="L290">                connection.close();</span>
+            }
+<span class="nc" id="L292">        }</span>
+<span class="nc" id="L293">        log.warn( &quot;Unable to create a new outgoing session&quot; );</span>
+<span class="nc" id="L294">        return null;</span>
+    }
+
+    /**
+     * Authenticates the Originating Server domain with the Receiving Server. Once the domain has
+     * been authenticated the Receiving Server will start accepting packets from the Originating
+     * Server.&lt;p&gt;
+     *
+     * The Receiving Server will connect to the Authoritative Server to verify the dialback key.
+     * Most probably the Originating Server machine will be the Authoritative Server too.
+     *
+     * @param socketReader the reader to use for reading the answer from the Receiving Server.
+     * @param localDomain the domain to authenticate.
+     * @param remoteDomain the domain of the remote server (i.e. Receiving Server).
+     * @param id the stream id to be used for creating the dialback key.
+     * @return true if the Receiving Server authenticated the domain with the Authoritative Server.
+     */
+    public boolean authenticateDomain(OutgoingServerSocketReader socketReader, String localDomain, String remoteDomain, String id) {
+
+<span class="nc" id="L313">        final Logger log = LoggerFactory.getLogger( Log.getName() + &quot;[Acting as Originating Server: Authenticate domain: &quot; + localDomain + &quot; with RS: &quot; + remoteDomain + &quot; (id: &quot; + id + &quot;)]&quot; );</span>
+
+<span class="nc" id="L315">        log.debug( &quot;Authenticating domain ...&quot; );</span>
+
+<span class="nc" id="L317">        String key = AuthFactory.createDigest( id, getSecretkey() );</span>
+
+<span class="nc" id="L319">        synchronized (socketReader) {</span>
+<span class="nc" id="L320">            log.debug( &quot;Sending dialback key and wait for the validation response...&quot; );</span>
+<span class="nc" id="L321">            StringBuilder sb = new StringBuilder();</span>
+<span class="nc" id="L322">            sb.append(&quot;&lt;db:result&quot;);</span>
+<span class="nc" id="L323">            sb.append(&quot; from=\&quot;&quot;).append(localDomain).append(&quot;\&quot;&quot;);</span>
+<span class="nc" id="L324">            sb.append(&quot; to=\&quot;&quot;).append(remoteDomain).append(&quot;\&quot;&gt;&quot;);</span>
+<span class="nc" id="L325">            sb.append(key);</span>
+<span class="nc" id="L326">            sb.append(&quot;&lt;/db:result&gt;&quot;);</span>
+<span class="nc" id="L327">            connection.deliverRawText(sb.toString());</span>
+
+            // Process the answer from the Receiving Server
+            try {
+                while (true) {
+<span class="nc" id="L332">                    Element doc = socketReader.getElement(RemoteServerManager.getSocketTimeout(), TimeUnit.MILLISECONDS);</span>
+<span class="nc bnc" id="L333" title="All 2 branches missed.">                    if (doc == null) {</span>
+<span class="nc" id="L334">                        log.debug( &quot;Failed to authenticate domain: Time out waiting for validation response.&quot; );</span>
+<span class="nc" id="L335">                        return false;</span>
+                    }
+<span class="nc bnc" id="L337" title="All 4 branches missed.">                    else if (&quot;db&quot;.equals(doc.getNamespacePrefix()) &amp;&amp; &quot;result&quot;.equals(doc.getName())) {</span>
+<span class="nc bnc" id="L338" title="All 2 branches missed.">                        if ( &quot;valid&quot;.equals(doc.attributeValue(&quot;type&quot;)) ) {</span>
+<span class="nc" id="L339">                            log.debug( &quot;Authenticated succeeded!&quot; );</span>
+<span class="nc" id="L340">                            return true;</span>
+                        } else {
+<span class="nc" id="L342">                            log.debug( &quot;Failed to authenticate domain: the validation response was received, but did not grant authentication.&quot; );</span>
+<span class="nc" id="L343">                            return false;</span>
+                        }
+                    }
+                    else {
+<span class="nc" id="L347">                        log.warn( &quot;Ignoring unexpected answer while waiting for dialback validation: &quot; + doc.asXML() );</span>
+                    }
+<span class="nc" id="L349">                }</span>
+            }
+<span class="nc" id="L351">            catch (InterruptedException e) {</span>
+<span class="nc" id="L352">                log.debug( &quot;Failed to authenticate domain: An interrupt was received while waiting for validation response (is Openfire shutting down?)&quot; );</span>
+<span class="nc" id="L353">                return false;</span>
+            }
+<span class="nc" id="L355">        }</span>
+    }
+
+    /**
+     * Returns a new {@link IncomingServerSession} with a domain validated by the Authoritative
+     * Server. New domains may be added to the returned IncomingServerSession after they have
+     * been validated. See
+     * {@link LocalIncomingServerSession#validateSubsequentDomain(org.dom4j.Element)}. The remote
+     * server will be able to send packets through this session whose domains were previously
+     * validated.&lt;p&gt;
+     *
+     * When acting as an Authoritative Server this method will verify the requested key
+     * and will return null since the underlying TCP connection will be closed after sending the
+     * response to the Receiving Server.&lt;p&gt;
+     *
+     * @param reader reader of DOM documents on the connection to the remote server.
+     * @return an IncomingServerSession that was previously validated against the remote server.
+     * @throws IOException if an I/O error occurs while communicating with the remote server.
+     * @throws XmlPullParserException if an error occurs while parsing XML packets.
+     */
+    public LocalIncomingServerSession createIncomingSession(XMPPPacketReader reader) throws IOException,
+            XmlPullParserException {
+<span class="nc" id="L377">        XmlPullParser xpp = reader.getXPPParser();</span>
+        StringBuilder sb;
+<span class="nc bnc" id="L379" title="All 2 branches missed.">        if (&quot;jabber:server:dialback&quot;.equals(xpp.getNamespace(&quot;db&quot;))) {</span>
+<span class="nc" id="L380">            Log.debug(&quot;ServerDialback: Processing incoming session.&quot;);</span>
+
+<span class="nc" id="L382">            StreamID streamID = sessionManager.nextStreamID();</span>
+
+<span class="nc" id="L384">            sb = new StringBuilder();</span>
+<span class="nc" id="L385">            sb.append(&quot;&lt;stream:stream&quot;);</span>
+<span class="nc" id="L386">            sb.append(&quot; xmlns:stream=\&quot;http://etherx.jabber.org/streams\&quot;&quot;);</span>
+<span class="nc" id="L387">            sb.append(&quot; xmlns=\&quot;jabber:server\&quot; xmlns:db=\&quot;jabber:server:dialback\&quot;&quot;);</span>
+<span class="nc" id="L388">            sb.append(&quot; id=\&quot;&quot;);</span>
+<span class="nc" id="L389">            sb.append(streamID.toString());</span>
+<span class="nc" id="L390">            sb.append(&quot;\&quot;&gt;&quot;);</span>
+<span class="nc" id="L391">            connection.deliverRawText(sb.toString());</span>
+
+            try {
+<span class="nc" id="L394">                Element doc = reader.parseDocument().getRootElement();</span>
+<span class="nc bnc" id="L395" title="All 4 branches missed.">                if (&quot;db&quot;.equals(doc.getNamespacePrefix()) &amp;&amp; &quot;result&quot;.equals(doc.getName())) {</span>
+<span class="nc" id="L396">                    String hostname = doc.attributeValue(&quot;from&quot;);</span>
+<span class="nc" id="L397">                    String recipient = doc.attributeValue(&quot;to&quot;);</span>
+<span class="nc" id="L398">                    Log.debug(&quot;ServerDialback: RS - Validating remote domain for incoming session from {} to {}&quot;, hostname, recipient);</span>
+<span class="nc bnc" id="L399" title="All 2 branches missed.">                    if (validateRemoteDomain(doc, streamID)) {</span>
+<span class="nc" id="L400">                        Log.debug(&quot;ServerDialback: RS - Validation of remote domain for incoming session from {} to {} was successful.&quot;, hostname, recipient);</span>
+                        // Create a server Session for the remote server
+<span class="nc" id="L402">                        LocalIncomingServerSession session = sessionManager.</span>
+<span class="nc" id="L403">                                createIncomingServerSession(connection, streamID, hostname);</span>
+                        // Add the validated domain as a valid domain
+<span class="nc" id="L405">                        session.addValidatedDomain(hostname);</span>
+                        // Set the domain or subdomain of the local server used when
+                        // validating the session
+<span class="nc" id="L408">                        session.setLocalDomain(recipient);</span>
+<span class="nc" id="L409">                        return session;</span>
+                    } else {
+<span class="nc" id="L411">                        Log.debug(&quot;ServerDialback: RS - Validation of remote domain for incoming session from {} to {} was not successful.&quot;, hostname, recipient);</span>
+<span class="nc" id="L412">                        return null;</span>
+                    }
+                }
+<span class="nc bnc" id="L415" title="All 4 branches missed.">                else if (&quot;db&quot;.equals(doc.getNamespacePrefix()) &amp;&amp; &quot;verify&quot;.equals(doc.getName())) {</span>
+                    // When acting as an Authoritative Server the Receiving Server will send a
+                    // db:verify packet for verifying a key that was previously sent by this
+                    // server when acting as the Originating Server
+<span class="nc" id="L419">                    verifyReceivedKey(doc, connection);</span>
+                    // Close the underlying connection
+<span class="nc" id="L421">                    connection.close();</span>
+<span class="nc" id="L422">                    String verifyFROM = doc.attributeValue(&quot;from&quot;);</span>
+<span class="nc" id="L423">                    String id = doc.attributeValue(&quot;id&quot;);</span>
+<span class="nc" id="L424">                    Log.debug(&quot;ServerDialback: AS - Connection closed for host: &quot; + verifyFROM + &quot; id: &quot; + id);</span>
+<span class="nc" id="L425">                    return null;</span>
+                }
+                else {
+<span class="nc" id="L428">                    Log.debug(&quot;ServerDialback: Received an invalid/unknown packet while trying to process an incoming session: {}&quot;, doc.asXML());</span>
+                    // The remote server sent an invalid/unknown packet
+<span class="nc" id="L430">                    connection.deliverRawText(</span>
+<span class="nc" id="L431">                            new StreamError(StreamError.Condition.invalid_xml).toXML());</span>
+                    // Close the underlying connection
+<span class="nc" id="L433">                    connection.close();</span>
+<span class="nc" id="L434">                    return null;</span>
+                }
+            }
+<span class="nc" id="L437">            catch (Exception e) {</span>
+<span class="nc" id="L438">                Log.error(&quot;An error occured while creating a server session&quot;, e);</span>
+                // Close the underlying connection
+<span class="nc" id="L440">                connection.close();</span>
+<span class="nc" id="L441">                return null;</span>
+            }
+
+        }
+        else {
+<span class="nc" id="L446">            Log.debug(&quot;ServerDialback: Received a stanza in an invalid namespace while trying to process an incoming session: {}&quot;, xpp.getNamespace(&quot;db&quot;));</span>
+<span class="nc" id="L447">            connection.deliverRawText(</span>
+<span class="nc" id="L448">                    new StreamError(StreamError.Condition.invalid_namespace).toXML());</span>
+            // Close the underlying connection
+<span class="nc" id="L450">            connection.close();</span>
+<span class="nc" id="L451">            return null;</span>
+        }
+    }
+    
+    /**
+     * Send a dialback error.
+     * 
+     * @param from From
+     * @param to To
+     * @param err Error type.
+     */
+    protected void dialbackError(String from, String to, PacketError err) {
+<span class="nc" id="L463">        connection.deliverRawText(&quot;&lt;db:result type=\&quot;error\&quot; from=\&quot;&quot; + from + &quot;\&quot; to=\&quot;&quot; + to + &quot;\&quot;&gt;&quot; + err.toXML() + &quot;&lt;/db:result&gt;&quot;);</span>
+<span class="nc" id="L464">    }</span>
+
+    /**
+     * Returns true if the domain requested by the remote server was validated by the Authoritative
+     * Server. To validate the domain a new TCP connection will be established to the
+     * Authoritative Server. The Authoritative Server may be the same Originating Server or
+     * some other machine in the Originating Server's network.&lt;p&gt;
+     *
+     * If the domain was not valid or some error occurred while validating the domain then the
+     * underlying TCP connection may be closed.
+     *
+     * @param doc the request for validating the new domain.
+     * @param streamID the stream id generated by this server for the Originating Server.
+     * @return true if the requested domain is valid.
+     */
+    public boolean validateRemoteDomain(Element doc, StreamID streamID) {
+        StringBuilder sb;
+<span class="nc" id="L481">        String recipient = doc.attributeValue(&quot;to&quot;);</span>
+<span class="nc" id="L482">        String remoteDomain = doc.attributeValue(&quot;from&quot;);</span>
+
+<span class="nc" id="L484">        final Logger log = LoggerFactory.getLogger( Log.getName() + &quot;[Acting as Receiving Server: Validate domain:&quot; + recipient + &quot;(id &quot; + streamID + &quot;) for OS: &quot; + remoteDomain + &quot;]&quot; );</span>
+
+<span class="nc" id="L486">        log.debug( &quot;Validating domain...&quot;);</span>
+<span class="nc bnc" id="L487" title="All 2 branches missed.">        if (connection.getTlsPolicy() == Connection.TLSPolicy.required &amp;&amp;</span>
+<span class="nc bnc" id="L488" title="All 2 branches missed.">                !connection.isSecure()) {</span>
+<span class="nc" id="L489">            connection.deliverRawText(new StreamError(StreamError.Condition.policy_violation).toXML());</span>
+            // Close the underlying connection
+<span class="nc" id="L491">            connection.close();</span>
+<span class="nc" id="L492">            return false;</span>
+        }
+
+<span class="nc bnc" id="L495" title="All 2 branches missed.">        if (!RemoteServerManager.canAccess(remoteDomain)) {</span>
+<span class="nc" id="L496">            connection.deliverRawText(new StreamError(StreamError.Condition.policy_violation).toXML());</span>
+            // Close the underlying connection
+<span class="nc" id="L498">            connection.close();</span>
+<span class="nc" id="L499">            log.debug( &quot;Unable to validate domain: Remote domain is not allowed to establish a connection to this server.&quot; );</span>
+<span class="nc" id="L500">            return false;</span>
+        }
+<span class="nc bnc" id="L502" title="All 2 branches missed.">        else if (isHostUnknown(recipient)) {</span>
+<span class="nc" id="L503">            dialbackError(recipient, remoteDomain, new PacketError(PacketError.Condition.item_not_found, PacketError.Type.cancel, &quot;Service not hosted here&quot;));</span>
+<span class="nc" id="L504">            log.debug( &quot;Unable to validate domain: recipient not recognized as a local domain.&quot; );</span>
+<span class="nc" id="L505">            return false;</span>
+        }
+        else {
+<span class="nc" id="L508">            log.debug( &quot;Check if the remote domain already has a connection to the target domain/subdomain&quot; );</span>
+<span class="nc" id="L509">            boolean alreadyExists = false;</span>
+<span class="nc bnc" id="L510" title="All 2 branches missed.">            for (IncomingServerSession session : sessionManager.getIncomingServerSessions(remoteDomain)) {</span>
+<span class="nc bnc" id="L511" title="All 2 branches missed.">                if (recipient.equals(session.getLocalDomain())) {</span>
+<span class="nc" id="L512">                    alreadyExists = true;</span>
+                }
+<span class="nc" id="L514">            }</span>
+<span class="nc bnc" id="L515" title="All 4 branches missed.">            if (alreadyExists &amp;&amp; !sessionManager.isMultipleServerConnectionsAllowed()) {</span>
+<span class="nc" id="L516">                dialbackError(recipient, remoteDomain, new PacketError(PacketError.Condition.resource_constraint, PacketError.Type.cancel, &quot;Incoming session already exists&quot;));</span>
+<span class="nc" id="L517">                log.debug( &quot;Unable to validate domain: An incoming connection already exists from this remote domain, and multiple connections are not allowed.&quot; );</span>
+<span class="nc" id="L518">                return false;</span>
+            }
+            else {
+<span class="nc" id="L521">                log.debug( &quot;Checking to see if the remote server provides stronger authentication based on SASL. If that's the case, dialback-based authentication can be skipped.&quot; );</span>
+<span class="nc bnc" id="L522" title="All 2 branches missed.">                if (SASLAuthentication.verifyCertificates(connection.getPeerCertificates(), remoteDomain, true)) {</span>
+<span class="nc" id="L523">                    log.debug( &quot;Host authenticated based on SASL. Weaker dialback-based authentication is skipped.&quot; );</span>
+<span class="nc" id="L524">                    sb = new StringBuilder();</span>
+<span class="nc" id="L525">                    sb.append(&quot;&lt;db:result&quot;);</span>
+<span class="nc" id="L526">                    sb.append(&quot; from=\&quot;&quot;).append(recipient).append(&quot;\&quot;&quot;);</span>
+<span class="nc" id="L527">                    sb.append(&quot; to=\&quot;&quot;).append(remoteDomain).append(&quot;\&quot;&quot;);</span>
+<span class="nc" id="L528">                    sb.append(&quot; type=\&quot;valid\&quot;&quot;);</span>
+<span class="nc" id="L529">                    sb.append(&quot;/&gt;&quot;);</span>
+<span class="nc" id="L530">                    connection.deliverRawText(sb.toString());</span>
+
+<span class="nc" id="L532">                    log.debug( &quot;Domain validated successfully!&quot; );</span>
+<span class="nc" id="L533">                    return true;</span>
+                }
+
+<span class="nc" id="L536">                log.debug( &quot;Unable to authenticate host based on stronger SASL. Proceeding with dialback...&quot; );</span>
+
+<span class="nc" id="L538">                String key = doc.getTextTrim();</span>
+
+<span class="nc" id="L540">                final Map.Entry&lt;Socket, Boolean&gt; socketToXmppDomain = SocketUtil.createSocketToXmppDomain( remoteDomain, RemoteServerManager.getPortForServer(remoteDomain) );</span>
+
+<span class="nc bnc" id="L542" title="All 2 branches missed.">                if ( socketToXmppDomain == null )</span>
+                {
+<span class="nc" id="L544">                    log.debug( &quot;Unable to validate domain: No server available for verifying key of remote server.&quot; );</span>
+<span class="nc" id="L545">                    dialbackError(recipient, remoteDomain, new PacketError(PacketError.Condition.remote_server_not_found, PacketError.Type.cancel, &quot;Unable to connect to authoritative server&quot;));</span>
+<span class="nc" id="L546">                    return false;</span>
+                }
+
+<span class="nc" id="L549">                Socket socket = socketToXmppDomain.getKey();</span>
+<span class="nc" id="L550">                boolean directTLS = socketToXmppDomain.getValue();</span>
+
+                VerifyResult result;
+                try {
+<span class="nc" id="L554">                    log.debug( &quot;Verifying dialback key...&quot; );</span>
+                    try
+                    {
+<span class="nc" id="L557">                        result = verifyKey( key, streamID, recipient, remoteDomain, socket, directTLS, directTLS );</span>
+                    }
+<span class="nc" id="L559">                    catch (SSLHandshakeException e)</span>
+                    {
+<span class="nc" id="L561">                        result = VerifyResult.error;</span>
+<span class="nc" id="L562">                        log.debug( &quot;Verification of dialback key failed due to TLS failure.&quot;, e );</span>
+
+                        // The receiving entity is expected to close the socket *without* sending any more data (&lt;failure/&gt; nor &lt;/stream&gt;).
+                        // It is probably (see OF-794) best if we, as the initiating entity, therefor don't send any data either.
+<span class="nc" id="L566">                        final SocketAddress oldAddress = socket.getRemoteSocketAddress();</span>
+<span class="nc" id="L567">                        socket.close();</span>
+
+<span class="nc bnc" id="L569" title="All 2 branches missed.">                        if ( !directTLS )</span>
+                        {
+<span class="nc" id="L571">                            log.debug( &quot;Retry without StartTLS... Re-opening socket (with the same remote peer)...&quot; );</span>
+
+                            // Retry, without TLS.
+<span class="nc" id="L574">                            socket = new Socket();</span>
+<span class="nc" id="L575">                            socket.connect( oldAddress, RemoteServerManager.getSocketTimeout() );</span>
+<span class="nc" id="L576">                            log.debug( &quot;Successfully re-opened socket! Try to validate dialback key again (without TLS this time)...&quot; );</span>
+
+<span class="nc" id="L578">                            result = verifyKey( key, streamID, recipient, remoteDomain, socket, true, directTLS );</span>
+                        }
+<span class="nc" id="L580">                    }</span>
+
+<span class="nc bnc" id="L582" title="All 2 branches missed.">                    switch(result) {</span>
+                    case valid:
+                    case invalid:
+<span class="nc bnc" id="L585" title="All 2 branches missed.">                        boolean valid = (result == VerifyResult.valid);</span>
+<span class="nc bnc" id="L586" title="All 2 branches missed.">                        log.debug( &quot;Dialback key is&quot; + (valid? &quot;valid&quot;:&quot;invalid&quot;) + &quot;. Sending verification result to remote domain.&quot; );</span>
+<span class="nc" id="L587">                        sb = new StringBuilder();</span>
+<span class="nc" id="L588">                        sb.append(&quot;&lt;db:result&quot;);</span>
+<span class="nc" id="L589">                        sb.append(&quot; from=\&quot;&quot;).append(recipient).append(&quot;\&quot;&quot;);</span>
+<span class="nc" id="L590">                        sb.append(&quot; to=\&quot;&quot;).append(remoteDomain).append(&quot;\&quot;&quot;);</span>
+<span class="nc" id="L591">                        sb.append(&quot; type=\&quot;&quot;);</span>
+<span class="nc bnc" id="L592" title="All 2 branches missed.">                        sb.append(valid ? &quot;valid&quot; : &quot;invalid&quot;);</span>
+<span class="nc" id="L593">                        sb.append(&quot;\&quot;/&gt;&quot;);</span>
+<span class="nc" id="L594">                        connection.deliverRawText(sb.toString());</span>
+    
+<span class="nc bnc" id="L596" title="All 2 branches missed.">                        if (!valid) {</span>
+<span class="nc" id="L597">                            log.debug( &quot;Close the underlying connection as key verification failed.&quot; );</span>
+<span class="nc" id="L598">                            connection.close();</span>
+<span class="nc" id="L599">                            log.debug( &quot;Unable to validate domain: dialback key is invalid.&quot; );</span>
+<span class="nc" id="L600">                            return false;</span>
+                        } else {
+<span class="nc" id="L602">                            log.debug( &quot;Successfully validated domain!&quot; );</span>
+<span class="nc" id="L603">                            return true;</span>
+                        }
+                    default:
+                        break;
+                    }
+<span class="nc" id="L608">                    log.debug( &quot;Unable to validate domain: key verification did not complete (the AS likely returned an error or a time out occurred).&quot; );</span>
+<span class="nc" id="L609">                    dialbackError( recipient, remoteDomain, new PacketError( PacketError.Condition.remote_server_timeout, PacketError.Type.cancel, &quot;Authoritative server returned error&quot; ) );</span>
+<span class="nc" id="L610">                    return false;</span>
+                }
+<span class="nc" id="L612">                catch (Exception e) {</span>
+<span class="nc" id="L613">                    dialbackError(recipient, remoteDomain, new PacketError(PacketError.Condition.remote_server_timeout, PacketError.Type.cancel, &quot;Authoritative server failed&quot;));</span>
+<span class="nc" id="L614">                    log.warn( &quot;Unable to validate domain: An exception occurred while verifying the dialback key.&quot;, e );</span>
+<span class="nc" id="L615">                    return false;</span>
+                }
+            }
+        }
+    }
+
+    private boolean isHostUnknown(String recipient) {
+<span class="nc bnc" id="L622" title="All 2 branches missed.">        boolean host_unknown = !serverName.equals(recipient);</span>
+        // If the recipient does not match the serverName then check if it matches a subdomain. This
+        // trick is useful when subdomains of this server are registered in the DNS so remote
+        // servers may establish connections directly to a subdomain of this server
+<span class="nc bnc" id="L626" title="All 4 branches missed.">        if (host_unknown &amp;&amp; recipient.contains(serverName)) {</span>
+<span class="nc bnc" id="L627" title="All 2 branches missed.">            host_unknown = !routingTable.hasComponentRoute(new JID(recipient));</span>
+        }
+<span class="nc" id="L629">        return host_unknown;</span>
+    }
+
+    private VerifyResult sendVerifyKey(String key, StreamID streamID, String recipient, String remoteDomain, Writer writer, XMPPPacketReader reader, Socket socket, boolean skipTLS, boolean directTLS) throws IOException, XmlPullParserException, RemoteConnectionFailedException {
+<span class="nc" id="L633">        final Logger log = LoggerFactory.getLogger( Log.getName() + &quot;[Acting as Receiving Server: Verify key with AS: &quot; + remoteDomain + &quot; for OS: &quot; + recipient + &quot; (id &quot; + streamID + &quot;)]&quot; );</span>
+
+<span class="nc" id="L635">        VerifyResult result = VerifyResult.error;</span>
+
+<span class="nc" id="L637">        final ConnectionManagerImpl connectionManager = ( (ConnectionManagerImpl) XMPPServer.getInstance().getConnectionManager() );</span>
+<span class="nc" id="L638">        final TLSStreamHandler tlsStreamHandler = new TLSStreamHandler( socket, connectionManager.getListener( ConnectionType.SOCKET_S2S, directTLS ).generateConnectionConfiguration(), true );</span>
+
+<span class="nc bnc" id="L640" title="All 2 branches missed.">        if ( directTLS ) {</span>
+            // Start handshake
+<span class="nc" id="L642">            log.debug( &quot;Starting Direct TLS handshake.&quot; );</span>
+<span class="nc" id="L643">            tlsStreamHandler.start();</span>
+
+            // Use new wrapped writers
+<span class="nc" id="L646">            writer = new BufferedWriter( new OutputStreamWriter( tlsStreamHandler.getOutputStream(), StandardCharsets.UTF_8 ) );</span>
+<span class="nc" id="L647">            reader.getXPPParser().setInput( new InputStreamReader( tlsStreamHandler.getInputStream(), StandardCharsets.UTF_8 ) );</span>
+        }
+
+<span class="nc" id="L650">        log.debug( &quot;Send the Authoritative Server a stream header and wait for answer.&quot; );</span>
+<span class="nc" id="L651">        StringBuilder stream = new StringBuilder();</span>
+<span class="nc" id="L652">        stream.append(&quot;&lt;stream:stream&quot;);</span>
+<span class="nc" id="L653">        stream.append(&quot; xmlns:stream=\&quot;http://etherx.jabber.org/streams\&quot;&quot;);</span>
+<span class="nc" id="L654">        stream.append(&quot; xmlns=\&quot;jabber:server\&quot;&quot;);</span>
+<span class="nc" id="L655">        stream.append(&quot; xmlns:db=\&quot;jabber:server:dialback\&quot;&quot;);</span>
+<span class="nc" id="L656">        stream.append(&quot; to=\&quot;&quot;);</span>
+<span class="nc" id="L657">        stream.append(remoteDomain);</span>
+<span class="nc" id="L658">        stream.append(&quot;\&quot;&quot;);</span>
+<span class="nc" id="L659">        stream.append(&quot; from=\&quot;&quot;);</span>
+<span class="nc" id="L660">        stream.append(recipient);</span>
+<span class="nc" id="L661">        stream.append(&quot;\&quot;&quot;);</span>
+<span class="nc" id="L662">        stream.append(&quot; version=\&quot;1.0\&quot;&gt;&quot;);</span>
+<span class="nc" id="L663">        writer.write(stream.toString());</span>
+<span class="nc" id="L664">        writer.flush();</span>
+
+        // Get the answer from the Authoritative Server
+<span class="nc" id="L667">        XmlPullParser xpp = reader.getXPPParser();</span>
+<span class="nc bnc" id="L668" title="All 2 branches missed.">        for (int eventType = xpp.getEventType(); eventType != XmlPullParser.START_TAG;) {</span>
+<span class="nc" id="L669">            eventType = xpp.next();</span>
+        }
+
+<span class="nc" id="L672">        log.debug( &quot;Got a response.&quot; ); // TODO there's code duplication here with LocalOutgoingServerSession.</span>
+<span class="nc bnc" id="L673" title="All 4 branches missed.">        if ((xpp.getAttributeValue(&quot;&quot;, &quot;version&quot;) != null) &amp;&amp; (xpp.getAttributeValue(&quot;&quot;, &quot;version&quot;).equals(&quot;1.0&quot;))) {</span>
+<span class="nc" id="L674">            log.debug( &quot;The remote server is XMPP 1.0 compliant (or at least reports to be).&quot;);</span>
+            Document doc;
+            try {
+<span class="nc" id="L677">                doc = reader.parseDocument();</span>
+<span class="nc" id="L678">            } catch (DocumentException e) {</span>
+<span class="nc" id="L679">                log.warn(&quot;Unable to verify key: XML Error!&quot;, e);</span>
+<span class="nc" id="L680">                return VerifyResult.error;</span>
+<span class="nc" id="L681">            }</span>
+<span class="nc" id="L682">            Element features = doc.getRootElement();</span>
+<span class="nc" id="L683">            Element starttls = features.element(&quot;starttls&quot;);</span>
+<span class="nc bnc" id="L684" title="All 6 branches missed.">            if (!directTLS &amp;&amp; !skipTLS &amp;&amp; starttls != null) {</span>
+<span class="nc" id="L685">                writer.write(&quot;&lt;starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'/&gt;&quot;);</span>
+<span class="nc" id="L686">                writer.flush();</span>
+                try {
+<span class="nc" id="L688">                    doc = reader.parseDocument();</span>
+<span class="nc" id="L689">                } catch (DocumentException e) {</span>
+<span class="nc" id="L690">                    log.warn(&quot;Unable to verify key: XML Error!&quot;, e);</span>
+<span class="nc" id="L691">                    return VerifyResult.error;</span>
+<span class="nc" id="L692">                }</span>
+<span class="nc bnc" id="L693" title="All 2 branches missed.">                if (!doc.getRootElement().getName().equals(&quot;proceed&quot;)) {</span>
+<span class="nc" id="L694">                    log.warn(&quot;Unable to verify key: Got {} instead of proceed for starttls&quot;, doc.getRootElement().getName());</span>
+<span class="nc" id="L695">                    log.debug(&quot;Like this: {}&quot;, doc.asXML());</span>
+<span class="nc" id="L696">                    return VerifyResult.error;</span>
+                }
+
+<span class="nc" id="L699">                log.debug( &quot;Negotiating StartTLS with AS... &quot; );</span>
+                // Start handshake
+<span class="nc" id="L701">                tlsStreamHandler.start();</span>
+                // Use new wrapped writers
+<span class="nc" id="L703">                writer = new BufferedWriter( new OutputStreamWriter( tlsStreamHandler.getOutputStream(), StandardCharsets.UTF_8 ) );</span>
+<span class="nc" id="L704">                reader.getXPPParser().setInput( new InputStreamReader( tlsStreamHandler.getInputStream(), StandardCharsets.UTF_8 ) );</span>
+<span class="nc" id="L705">                log.debug( &quot;Successfully negotiated StartTLS with AS... &quot; );</span>
+                /// Recurses!
+<span class="nc" id="L707">                return sendVerifyKey( key, streamID, recipient, remoteDomain, writer, reader, socket, skipTLS, directTLS );</span>
+            }
+        }
+<span class="nc bnc" id="L710" title="All 2 branches missed.">        if (&quot;jabber:server:dialback&quot;.equals(xpp.getNamespace(&quot;db&quot;))) {</span>
+<span class="nc" id="L711">            log.debug(&quot;Request for verification of the key and wait for response&quot;);</span>
+<span class="nc" id="L712">            StringBuilder sb = new StringBuilder();</span>
+<span class="nc" id="L713">            sb.append(&quot;&lt;db:verify&quot;);</span>
+<span class="nc" id="L714">            sb.append(&quot; from=\&quot;&quot;).append(recipient).append(&quot;\&quot;&quot;);</span>
+<span class="nc" id="L715">            sb.append(&quot; to=\&quot;&quot;).append(remoteDomain).append(&quot;\&quot;&quot;);</span>
+<span class="nc" id="L716">            sb.append(&quot; id=\&quot;&quot;).append(streamID.getID()).append(&quot;\&quot;&gt;&quot;);</span>
+<span class="nc" id="L717">            sb.append(key);</span>
+<span class="nc" id="L718">            sb.append(&quot;&lt;/db:verify&gt;&quot;);</span>
+<span class="nc" id="L719">            writer.write(sb.toString());</span>
+<span class="nc" id="L720">            writer.flush();</span>
+
+            try {
+<span class="nc" id="L723">                Element doc = reader.parseDocument().getRootElement();</span>
+<span class="nc bnc" id="L724" title="All 4 branches missed.">                if (&quot;db&quot;.equals(doc.getNamespacePrefix()) &amp;&amp; &quot;verify&quot;.equals(doc.getName())) {</span>
+<span class="nc bnc" id="L725" title="All 4 branches missed.">                    if (doc.attributeValue(&quot;id&quot;) == null || !streamID.equals(BasicStreamIDFactory.createStreamID( doc.attributeValue(&quot;id&quot;) ))) {</span>
+                        // Include the invalid-id stream error condition in the response
+<span class="nc" id="L727">                        writer.write(new StreamError(StreamError.Condition.invalid_id).toXML());</span>
+<span class="nc" id="L728">                        writer.flush();</span>
+                        // Thrown an error so &lt;remote-connection-failed/&gt; stream error
+                        // condition is sent to the Originating Server
+<span class="nc" id="L731">                        throw new RemoteConnectionFailedException(&quot;Invalid ID&quot;);</span>
+                    }
+<span class="nc bnc" id="L733" title="All 2 branches missed.">                    else if (isHostUnknown( doc.attributeValue( &quot;to&quot; ) )) {</span>
+                        // Include the host-unknown stream error condition in the response
+<span class="nc" id="L735">                        writer.write(</span>
+<span class="nc" id="L736">                                new StreamError(StreamError.Condition.host_unknown).toXML());</span>
+<span class="nc" id="L737">                        writer.flush();</span>
+                        // Thrown an error so &lt;remote-connection-failed/&gt; stream error
+                        // condition is sent to the Originating Server
+<span class="nc" id="L740">                        throw new RemoteConnectionFailedException(&quot;Host unknown&quot;);</span>
+                    }
+<span class="nc bnc" id="L742" title="All 2 branches missed.">                    else if (!remoteDomain.equals(doc.attributeValue(&quot;from&quot;))) {</span>
+                        // Include the invalid-from stream error condition in the response
+<span class="nc" id="L744">                        writer.write(</span>
+<span class="nc" id="L745">                                new StreamError(StreamError.Condition.invalid_from).toXML());</span>
+<span class="nc" id="L746">                        writer.flush();</span>
+                        // Thrown an error so &lt;remote-connection-failed/&gt; stream error
+                        // condition is sent to the Originating Server
+<span class="nc" id="L749">                        throw new RemoteConnectionFailedException(&quot;Invalid From&quot;);</span>
+                    }
+<span class="nc bnc" id="L751" title="All 2 branches missed.">                    else if (&quot;valid&quot;.equals(doc.attributeValue(&quot;type&quot;))){</span>
+<span class="nc" id="L752">                        log.debug(&quot;Key was VERIFIED by the Authoritative Server.&quot;);</span>
+<span class="nc" id="L753">                        result = VerifyResult.valid;</span>
+                    }
+<span class="nc bnc" id="L755" title="All 2 branches missed.">                    else if (&quot;invalid&quot;.equals(doc.attributeValue(&quot;type&quot;))){</span>
+<span class="nc" id="L756">                        log.debug(&quot;Key was NOT VERIFIED by the Authoritative Server.&quot;);</span>
+<span class="nc" id="L757">                        result = VerifyResult.invalid;</span>
+                    }
+                    else {
+<span class="nc" id="L760">                        log.debug(&quot;Key was ERRORED by the Authoritative Server.&quot;);</span>
+<span class="nc" id="L761">                        result = VerifyResult.error;</span>
+                    }
+                }
+                else {
+<span class="nc" id="L765">                    log.debug(&quot;db:verify answer was: &quot; + doc.asXML());</span>
+                }
+            }
+<span class="nc" id="L768">            catch (DocumentException | RuntimeException e) {</span>
+<span class="nc" id="L769">                log.error(&quot;An error occurred while connecting to the Authoritative Server:&quot;, e);</span>
+                // Thrown an error so &lt;remote-connection-failed/&gt; stream error condition is
+                // sent to the Originating Server
+<span class="nc" id="L772">                throw new RemoteConnectionFailedException(&quot;Error connecting to the Authoritative Server&quot;);</span>
+<span class="nc" id="L773">            }</span>
+
+<span class="nc" id="L775">        }</span>
+        else {
+            // Include the invalid-namespace stream error condition in the response
+<span class="nc" id="L778">            writer.write(new StreamError(StreamError.Condition.invalid_namespace).toXML());</span>
+<span class="nc" id="L779">            writer.flush();</span>
+            // Thrown an error so &lt;remote-connection-failed/&gt; stream error condition is
+            // sent to the Originating Server
+<span class="nc" id="L782">            throw new RemoteConnectionFailedException(&quot;Invalid namespace&quot;);</span>
+        }
+<span class="nc" id="L784">        return result;</span>
+    }
+
+    /**
+     * Verifies the key with the Authoritative Server.
+     */
+    private VerifyResult verifyKey(String key, StreamID streamID, String recipient, String remoteDomain, Socket socket, boolean skipTLS, boolean directTLS ) throws IOException, XmlPullParserException, RemoteConnectionFailedException {
+
+<span class="nc" id="L792">        final Logger log = LoggerFactory.getLogger( Log.getName() + &quot;[Acting as Receiving Server: Verify key with AS: &quot; + remoteDomain + &quot; for OS: &quot; + recipient + &quot; (id &quot; + streamID + &quot;)]&quot; );</span>
+
+<span class="nc" id="L794">        log.debug( &quot;Verifying key ...&quot; );</span>
+        XMPPPacketReader reader;
+<span class="nc" id="L796">        Writer writer = null;</span>
+        // Set a read timeout
+<span class="nc" id="L798">        socket.setSoTimeout(RemoteServerManager.getSocketTimeout());</span>
+<span class="nc" id="L799">        VerifyResult result = VerifyResult.error;</span>
+        try {
+<span class="nc" id="L801">            reader = new XMPPPacketReader();</span>
+<span class="nc" id="L802">            reader.setXPPFactory(FACTORY);</span>
+
+<span class="nc" id="L804">            reader.getXPPParser().setInput(new InputStreamReader(socket.getInputStream(), CHARSET));</span>
+            // Get a writer for sending the open stream tag
+<span class="nc" id="L806">            writer = new BufferedWriter(new OutputStreamWriter(socket.getOutputStream(), CHARSET));</span>
+<span class="nc" id="L807">            result = sendVerifyKey(key, streamID, recipient, remoteDomain, writer, reader, socket, skipTLS, directTLS );</span>
+        }
+        finally {
+<span class="nc" id="L810">            try {</span>
+                // Close the stream
+<span class="nc" id="L812">                StringBuilder sb = new StringBuilder();</span>
+<span class="nc" id="L813">                sb.append(&quot;&lt;/stream:stream&gt;&quot;);</span>
+<span class="nc" id="L814">                writer.write(sb.toString());</span>
+<span class="nc" id="L815">                writer.flush();</span>
+                // Close the TCP connection
+<span class="nc" id="L817">                socket.close();</span>
+            }
+<span class="nc" id="L819">            catch (IOException ioe) {</span>
+                // Do nothing
+<span class="nc" id="L821">            }</span>
+<span class="nc" id="L822">        }</span>
+
+<span class="nc bnc" id="L824" title="All 3 branches missed.">        switch ( result ) {</span>
+            case valid:
+<span class="nc" id="L826">                log.debug( &quot;Successfully verified key!&quot; );</span>
+<span class="nc" id="L827">                break;</span>
+
+            case invalid:
+<span class="nc" id="L830">                log.debug( &quot;Unable to verify key: AS reports that the key is invalid.&quot; );</span>
+<span class="nc" id="L831">                break;</span>
+
+            default:
+            case decline:
+            case error:
+<span class="nc" id="L836">                log.debug( &quot;Unable to verify key: An error occurred.&quot; );</span>
+                break;
+        }
+<span class="nc" id="L839">        return result;</span>
+    }
+
+    /**
+     * Verifies the key sent by a Receiving Server. This server will be acting as the
+     * Authoritative Server when executing this method. The remote server may have established
+     * a new connection to the Authoritative Server (i.e. this server) for verifying the key
+     * or it may be reusing an existing incoming connection.
+     *
+     * @param doc the Element that contains the key to verify.
+     * @param connection the connection to use for sending the verification result
+     * @return true if the key was verified.
+     */
+    public static boolean verifyReceivedKey(Element doc, Connection connection) {
+<span class="nc" id="L853">        String verifyFROM = doc.attributeValue(&quot;from&quot;);</span>
+<span class="nc" id="L854">        String verifyTO = doc.attributeValue(&quot;to&quot;);</span>
+<span class="nc" id="L855">        String key = doc.getTextTrim();</span>
+<span class="nc" id="L856">        StreamID streamID = BasicStreamIDFactory.createStreamID( doc.attributeValue(&quot;id&quot;) );</span>
+
+<span class="nc" id="L858">        final Logger log = LoggerFactory.getLogger( Log.getName() + &quot;[Acting as Authoritative Server: Verify key sent by RS: &quot; + verifyFROM + &quot; (id &quot; + streamID+ &quot;)]&quot; );</span>
+
+<span class="nc" id="L860">        log.debug( &quot;Verifying key... &quot;);</span>
+
+        // TODO If the value of the 'to' address does not match a recognized hostname,
+        // then generate a &lt;host-unknown/&gt; stream error condition
+        // TODO If the value of the 'from' address does not match the hostname
+        // represented by the Receiving Server when opening the TCP connection, then
+        // generate an &lt;invalid-from/&gt; stream error condition
+
+        // Verify the received key
+        // Created the expected key based on the received ID value and the shared secret
+<span class="nc" id="L870">        String expectedKey = AuthFactory.createDigest(streamID.getID(), getSecretkey());</span>
+<span class="nc" id="L871">        boolean verified = expectedKey.equals(key);</span>
+
+        // Send the result of the key verification
+<span class="nc" id="L874">        StringBuilder sb = new StringBuilder();</span>
+<span class="nc" id="L875">        sb.append(&quot;&lt;db:verify&quot;);</span>
+<span class="nc" id="L876">        sb.append(&quot; from=\&quot;&quot;).append(verifyTO).append(&quot;\&quot;&quot;);</span>
+<span class="nc" id="L877">        sb.append(&quot; to=\&quot;&quot;).append(verifyFROM).append(&quot;\&quot;&quot;);</span>
+<span class="nc" id="L878">        sb.append(&quot; type=\&quot;&quot;);</span>
+<span class="nc bnc" id="L879" title="All 2 branches missed.">        sb.append(verified ? &quot;valid&quot; : &quot;invalid&quot;);</span>
+<span class="nc" id="L880">        sb.append(&quot;\&quot; id=\&quot;&quot;).append(streamID.getID()).append(&quot;\&quot;/&gt;&quot;);</span>
+<span class="nc" id="L881">        connection.deliverRawText(sb.toString());</span>
+<span class="nc bnc" id="L882" title="All 2 branches missed.">        log.debug(&quot;Verification successful! Key was: &quot; + (verified ? &quot;VALID&quot; : &quot;INVALID&quot;));</span>
+<span class="nc" id="L883">        return verified;</span>
+    }
+
+    /**
+     * Returns the secret key that was randomly generated. When running inside of a cluster
+     * the key will be unique to all cluster nodes.
+     *
+     * @return the secret key that was randomly generated.
+     */
+    private static String getSecretkey() {
+<span class="nc" id="L893">        String key = &quot;secretKey&quot;;</span>
+<span class="nc" id="L894">        Lock lock = CacheFactory.getLock(key, secretKeyCache);</span>
+        try {
+<span class="nc" id="L896">            lock.lock();</span>
+<span class="nc" id="L897">            String secret = secretKeyCache.get(key);</span>
+<span class="nc bnc" id="L898" title="All 2 branches missed.">            if (secret == null) {</span>
+<span class="nc" id="L899">                secret = StringUtils.randomString(10);</span>
+<span class="nc" id="L900">                secretKeyCache.put(key, secret);</span>
+            }
+<span class="nc" id="L902">            return secret;</span>
+        }
+        finally {
+<span class="nc" id="L905">            lock.unlock();</span>
+<span class="nc" id="L906">        }</span>
+    }
+}
+
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

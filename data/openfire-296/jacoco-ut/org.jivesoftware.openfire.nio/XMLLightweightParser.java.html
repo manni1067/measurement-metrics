@@ -1,0 +1,485 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>XMLLightweightParser.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.nio</a> &gt; <span class="el_source">XMLLightweightParser.java</span></div><h1>XMLLightweightParser.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.nio;
+
+import java.nio.CharBuffer;
+import java.nio.charset.Charset;
+import java.nio.charset.CharsetDecoder;
+import java.nio.charset.CodingErrorAction;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+import org.apache.mina.core.buffer.IoBuffer;
+import org.apache.mina.filter.codec.ProtocolDecoderException;
+import org.jivesoftware.util.JiveGlobals;
+import org.jivesoftware.util.PropertyEventDispatcher;
+import org.jivesoftware.util.PropertyEventListener;
+
+/**
+ * This is a Light-Weight XML Parser.
+ * It read data from a channel and collect data until data are available in
+ * the channel.
+ * When a message is complete you can retrieve messages invoking the method
+ * getMsgs() and you can invoke the method areThereMsgs() to know if at least
+ * an message is presents.
+ *
+ * @author Daniele Piras
+ * @author Gaston Dombiak
+ */
+class XMLLightweightParser {
+
+<span class="fc" id="L48">    private static final Pattern XML_HAS_CHARREF = Pattern.compile(&quot;&amp;#(0*([0-9]+)|[xX]0*([0-9a-fA-F]+));&quot;);</span>
+
+    private static final String MAX_PROPERTY_NAME = &quot;xmpp.parser.buffer.size&quot;;
+    private static int maxBufferSize;
+    // Chars that rappresent CDATA section start
+<span class="fc" id="L53">    protected static char[] CDATA_START = {'&lt;', '!', '[', 'C', 'D', 'A', 'T', 'A', '['};</span>
+    // Chars that rappresent CDATA section end
+<span class="fc" id="L55">    protected static char[] CDATA_END = {']', ']', '&gt;'};</span>
+
+    // Buffer with all data retrieved
+<span class="nc" id="L58">    protected StringBuilder buffer = new StringBuilder();</span>
+
+    // ---- INTERNAL STATUS -------
+    // Initial status
+    protected static final int INIT = 0;
+    // Status used when the first tag name is retrieved
+    protected static final int HEAD = 2;
+    // Status used when robot is inside the xml and it looking for the tag conclusion
+    protected static final int INSIDE = 3;
+    // Status used when a '&lt;' is found and try to find the conclusion tag.
+    protected static final int PRETAIL = 4;
+    // Status used when the ending tag is equal to the head tag
+    protected static final int TAIL = 5;
+    // Status used when robot is inside the main tag and found an '/' to check '/&gt;'.
+    protected static final int VERIFY_CLOSE_TAG = 6;
+    //  Status used when you are inside a parameter
+    protected static final int INSIDE_PARAM_VALUE = 7;
+    //  Status used when you are inside a cdata section
+    protected static final int INSIDE_CDATA = 8;
+    // Status used when you are outside a tag/reading text
+    protected static final int OUTSIDE = 9;
+    
+<span class="nc" id="L80">    final String[] sstatus = {&quot;INIT&quot;, &quot;&quot;, &quot;HEAD&quot;, &quot;INSIDE&quot;, &quot;PRETAIL&quot;, &quot;TAIL&quot;, &quot;VERIFY&quot;, &quot;INSIDE_PARAM&quot;, &quot;INSIDE_CDATA&quot;, &quot;OUTSIDE&quot;};</span>
+
+
+    // Current robot status
+<span class="nc" id="L84">    protected int status = XMLLightweightParser.INIT;</span>
+
+    // Index to looking for a CDATA section start or end.
+<span class="nc" id="L87">    protected int cdataOffset = 0;</span>
+
+    // Number of chars that machs with the head tag. If the tailCount is equal to
+    // the head length so a close tag is found.
+<span class="nc" id="L91">    protected int tailCount = 0;</span>
+    // Indicate the starting point in the buffer for the next message.
+<span class="nc" id="L93">    protected int startLastMsg = 0;</span>
+    // Flag used to discover tag in the form &lt;tag /&gt;.
+<span class="nc" id="L95">    protected boolean insideRootTag = false;</span>
+    // Object conteining the head tag
+<span class="nc" id="L97">    protected StringBuilder head = new StringBuilder(16);</span>
+    // List with all finished messages found.
+<span class="nc" id="L99">    protected List&lt;String&gt; msgs = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L100">    private int depth = 0;</span>
+
+<span class="nc" id="L102">    protected boolean insideChildrenTag = false;</span>
+
+    CharsetDecoder encoder;
+
+    static {
+        // Set default max buffer size to 1MB. If limit is reached then close connection
+<span class="fc" id="L108">        maxBufferSize = JiveGlobals.getIntProperty(MAX_PROPERTY_NAME, 1048576);</span>
+        // Listen for changes to this property
+<span class="fc" id="L110">        PropertyEventDispatcher.addListener(new PropertyListener());</span>
+<span class="fc" id="L111">    }</span>
+
+<span class="nc" id="L113">    public XMLLightweightParser(Charset charset) {</span>
+<span class="nc" id="L114">        encoder = charset.newDecoder()</span>
+<span class="nc" id="L115">            .onMalformedInput(CodingErrorAction.REPLACE)</span>
+<span class="nc" id="L116">            .onUnmappableCharacter(CodingErrorAction.REPLACE);</span>
+<span class="nc" id="L117">    }</span>
+
+    /*
+    * true if the parser has found some complete xml message.
+    */
+    public boolean areThereMsgs() {
+<span class="nc bnc" id="L123" title="All 2 branches missed.">        return (msgs.size() &gt; 0);</span>
+    }
+
+    /*
+    * @return an array with all messages found
+    */
+    public String[] getMsgs() {
+<span class="nc" id="L130">        String[] res = new String[msgs.size()];</span>
+<span class="nc bnc" id="L131" title="All 2 branches missed.">        for (int i = 0; i &lt; res.length; i++) {</span>
+<span class="nc" id="L132">            res[i] = msgs.get(i);</span>
+        }
+<span class="nc" id="L134">        msgs.clear();</span>
+<span class="nc" id="L135">        invalidateBuffer();</span>
+<span class="nc" id="L136">        return res;</span>
+    }
+
+    /*
+    * Method use to re-initialize the buffer
+    */
+    protected void invalidateBuffer() {
+<span class="nc bnc" id="L143" title="All 2 branches missed.">        if (buffer.length() &gt; 0) {</span>
+<span class="nc" id="L144">            String str = buffer.substring(startLastMsg);</span>
+<span class="nc" id="L145">            buffer.delete(0, buffer.length());</span>
+<span class="nc" id="L146">            buffer.append(str);</span>
+<span class="nc" id="L147">            buffer.trimToSize();</span>
+        }
+<span class="nc" id="L149">        startLastMsg = 0;</span>
+<span class="nc" id="L150">    }</span>
+
+
+    /*
+    * Method that add a message to the list and reinit parser.
+    */
+    protected void foundMsg(String msg) throws XMLNotWellFormedException {
+        // Add message to the complete message list
+<span class="nc bnc" id="L158" title="All 2 branches missed.">        if (msg != null) {</span>
+<span class="nc bnc" id="L159" title="All 2 branches missed.">            if (hasIllegalCharacterReferences(msg)) {</span>
+<span class="nc" id="L160">                buffer = null;</span>
+<span class="nc" id="L161">                throw new XMLNotWellFormedException(&quot;Illegal character reference found in: &quot; + msg);</span>
+            }
+<span class="nc" id="L163">            msgs.add(msg);</span>
+        }
+        // Move the position into the buffer
+<span class="nc" id="L166">        status = XMLLightweightParser.INIT;</span>
+<span class="nc" id="L167">        tailCount = 0;</span>
+<span class="nc" id="L168">        cdataOffset = 0;</span>
+<span class="nc" id="L169">        head.setLength(0);</span>
+<span class="nc" id="L170">        insideRootTag = false;</span>
+<span class="nc" id="L171">        insideChildrenTag = false;</span>
+<span class="nc" id="L172">        depth = 0;</span>
+<span class="nc" id="L173">    }</span>
+
+    /*
+    * Main reading method
+    */
+    public void read(IoBuffer byteBuffer) throws Exception {
+<span class="nc bnc" id="L179" title="All 2 branches missed.">        if (buffer == null) {</span>
+            // exception was thrown before, avoid duplicate exception(s)
+            // &quot;read&quot; and discard remaining data
+<span class="nc" id="L182">            byteBuffer.position(byteBuffer.limit());</span>
+<span class="nc" id="L183">            return;</span>
+        }
+<span class="nc" id="L185">        invalidateBuffer();</span>
+        // Check that the buffer is not bigger than 1 Megabyte. For security reasons
+        // we will abort parsing when 1 Mega of queued chars was found.
+<span class="nc bnc" id="L188" title="All 2 branches missed.">        if (buffer.length() &gt; maxBufferSize) {</span>
+            // purge the local buffer / free memory
+<span class="nc" id="L190">            buffer = null;</span>
+            // processing the exception takes quite long
+<span class="nc" id="L192">            final ProtocolDecoderException ex = new ProtocolDecoderException(&quot;Stopped parsing never ending stanza&quot;);</span>
+<span class="nc" id="L193">            ex.setHexdump(&quot;(redacted hex dump of never ending stanza)&quot;);</span>
+<span class="nc" id="L194">            throw ex;</span>
+        }
+<span class="nc" id="L196">        CharBuffer charBuffer = CharBuffer.allocate(byteBuffer.capacity());</span>
+<span class="nc" id="L197">        encoder.reset();</span>
+<span class="nc" id="L198">        encoder.decode(byteBuffer.buf(), charBuffer, false);</span>
+<span class="nc" id="L199">        char[] buf = new char[charBuffer.position()];</span>
+<span class="nc" id="L200">        charBuffer.flip();</span>
+<span class="nc" id="L201">        charBuffer.get(buf);</span>
+<span class="nc" id="L202">        int readChar = buf.length;</span>
+
+        // Just return if nothing was read
+<span class="nc bnc" id="L205" title="All 2 branches missed.">        if (readChar == 0) {</span>
+<span class="nc" id="L206">            return;</span>
+        }
+
+<span class="nc" id="L209">        buffer.append(buf);</span>
+
+        // Robot.
+        char ch;
+<span class="nc" id="L213">        boolean isHighSurrogate = false;</span>
+<span class="nc bnc" id="L214" title="All 2 branches missed.">        for (int i = 0; i &lt; readChar; i++) {</span>
+<span class="nc" id="L215">            ch = buf[i];</span>
+<span class="nc bnc" id="L216" title="All 10 branches missed.">            if (ch &lt; 0x20 &amp;&amp; ch != 0x9 &amp;&amp; ch != 0xA &amp;&amp; ch != 0xD &amp;&amp; ch != 0x0) {</span>
+                 //Unicode characters in the range 0x0000-0x001F other than 9, A, and D are not allowed in XML
+                 //We need to allow the NULL character, however, for Flash XMLSocket clients to work.
+<span class="nc" id="L219">                buffer = null;</span>
+<span class="nc" id="L220">                throw new XMLNotWellFormedException(&quot;Character is invalid in: &quot; + ch);</span>
+            }
+<span class="nc bnc" id="L222" title="All 2 branches missed.">            if (isHighSurrogate) {</span>
+<span class="nc bnc" id="L223" title="All 2 branches missed.">                if (Character.isLowSurrogate(ch)) {</span>
+                    // Everything is fine. Clean up traces for surrogates
+<span class="nc" id="L225">                    isHighSurrogate = false;</span>
+                }
+                else {
+                    // Trigger error. Found high surrogate not followed by low surrogate
+<span class="nc" id="L229">                    buffer = null;</span>
+<span class="nc" id="L230">                    throw new Exception(&quot;Found high surrogate not followed by low surrogate&quot;);</span>
+                }
+            }
+<span class="nc bnc" id="L233" title="All 2 branches missed.">            else if (Character.isHighSurrogate(ch)) {</span>
+<span class="nc" id="L234">                isHighSurrogate = true;</span>
+            }
+<span class="nc bnc" id="L236" title="All 2 branches missed.">            else if (Character.isLowSurrogate(ch)) {</span>
+                // Trigger error. Found low surrogate char without a preceding high surrogate
+<span class="nc" id="L238">                buffer = null;</span>
+<span class="nc" id="L239">                throw new Exception(&quot;Found low surrogate char without a preceding high surrogate&quot;);</span>
+            }
+<span class="nc bnc" id="L241" title="All 2 branches missed.">            if (status == XMLLightweightParser.TAIL) {</span>
+                // Looking for the close tag
+<span class="nc bnc" id="L243" title="All 4 branches missed.">                if (depth &lt; 1 &amp;&amp; ch == head.charAt(tailCount)) {</span>
+<span class="nc" id="L244">                    tailCount++;</span>
+<span class="nc bnc" id="L245" title="All 2 branches missed.">                    if (tailCount == head.length()) {</span>
+                        // Close stanza found!
+                        // Calculate the correct start,end position of the message into the buffer
+<span class="nc" id="L248">                        int end = buffer.length() - readChar + (i + 1);</span>
+<span class="nc" id="L249">                        String msg = buffer.substring(startLastMsg, end);</span>
+                        // Add message to the list
+<span class="nc" id="L251">                        foundMsg(msg);</span>
+<span class="nc" id="L252">                        startLastMsg = end;</span>
+<span class="nc" id="L253">                    }</span>
+                } else {
+<span class="nc" id="L255">                    tailCount = 0;</span>
+<span class="nc" id="L256">                    status = XMLLightweightParser.INSIDE;</span>
+                }
+<span class="nc bnc" id="L258" title="All 2 branches missed.">            } else if (status == XMLLightweightParser.PRETAIL) {</span>
+<span class="nc bnc" id="L259" title="All 2 branches missed.">                if (ch == XMLLightweightParser.CDATA_START[cdataOffset]) {</span>
+<span class="nc" id="L260">                    cdataOffset++;</span>
+<span class="nc bnc" id="L261" title="All 2 branches missed.">                    if (cdataOffset == XMLLightweightParser.CDATA_START.length) {</span>
+<span class="nc" id="L262">                        status = XMLLightweightParser.INSIDE_CDATA;</span>
+<span class="nc" id="L263">                        cdataOffset = 0;</span>
+<span class="nc" id="L264">                        continue;</span>
+                    }
+                } else {
+<span class="nc" id="L267">                    cdataOffset = 0;</span>
+<span class="nc" id="L268">                    status = XMLLightweightParser.INSIDE;</span>
+                }
+<span class="nc bnc" id="L270" title="All 2 branches missed.">                if (ch == '/') {</span>
+<span class="nc" id="L271">                    status = XMLLightweightParser.TAIL;</span>
+<span class="nc" id="L272">                    depth--;</span>
+                }
+<span class="nc bnc" id="L274" title="All 2 branches missed.">                else if (ch == '!') {</span>
+                    // This is a &lt;! (comment) so ignore it
+<span class="nc" id="L276">                    status = XMLLightweightParser.INSIDE;</span>
+                }
+                else {
+<span class="nc" id="L279">                    depth++;</span>
+                }
+<span class="nc bnc" id="L281" title="All 2 branches missed.">            } else if (status == XMLLightweightParser.VERIFY_CLOSE_TAG) {</span>
+<span class="nc bnc" id="L282" title="All 2 branches missed.">                if (ch == '&gt;') {</span>
+<span class="nc" id="L283">                    depth--;</span>
+<span class="nc" id="L284">                    status = XMLLightweightParser.OUTSIDE;</span>
+<span class="nc bnc" id="L285" title="All 2 branches missed.">                    if (depth &lt; 1) {</span>
+                        // Found a tag in the form &lt;tag /&gt;
+<span class="nc" id="L287">                        int end = buffer.length() - readChar + (i + 1);</span>
+<span class="nc" id="L288">                        String msg = buffer.substring(startLastMsg, end);</span>
+                        // Add message to the list
+<span class="nc" id="L290">                        foundMsg(msg);</span>
+<span class="nc" id="L291">                        startLastMsg = end;</span>
+<span class="nc" id="L292">                    } </span>
+<span class="nc bnc" id="L293" title="All 2 branches missed.">                } else if (ch == '&lt;') {</span>
+<span class="nc" id="L294">                    status = XMLLightweightParser.PRETAIL;</span>
+<span class="nc" id="L295">                    insideChildrenTag = true;</span>
+                } else {
+<span class="nc" id="L297">                    status = XMLLightweightParser.INSIDE;</span>
+                }
+<span class="nc bnc" id="L299" title="All 2 branches missed.">            } else if (status == XMLLightweightParser.INSIDE_PARAM_VALUE) {</span>
+
+<span class="nc bnc" id="L301" title="All 2 branches missed.">                if (ch == '&quot;') {</span>
+<span class="nc" id="L302">                    status = XMLLightweightParser.INSIDE;</span>
+                }
+<span class="nc bnc" id="L304" title="All 2 branches missed.">            } else if (status == XMLLightweightParser.INSIDE_CDATA) {</span>
+<span class="nc bnc" id="L305" title="All 2 branches missed.">                if (ch == XMLLightweightParser.CDATA_END[cdataOffset]) {</span>
+<span class="nc" id="L306">                    cdataOffset++;</span>
+<span class="nc bnc" id="L307" title="All 2 branches missed.">                    if (cdataOffset == XMLLightweightParser.CDATA_END.length) {</span>
+<span class="nc" id="L308">                        status = XMLLightweightParser.OUTSIDE;</span>
+<span class="nc" id="L309">                        cdataOffset = 0;</span>
+                    }
+<span class="nc bnc" id="L311" title="All 4 branches missed.">                } else if (cdataOffset == XMLLightweightParser.CDATA_END.length-1 &amp;&amp; ch == XMLLightweightParser.CDATA_END[cdataOffset - 1]) {</span>
+                    // if we are looking for the last CDATA_END char, and we instead found an extra ']' 
+                    // char, leave cdataOffset as is and proceed to the next char. This could be a case 
+                    // where the XML character data ends with multiple square braces. For Example ]]]&gt;
+                } else {
+<span class="nc" id="L316">                    cdataOffset = 0;</span>
+                }
+<span class="nc bnc" id="L318" title="All 2 branches missed.">            } else if (status == XMLLightweightParser.INSIDE) {</span>
+<span class="nc bnc" id="L319" title="All 2 branches missed.">                if (ch == XMLLightweightParser.CDATA_START[cdataOffset]) {</span>
+<span class="nc" id="L320">                    cdataOffset++;</span>
+<span class="nc bnc" id="L321" title="All 2 branches missed.">                    if (cdataOffset == XMLLightweightParser.CDATA_START.length) {</span>
+<span class="nc" id="L322">                        status = XMLLightweightParser.INSIDE_CDATA;</span>
+<span class="nc" id="L323">                        cdataOffset = 0;</span>
+<span class="nc" id="L324">                        continue;</span>
+                    }
+                } else {
+<span class="nc" id="L327">                    cdataOffset = 0;</span>
+<span class="nc" id="L328">                    status = XMLLightweightParser.INSIDE;</span>
+                }
+<span class="nc bnc" id="L330" title="All 2 branches missed.">                if (ch == '&quot;') {</span>
+<span class="nc" id="L331">                    status = XMLLightweightParser.INSIDE_PARAM_VALUE;</span>
+<span class="nc bnc" id="L332" title="All 2 branches missed.">                } else if (ch == '&gt;') {</span>
+<span class="nc" id="L333">                    status = XMLLightweightParser.OUTSIDE;</span>
+<span class="nc bnc" id="L334" title="All 8 branches missed.">                    if (insideRootTag &amp;&amp; (head.length() == 14 || head.length() == 5 || head.length() == 13)) {</span>
+<span class="nc" id="L335">                        final String headString = head.toString();</span>
+<span class="nc bnc" id="L336" title="All 2 branches missed.">                        if (&quot;stream:stream&gt;&quot;.equals(headString)</span>
+<span class="nc bnc" id="L337" title="All 2 branches missed.">                            || &quot;?xml&gt;&quot;.equals(headString)</span>
+<span class="nc bnc" id="L338" title="All 2 branches missed.">                            || &quot;flash:stream&gt;&quot;.equals(headString)) {</span>
+                            // Found closing stream:stream
+<span class="nc" id="L340">                            int end = buffer.length() - readChar + (i + 1);</span>
+                            // Skip LF, CR and other &quot;weird&quot; characters that could appear
+<span class="nc bnc" id="L342" title="All 4 branches missed.">                            while (startLastMsg &lt; end &amp;&amp; '&lt;' != buffer.charAt(startLastMsg)) {</span>
+<span class="nc" id="L343">                                startLastMsg++;</span>
+                            }
+<span class="nc" id="L345">                            String msg = buffer.substring(startLastMsg, end);</span>
+<span class="nc" id="L346">                            foundMsg(msg);</span>
+<span class="nc" id="L347">                            startLastMsg = end;</span>
+                        }
+                    }
+<span class="nc" id="L350">                    insideRootTag = false;</span>
+<span class="nc bnc" id="L351" title="All 2 branches missed.">                } else if (ch == '/') {</span>
+<span class="nc" id="L352">                    status = XMLLightweightParser.VERIFY_CLOSE_TAG;</span>
+                }
+<span class="nc bnc" id="L354" title="All 2 branches missed.">            } else if (status == XMLLightweightParser.HEAD) {</span>
+<span class="nc bnc" id="L355" title="All 4 branches missed.">                if (ch == ' ' || ch == '&gt;') {</span>
+                    // Append &gt; to head to allow searching &lt;/tag&gt;
+<span class="nc" id="L357">                    head.append('&gt;');</span>
+<span class="nc bnc" id="L358" title="All 2 branches missed.">                    if(ch == '&gt;')</span>
+<span class="nc" id="L359">                        status = XMLLightweightParser.OUTSIDE;</span>
+                    else
+<span class="nc" id="L361">                        status = XMLLightweightParser.INSIDE;</span>
+<span class="nc" id="L362">                    insideRootTag = true;</span>
+<span class="nc" id="L363">                    insideChildrenTag = false;</span>
+<span class="nc" id="L364">                    continue;</span>
+                }
+<span class="nc bnc" id="L366" title="All 4 branches missed.">                else if (ch == '/' &amp;&amp; head.length() &gt; 0) {</span>
+<span class="nc" id="L367">                    status = XMLLightweightParser.VERIFY_CLOSE_TAG;</span>
+<span class="nc" id="L368">                    depth--;</span>
+                }
+<span class="nc" id="L370">                head.append(ch);</span>
+
+<span class="nc bnc" id="L372" title="All 2 branches missed.">            } else if (status == XMLLightweightParser.INIT) {</span>
+<span class="nc bnc" id="L373" title="All 2 branches missed.">                if (ch == '&lt;') {</span>
+<span class="nc" id="L374">                    status = XMLLightweightParser.HEAD;</span>
+<span class="nc" id="L375">                    depth = 1;</span>
+                }
+                else {
+<span class="nc" id="L378">                    startLastMsg++;</span>
+                }
+<span class="nc bnc" id="L380" title="All 2 branches missed.">            } else if (status == XMLLightweightParser.OUTSIDE) {</span>
+<span class="nc bnc" id="L381" title="All 2 branches missed.">                if (ch == '&lt;') {</span>
+<span class="nc" id="L382">                    status = XMLLightweightParser.PRETAIL;</span>
+<span class="nc" id="L383">                    cdataOffset = 1;</span>
+<span class="nc" id="L384">                    insideChildrenTag = true;</span>
+                }
+            }
+        }
+<span class="nc bnc" id="L388" title="All 4 branches missed.">        if (head.length() == 15 || head.length() == 14) {</span>
+<span class="nc" id="L389">            final String headString = head.toString();</span>
+<span class="nc bnc" id="L390" title="All 4 branches missed.">            if (&quot;/stream:stream&gt;&quot;.equals(headString) || (&quot;/flash:stream&gt;&quot;.equals(headString))) {</span>
+<span class="nc" id="L391">                foundMsg(&quot;&lt;/stream:stream&gt;&quot;);</span>
+            }
+        }
+<span class="nc" id="L394">    }</span>
+
+    /**
+     * This method verifies if the provided argument contains at least one numeric character reference (
+     * &lt;code&gt;CharRef	   ::=   	'&amp;#' [0-9]+ ';' | '&amp;#x' [0-9a-fA-F]+ ';&lt;/code&gt;) for which the decimal or hexidecimal
+     * character value refers to an invalid XML 1.0 character.
+     * 
+     * @param string
+     *            The input string
+     * @return {@code true} if the input string contains an invalid numeric character reference, {@code false}
+     *         otherwise.
+     * @see http://www.w3.org/TR/2008/REC-xml-20081126/#dt-charref
+     */
+    public static boolean hasIllegalCharacterReferences(String string) {
+        // If there's no character reference, don't bother to do more specific checking.
+<span class="fc" id="L409">        final Matcher matcher = XML_HAS_CHARREF.matcher(string);</span>
+
+<span class="fc bfc" id="L411" title="All 2 branches covered.">        while (matcher.find()) {</span>
+<span class="fc" id="L412">            final String decValue = matcher.group(2);</span>
+<span class="fc bfc" id="L413" title="All 2 branches covered.">            if (decValue != null) {</span>
+<span class="fc" id="L414">                final int value = Integer.parseInt(decValue);</span>
+<span class="fc bfc" id="L415" title="All 2 branches covered.">                if (!isLegalXmlCharacter(value)) {</span>
+<span class="fc" id="L416">                    return true;</span>
+                } else {
+                    continue;
+                }
+            }
+
+<span class="fc" id="L422">            final String hexValue = matcher.group(3);</span>
+<span class="pc bpc" id="L423" title="1 of 2 branches missed.">            if (hexValue != null) {</span>
+<span class="fc" id="L424">                final int value = Integer.parseInt(hexValue, 16);</span>
+<span class="fc bfc" id="L425" title="All 2 branches covered.">                if (!isLegalXmlCharacter(value)) {</span>
+<span class="fc" id="L426">                    return true;</span>
+                } else {
+                    continue;
+                }
+            }
+
+            // This is bad. The XML_HAS_CHARREF expression should have a hit for either the decimal
+            // or the heximal notation.
+<span class="nc" id="L434">            throw new IllegalStateException(</span>
+                    &quot;An error occurred while searching for illegal character references in the value [&quot; + string + &quot;].&quot;);
+        }
+
+<span class="fc" id="L438">        return false;</span>
+    }
+
+    /**
+     * Verifies if the codepoint value represents a valid character as defined in paragraph 2.2 of
+     * &quot;Extensible Markup Language (XML) 1.0 (Fifth Edition)&quot;
+     * 
+     * @param value
+     *            the codepoint
+     * @return {@code true} if the codepoint is a valid charater per XML 1.0 definition, {@code false} otherwise.
+     * @see http://www.w3.org/TR/2008/REC-xml-20081126/#NT-Char
+     */
+    public static boolean isLegalXmlCharacter(int value) {
+<span class="fc bfc" id="L451" title="All 18 branches covered.">        return value == 0x9 || value == 0xA || value == 0xD || (value &gt;= 0x20 &amp;&amp; value &lt;= 0xD7FF)</span>
+                || (value &gt;= 0xE000 &amp;&amp; value &lt;= 0xFFFD) || (value &gt;= 0x10000 &amp;&amp; value &lt;= 0x10FFFF);
+    }
+    
+<span class="fc" id="L455">    private static class PropertyListener implements PropertyEventListener {</span>
+        @Override
+        public void propertySet(String property, Map&lt;String, Object&gt; params) {
+<span class="pc bpc" id="L458" title="1 of 2 branches missed.">            if (MAX_PROPERTY_NAME.equals(property)) {</span>
+<span class="nc" id="L459">                String value = (String) params.get(&quot;value&quot;);</span>
+<span class="nc bnc" id="L460" title="All 2 branches missed.">                if (value != null) {</span>
+<span class="nc" id="L461">                    maxBufferSize = Integer.parseInt(value);</span>
+                }
+            }
+<span class="fc" id="L464">        }</span>
+
+        @Override
+        public void propertyDeleted(String property, Map&lt;String, Object&gt; params) {
+<span class="pc bpc" id="L468" title="1 of 2 branches missed.">            if (MAX_PROPERTY_NAME.equals(property)) {</span>
+                // Use default value when none was specified
+<span class="nc" id="L470">                maxBufferSize = 1048576;</span>
+            }
+<span class="fc" id="L472">        }</span>
+
+        @Override
+        public void xmlPropertySet(String property, Map&lt;String, Object&gt; params) {
+            // Do nothing
+<span class="fc" id="L477">        }</span>
+
+        @Override
+        public void xmlPropertyDeleted(String property, Map&lt;String, Object&gt; params) {
+            // Do nothing
+<span class="fc" id="L482">        }</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

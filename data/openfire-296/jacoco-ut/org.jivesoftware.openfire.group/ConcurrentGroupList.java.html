@@ -1,0 +1,248 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>ConcurrentGroupList.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.group</a> &gt; <span class="el_source">ConcurrentGroupList.java</span></div><h1>ConcurrentGroupList.java</h1><pre class="source lang-java linenums">package org.jivesoftware.openfire.group;
+
+import java.util.Collection;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.Set;
+import java.util.concurrent.CopyOnWriteArrayList;
+
+import org.xmpp.packet.JID;
+
+/**
+ * This list specifies additional methods that understand groups among 
+ * the items in the list.
+ * 
+ * @author Tom Evans
+ */
+public class ConcurrentGroupList&lt;T&gt; extends CopyOnWriteArrayList&lt;T&gt; implements GroupAwareList&lt;T&gt; {
+
+    private static final long serialVersionUID = 7735849143650412115L;
+
+    // This set is used to optimize group operations within this list.
+    // We only populate this set when it's needed to dereference the
+    // groups in the base list, but once it exists we keep it in sync
+    // via the various add/remove operations.
+    // NOTE: added volatile keyword for double-check idiom (lazy instantiation)
+    private volatile transient Set&lt;String&gt; knownGroupNamesInList;
+    
+    public ConcurrentGroupList() {
+<span class="nc" id="L29">        super();</span>
+<span class="nc" id="L30">    }</span>
+
+    public ConcurrentGroupList(Collection&lt;? extends T&gt; c) {
+<span class="nc" id="L33">        super(c);</span>
+<span class="nc" id="L34">    }</span>
+
+    /**
+     * Returns true if the list contains the given JID. If the JID
+     * is not found in the list, search the list for groups and look
+     * for the JID in each of the corresponding groups.
+     * 
+     * @param value The target, presumably a JID
+     * @return True if the target is in the list, or in any groups in the list
+     */
+    @Override
+    public boolean includes(Object value) {
+<span class="nc" id="L46">        boolean found = false;</span>
+<span class="nc bnc" id="L47" title="All 2 branches missed.">        if (contains(value)) {</span>
+<span class="nc" id="L48">            found = true;</span>
+<span class="nc bnc" id="L49" title="All 2 branches missed.">        } else if (value instanceof JID) {</span>
+<span class="nc" id="L50">            JID target = (JID) value;</span>
+<span class="nc" id="L51">            Iterator&lt;Group&gt; iterator = getGroups().iterator();</span>
+<span class="nc bnc" id="L52" title="All 4 branches missed.">            while (!found &amp;&amp; iterator.hasNext()) {</span>
+<span class="nc" id="L53">                found = iterator.next().isUser(target);</span>
+            }
+        }
+<span class="nc" id="L56">        return found;</span>
+    }
+
+    /**
+     * Returns the groups that are implied (resolvable) from the items in the list.
+     * 
+     * @return A Set containing the groups in the list
+     */
+    @Override
+    public Set&lt;Group&gt; getGroups() {
+<span class="nc" id="L66">        Set&lt;Group&gt; result = new HashSet&lt;&gt;();</span>
+<span class="nc bnc" id="L67" title="All 2 branches missed.">        for (String groupName : getKnownGroupNamesInList()) {</span>
+<span class="nc" id="L68">            result.add(Group.resolveFrom(groupName));</span>
+<span class="nc" id="L69">        }</span>
+<span class="nc" id="L70">        return result;</span>
+    }
+    
+    /**
+     * Accessor uses the  &quot;double-check idiom&quot; (j2se 5.0+) for proper lazy instantiation.
+     * Additionally, the set is not cached until there is at least one group in the list.
+     * 
+     * @return the known group names among the items in the list
+     */
+    private Set&lt;String&gt; getKnownGroupNamesInList() {
+<span class="nc" id="L80">        Set&lt;String&gt; result = knownGroupNamesInList;</span>
+<span class="nc bnc" id="L81" title="All 2 branches missed.">        if (result == null) {</span>
+<span class="nc" id="L82">            synchronized(this) {</span>
+<span class="nc" id="L83">                result = knownGroupNamesInList;</span>
+<span class="nc bnc" id="L84" title="All 2 branches missed.">                if (result == null) {</span>
+<span class="nc" id="L85">                    result = new HashSet&lt;&gt;();</span>
+                    // add all the groups into the group set
+<span class="nc" id="L87">                    Iterator&lt;T&gt; iterator = iterator();</span>
+<span class="nc bnc" id="L88" title="All 2 branches missed.">                    while (iterator.hasNext()) {</span>
+<span class="nc" id="L89">                        T listItem = iterator.next();</span>
+<span class="nc" id="L90">                        Group group = Group.resolveFrom(listItem);</span>
+<span class="nc bnc" id="L91" title="All 2 branches missed.">                        if (group != null) {</span>
+<span class="nc" id="L92">                            result.add(group.getName());</span>
+                        };
+<span class="nc" id="L94">                    }</span>
+<span class="nc bnc" id="L95" title="All 2 branches missed.">                    knownGroupNamesInList = result.isEmpty() ? null : result;</span>
+                }
+<span class="nc" id="L97">            }</span>
+        }
+<span class="nc" id="L99">        return result;</span>
+    }
+
+    /**
+     * This method is called from several of the mutators to keep
+     * the group set in sync with the full list. 
+     * 
+     * @param item The item to be added or removed if it is in the group set
+     * @param addOrRemove True to add, false to remove
+     * @return true if the given item is a group
+     */
+    private synchronized boolean syncGroups(Object item, boolean addOrRemove) {
+<span class="nc" id="L111">        boolean result = false;</span>
+        // only sync if the group list has been instantiated
+<span class="nc bnc" id="L113" title="All 2 branches missed.">        if (knownGroupNamesInList != null) {</span>
+<span class="nc" id="L114">            Group group = Group.resolveFrom(item);</span>
+<span class="nc bnc" id="L115" title="All 2 branches missed.">            if (group != null) {</span>
+<span class="nc" id="L116">                result = true;</span>
+<span class="nc bnc" id="L117" title="All 2 branches missed.">                if (addOrRemove == ADD) {</span>
+<span class="nc" id="L118">                    knownGroupNamesInList.add(group.getName());</span>
+<span class="nc bnc" id="L119" title="All 2 branches missed.">                } else if (addOrRemove == REMOVE) {</span>
+<span class="nc" id="L120">                    knownGroupNamesInList.remove(group.getName());</span>
+<span class="nc bnc" id="L121" title="All 2 branches missed.">                    if (knownGroupNamesInList.isEmpty()) {</span>
+<span class="nc" id="L122">                        knownGroupNamesInList = null;</span>
+                    }
+                }
+            }
+        }
+<span class="nc" id="L127">        return result;</span>
+    }
+    
+    // below are overrides for the various mutators
+    
+    @Override
+    public T set(int index, T element) {
+<span class="nc" id="L134">        T result = super.set(index, element);</span>
+<span class="nc" id="L135">        syncGroups(element, ADD);</span>
+<span class="nc" id="L136">        return result;</span>
+    }
+
+    @Override
+    public boolean add(T e) {
+<span class="nc" id="L141">        boolean result = super.add(e);</span>
+<span class="nc" id="L142">        syncGroups(e, ADD);</span>
+<span class="nc" id="L143">        return result;</span>
+    }
+
+    @Override
+    public void add(int index, T element) {
+<span class="nc" id="L148">        super.add(index, element);</span>
+<span class="nc" id="L149">        syncGroups(element, ADD);</span>
+<span class="nc" id="L150">    }</span>
+
+    @Override
+    public T remove(int index) {
+<span class="nc" id="L154">        T result = super.remove(index);</span>
+<span class="nc" id="L155">        syncGroups(result, REMOVE);</span>
+<span class="nc" id="L156">        return result;</span>
+    }
+
+    @Override
+    public boolean remove(Object o) {
+<span class="nc" id="L161">        boolean removed = super.remove(o);</span>
+<span class="nc bnc" id="L162" title="All 2 branches missed.">        if (removed) {</span>
+<span class="nc" id="L163">            syncGroups(o, REMOVE);</span>
+        }
+<span class="nc" id="L165">        return removed;</span>
+    }
+
+    @Override
+    public boolean addIfAbsent(T e) {
+<span class="nc" id="L170">        boolean added = super.addIfAbsent(e);</span>
+<span class="nc bnc" id="L171" title="All 2 branches missed.">        if (added) {</span>
+<span class="nc" id="L172">            syncGroups(e, ADD);</span>
+        }
+<span class="nc" id="L174">        return added;</span>
+    }
+
+    @Override
+    public boolean removeAll(Collection&lt;?&gt; c) {
+<span class="nc" id="L179">        boolean changed = super.removeAll(c);</span>
+<span class="nc bnc" id="L180" title="All 2 branches missed.">        if (changed) {</span>
+            // drop the transient set, will be rebuilt when/if needed
+<span class="nc" id="L182">            synchronized(this) {</span>
+<span class="nc" id="L183">                knownGroupNamesInList = null;</span>
+<span class="nc" id="L184">            }</span>
+        }
+<span class="nc" id="L186">        return changed;</span>
+    }
+
+    @Override
+    public boolean retainAll(Collection&lt;?&gt; c) {
+<span class="nc" id="L191">        boolean changed = super.retainAll(c);</span>
+<span class="nc bnc" id="L192" title="All 2 branches missed.">        if (changed) {</span>
+            // drop the transient set, will be rebuilt when/if needed
+<span class="nc" id="L194">            synchronized(this) {</span>
+<span class="nc" id="L195">                knownGroupNamesInList = null;</span>
+<span class="nc" id="L196">            }</span>
+        }
+<span class="nc" id="L198">        return changed;</span>
+    }
+
+    @Override
+    public int addAllAbsent(Collection&lt;? extends T&gt; c) {
+<span class="nc" id="L203">        int added = super.addAllAbsent(c);</span>
+<span class="nc bnc" id="L204" title="All 2 branches missed.">        if (added &gt; 0) {</span>
+            // drop the transient set, will be rebuilt when/if needed
+<span class="nc" id="L206">            synchronized(this) {</span>
+<span class="nc" id="L207">                knownGroupNamesInList = null;</span>
+<span class="nc" id="L208">            }</span>
+        }
+<span class="nc" id="L210">        return added;</span>
+    }
+
+    @Override
+    public void clear() {
+<span class="nc" id="L215">        super.clear();</span>
+<span class="nc" id="L216">        synchronized(this) {</span>
+<span class="nc" id="L217">            knownGroupNamesInList = null;</span>
+<span class="nc" id="L218">        }</span>
+<span class="nc" id="L219">    }</span>
+
+    @Override
+    public boolean addAll(Collection&lt;? extends T&gt; c) {
+<span class="nc" id="L223">        boolean changed = super.addAll(c);</span>
+<span class="nc bnc" id="L224" title="All 2 branches missed.">        if (changed) {</span>
+            // drop the transient set, will be rebuilt when/if needed
+<span class="nc" id="L226">            synchronized(this) {</span>
+<span class="nc" id="L227">                knownGroupNamesInList = null;</span>
+<span class="nc" id="L228">            }</span>
+        }
+<span class="nc" id="L230">        return changed;</span>
+    }
+
+    @Override
+    public boolean addAll(int index, Collection&lt;? extends T&gt; c) {
+<span class="nc" id="L235">        boolean changed = super.addAll(index, c);</span>
+<span class="nc bnc" id="L236" title="All 2 branches missed.">        if (changed) {</span>
+            // drop the transient set, will be rebuilt when/if needed
+<span class="nc" id="L238">            synchronized(this) {</span>
+<span class="nc" id="L239">                knownGroupNamesInList = null;</span>
+<span class="nc" id="L240">            }</span>
+        }
+<span class="nc" id="L242">        return changed;</span>
+    }
+
+    private static final boolean ADD = true;
+    private static final boolean REMOVE = false;
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

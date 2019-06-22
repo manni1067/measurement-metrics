@@ -1,0 +1,199 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>ClientSessionConnection.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.multiplex</a> &gt; <span class="el_source">ClientSessionConnection.java</span></div><h1>ClientSessionConnection.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.multiplex;
+
+import org.dom4j.Element;
+import org.jivesoftware.openfire.StreamID;
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.net.VirtualConnection;
+import org.jivesoftware.openfire.session.ConnectionMultiplexerSession;
+import org.jivesoftware.openfire.spi.ConnectionConfiguration;
+import org.jivesoftware.openfire.spi.ConnectionManagerImpl;
+import org.jivesoftware.openfire.spi.ConnectionType;
+import org.xmpp.packet.IQ;
+import org.xmpp.packet.Packet;
+
+import java.net.InetAddress;
+import java.net.UnknownHostException;
+
+/**
+ * Represents a connection of a Client Session that was established to a Connection Manager.
+ * Connection Managers have their own physical connections to the server that are multiplexed
+ * among connected clients. Each created {@link org.jivesoftware.openfire.session.ClientSession}
+ * will use an instance of this class as its connection.
+ *
+ * @author Gaston Dombiak
+ */
+public class ClientSessionConnection extends VirtualConnection {
+
+    private String connectionManagerName;
+    private String serverName;
+    private ConnectionMultiplexerManager multiplexerManager;
+    private String hostName;
+    private String hostAddress;
+
+<span class="nc" id="L49">    public ClientSessionConnection(String connectionManagerName, String hostName, String hostAddress) {</span>
+<span class="nc" id="L50">        this.connectionManagerName = connectionManagerName;</span>
+<span class="nc" id="L51">        multiplexerManager = ConnectionMultiplexerManager.getInstance();</span>
+<span class="nc" id="L52">        serverName = XMPPServer.getInstance().getServerInfo().getXMPPDomain();</span>
+<span class="nc" id="L53">        this.hostName = hostName;</span>
+<span class="nc" id="L54">        this.hostAddress = hostAddress;</span>
+<span class="nc" id="L55">    }</span>
+
+    /**
+     * Delivers the packet to the Connection Manager that in turn will forward it to the
+     * target user. Connection Managers may have one or many connections to the server so
+     * just get any connection to the Connection Manager (uses a random) and use it.&lt;p&gt;
+     *
+     * If the packet to send does not have a TO attribute then wrap the packet with a
+     * special IQ packet. The wrapper IQ packet will be sent to the Connection Manager
+     * and the stream ID of this Client Session will be used for identifying that the wrapped
+     * packet must be sent to the connected user. Since some packets can be exchanged before
+     * the user has a binded JID we need to use the stream ID as the unique identifier.
+     *
+     * @param packet the packet to send to the user.
+     */
+    @Override
+    public void deliver(Packet packet) {
+<span class="nc" id="L72">        StreamID streamID = session.getStreamID();</span>
+<span class="nc" id="L73">        ConnectionMultiplexerSession multiplexerSession =</span>
+<span class="nc" id="L74">                multiplexerManager.getMultiplexerSession(connectionManagerName,streamID);</span>
+<span class="nc bnc" id="L75" title="All 2 branches missed.">        if (multiplexerSession != null) {</span>
+            // Wrap packet so that the connection manager can figure out the target session
+<span class="nc" id="L77">            Route wrapper = new Route(streamID);</span>
+<span class="nc" id="L78">            wrapper.setFrom(serverName);</span>
+<span class="nc" id="L79">            wrapper.setTo(connectionManagerName);</span>
+<span class="nc" id="L80">            wrapper.setChildElement(packet.getElement().createCopy());</span>
+            // Deliver wrapper
+<span class="nc" id="L82">            multiplexerSession.process(wrapper);</span>
+<span class="nc" id="L83">            session.incrementServerPacketCount();</span>
+        }
+<span class="nc" id="L85">    }</span>
+
+    /**
+     * Delivers the stanza to the Connection Manager that in turn will forward it to the
+     * target user. Connection Managers may have one or many connections to the server so
+     * just get any connection to the Connection Manager (uses a random) and use it.&lt;p&gt;
+     *
+     * The stanza to send wrapped with a special IQ packet. The wrapper IQ packet will be
+     * sent to the Connection Manager and the stream ID of this Client Session will be used
+     * for identifying that the wrapped stanza must be sent to the connected user.
+     *
+     * @param text the stanza to send to the user.
+     */
+    @Override
+    public void deliverRawText(String text) {
+<span class="nc" id="L100">        StreamID streamID = session.getStreamID();</span>
+<span class="nc" id="L101">        ConnectionMultiplexerSession multiplexerSession =</span>
+<span class="nc" id="L102">                multiplexerManager.getMultiplexerSession(connectionManagerName,streamID);</span>
+<span class="nc bnc" id="L103" title="All 2 branches missed.">        if (multiplexerSession != null) {</span>
+            // Wrap packet so that the connection manager can figure out the target session
+<span class="nc" id="L105">            StringBuilder sb = new StringBuilder(200 + text.length());</span>
+<span class="nc" id="L106">            sb.append(&quot;&lt;route from=\&quot;&quot;).append(serverName);</span>
+<span class="nc" id="L107">            sb.append(&quot;\&quot; to=\&quot;&quot;).append(connectionManagerName);</span>
+<span class="nc" id="L108">            sb.append(&quot;\&quot; streamid=\&quot;&quot;).append(streamID.getID()).append(&quot;\&quot;&gt;&quot;);</span>
+<span class="nc" id="L109">            sb.append(text);</span>
+<span class="nc" id="L110">            sb.append(&quot;&lt;/route&gt;&quot;);</span>
+            // Deliver the wrapped stanza
+<span class="nc" id="L112">            multiplexerSession.deliverRawText(sb.toString());</span>
+        }
+<span class="nc" id="L114">    }</span>
+
+    @Override
+    public ConnectionConfiguration getConfiguration()
+    {
+        // Here, a client-to-server configuration is mocked. It is likely not used, as actual connection handling takes
+        // place at the connection manager.
+<span class="nc" id="L121">        final ConnectionManagerImpl connectionManager = ((ConnectionManagerImpl) XMPPServer.getInstance().getConnectionManager());</span>
+<span class="nc" id="L122">        return connectionManager.getListener( ConnectionType.SOCKET_C2S, true ).generateConnectionConfiguration();</span>
+    }
+
+    public byte[] getAddress() throws UnknownHostException {
+<span class="nc bnc" id="L126" title="All 2 branches missed.">        if (hostAddress != null) {</span>
+<span class="nc" id="L127">            return InetAddress.getByName(hostAddress).getAddress();</span>
+        }
+<span class="nc" id="L129">        return null;</span>
+    }
+
+    @Override
+    public String getHostAddress() throws UnknownHostException {
+<span class="nc bnc" id="L134" title="All 2 branches missed.">        if (hostAddress != null) {</span>
+<span class="nc" id="L135">            return hostAddress;</span>
+        }
+        // Return IP address of the connection manager that the client used to log in
+<span class="nc" id="L138">        ConnectionMultiplexerSession multiplexerSession =</span>
+<span class="nc" id="L139">                multiplexerManager.getMultiplexerSession(connectionManagerName);</span>
+<span class="nc bnc" id="L140" title="All 2 branches missed.">        if (multiplexerSession != null) {</span>
+<span class="nc" id="L141">            return multiplexerSession.getHostAddress();</span>
+        }
+<span class="nc" id="L143">        return null;</span>
+    }
+
+    @Override
+    public String getHostName() throws UnknownHostException {
+<span class="nc bnc" id="L148" title="All 2 branches missed.">        if (hostName != null) {</span>
+<span class="nc" id="L149">            return hostName;</span>
+        }
+        // Return IP address of the connection manager that the client used to log in
+<span class="nc" id="L152">        ConnectionMultiplexerSession multiplexerSession =</span>
+<span class="nc" id="L153">                multiplexerManager.getMultiplexerSession(connectionManagerName);</span>
+<span class="nc bnc" id="L154" title="All 2 branches missed.">        if (multiplexerSession != null) {</span>
+<span class="nc" id="L155">            return multiplexerSession.getHostName();</span>
+        }
+<span class="nc" id="L157">        return null;</span>
+    }
+
+    @Override
+    public void systemShutdown() {
+        // Do nothing since a system-shutdown error will be sent to the Connection Manager
+        // that in turn will send a system-shutdown to connected clients. This is an
+        // optimization to reduce number of packets being sent from the server.
+<span class="nc" id="L165">    }</span>
+
+    /**
+     * If the Connection Manager or the Client requested to close the connection then just do
+     * nothing. But if the server originated the request to close the connection then we need
+     * to send to the Connection Manager a packet letting him know that the Client Session needs
+     * to be terminated.
+     */
+    @Override
+    public void closeVirtualConnection() {
+        // Figure out who requested the connection to be closed
+<span class="nc" id="L176">        StreamID streamID = session.getStreamID();</span>
+<span class="nc bnc" id="L177" title="All 2 branches missed.">        if (multiplexerManager.getClientSession(connectionManagerName, streamID) == null) {</span>
+            // Client or Connection manager requested to close the session
+            // Do nothing since it has already been removed and closed
+        }
+        else {
+<span class="nc" id="L182">            ConnectionMultiplexerSession multiplexerSession =</span>
+<span class="nc" id="L183">                    multiplexerManager.getMultiplexerSession(connectionManagerName,streamID);</span>
+<span class="nc bnc" id="L184" title="All 2 branches missed.">            if (multiplexerSession != null) {</span>
+                // Server requested to close the client session so let the connection manager
+                // know that he has to finish the client session
+<span class="nc" id="L187">                IQ closeRequest = new IQ(IQ.Type.set);</span>
+<span class="nc" id="L188">                closeRequest.setFrom(serverName);</span>
+<span class="nc" id="L189">                closeRequest.setTo(connectionManagerName);</span>
+<span class="nc" id="L190">                Element child = closeRequest.setChildElement(&quot;session&quot;,</span>
+                        &quot;http://jabber.org/protocol/connectionmanager&quot;);
+<span class="nc" id="L192">                child.addAttribute(&quot;id&quot;, streamID.getID());</span>
+<span class="nc" id="L193">                child.addElement(&quot;close&quot;);</span>
+<span class="nc" id="L194">                multiplexerSession.process(closeRequest);</span>
+            }
+        }
+<span class="nc" id="L197">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

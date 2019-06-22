@@ -1,0 +1,400 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>IQMUCSearchHandler.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.muc.spi</a> &gt; <span class="el_source">IQMUCSearchHandler.java</span></div><h1>IQMUCSearchHandler.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.jivesoftware.openfire.muc.spi;
+
+import org.dom4j.DocumentHelper;
+import org.dom4j.Element;
+import org.dom4j.QName;
+import org.jivesoftware.openfire.muc.MUCRoom;
+import org.jivesoftware.openfire.muc.MultiUserChatService;
+import org.xmpp.forms.DataForm;
+import org.xmpp.forms.FormField;
+import org.xmpp.packet.IQ;
+import org.xmpp.packet.PacketError;
+import org.xmpp.packet.PacketError.Condition;
+import org.xmpp.resultsetmanagement.ResultSet;
+import org.xmpp.resultsetmanagement.ResultSetImpl;
+
+import java.util.*;
+
+/**
+ * This class adds jabber:iq:search combined with 'result set management'
+ * functionality to the MUC service of Openfire.
+ * 
+ * @author Guus der Kinderen - Nimbuzz B.V. &amp;lt;guus@nimbuzz.com&amp;gt;
+ * @author Giancarlo Frison - Nimbuzz B.V. &amp;lt;giancarlo@nimbuzz.com&amp;gt;
+ */
+public class IQMUCSearchHandler
+{
+    public static final String JABBER_IQ_SEARCH = &quot;jabber:iq:search&quot;;
+    public static final String SUBJECT = &quot;subject&quot;;
+    public static final String NUM_USERS = &quot;num_users&quot;;
+    public static final String NUM_MAX_USERS = &quot;num_max_users&quot;;
+    /**
+     * The MUC-server to extend with jabber:iq:search functionality.
+     */
+    private final MultiUserChatService mucService;
+
+    /**
+     * Creates a new instance of the search provider.
+     * 
+     * @param mucService
+     *            The server for which to return search results.
+     */
+    public IQMUCSearchHandler(MultiUserChatService mucService)
+<span class="nc" id="L58">    {</span>
+<span class="nc" id="L59">        this.mucService = mucService;</span>
+<span class="nc" id="L60">    }</span>
+
+    /**
+     * Utility method that returns a 'jabber:iq:search' child element filled
+     * with a blank dataform.
+     * 
+     * @return Element, named 'query', escaped by the 'jabber:iq:search'
+     *         namespace, filled with a blank dataform.
+     */
+    private static Element getDataElement()
+    {
+<span class="nc" id="L71">        final DataForm searchForm = new DataForm(DataForm.Type.form);</span>
+<span class="nc" id="L72">        searchForm.setTitle(&quot;Chat Rooms Search&quot;);</span>
+<span class="nc" id="L73">        searchForm.addInstruction(&quot;Instructions&quot;);</span>
+
+<span class="nc" id="L75">        final FormField typeFF = searchForm.addField();</span>
+<span class="nc" id="L76">        typeFF.setVariable(&quot;FORM_TYPE&quot;);</span>
+<span class="nc" id="L77">        typeFF.setType(FormField.Type.hidden);</span>
+<span class="nc" id="L78">        typeFF.addValue(JABBER_IQ_SEARCH);</span>
+
+<span class="nc" id="L80">        final FormField nameFF = searchForm.addField();</span>
+<span class="nc" id="L81">        nameFF.setVariable(&quot;name&quot;);</span>
+<span class="nc" id="L82">        nameFF.setType(FormField.Type.text_single);</span>
+<span class="nc" id="L83">        nameFF.setLabel(&quot;Name&quot;);</span>
+<span class="nc" id="L84">        nameFF.setRequired(false);</span>
+
+<span class="nc" id="L86">        final FormField matchFF = searchForm.addField();</span>
+<span class="nc" id="L87">        matchFF.setVariable(&quot;name_is_exact_match&quot;);</span>
+<span class="nc" id="L88">        matchFF.setType(FormField.Type.boolean_type);</span>
+<span class="nc" id="L89">        matchFF.setLabel(&quot;Name must match exactly&quot;);</span>
+<span class="nc" id="L90">        matchFF.setRequired(false);</span>
+
+<span class="nc" id="L92">        final FormField subjectFF = searchForm.addField();</span>
+<span class="nc" id="L93">        subjectFF.setVariable(SUBJECT);</span>
+<span class="nc" id="L94">        subjectFF.setType(FormField.Type.text_single);</span>
+<span class="nc" id="L95">        subjectFF.setLabel(&quot;Subject&quot;);</span>
+<span class="nc" id="L96">        subjectFF.setRequired(false);</span>
+
+<span class="nc" id="L98">        final FormField userAmountFF = searchForm.addField();</span>
+<span class="nc" id="L99">        userAmountFF.setVariable(NUM_USERS);</span>
+<span class="nc" id="L100">        userAmountFF.setType(FormField.Type.text_single);</span>
+<span class="nc" id="L101">        userAmountFF.setLabel(&quot;Number of users&quot;);</span>
+<span class="nc" id="L102">        userAmountFF.setRequired(false);</span>
+
+<span class="nc" id="L104">        final FormField maxUsersFF = searchForm.addField();</span>
+<span class="nc" id="L105">        maxUsersFF.setVariable(NUM_MAX_USERS);</span>
+<span class="nc" id="L106">        maxUsersFF.setType(FormField.Type.text_single);</span>
+<span class="nc" id="L107">        maxUsersFF.setLabel(&quot;Max number allowed of users&quot;);</span>
+<span class="nc" id="L108">        maxUsersFF.setRequired(false);</span>
+
+<span class="nc" id="L110">        final FormField includePasswordProtectedFF = searchForm.addField();</span>
+<span class="nc" id="L111">        includePasswordProtectedFF.setVariable(&quot;include_password_protected&quot;);</span>
+<span class="nc" id="L112">        includePasswordProtectedFF.setType(FormField.Type.boolean_type);</span>
+<span class="nc" id="L113">        includePasswordProtectedFF.setLabel(&quot;Include password protected rooms&quot;);</span>
+<span class="nc" id="L114">        includePasswordProtectedFF.setRequired(false);</span>
+
+<span class="nc" id="L116">        final Element probeResult = DocumentHelper.createElement(QName.get(</span>
+            &quot;query&quot;, JABBER_IQ_SEARCH));
+<span class="nc" id="L118">        probeResult.add(searchForm.getElement());</span>
+<span class="nc" id="L119">        return probeResult;</span>
+    }
+
+    /**
+     * Constructs an answer on a IQ stanza that contains a search request. The
+     * answer will be an IQ stanza of type 'result' or 'error'.
+     * 
+     * @param iq
+     *            The IQ stanza that is the search request.
+     * @return An answer to the provided request.
+     */
+    public IQ handleIQ(IQ iq)
+    {
+<span class="nc" id="L132">        final IQ reply = IQ.createResultIQ(iq);</span>
+<span class="nc" id="L133">        final Element formElement = iq.getChildElement().element(</span>
+<span class="nc" id="L134">            QName.get(&quot;x&quot;, &quot;jabber:x:data&quot;));</span>
+<span class="nc bnc" id="L135" title="All 2 branches missed.">        if (formElement == null)</span>
+        {
+<span class="nc" id="L137">            reply.setChildElement(getDataElement());</span>
+<span class="nc" id="L138">            return reply;</span>
+        }
+
+        // parse params from request.
+<span class="nc" id="L142">        final DataForm df = new DataForm(formElement);</span>
+<span class="nc" id="L143">        boolean nameIsExactMatch = false;</span>
+<span class="nc" id="L144">        String subject = null;</span>
+<span class="nc" id="L145">        int numUsers = -1;</span>
+<span class="nc" id="L146">        int numMaxUsers = -1;</span>
+<span class="nc" id="L147">        boolean includePasswordProtectedRooms = true;</span>
+
+<span class="nc" id="L149">        final Set&lt;String&gt; names = new HashSet&lt;&gt;();</span>
+<span class="nc bnc" id="L150" title="All 2 branches missed.">        for (final FormField field : df.getFields()) </span>
+        {
+<span class="nc bnc" id="L152" title="All 2 branches missed.">            if (field.getVariable().equals(&quot;name&quot;))</span>
+            {
+<span class="nc" id="L154">                names.add(field.getFirstValue());</span>
+            }
+<span class="nc" id="L156">        }</span>
+
+<span class="nc" id="L158">        final FormField matchFF = df.getField(&quot;nameIsExactMatch&quot;);</span>
+<span class="nc bnc" id="L159" title="All 2 branches missed.">        if (matchFF != null)</span>
+        {
+<span class="nc" id="L161">            final String b = matchFF.getFirstValue();</span>
+<span class="nc bnc" id="L162" title="All 2 branches missed.">            if (b != null)</span>
+            {
+<span class="nc bnc" id="L164" title="All 2 branches missed.">                nameIsExactMatch = b.equals(&quot;1&quot;)</span>
+<span class="nc bnc" id="L165" title="All 2 branches missed.">                        || b.equalsIgnoreCase(&quot;true&quot;)</span>
+<span class="nc bnc" id="L166" title="All 2 branches missed.">                        || b.equalsIgnoreCase(&quot;yes&quot;);</span>
+            }
+        }
+
+<span class="nc" id="L170">        final FormField subjectFF = df.getField(SUBJECT);</span>
+<span class="nc bnc" id="L171" title="All 2 branches missed.">        if (subjectFF != null)</span>
+        {
+<span class="nc" id="L173">            subject = subjectFF.getFirstValue();</span>
+        }
+
+        try
+        {
+<span class="nc" id="L178">            final FormField userAmountFF = df.getField(NUM_USERS);</span>
+<span class="nc bnc" id="L179" title="All 2 branches missed.">            if (userAmountFF != null)</span>
+            {
+<span class="nc" id="L181">                String value = userAmountFF.getFirstValue();</span>
+<span class="nc bnc" id="L182" title="All 4 branches missed.">                if (value != null &amp;&amp; !&quot;&quot;.equals(value)) {</span>
+<span class="nc" id="L183">                    numUsers = Integer.parseInt(value);</span>
+                }
+            }
+
+<span class="nc" id="L187">            final FormField maxUsersFF = df.getField(NUM_MAX_USERS);</span>
+<span class="nc bnc" id="L188" title="All 2 branches missed.">            if (maxUsersFF != null)</span>
+            {
+<span class="nc" id="L190">                String value = maxUsersFF.getFirstValue();</span>
+<span class="nc bnc" id="L191" title="All 4 branches missed.">                if (value != null &amp;&amp; !&quot;&quot;.equals(value)) {</span>
+<span class="nc" id="L192">                    numMaxUsers = Integer.parseInt(value);</span>
+                }
+            }
+        }
+<span class="nc" id="L196">        catch (NumberFormatException e)</span>
+        {
+<span class="nc" id="L198">            reply.setError(PacketError.Condition.bad_request);</span>
+<span class="nc" id="L199">            return reply;</span>
+<span class="nc" id="L200">        }</span>
+
+<span class="nc" id="L202">        final FormField includePasswordProtectedRoomsFF = df.getField(&quot;include_password_protected&quot;);</span>
+<span class="nc bnc" id="L203" title="All 2 branches missed.">        if (includePasswordProtectedRoomsFF != null)</span>
+        {
+<span class="nc" id="L205">            final String b = includePasswordProtectedRoomsFF.getFirstValue();</span>
+<span class="nc bnc" id="L206" title="All 2 branches missed.">            if (b != null)</span>
+            {
+<span class="nc bnc" id="L208" title="All 4 branches missed.">                if (b.equals(&quot;0&quot;) || b.equalsIgnoreCase(&quot;false&quot;)</span>
+<span class="nc bnc" id="L209" title="All 2 branches missed.">                        || b.equalsIgnoreCase(&quot;no&quot;))</span>
+                {
+<span class="nc" id="L211">                    includePasswordProtectedRooms = false;</span>
+                }
+            }
+        }
+
+        // search for chatrooms matching the request params.
+<span class="nc" id="L217">        final List&lt;MUCRoom&gt; mucs = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L218" title="All 2 branches missed.">        for (MUCRoom room : mucService.getChatRooms())</span>
+        {
+<span class="nc" id="L220">            boolean find = false;</span>
+
+<span class="nc bnc" id="L222" title="All 2 branches missed.">            if (!names.isEmpty())</span>
+            {
+<span class="nc bnc" id="L224" title="All 2 branches missed.">                for (final String name : names)</span>
+                {
+<span class="nc bnc" id="L226" title="All 2 branches missed.">                    if (nameIsExactMatch)</span>
+                    {
+<span class="nc bnc" id="L228" title="All 2 branches missed.">                        if (name.equalsIgnoreCase(room.getNaturalLanguageName()))</span>
+                        {
+<span class="nc" id="L230">                            find = true;</span>
+<span class="nc" id="L231">                            break;</span>
+                        }
+                    }
+                    else
+                    {
+<span class="nc bnc" id="L236" title="All 2 branches missed.">                        if (room.getNaturalLanguageName().toLowerCase().indexOf(</span>
+<span class="nc" id="L237">                            name.toLowerCase()) != -1)</span>
+                        {
+<span class="nc" id="L239">                            find = true;</span>
+<span class="nc" id="L240">                            break;</span>
+                        }
+                    }
+<span class="nc" id="L243">                }</span>
+            }
+
+<span class="nc bnc" id="L246" title="All 2 branches missed.">            if (subject != null</span>
+<span class="nc bnc" id="L247" title="All 2 branches missed.">                    &amp;&amp; room.getSubject().toLowerCase().indexOf(</span>
+<span class="nc" id="L248">                        subject.toLowerCase()) != -1)</span>
+            {
+<span class="nc" id="L250">                find = true;</span>
+            }
+
+<span class="nc bnc" id="L253" title="All 4 branches missed.">            if (numUsers &gt; -1 &amp;&amp; room.getParticipants().size() &lt; numUsers)</span>
+            {
+<span class="nc" id="L255">                find = false;</span>
+            }
+
+<span class="nc bnc" id="L258" title="All 4 branches missed.">            if (numMaxUsers &gt; -1 &amp;&amp; room.getMaxUsers() &lt; numMaxUsers)</span>
+            {
+<span class="nc" id="L260">                find = false;</span>
+            }
+
+<span class="nc bnc" id="L263" title="All 4 branches missed.">            if (!includePasswordProtectedRooms &amp;&amp; room.isPasswordProtected())</span>
+            {
+<span class="nc" id="L265">                find = false;</span>
+            }
+
+<span class="nc bnc" id="L268" title="All 4 branches missed.">            if (find &amp;&amp; canBeIncludedInResult(room))</span>
+            {
+<span class="nc" id="L270">                mucs.add(room);</span>
+            }
+<span class="nc" id="L272">        }</span>
+
+<span class="nc" id="L274">        final ResultSet&lt;MUCRoom&gt; searchResults = new ResultSetImpl&lt;&gt;(</span>
+<span class="nc" id="L275">            sortByUserAmount(mucs));</span>
+
+        // See if the requesting entity would like to apply 'result set
+        // management'
+<span class="nc" id="L279">        final Element set = iq.getChildElement().element(</span>
+<span class="nc" id="L280">            QName.get(&quot;set&quot;, ResultSet.NAMESPACE_RESULT_SET_MANAGEMENT));</span>
+        final List&lt;MUCRoom&gt; mucrsm;
+
+        // apply RSM only if the element exists, and the (total) results
+        // set is not empty.
+<span class="nc bnc" id="L285" title="All 4 branches missed.">        final boolean applyRSM = set != null &amp;&amp; !mucs.isEmpty();</span>
+
+<span class="nc bnc" id="L287" title="All 2 branches missed.">        if (applyRSM)</span>
+        {
+<span class="nc bnc" id="L289" title="All 2 branches missed.">            if (!ResultSet.isValidRSMRequest(set))</span>
+            {
+<span class="nc" id="L291">                reply.setError(Condition.bad_request);</span>
+<span class="nc" id="L292">                return reply;</span>
+            }
+
+            try
+            {
+<span class="nc" id="L297">                mucrsm = searchResults.applyRSMDirectives(set);</span>
+            }
+<span class="nc" id="L299">            catch (NullPointerException e)</span>
+            {
+<span class="nc" id="L301">                final IQ itemNotFound = IQ.createResultIQ(iq);</span>
+<span class="nc" id="L302">                itemNotFound.setError(Condition.item_not_found);</span>
+<span class="nc" id="L303">                return itemNotFound;</span>
+<span class="nc" id="L304">            }</span>
+        }
+        else
+        {
+            // if no rsm, all found rooms are part of the result.
+<span class="nc" id="L309">            mucrsm = new ArrayList&lt;&gt;(searchResults);</span>
+        }
+
+<span class="nc" id="L312">        final Element res = DocumentHelper.createElement(QName.get(&quot;query&quot;,</span>
+            JABBER_IQ_SEARCH));
+
+<span class="nc" id="L315">        final DataForm resultform = new DataForm(DataForm.Type.result);</span>
+<span class="nc" id="L316">        boolean atLeastoneResult = false;</span>
+<span class="nc bnc" id="L317" title="All 2 branches missed.">        for (MUCRoom room : mucrsm)</span>
+        {
+<span class="nc" id="L319">            final Map&lt;String, Object&gt; fields = new HashMap&lt;&gt;();</span>
+<span class="nc" id="L320">            fields.put(&quot;name&quot;, room.getNaturalLanguageName());</span>
+<span class="nc" id="L321">            fields.put(SUBJECT, room.getSubject());</span>
+<span class="nc" id="L322">            fields.put(NUM_USERS, room.getOccupantsCount());</span>
+<span class="nc" id="L323">            fields.put(NUM_MAX_USERS, determineMaxUsersDisplay(room.getMaxUsers()));</span>
+<span class="nc" id="L324">            fields.put(&quot;is_password_protected&quot;, room.isPasswordProtected());</span>
+<span class="nc" id="L325">            fields.put(&quot;is_member_only&quot;, room.isMembersOnly());</span>
+<span class="nc" id="L326">            fields.put(&quot;jid&quot;, room.getRole().getRoleAddress().toString());</span>
+<span class="nc" id="L327">            resultform.addItemFields(fields);</span>
+<span class="nc" id="L328">            atLeastoneResult = true;</span>
+<span class="nc" id="L329">        }</span>
+<span class="nc bnc" id="L330" title="All 2 branches missed.">        if (atLeastoneResult)</span>
+        {
+<span class="nc" id="L332">            resultform.addReportedField(&quot;name&quot;, &quot;Name&quot;, FormField.Type.text_single);</span>
+<span class="nc" id="L333">            resultform.addReportedField(SUBJECT, &quot;Subject&quot;, FormField.Type.text_single);</span>
+<span class="nc" id="L334">            resultform.addReportedField(NUM_USERS, &quot;Number of users&quot;, FormField.Type.text_single);</span>
+<span class="nc" id="L335">            resultform.addReportedField(NUM_MAX_USERS, &quot;Max number allowed of users&quot;, FormField.Type.text_single);</span>
+<span class="nc" id="L336">            resultform.addReportedField(&quot;is_password_protected&quot;, &quot;Is a password protected room.&quot;, FormField.Type.boolean_type);</span>
+<span class="nc" id="L337">            resultform.addReportedField(&quot;is_member_only&quot;, &quot;Is a member only room.&quot;, FormField.Type.boolean_type);</span>
+<span class="nc" id="L338">            resultform.addReportedField(&quot;jid&quot;, &quot;JID&quot;, FormField.Type.jid_single);</span>
+        }
+<span class="nc" id="L340">                res.add(resultform.getElement());</span>
+<span class="nc bnc" id="L341" title="All 2 branches missed.">        if (applyRSM)</span>
+        {
+<span class="nc" id="L343">            res.add(searchResults.generateSetElementFromResults(mucrsm));</span>
+        }
+
+<span class="nc" id="L346">        reply.setChildElement(res);</span>
+
+<span class="nc" id="L348">        return reply;</span>
+    }
+
+    private String determineMaxUsersDisplay(int maxUsers) {
+<span class="nc bnc" id="L352" title="All 2 branches missed.">        return (maxUsers == 0) ? &quot;unlimited&quot; : String.valueOf(maxUsers);</span>
+     }
+
+
+    /**
+     * Sorts the provided list in such a way that the MUC with the most users
+     * will be the first one in the list.
+     * 
+     * @param mucs
+     *            The unordered list that will be sorted.
+     * @return The sorted list of MUC rooms.
+     */
+    private static List&lt;MUCRoom&gt; sortByUserAmount(List&lt;MUCRoom&gt; mucs)
+    {
+<span class="nc" id="L366">        Collections.sort(mucs, new Comparator&lt;MUCRoom&gt;()</span>
+<span class="nc" id="L367">        {</span>
+            @Override
+            public int compare(MUCRoom o1, MUCRoom o2)
+            {
+<span class="nc" id="L371">                return o2.getOccupantsCount() - o1.getOccupantsCount();</span>
+            }
+        });
+
+<span class="nc" id="L375">        return mucs;</span>
+    }
+
+    /**
+     * Checks if the room may be included in search results. This is almost
+     * identical to {@link MultiUserChatServiceImpl#canDiscoverRoom(org.jivesoftware.openfire.muc.MUCRoom, org.xmpp.packet.JID)},
+     * but that method is private and cannot be re-used here.
+     * 
+     * @param room
+     *            The room to check
+     * @return ''true'' if the room may be included in search results, ''false''
+     *         otherwise.
+     */
+    private static boolean canBeIncludedInResult(MUCRoom room)
+    {
+        // Check if locked rooms may be discovered
+<span class="nc" id="L391">        final boolean discoverLocked = MUCPersistenceManager.getBooleanProperty(room.getMUCService().getServiceName(), &quot;discover.locked&quot;, true);</span>
+
+<span class="nc bnc" id="L393" title="All 4 branches missed.">        if (!discoverLocked &amp;&amp; room.isLocked())</span>
+        {
+<span class="nc" id="L395">            return false;</span>
+        }
+<span class="nc" id="L397">        return room.isPublicRoom();</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

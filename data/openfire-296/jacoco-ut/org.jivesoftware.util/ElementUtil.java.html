@@ -1,0 +1,392 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>ElementUtil.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.util</a> &gt; <span class="el_source">ElementUtil.java</span></div><h1>ElementUtil.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2004-2009 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.util;
+
+import org.dom4j.Element;
+import org.dom4j.Node;
+
+import java.util.*;
+
+/**
+ * &lt;p&gt;We use a simple
+ * naming convention of meta-data key names: data is stored
+ * heirarchically separated by dots. The last name may contain
+ * a colon ':' character that is read as name:attribute.
+ * For example setting X.Y.Z to someValue, would map to an XML snippet of:&lt;/p&gt;
+ * &lt;pre&gt;
+ * &amp;lt;X&amp;gt;
+ *     &amp;lt;Y&amp;gt;
+ *         &amp;lt;Z&amp;gt;someValue&amp;lt;/Z&amp;gt;
+ *     &amp;lt;/Y&amp;gt;
+ * &amp;lt;/X&amp;gt;
+ * &lt;/pre&gt;
+ * &lt;p&gt;And X.Y.Z:key to anotherValue as:&lt;/p&gt;
+ * &lt;pre&gt;
+ * &amp;lt;X&amp;gt;
+ *     &amp;lt;Y&amp;gt;
+ *         &amp;lt;Z key=&quot;anotherValue&quot; /&amp;gt;
+ *     &amp;lt;/Y&amp;gt;
+ * &amp;lt;/X&amp;gt;
+ * &lt;/pre&gt;
+ * &lt;p&gt;Some XML cannot be built or accessed using this naming
+ * convention (e.g. a typical Roster reset packet). More complex XML
+ * packet should be represented using the XMPPDOMFragment. The
+ * Element class is designed to provide 80% of XML
+ * manipulation capabilities with the simplest 20% of code and API size
+ * making it convenient for meta-data, simple IQ packets, etc.&lt;/p&gt;
+ */
+public class ElementUtil {
+
+
+<span class="nc" id="L55">    private ElementUtil() {</span>
+<span class="nc" id="L56">    }</span>
+
+
+    /**
+     * Returns the value of the specified property. A {@code null} answer does not necessarily mean
+     * that the property does not exist.
+     *
+     * @param element the element from which the property should be retrieved
+     * @param name the name of the property to get.
+     * @return the value of the specified property.
+     */
+    public static String getProperty(Element element, String name) {
+<span class="nc" id="L68">        String value = null;</span>
+<span class="nc" id="L69">        String[] propName = parsePropertyName(name);</span>
+
+        // Grab the attribute if there is one
+<span class="nc" id="L72">        String lastName = propName[propName.length - 1];</span>
+<span class="nc" id="L73">        String attName = null;</span>
+<span class="nc" id="L74">        int attributeIndex = lastName.indexOf(':');</span>
+<span class="nc bnc" id="L75" title="All 2 branches missed.">        if (attributeIndex &gt;= 0) {</span>
+<span class="nc" id="L76">            propName[propName.length - 1] = lastName.substring(0, attributeIndex);</span>
+<span class="nc" id="L77">            attName = lastName.substring(attributeIndex + 1);</span>
+        }
+
+        // Search for this property by traversing down the XML hierarchy.
+<span class="nc bnc" id="L81" title="All 2 branches missed.">        int i = propName[0].equals(element.getName()) ? 1 : 0;</span>
+<span class="nc bnc" id="L82" title="All 2 branches missed.">        for (; i &lt; propName.length; i++) {</span>
+<span class="nc" id="L83">            element = element.element(propName[i]);</span>
+<span class="nc bnc" id="L84" title="All 2 branches missed.">            if (element == null) {</span>
+<span class="nc" id="L85">                break;</span>
+            }
+        }
+<span class="nc bnc" id="L88" title="All 2 branches missed.">        if (element != null) {</span>
+<span class="nc bnc" id="L89" title="All 2 branches missed.">            if (attName == null) {</span>
+<span class="nc" id="L90">                value = element.getTextTrim();</span>
+            }
+            else {
+<span class="nc" id="L93">                value = element.attributeValue(attName);</span>
+            }
+        }
+
+<span class="nc" id="L97">        return value;</span>
+    }
+
+    /**
+     * Returns true if the specified property is included in the XML hierarchy. A property could
+     * have a value associated or not. If the property has an associated value then
+     *
+     * @param element the element to check
+     * @param name the name of the property to find out.
+     * @return true if the specified property is included in the XML hierarchy.
+     */
+    public static boolean includesProperty(Element element, String name) {
+<span class="nc" id="L109">        String[] propName = parsePropertyName(name);</span>
+
+        // Grab the attribute if there is one
+<span class="nc" id="L112">        String lastName = propName[propName.length - 1];</span>
+<span class="nc" id="L113">        String attName = null;</span>
+<span class="nc" id="L114">        int attributeIndex = lastName.indexOf(':');</span>
+<span class="nc bnc" id="L115" title="All 2 branches missed.">        if (attributeIndex &gt;= 0) {</span>
+<span class="nc" id="L116">            propName[propName.length - 1] = lastName.substring(0, attributeIndex);</span>
+<span class="nc" id="L117">            attName = lastName.substring(attributeIndex + 1);</span>
+        }
+
+        // Search for this property by traversing down the XML hierarchy.
+<span class="nc bnc" id="L121" title="All 2 branches missed.">        int i = propName[0].equals(element.getName()) ? 1 : 0;</span>
+<span class="nc bnc" id="L122" title="All 2 branches missed.">        for (; i &lt; propName.length; i++) {</span>
+<span class="nc" id="L123">            element = element.element(propName[i]);</span>
+<span class="nc bnc" id="L124" title="All 2 branches missed.">            if (element == null) {</span>
+<span class="nc" id="L125">                break;</span>
+            }
+        }
+
+<span class="nc bnc" id="L129" title="All 2 branches missed.">        if (element != null) {</span>
+<span class="nc bnc" id="L130" title="All 2 branches missed.">            if (attName == null){</span>
+                // The property exists so return true
+<span class="nc" id="L132">                return true;</span>
+            } else {
+                // The property exists if the attribute exists in the element
+<span class="nc bnc" id="L135" title="All 2 branches missed.">                return element.attribute(attName) != null;</span>
+            }
+        }
+        else {
+            // The property does not exist so return false
+<span class="nc" id="L140">            return false;</span>
+        }
+    }
+
+    /**
+     * Return all values who's path matches the given property name as a String array,
+     * or an empty array if the if there are no children. You MAY NOT use the atttribute
+     * markup (using a ':' in the last element name) with this call.
+     * &lt;p&gt;
+     * getProperties() allows you to retrieve several values with the same property name.
+     * For example, consider the XML file entry:&lt;/p&gt;
+     * &lt;pre&gt;
+     * &amp;lt;foo&amp;gt;
+     *     &amp;lt;bar&amp;gt;
+     *         &amp;lt;prop&amp;gt;some value&amp;lt;/prop&amp;gt;
+     *         &amp;lt;prop&amp;gt;other value&amp;lt;/prop&amp;gt;
+     *         &amp;lt;prop&amp;gt;last value&amp;lt;/prop&amp;gt;
+     *     &amp;lt;/bar&amp;gt;
+     * &amp;lt;/foo&amp;gt;
+     * &lt;/pre&gt;
+     * If you call getProperties(&quot;foo.bar.prop&quot;) will return a string array containing
+     * {&quot;some value&quot;, &quot;other value&quot;, &quot;last value&quot;}.
+     *
+     * @param element the element to get the properties for
+     * @param name the name of the property to retrieve
+     * @return all child property values for the given node name.
+     */
+    public String[] getProperties(Element element, String name) {
+<span class="nc" id="L168">        String[] propName = parsePropertyName(name);</span>
+
+        // Search for this property by traversing down the XML heirarchy, stopping one short.
+<span class="nc bnc" id="L171" title="All 2 branches missed.">        int i = propName[0].equals(element.getName()) ? 1 : 0;</span>
+<span class="nc bnc" id="L172" title="All 2 branches missed.">        for (; i &lt; propName.length - 1; i++) {</span>
+<span class="nc" id="L173">            element = element.element(propName[i]);</span>
+<span class="nc bnc" id="L174" title="All 2 branches missed.">            if (element == null) {</span>
+                // This node doesn't match this part of the property name which
+                // indicates this property doesn't exist so return empty array.
+<span class="nc" id="L177">                return new String[]{};</span>
+            }
+        }
+        // We found matching property, return names of children.
+<span class="nc" id="L181">        Iterator iter = element.elementIterator(propName[propName.length - 1]);</span>
+<span class="nc" id="L182">        ArrayList&lt;String&gt; props = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L183" title="All 2 branches missed.">        while (iter.hasNext()) {</span>
+<span class="nc" id="L184">            Element e = (Element) iter.next();</span>
+<span class="nc" id="L185">            props.add(e.getName());</span>
+<span class="nc" id="L186">        }</span>
+<span class="nc" id="L187">        String[] childrenNames = new String[props.size()];</span>
+<span class="nc" id="L188">        return props.toArray(childrenNames);</span>
+    }
+
+    /**
+     * Sets a property to an array of values.  You MAY NOT use the atttribute
+     * markup (using a ':' in the last element name) with this call. Multiple values matching the
+     * same property is mapped to an XML file as multiple elements containing each value.
+     * For example, using the name &quot;foo.bar.prop&quot;, and the value string array containing
+     * {&quot;some value&quot;, &quot;other value&quot;, &quot;last value&quot;} would produce the following XML:
+     * &lt;pre&gt;
+     * &amp;lt;foo&amp;gt;
+     *     &amp;lt;bar&amp;gt;
+     *         &amp;lt;prop&amp;gt;some value&amp;lt;/prop&amp;gt;
+     *         &amp;lt;prop&amp;gt;other value&amp;lt;/prop&amp;gt;
+     *         &amp;lt;prop&amp;gt;last value&amp;lt;/prop&amp;gt;
+     *     &amp;lt;/bar&amp;gt;
+     * &amp;lt;/foo&amp;gt;
+     * &lt;/pre&gt;
+     *
+     * @param element the element to set the properties on
+     * @param name   the name of the property.
+     * @param values The array of values for the property (can be empty but not null)
+     */
+    public static void setProperties(Element element, String name, String[] values) {
+<span class="nc" id="L212">        String[] propName = parsePropertyName(name);</span>
+<span class="nc" id="L213">        setProperty(element, name, values[0]);</span>
+
+        // Search for this property by traversing down the XML heirarchy, stopping one short.
+<span class="nc bnc" id="L216" title="All 2 branches missed.">        int i = propName[0].equals(element.getName()) ? 1 : 0;</span>
+<span class="nc bnc" id="L217" title="All 2 branches missed.">        for (; i &lt; propName.length - 1; i++) {</span>
+<span class="nc" id="L218">            element = element.element(propName[i]);</span>
+<span class="nc bnc" id="L219" title="All 2 branches missed.">            if (element == null) {</span>
+                // This node doesn't match this part of the property name which
+                // indicates this property doesn't exist so return empty array.
+<span class="nc" id="L222">                return;</span>
+            }
+        }
+<span class="nc" id="L225">        String childName = propName[propName.length - 1];</span>
+        // We found matching property, clear all children.
+<span class="nc" id="L227">        Iterator iter = element.elementIterator(childName);</span>
+<span class="nc bnc" id="L228" title="All 2 branches missed.">        while (iter.hasNext()) {</span>
+<span class="nc" id="L229">            ((Node) iter.next()).detach();</span>
+        }
+<span class="nc bnc" id="L231" title="All 2 branches missed.">        for (int j = 0; i &lt; values.length; i++) {</span>
+<span class="nc bnc" id="L232" title="All 2 branches missed.">            if (values[j] != null) {</span>
+<span class="nc" id="L233">                element.addElement(childName).setText(values[j]);</span>
+            }
+        }
+<span class="nc" id="L236">    }</span>
+
+    /**
+     * Return all children property names of a parent property as a String array,
+     * or an empty array if the if there are no children. You MAY NOT use the atttribute
+     * markup (using a ':' in the last element name) with this call.
+     * For example, given the properties {@code X.Y.A}, {@code X.Y.B}, and {@code X.Y.C}, then
+     * the child properties of {@code X.Y} are {@code A}, {@code B}, and
+     * {@code C}.
+     *
+     * @param element the element to get the properties from
+     * @param parent the name of the parent property.
+     * @return all child property values for the given parent.
+     */
+    public static String[] getChildrenProperties(Element element, String parent) {
+<span class="nc" id="L251">        String[] propName = parsePropertyName(parent);</span>
+
+        // Search for this property by traversing down the XML heirarchy.
+<span class="nc bnc" id="L254" title="All 2 branches missed.">        int i = propName[0].equals(element.getName()) ? 1 : 0;</span>
+<span class="nc bnc" id="L255" title="All 2 branches missed.">        for (; i &lt; propName.length; i++) {</span>
+<span class="nc" id="L256">            element = element.element(propName[i]);</span>
+<span class="nc bnc" id="L257" title="All 2 branches missed.">            if (element == null) {</span>
+                // This node doesn't match this part of the property name which
+                // indicates this property doesn't exist so return empty array.
+<span class="nc" id="L260">                return new String[]{};</span>
+            }
+        }
+        // We found matching property, return names of children.
+<span class="nc" id="L264">        List children = element.elements();</span>
+<span class="nc" id="L265">        int childCount = children.size();</span>
+<span class="nc" id="L266">        String[] childrenNames = new String[childCount];</span>
+<span class="nc bnc" id="L267" title="All 2 branches missed.">        for (int j = 0; i &lt; childCount; i++) {</span>
+<span class="nc" id="L268">            childrenNames[j] = ((Element) children.get(j)).getName();</span>
+        }
+<span class="nc" id="L270">        return childrenNames;</span>
+    }
+
+    /**
+     * Returns all recursive children of the given parent property or an empty string array
+     * if no children exist. The list of children is depth-first so the array is optimized
+     * for easy displaying.
+     *
+     * @param element the element to get the properties from
+     * @param parent the parent property.
+     * @return all recursive children of the given property in depth-first order or an empty
+     *         string array if no children exist.
+     */
+    public static String[] getRecursiveChildrenProperties(Element element, String parent) {
+<span class="nc" id="L284">        String[] properties = getChildrenProperties(element, parent);</span>
+<span class="nc bnc" id="L285" title="All 2 branches missed.">        if (properties.length == 0) {</span>
+<span class="nc" id="L286">            return properties;</span>
+        }
+        else {
+<span class="nc" id="L289">            List&lt;String&gt; list = new ArrayList&lt;&gt;(15);</span>
+<span class="nc bnc" id="L290" title="All 2 branches missed.">            for (int i = 0; i &lt; properties.length; i++) {</span>
+<span class="nc" id="L291">                String propName = parent + &quot;.&quot; + properties[i];</span>
+<span class="nc" id="L292">                list.add(propName);</span>
+<span class="nc" id="L293">                list.addAll(Arrays.asList(getRecursiveChildrenProperties(element, propName)));</span>
+            }
+<span class="nc" id="L295">            return list.toArray(new String[]{});</span>
+        }
+    }
+
+    /**
+     * Sets the value of the specified property. If the property doesn't
+     * currently exist, it will be automatically created.
+     *
+     * @param element the element to set the property on
+     * @param name  the name of the property to set.
+     * @param value the new value for the property.
+     */
+    public static void setProperty(Element element, String name, String value) {
+<span class="nc bnc" id="L308" title="All 4 branches missed.">        if (name == null || name.length() == 0) return;</span>
+<span class="nc bnc" id="L309" title="All 2 branches missed.">        if (value == null) value = &quot;&quot;;</span>
+
+<span class="nc" id="L311">        String[] propName = parsePropertyName(name);</span>
+
+        // Search for this property by traversing down the XML heirarchy.
+<span class="nc bnc" id="L314" title="All 2 branches missed.">        int i = propName[0].equals(element.getName()) ? 1 : 0;</span>
+<span class="nc bnc" id="L315" title="All 2 branches missed.">        for (; i &lt; propName.length - 1; i++) {</span>
+            // If we don't find this part of the property in the XML heirarchy
+            // we add it as a new node
+<span class="nc bnc" id="L318" title="All 2 branches missed.">            if (element.element(propName[i]) == null) {</span>
+<span class="nc" id="L319">                element.addElement(propName[i]);</span>
+            }
+<span class="nc" id="L321">            element = element.element(propName[i]);</span>
+        }
+<span class="nc" id="L323">        String lastName = propName[propName.length - 1];</span>
+<span class="nc" id="L324">        int attributeIndex = lastName.indexOf(':');</span>
+<span class="nc bnc" id="L325" title="All 2 branches missed.">        if (attributeIndex &gt;= 0) {</span>
+<span class="nc" id="L326">            String eleName = lastName.substring(0, attributeIndex);</span>
+<span class="nc" id="L327">            String attName = lastName.substring(attributeIndex + 1);</span>
+            // If we don't find this part of the property in the XML heirarchy
+            // we add it as a new node
+<span class="nc bnc" id="L330" title="All 2 branches missed.">            if (element.element(eleName) == null) {</span>
+<span class="nc" id="L331">                element.addElement(eleName);</span>
+            }
+<span class="nc" id="L333">            element.element(eleName).addAttribute(attName, value);</span>
+<span class="nc" id="L334">        }</span>
+        else {
+            // If we don't find this part of the property in the XML heirarchy
+            // we add it as a new node
+<span class="nc bnc" id="L338" title="All 2 branches missed.">            if (element.element(lastName) == null) {</span>
+<span class="nc" id="L339">                element.addElement(lastName);</span>
+            }
+            // Set the value of the property in this node.
+<span class="nc" id="L342">            element.element(lastName).setText(value);</span>
+        }
+<span class="nc" id="L344">    }</span>
+
+    /**
+     * &lt;p&gt;Deletes the specified property.&lt;/p&gt;
+     * &lt;p&gt;You MAY NOT use the atttribute
+     * markup (using a ':' in the last element name) with this call.
+     * deleteProperty() removes both the containing text, and the element itself along with
+     * any attributes associated with that element.&lt;/p&gt;
+     *
+     * @param element the element to delete the property from
+     * @param name the property to delete.
+     */
+    public static void deleteProperty(Element element, String name) {
+        // Remove property from cache.
+<span class="nc" id="L358">        String[] propName = parsePropertyName(name);</span>
+
+        // Search for this property by traversing down the XML heirarchy.
+<span class="nc bnc" id="L361" title="All 2 branches missed.">        for (int i = 0; i &lt; propName.length - 1; i++) {</span>
+<span class="nc" id="L362">            element = element.element(propName[i]);</span>
+            // Can't find the property so return.
+<span class="nc bnc" id="L364" title="All 2 branches missed.">            if (element == null) {</span>
+<span class="nc" id="L365">                return;</span>
+            }
+        }
+        // Found the correct element to remove, so remove it...
+<span class="nc" id="L369">        element.remove(element.element(propName[propName.length - 1]));</span>
+<span class="nc" id="L370">    }</span>
+
+    /**
+     * Returns an array representation of the given Jive property. Jive
+     * properties are always in the format &quot;prop.name.is.this&quot; which would be
+     * represented as an array of four Strings.
+     *
+     * @param name the name of the Jive property.
+     * @return an array representation of the given Jive property.
+     */
+    private static String[] parsePropertyName(String name) {
+<span class="nc" id="L381">        List&lt;String&gt; propName = new ArrayList&lt;&gt;(5);</span>
+        // Use a StringTokenizer to tokenize the property name.
+<span class="nc" id="L383">        StringTokenizer tokenizer = new StringTokenizer(name, &quot;.&quot;);</span>
+<span class="nc bnc" id="L384" title="All 2 branches missed.">        while (tokenizer.hasMoreTokens()) {</span>
+<span class="nc" id="L385">            propName.add(tokenizer.nextToken());</span>
+        }
+<span class="nc" id="L387">        return propName.toArray(new String[propName.size()]);</span>
+    }
+
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

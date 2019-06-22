@@ -1,0 +1,170 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>MappedUserPropertyProvider.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.user.property</a> &gt; <span class="el_source">MappedUserPropertyProvider.java</span></div><h1>MappedUserPropertyProvider.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2017 IgniteRealtime.org
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.jivesoftware.openfire.user.property;
+
+import org.jivesoftware.openfire.user.UserNotFoundException;
+import org.jivesoftware.util.ClassUtils;
+import org.jivesoftware.util.JiveGlobals;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.util.Map;
+
+/**
+ * A {@link UserPropertyProvider} that delegates to a user-specific UserPropertyProvider.
+ *
+ * This implementation will explicitly verify if a user exists, when operating on its properties, but only if the
+ * corresponding mapped provider does so. If that is the case, then the methods of this implementation will throw
+ * {@link org.jivesoftware.openfire.user.UserNotFoundException}.
+ *
+ * This class related to, but is distinct from {@link HybridUserPropertyProvider}. The Hybrid variant of the provider
+ * iterates over providers, operating on the first applicable instance. This Mapped variant, however, maps each user to
+ * exactly one provider.
+ *
+ * To use this provider, use the following system property definition:
+ *
+ * &lt;ul&gt;
+ * &lt;li&gt;{@code provider.userproperty.className = org.jivesoftware.openfire.user.MappedUserPropertyProvider}&lt;/li&gt;
+ * &lt;/ul&gt;
+ *
+ * To be usable, a {@link UserPropertyProviderMapper} must be configured using the {@code mappedUserPropertyProvider.mapper.className}
+ * system property. It is of importance to note that most UserPropertyProviderMapper implementations will require additional
+ * configuration.
+ *
+ * @author Guus der Kinderen, guus@goodbytes.nl
+ */
+public class MappedUserPropertyProvider implements UserPropertyProvider
+{
+    /**
+     * Name of the property of which the value is expected to be the classname of the UserPropertyProviderMapper
+     * instance to be used by instances of this class.
+     */
+    public static final String PROPERTY_MAPPER_CLASSNAME = &quot;mappedUserPropertyProvider.mapper.className&quot;;
+<span class="nc" id="L56">    private static final Logger Log = LoggerFactory.getLogger( MappedUserPropertyProvider.class );</span>
+    /**
+     * Used to determine what provider is to be used to operate on a particular user.
+     */
+    protected final UserPropertyProviderMapper mapper;
+
+    public MappedUserPropertyProvider()
+<span class="nc" id="L63">    {</span>
+        // Migrate properties.
+<span class="nc" id="L65">        JiveGlobals.migrateProperty( PROPERTY_MAPPER_CLASSNAME );</span>
+
+        // Instantiate mapper.
+<span class="nc" id="L68">        final String mapperClass = JiveGlobals.getProperty( PROPERTY_MAPPER_CLASSNAME );</span>
+<span class="nc bnc" id="L69" title="All 2 branches missed.">        if ( mapperClass == null )</span>
+        {
+<span class="nc" id="L71">            throw new IllegalStateException( &quot;A mapper must be specified via openfire.xml or the system properties.&quot; );</span>
+        }
+
+        try
+        {
+<span class="nc" id="L76">            final Class c = ClassUtils.forName( mapperClass );</span>
+<span class="nc" id="L77">            mapper = (UserPropertyProviderMapper) c.newInstance();</span>
+        }
+<span class="nc" id="L79">        catch ( Exception e )</span>
+        {
+<span class="nc" id="L81">            throw new IllegalStateException( &quot;Unable to create new instance of UserPropertyProviderMapper class: &quot; + mapperClass, e );</span>
+<span class="nc" id="L82">        }</span>
+<span class="nc" id="L83">    }</span>
+
+    /**
+     * Instantiates a UserPropertyProvider based on a property value (that is expected to be a class name). When the
+     * property is not set, this method returns null. When the property is set, but an exception occurs while
+     * instantiating the class, this method logs the error and returns null.
+     *
+     * UserProvider classes are required to have a public, no-argument constructor.
+     *
+     * @param propertyName A property name (cannot ben ull).
+     * @return A user provider (can be null).
+     */
+    public static UserPropertyProvider instantiate( String propertyName )
+    {
+<span class="nc" id="L97">        final String className = JiveGlobals.getProperty( propertyName );</span>
+<span class="nc bnc" id="L98" title="All 2 branches missed.">        if ( className == null )</span>
+        {
+<span class="nc" id="L100">            Log.debug( &quot;Property '{}' is undefined. Skipping.&quot;, propertyName );</span>
+<span class="nc" id="L101">            return null;</span>
+        }
+<span class="nc" id="L103">        Log.debug( &quot;About to to instantiate an UserPropertyProvider '{}' based on the value of property '{}'.&quot;, className, propertyName );</span>
+        try
+        {
+<span class="nc" id="L106">            final Class c = ClassUtils.forName( className );</span>
+<span class="nc" id="L107">            final UserPropertyProvider provider = (UserPropertyProvider) c.newInstance();</span>
+<span class="nc" id="L108">            Log.debug( &quot;Instantiated UserPropertyProvider '{}'&quot;, className );</span>
+<span class="nc" id="L109">            return provider;</span>
+        }
+<span class="nc" id="L111">        catch ( Exception e )</span>
+        {
+<span class="nc" id="L113">            Log.error( &quot;Unable to load UserPropertyProvider '{}'. Users in this provider will be disabled.&quot;, className, e );</span>
+<span class="nc" id="L114">            return null;</span>
+        }
+    }
+
+    @Override
+    public Map&lt;String, String&gt; loadProperties( String username ) throws UserNotFoundException
+    {
+<span class="nc" id="L121">        return mapper.getUserPropertyProvider( username ).loadProperties( username );</span>
+    }
+
+    @Override
+    public String loadProperty( String username, String propName ) throws UserNotFoundException
+    {
+<span class="nc" id="L127">        return mapper.getUserPropertyProvider( username ).loadProperty( username, propName );</span>
+    }
+
+    @Override
+    public void insertProperty( String username, String propName, String propValue ) throws UserNotFoundException
+    {
+<span class="nc" id="L133">        mapper.getUserPropertyProvider( username ).insertProperty( username, propName, propValue );</span>
+<span class="nc" id="L134">    }</span>
+
+    @Override
+    public void updateProperty( String username, String propName, String propValue ) throws UserNotFoundException
+    {
+<span class="nc" id="L139">        mapper.getUserPropertyProvider( username ).updateProperty( username, propName, propValue );</span>
+<span class="nc" id="L140">    }</span>
+
+    @Override
+    public void deleteProperty( String username, String propName ) throws UserNotFoundException
+    {
+<span class="nc" id="L145">        mapper.getUserPropertyProvider( username ).deleteProperty( username, propName );</span>
+<span class="nc" id="L146">    }</span>
+
+    /**
+     * Returns whether &lt;em&gt;all&lt;/em&gt; backing providers are read-only. When read-only, properties can not be created,
+     * deleted, or modified. If at least one provider is not read-only, this method returns false.
+     *
+     * @return true when all backing providers are read-only, otherwise false.
+     */
+    @Override
+    public boolean isReadOnly()
+    {
+        // TODO Make calls concurrent for improved throughput.
+<span class="nc bnc" id="L158" title="All 2 branches missed.">        for ( final UserPropertyProvider provider : mapper.getUserPropertyProviders() )</span>
+        {
+            // If at least one provider is not readonly, neither is this proxy.
+<span class="nc bnc" id="L161" title="All 2 branches missed.">            if ( !provider.isReadOnly() )</span>
+            {
+<span class="nc" id="L163">                return false;</span>
+            }
+<span class="nc" id="L165">        }</span>
+
+<span class="nc" id="L167">        return true;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

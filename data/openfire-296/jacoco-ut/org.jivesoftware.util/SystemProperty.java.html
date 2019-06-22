@@ -1,0 +1,715 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>SystemProperty.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.util</a> &gt; <span class="el_source">SystemProperty.java</span></div><h1>SystemProperty.java</h1><pre class="source lang-java linenums">package org.jivesoftware.util;
+
+import java.time.Duration;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.BiFunction;
+import java.util.function.Consumer;
+import java.util.function.Function;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
+import org.apache.commons.lang3.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmpp.packet.JID;
+
+/**
+ * Represents a system property - also accessible via {@link JiveGlobals}. The only way to create a SystemProperty object
+ * is to use a {@link Builder}.
+ *
+ * @param &lt;T&gt; The type of system property.
+ */
+public final class SystemProperty&lt;T&gt; {
+
+<span class="fc" id="L38">    private static final Logger LOGGER = LoggerFactory.getLogger(SystemProperty.class);</span>
+<span class="fc" id="L39">    private static final Map&lt;String, SystemProperty&gt; PROPERTIES = new ConcurrentHashMap&lt;&gt;();</span>
+<span class="fc" id="L40">    private static final Map&lt;ChronoUnit, Function&lt;Duration, Long&gt;&gt; DURATION_TO_LONG = new HashMap&lt;&gt;();</span>
+<span class="fc" id="L41">    private static final Map&lt;ChronoUnit, Function&lt;Long, Duration&gt;&gt; LONG_TO_DURATION = new HashMap&lt;&gt;();</span>
+<span class="fc" id="L42">    private static final Map&lt;Class, BiFunction&lt;String, SystemProperty, Object&gt;&gt; FROM_STRING = new HashMap&lt;&gt;();</span>
+<span class="fc" id="L43">    private static final Map&lt;Class, BiFunction&lt;Object, SystemProperty, String&gt;&gt; TO_STRING = new HashMap&lt;&gt;();</span>
+<span class="fc" id="L44">    private static final Map&lt;Class, BiFunction&lt;Object, SystemProperty, String&gt;&gt; TO_DISPLAY_STRING = new HashMap&lt;&gt;();</span>
+<span class="fc" id="L45">    private static final Set&lt;Class&gt; NULLABLE_TYPES = Collections.unmodifiableSet(new HashSet&lt;&gt;(Arrays.asList(String.class, Class.class, Duration.class, Instant.class, JID.class)));</span>
+
+    static {
+        // Populate the map that turns a Duration to a Long based on the ChronoUnit a property should be saved in
+<span class="fc" id="L49">        DURATION_TO_LONG.put(ChronoUnit.MILLIS, Duration::toMillis);</span>
+<span class="fc" id="L50">        DURATION_TO_LONG.put(ChronoUnit.SECONDS, Duration::getSeconds);</span>
+<span class="fc" id="L51">        DURATION_TO_LONG.put(ChronoUnit.MINUTES, Duration::toMinutes);</span>
+<span class="fc" id="L52">        DURATION_TO_LONG.put(ChronoUnit.HOURS, Duration::toHours);</span>
+<span class="fc" id="L53">        DURATION_TO_LONG.put(ChronoUnit.DAYS, Duration::toDays);</span>
+    }
+
+    static {
+        // Populate the map that turns a Long to a Duration based on the ChronoUnit a property should be saved in
+<span class="fc" id="L58">        LONG_TO_DURATION.put(ChronoUnit.MILLIS, Duration::ofMillis);</span>
+<span class="fc" id="L59">        LONG_TO_DURATION.put(ChronoUnit.SECONDS, Duration::ofSeconds);</span>
+<span class="fc" id="L60">        LONG_TO_DURATION.put(ChronoUnit.MINUTES, Duration::ofMinutes);</span>
+<span class="fc" id="L61">        LONG_TO_DURATION.put(ChronoUnit.HOURS, Duration::ofHours);</span>
+<span class="fc" id="L62">        LONG_TO_DURATION.put(ChronoUnit.DAYS, Duration::ofDays);</span>
+    }
+
+    static {
+        // Given a String value and a system property, converts the String to the object of appropriate type or null
+<span class="fc" id="L67">        FROM_STRING.put(String.class, (value, systemProperty) -&gt; value);</span>
+<span class="pc" id="L68">        FROM_STRING.put(Integer.class, (value, systemProperty) -&gt; org.jivesoftware.util.StringUtils.parseInteger(value).orElse(null));</span>
+<span class="fc" id="L69">        FROM_STRING.put(Long.class, (value, systemProperty) -&gt; org.jivesoftware.util.StringUtils.parseLong(value).orElse(null));</span>
+<span class="fc bfc" id="L70" title="All 2 branches covered.">        FROM_STRING.put(Boolean.class, (value, systemProperty) -&gt; value == null ? null : Boolean.valueOf(value));</span>
+<span class="fc" id="L71">        FROM_STRING.put(Duration.class, (value, systemProperty) -&gt; org.jivesoftware.util.StringUtils.parseLong(value).map(longValue -&gt; LONG_TO_DURATION.get(systemProperty.chronoUnit).apply(longValue)).orElse(null));</span>
+<span class="fc" id="L72">        FROM_STRING.put(Instant.class, (value, systemProperty) -&gt; org.jivesoftware.util.StringUtils.parseLong(value).map(Instant::ofEpochMilli).orElse(null));</span>
+<span class="fc" id="L73">        FROM_STRING.put(JID.class, (value, systemProperty) -&gt; {</span>
+<span class="fc bfc" id="L74" title="All 2 branches covered.">            if(value == null) {</span>
+<span class="fc" id="L75">                return null;</span>
+            }
+            try {
+<span class="fc" id="L78">                return new JID(value);</span>
+<span class="fc" id="L79">            } catch(final Exception e) {</span>
+<span class="fc" id="L80">                LOGGER.warn(&quot;Configured property {} is not a valid JID&quot;, value);</span>
+<span class="fc" id="L81">                return null;</span>
+            }
+        });
+<span class="fc" id="L84">        FROM_STRING.put(Enum.class, (value, systemProperty) -&gt; {</span>
+<span class="fc bfc" id="L85" title="All 2 branches covered.">            if (StringUtils.isBlank(value)) {</span>
+<span class="fc" id="L86">                return null;</span>
+            }
+<span class="pc bpc" id="L88" title="1 of 2 branches missed.">            for (final Object constant : systemProperty.defaultValue.getClass().getEnumConstants()) {</span>
+<span class="fc bfc" id="L89" title="All 2 branches covered.">                if (((Enum) constant).name().equals(value)) {</span>
+<span class="fc" id="L90">                    return constant;</span>
+                }
+            }
+<span class="nc" id="L93">            return null;</span>
+        });
+<span class="fc" id="L95">        FROM_STRING.put(Class.class, (value, systemProperty) -&gt; {</span>
+<span class="fc bfc" id="L96" title="All 2 branches covered.">            if(StringUtils.isBlank(value)) {</span>
+<span class="fc" id="L97">                return null;</span>
+            }
+            try {
+<span class="fc" id="L100">                final Class clazz = Class.forName(value);</span>
+                //noinspection unchecked
+<span class="fc bfc" id="L102" title="All 2 branches covered.">                if (systemProperty.baseClass.isAssignableFrom(clazz)) {</span>
+<span class="fc" id="L103">                    return clazz;</span>
+                } else {
+<span class="fc" id="L105">                    LOGGER.warn(&quot;Configured property {} is not an instance of {}&quot;, value, systemProperty.baseClass.getName());</span>
+<span class="fc" id="L106">                    return null;</span>
+                }
+<span class="fc" id="L108">            } catch (final ClassNotFoundException e) {</span>
+<span class="fc" id="L109">                LOGGER.warn(&quot;Class {} was not found&quot;, value, e);</span>
+<span class="fc" id="L110">                return null;</span>
+            }
+        });
+<span class="fc" id="L113">        FROM_STRING.put(List.class, (value, systemProperty) -&gt; getObjectStream(value, systemProperty).collect(Collectors.toList()));</span>
+<span class="fc" id="L114">        FROM_STRING.put(Set.class, (value, systemProperty) -&gt; getObjectStream(value, systemProperty).collect(Collectors.toCollection(LinkedHashSet::new)));</span>
+    }
+
+    private static Stream&lt;Object&gt; getObjectStream(final String value, final SystemProperty systemProperty) {
+<span class="fc bfc" id="L118" title="All 2 branches covered.">        if (StringUtils.isEmpty(value)) {</span>
+<span class="fc" id="L119">            return Stream.empty();</span>
+        }
+<span class="fc" id="L121">        final List&lt;String&gt; strings = Arrays.asList(value.split(&quot;,&quot;));</span>
+<span class="fc" id="L122">        Stream&lt;Object&gt; stream = strings.stream()</span>
+<span class="fc" id="L123">            .map(singleValue -&gt; FROM_STRING.get(systemProperty.collectionType).apply(singleValue, systemProperty))</span>
+<span class="fc" id="L124">            .filter(Objects::nonNull);</span>
+<span class="fc bfc" id="L125" title="All 2 branches covered.">        if (systemProperty.sorted) {</span>
+<span class="fc" id="L126">            stream = stream.sorted();</span>
+        }
+<span class="fc" id="L128">        return stream;</span>
+    }
+
+    static {
+        // Given a value and a system property, converts the value to a String with the appropriate value or null
+<span class="fc" id="L133">        TO_STRING.put(String.class, (value, systemProperty) -&gt; (String)value);</span>
+<span class="pc" id="L134">        TO_STRING.put(Integer.class, (value, systemProperty) -&gt; value.toString());</span>
+<span class="fc" id="L135">        TO_STRING.put(Long.class, (value, systemProperty) -&gt; value.toString());</span>
+<span class="fc" id="L136">        TO_STRING.put(Boolean.class, (value, systemProperty) -&gt; value.toString());</span>
+<span class="pc bpc" id="L137" title="1 of 2 branches missed.">        TO_STRING.put(Duration.class, (value, systemProperty) -&gt; value == null ? null : DURATION_TO_LONG.get(systemProperty.chronoUnit).apply((Duration) value).toString());</span>
+<span class="pc bpc" id="L138" title="1 of 2 branches missed.">        TO_STRING.put(Instant.class, (value, systemProperty) -&gt; value == null ? null : String.valueOf(((Instant)value).toEpochMilli()));</span>
+<span class="pc bpc" id="L139" title="1 of 2 branches missed.">        TO_STRING.put(JID.class, (value, systemProperty) -&gt; value == null ? null : value.toString());</span>
+<span class="pc bpc" id="L140" title="1 of 2 branches missed.">        TO_STRING.put(Enum.class, (value, systemProperty) -&gt; value == null ? null : ((Enum)value).name());</span>
+<span class="pc bpc" id="L141" title="1 of 2 branches missed.">        TO_STRING.put(Class.class, (value, systemProperty) -&gt; value == null ? null : ((Class)value).getName());</span>
+<span class="fc" id="L142">        TO_STRING.put(List.class, (value, systemProperty) -&gt; {</span>
+<span class="fc" id="L143">            final Collection collection = (Collection) value;</span>
+<span class="pc bpc" id="L144" title="2 of 4 branches missed.">            if (collection == null || collection.isEmpty()) {</span>
+<span class="nc" id="L145">                return null;</span>
+            }
+            // noinspection unchecked
+<span class="fc" id="L148">            Stream&lt;String&gt; stream = collection.stream()</span>
+<span class="fc" id="L149">                .map(singleValue -&gt; TO_STRING.get(systemProperty.collectionType).apply(singleValue, systemProperty))</span>
+<span class="fc" id="L150">                .filter(Objects::nonNull);</span>
+<span class="fc bfc" id="L151" title="All 2 branches covered.">            if(systemProperty.sorted) {</span>
+<span class="fc" id="L152">                stream = stream.sorted();</span>
+            }
+<span class="fc" id="L154">            return stream.collect(Collectors.joining(&quot;,&quot;));</span>
+        });
+<span class="fc" id="L156">        TO_STRING.put(Set.class, TO_STRING.get(List.class));</span>
+    }
+
+    static {
+        // Given a value and a system property, converts the value to a display String of the appropriate value or null
+<span class="fc" id="L161">        TO_DISPLAY_STRING.put(String.class, (value, systemProperty) -&gt; (String) value);</span>
+<span class="pc" id="L162">        TO_DISPLAY_STRING.put(Integer.class, (value, systemProperty) -&gt; value.toString());</span>
+<span class="fc" id="L163">        TO_DISPLAY_STRING.put(Long.class, (value, systemProperty) -&gt; value.toString());</span>
+<span class="pc" id="L164">        TO_DISPLAY_STRING.put(Boolean.class, (value, systemProperty) -&gt; value.toString());</span>
+<span class="pc bpc" id="L165" title="1 of 2 branches missed.">        TO_DISPLAY_STRING.put(Duration.class, (value, systemProperty) -&gt; value == null ? null : org.jivesoftware.util.StringUtils.getFullElapsedTime((Duration)value));</span>
+<span class="pc bnc" id="L166" title="All 2 branches missed.">        TO_DISPLAY_STRING.put(Instant.class, (value, systemProperty) -&gt; value == null ? null : Date.from((Instant) value).toString());</span>
+<span class="pc bpc" id="L167" title="1 of 2 branches missed.">        TO_DISPLAY_STRING.put(JID.class, (value, systemProperty) -&gt; value == null ? null : value.toString());</span>
+<span class="pc bpc" id="L168" title="1 of 2 branches missed.">        TO_DISPLAY_STRING.put(Enum.class, (value, systemProperty) -&gt; value == null ? null : ((Enum)value).name());</span>
+<span class="pc bnc" id="L169" title="All 2 branches missed.">        TO_DISPLAY_STRING.put(Class.class, (value, systemProperty) -&gt; value == null ? null : ((Class)value).getName());</span>
+<span class="fc" id="L170">        TO_DISPLAY_STRING.put(List.class, (value, systemProperty) -&gt; {</span>
+<span class="fc" id="L171">            final Collection collection = (Collection) value;</span>
+<span class="pc bpc" id="L172" title="2 of 4 branches missed.">            if (collection == null || collection.isEmpty()) {</span>
+<span class="nc" id="L173">                return null;</span>
+            }
+            // noinspection unchecked
+<span class="fc" id="L176">            Stream&lt;String&gt; stream = collection.stream()</span>
+<span class="fc" id="L177">                .map(singleValue -&gt; TO_DISPLAY_STRING.get(systemProperty.collectionType).apply(singleValue, systemProperty))</span>
+<span class="fc" id="L178">                .filter(Objects::nonNull);</span>
+<span class="fc bfc" id="L179" title="All 2 branches covered.">            if(systemProperty.sorted) {</span>
+<span class="fc" id="L180">                stream = stream.sorted();</span>
+            }
+<span class="fc" id="L182">            return stream.collect(Collectors.joining(&quot;,&quot;));</span>
+        });
+<span class="fc" id="L184">        TO_DISPLAY_STRING.put(Set.class, TO_DISPLAY_STRING.get(List.class));</span>
+    }
+
+    static {
+        // Add a (single) listener that will call the listeners of each given property
+<span class="fc" id="L189">        PropertyEventDispatcher.addListener(new PropertyEventListener() {</span>
+            @SuppressWarnings(&quot;unchecked&quot;)
+            @Override
+            public void propertySet(final String property, final Map&lt;String, Object&gt; params) {
+<span class="fc" id="L193">                final SystemProperty systemProperty = PROPERTIES.get(property);</span>
+<span class="fc bfc" id="L194" title="All 2 branches covered.">                if (systemProperty != null) {</span>
+<span class="fc" id="L195">                    final Object newValue = systemProperty.getValue();</span>
+<span class="fc" id="L196">                    systemProperty.listeners.forEach(consumer -&gt; ((Consumer) consumer).accept(newValue));</span>
+                }
+<span class="fc" id="L198">            }</span>
+
+            @Override
+            public void propertyDeleted(final String property, final Map&lt;String, Object&gt; params) {
+<span class="fc" id="L202">                propertySet(property, params);</span>
+<span class="fc" id="L203">            }</span>
+
+            @Override
+            public void xmlPropertySet(final String property, final Map&lt;String, Object&gt; params) {
+                // Ignored - we're only covering database properties
+<span class="fc" id="L208">            }</span>
+
+            @Override
+            public void xmlPropertyDeleted(final String property, final Map&lt;String, Object&gt; params) {
+                // Ignored - we're only covering database properties
+<span class="fc" id="L213">            }</span>
+        });
+<span class="fc" id="L215">    }</span>
+
+    private final Class&lt;T&gt; clazz;
+    private final String key;
+    private final String description;
+    private final String plugin;
+    private final T defaultValue;
+    private final T minValue;
+    private final T maxValue;
+    private final boolean dynamic;
+<span class="fc" id="L225">    private final Set&lt;Consumer&lt;T&gt;&gt; listeners = ConcurrentHashMap.newKeySet();</span>
+    private final T initialValue;
+    private final boolean encrypted;
+    private final ChronoUnit chronoUnit;
+    private final Class baseClass;
+    private final Class collectionType;
+    private final boolean sorted;
+
+<span class="fc" id="L233">    private SystemProperty(final Builder&lt;T&gt; builder) {</span>
+        // Before we do anything, convert XML based provider setup to Database based
+<span class="fc" id="L235">        JiveGlobals.migrateProperty(builder.key);</span>
+<span class="fc" id="L236">        this.clazz = builder.clazz;</span>
+<span class="fc" id="L237">        this.key = builder.key;</span>
+<span class="fc" id="L238">        this.description = LocaleUtils.getLocalizedString(&quot;system_property.&quot; + key);</span>
+<span class="fc" id="L239">        this.plugin = builder.plugin;</span>
+<span class="fc" id="L240">        this.defaultValue = builder.defaultValue;</span>
+<span class="fc" id="L241">        this.minValue = builder.minValue;</span>
+<span class="fc" id="L242">        this.maxValue = builder.maxValue;</span>
+<span class="fc" id="L243">        this.dynamic = builder.dynamic;</span>
+<span class="fc" id="L244">        this.encrypted = builder.encrypted;</span>
+<span class="fc bfc" id="L245" title="All 2 branches covered.">        if (encrypted) {</span>
+            // Ensure a pre-existing JiveGlobal is encrypted - a null-operation if it doesn't exist/is already encrypted
+<span class="fc" id="L247">            JiveGlobals.setPropertyEncrypted(key, true);</span>
+        }
+<span class="fc" id="L249">        this.chronoUnit = builder.chronoUnit;</span>
+<span class="fc" id="L250">        this.baseClass = builder.baseClass;</span>
+<span class="fc" id="L251">        this.collectionType = builder.collectionType;</span>
+<span class="fc" id="L252">        this.sorted = builder.sorted;</span>
+<span class="fc" id="L253">        this.listeners.addAll(builder.listeners);</span>
+<span class="fc" id="L254">        this.initialValue = getValue();</span>
+<span class="fc" id="L255">    }</span>
+
+    /**
+     * @return an unmodifiable collection of all the current SystemProperties
+     */
+    public static Collection&lt;SystemProperty&gt; getProperties() {
+<span class="fc" id="L261">        return Collections.unmodifiableCollection(PROPERTIES.values());</span>
+    }
+
+    /**
+     * Removes all the properties for a specific plugin. This should be called by a plugin when it is unloaded to
+     * allow it to be added again without a server restart
+     * @param plugin The plugin for which properties should be removed
+     */
+    @SuppressWarnings(&quot;WeakerAccess&quot;)
+    public static void removePropertiesForPlugin(final String plugin) {
+<span class="fc" id="L271">        getProperties().stream()</span>
+<span class="fc" id="L272">            .filter(systemProperty -&gt; systemProperty.plugin.equals(plugin))</span>
+<span class="fc" id="L273">            .map(systemProperty -&gt; systemProperty.key)</span>
+<span class="fc" id="L274">            .forEach(PROPERTIES::remove);</span>
+<span class="fc" id="L275">    }</span>
+
+    /**
+     * Returns the SystemProperty for the specified key
+     *
+     * @param key the key for the property to fetch
+     * @return The SystemProperty for that key, if any
+     */
+    public static Optional&lt;SystemProperty&gt; getProperty(final String key) {
+<span class="fc" id="L284">        return Optional.ofNullable(PROPERTIES.get(key));</span>
+    }
+
+    // Enums are a special case
+    private Class getConverterClass() {
+<span class="fc bfc" id="L289" title="All 2 branches covered.">        if(Enum.class.isAssignableFrom(clazz)) {</span>
+<span class="fc" id="L290">            return Enum.class;</span>
+        } else {
+<span class="fc" id="L292">            return clazz;</span>
+        }
+    }
+
+    /**
+     * @return the current value of the SystemProperty, or the default value if it is not currently set to within the
+     * configured constraints. {@code null} if the property has not been set and there is no default value.
+     */
+    @SuppressWarnings(&quot;unchecked&quot;)
+    public T getValue() {
+<span class="fc" id="L302">        final T value = (T) FROM_STRING.get(getConverterClass()).apply(JiveGlobals.getProperty(key), this);</span>
+<span class="fc bfc" id="L303" title="All 6 branches covered.">        if (value == null || (Collection.class.isAssignableFrom(value.getClass()) &amp;&amp; ((Collection) value).isEmpty())) {</span>
+<span class="fc" id="L304">            return defaultValue;</span>
+        }
+<span class="fc bfc" id="L306" title="All 4 branches covered.">        if (minValue != null &amp;&amp; ((Comparable) minValue).compareTo(value) &gt; 0) {</span>
+<span class="fc" id="L307">            LOGGER.warn(&quot;Configured value of {} is less than the minimum value of {} for the SystemProperty {} - will use default value of {} instead&quot;,</span>
+                value, minValue, key, defaultValue);
+<span class="fc" id="L309">            return defaultValue;</span>
+        }
+<span class="pc bpc" id="L311" title="1 of 4 branches missed.">        if (maxValue != null &amp;&amp; ((Comparable) maxValue).compareTo(value) &lt; 0) {</span>
+<span class="fc" id="L312">            LOGGER.warn(&quot;Configured value of {} is more than the maximum value of {} for the SystemProperty {} - will use default value of {} instead&quot;,</span>
+                value, maxValue, key, defaultValue);
+<span class="fc" id="L314">            return defaultValue;</span>
+        }
+<span class="fc" id="L316">        return value;</span>
+    }
+
+    /**
+     * @return the value of this property as saved in the ofProperty table. {@code null} if there is no current value and the default is not set.
+     */
+    public String getValueAsSaved() {
+<span class="fc" id="L323">        return TO_STRING.get(getConverterClass()).apply(getValue(), this);</span>
+    }
+
+    /**
+     * @return the value a human readable value of this property. {@code null} if there is no current value and the default is not set.
+     */
+    public String getDisplayValue() {
+<span class="fc" id="L330">        return TO_DISPLAY_STRING.get(getConverterClass()).apply(getValue(), this);</span>
+    }
+
+    /**
+     * @return {@code false} if the property has been changed from it's default value, otherwise {@code true}
+     */
+    public boolean hasValueChanged() {
+<span class="nc bnc" id="L337" title="All 2 branches missed.">        return !Objects.equals(getValue(), defaultValue);</span>
+    }
+
+    /**
+     * @return the value a human readable value of this property. {@code null} if the default value is not configured.
+     */
+    public String getDefaultDisplayValue() {
+<span class="nc" id="L344">        return TO_DISPLAY_STRING.get(getConverterClass()).apply(defaultValue, this);</span>
+    }
+
+    /**
+     * Sets the value of the SystemProperty. Note that the new value can be outside any minimum/maximum for the property,
+     * and will be saved to the database as such, however subsequent attempts to retrieve it's value will return the default.
+     *
+     * @param value the new value for the SystemProperty
+     */
+    public void setValue(final T value) {
+<span class="fc" id="L354">        JiveGlobals.setProperty(key, TO_STRING.get(getConverterClass()).apply(value, this), isEncrypted());</span>
+<span class="fc" id="L355">    }</span>
+
+    /**
+     * @return the plugin that created this property - or simply {@code &quot;Openfire&quot;}
+     */
+    public String getPlugin() {
+<span class="fc" id="L361">        return plugin;</span>
+    }
+
+    /**
+     * @return {@code false} if Openfire or the plugin needs to be restarted for changes to this property to take effect, otherwise {@code true}
+     */
+    public boolean isDynamic() {
+<span class="fc" id="L368">        return dynamic;</span>
+    }
+
+    /**
+     * @return {@code true} if the property was initially setup to be encrypted, or was encrypted subsequently, otherwise {@code false}
+     */
+    public boolean isEncrypted() {
+<span class="pc bpc" id="L375" title="1 of 4 branches missed.">        return encrypted || JiveGlobals.isPropertyEncrypted(key);</span>
+    }
+
+    /**
+     * @return {@code true} if this property has changed and an Openfire or plugin restart is required, otherwise {@code false}
+     */
+    public boolean isRestartRequired() {
+<span class="fc bfc" id="L382" title="All 4 branches covered.">        return !(dynamic || Objects.equals(getValue(), initialValue));</span>
+    }
+
+    /***
+     * @param listener a listener to add to the property, that will be called whenever the property value changes
+     */
+    public void addListener(final Consumer&lt;T&gt; listener) {
+<span class="nc" id="L389">        this.listeners.add(listener);</span>
+<span class="nc" id="L390">    }</span>
+
+    /***
+     * @param listener the listener that is no longer required
+     */
+    public void removeListener(final Consumer&lt;T&gt; listener) {
+<span class="nc" id="L396">        this.listeners.remove(listener);</span>
+<span class="nc" id="L397">    }</span>
+
+    /**
+     * @return the {@link JiveGlobals} key for this property.
+     */
+    public String getKey() {
+<span class="nc" id="L403">        return key;</span>
+    }
+
+    /**
+     * @return the description of this property. This is set in the resource bundle for the current locale, using the
+     * key {@code system_property.}&lt;b&gt;&lt;i&gt;property-key&lt;/i&gt;&lt;/b&gt;.
+     */
+    public String getDescription() {
+<span class="nc" id="L411">        return description;</span>
+    }
+
+    /**
+     * @return the default value of this property. {@code null} if there is no default value configured.
+     */
+    public T getDefaultValue() {
+<span class="fc" id="L418">        return defaultValue;</span>
+    }
+
+    /**
+     * Used to build a {@link SystemProperty}
+     *
+     * @param &lt;T&gt; the type of system property to build
+     */
+    public static final class Builder&lt;T&gt; {
+        private final Class&lt;T&gt; clazz;
+<span class="fc" id="L428">        private final Set&lt;Consumer&lt;T&gt;&gt; listeners = new HashSet&lt;&gt;();</span>
+        private String key;
+<span class="fc" id="L430">        private String plugin = &quot;Openfire&quot;;</span>
+        private T defaultValue;
+        private T minValue;
+        private T maxValue;
+        private ChronoUnit chronoUnit;
+        private Boolean dynamic;
+<span class="fc" id="L436">        private boolean encrypted = false;</span>
+        private Class&lt;?&gt; baseClass;
+        private Class collectionType;
+        private boolean sorted;
+
+<span class="fc" id="L441">        private Builder(final Class&lt;T&gt; clazz) {</span>
+<span class="fc" id="L442">            this.clazz = clazz;</span>
+<span class="fc" id="L443">        }</span>
+
+        /**
+         * Start a new SystemProperty builder. The following types of SystemProperty are supported:
+         * &lt;ul&gt;
+         * &lt;li&gt;{@link String}&lt;/li&gt;
+         * &lt;li&gt;{@link Integer} - for which a default value must be supplied using {@link #setDefaultValue(Object)}&lt;/li&gt;
+         * &lt;li&gt;{@link Long} - for which a default value must be supplied&lt;/li&gt;
+         * &lt;li&gt;{@link Boolean} - for which a default value must be supplied&lt;/li&gt;
+         * &lt;li&gt;{@link Duration} - for which a {@link ChronoUnit} must be specified, to indicate how the value will be saved, using {@link #setChronoUnit(ChronoUnit)}&lt;/li&gt;
+         * &lt;li&gt;{@link Instant}&lt;/li&gt;
+         * &lt;li&gt;{@link JID}&lt;/li&gt;
+         * &lt;li&gt;{@link Class} - for which a base class must be specified from which values must inherit, using {@link #setBaseClass(Class)}&lt;/li&gt;
+         * &lt;li&gt;any {@link Enum} - for which a default value must be supplied&lt;/li&gt;
+         * &lt;li&gt;{@link List} - for which a collection type must be specified, using {@link #buildList(Class)}&lt;/li&gt;
+         * &lt;li&gt;{@link Set} - for which a collection type must be specified, using {@link #buildSet(Class)}&lt;/li&gt;
+         * &lt;/ul&gt;
+         *
+         * @param &lt;T&gt;   the type of SystemProperty
+         * @param clazz The class of property being built
+         * @return A SystemProperty builder
+         */
+        public static &lt;T&gt; Builder&lt;T&gt; ofType(final Class&lt;T&gt; clazz) {
+<span class="fc bfc" id="L466" title="All 2 branches covered.">            if (!Enum.class.isAssignableFrom(clazz)</span>
+<span class="pc bpc" id="L467" title="2 of 6 branches missed.">                &amp;&amp; (!FROM_STRING.containsKey(clazz) || !TO_STRING.containsKey(clazz) || !TO_DISPLAY_STRING.containsKey(clazz))) {</span>
+<span class="fc" id="L468">                throw new IllegalArgumentException(&quot;Cannot create a SystemProperty of type &quot; + clazz.getName());</span>
+            }
+<span class="fc" id="L470">            return new Builder&lt;&gt;(clazz);</span>
+        }
+
+        /**
+         * Sets the key for the SystemProperty. Must be unique
+         *
+         * @param key the property key
+         * @return The current SystemProperty builder
+         */
+        public Builder&lt;T&gt; setKey(final String key) {
+<span class="fc" id="L480">            this.key = key;</span>
+<span class="fc" id="L481">            return this;</span>
+        }
+
+        /**
+         * Sets the default value for the SystemProperty. This value will be used if the property is not set, or
+         * falls outside the minimum/maximum values configured.
+         *
+         * @param defaultValue the default value for the property
+         * @return The current SystemProperty builder
+         * @see #setMinValue(Object)
+         * @see #setMaxValue(Object)
+         */
+        @SuppressWarnings(&quot;unchecked&quot;)
+        public Builder&lt;T&gt; setDefaultValue(final T defaultValue) {
+<span class="fc bfc" id="L495" title="All 2 branches covered.">            if( defaultValue instanceof Instant) {</span>
+<span class="fc" id="L496">                this.defaultValue = (T) ((Instant) defaultValue).truncatedTo(ChronoUnit.MILLIS);</span>
+            } else {
+<span class="fc" id="L498">                this.defaultValue = defaultValue;</span>
+            }
+<span class="fc" id="L500">            return this;</span>
+        }
+
+        /**
+         * This indicates which class configured values must inherit from. It must be set (and can only be set) if the default
+         * value is a class.
+         *
+         * @param baseClass - the base class from which all configured values must inherit
+         * @return The current SystemProperty builder
+         */
+        public Builder&lt;T&gt; setBaseClass(final Class&lt;?&gt; baseClass) {
+<span class="fc bfc" id="L511" title="All 2 branches covered.">            if(clazz != Class.class) {</span>
+<span class="fc" id="L512">                throw new IllegalArgumentException(&quot;Only properties of type Class can have a base class set&quot;);</span>
+            }
+<span class="fc" id="L514">            this.baseClass = baseClass;</span>
+<span class="fc" id="L515">            return this;</span>
+        }
+
+        /**
+         * Sets the minimum value for the SystemProperty. If the configured value is less than minimum value, the
+         * default value will be used instead.
+         * &lt;p&gt;&lt;strong&gt;Important:&lt;/strong&gt; If a minimum value is configured, the type of property being built must
+         * implement {@link Comparable}.&lt;/p&gt;
+         *
+         * @param minValue the minimum value for the property
+         * @return The current SystemProperty builder
+         */
+        public Builder&lt;T&gt; setMinValue(final T minValue) {
+<span class="fc" id="L528">            this.minValue = minValue;</span>
+<span class="fc" id="L529">            return this;</span>
+        }
+
+        /**
+         * Sets the maximum value for the SystemProperty. If the configured value is more than maximum value, the
+         * default value will be used instead.
+         * &lt;p&gt;&lt;strong&gt;Important:&lt;/strong&gt; If a maximum value is configured, the type of property being built must
+         * implement {@link Comparable}.&lt;/p&gt;
+         *
+         * @param maxValue the maximum value for the property
+         * @return The current SystemProperty builder
+         */
+        public Builder&lt;T&gt; setMaxValue(final T maxValue) {
+<span class="fc" id="L542">            this.maxValue = maxValue;</span>
+<span class="fc" id="L543">            return this;</span>
+        }
+
+        /**
+         * If the type of the property is a {@link Duration} this is used to indicate how the value is saved in the
+         * database. For an example a Duration of one hour will be saved as &quot;60&quot; if the ChronoUnit is {@link ChronoUnit#MINUTES}, or
+         * saved as &quot;3600&quot; if the ChronoUnit is {@link ChronoUnit#SECONDS}.
+         * &lt;p&gt;&lt;strong&gt;Important:&lt;/strong&gt; The ChronoUnit is required, and must be set, if the type of property is a Duration.
+         *
+         * @param chronoUnit the unit of time the Duration is saved to the database in
+         * @return The current SystemProperty builder
+         */
+        public Builder&lt;T&gt; setChronoUnit(final ChronoUnit chronoUnit) {
+<span class="fc" id="L556">            this.chronoUnit = chronoUnit;</span>
+<span class="fc" id="L557">            return this;</span>
+        }
+
+        /**
+         * @param listener the listener that will be called when the value of the property changes
+         * @return The current SystemProperty builder
+         */
+        public Builder&lt;T&gt; addListener(final Consumer&lt;T&gt; listener) {
+<span class="fc" id="L565">            this.listeners.add(listener);</span>
+<span class="fc" id="L566">            return this;</span>
+        }
+
+        /**
+         * @param dynamic {@code true} if changes to this property take effect immediately, {@code false} if a restart
+         *                is required.
+         * @return The current SystemProperty builder
+         */
+        public Builder&lt;T&gt; setDynamic(final boolean dynamic) {
+<span class="fc" id="L575">            this.dynamic = dynamic;</span>
+<span class="fc" id="L576">            return this;</span>
+        }
+
+        /**
+         * @param encrypted {@code true} if this property should be encrypted, {@code false} if can be stored in
+         *                  plain text. Defaults to plain text if not otherwise specified.
+         * @return The current SystemProperty builder
+         */
+        public Builder&lt;T&gt; setEncrypted(final boolean encrypted) {
+<span class="fc" id="L585">            this.encrypted = encrypted;</span>
+<span class="fc" id="L586">            return this;</span>
+        }
+
+        /**
+         * @param sorted {@code true} if this property is a list and should be sorted, {@code false} otherwise.
+         * @return The current SystemProperty builder
+         */
+        public Builder&lt;T&gt; setSorted(final boolean sorted) {
+<span class="fc" id="L594">            this.sorted = sorted;</span>
+<span class="fc" id="L595">            return this;</span>
+        }
+
+        /**
+         * Sets the name of the plugin that is associated with this property. This is used on the Openfire System
+         * Properties admin interface to provide filtering capabilities. This will default to Openfire if not set.
+         *
+         * @param plugin the name of the plugin creating this property.
+         * @return The current SystemProperty builder
+         */
+        public Builder&lt;T&gt; setPlugin(final String plugin) {
+<span class="fc" id="L606">            this.plugin = plugin;</span>
+<span class="fc" id="L607">            return this;</span>
+        }
+
+        /**
+         * Validates the details of the SystemProperty, and generates one if it's valid.
+         *
+         * @return A SystemProperty object
+         * @throws IllegalArgumentException if incorrect arguments have been supplied to the builder
+         */
+        public SystemProperty&lt;T&gt; build() throws IllegalArgumentException {
+<span class="fc" id="L617">            checkNotNull(key, &quot;The property key has not been set&quot;);</span>
+<span class="fc bfc" id="L618" title="All 2 branches covered.">            if (PROPERTIES.containsKey(key)) {</span>
+<span class="fc" id="L619">                throw new IllegalArgumentException(&quot;A SystemProperty already exists with a key of &quot; + key);</span>
+            }
+<span class="fc bfc" id="L621" title="All 2 branches covered.">            if (!NULLABLE_TYPES.contains(clazz)) {</span>
+<span class="fc" id="L622">                checkNotNull(defaultValue, &quot;The properties default value has not been set&quot;);</span>
+            }
+            final Class classToCheck;
+<span class="fc bfc" id="L625" title="All 2 branches covered.">            if (Collection.class.isAssignableFrom(clazz)) {</span>
+<span class="fc" id="L626">                checkNotNull(collectionType, &quot;A collection type must be built using buildList() or buildSet()&quot;);</span>
+<span class="fc" id="L627">                classToCheck = collectionType;</span>
+            } else {
+<span class="fc" id="L629">                classToCheck = clazz;</span>
+            }
+
+<span class="fc bfc" id="L632" title="All 2 branches covered.">            if (sorted) {</span>
+<span class="pc bpc" id="L633" title="1 of 2 branches missed.">                if (!Collection.class.isAssignableFrom(clazz)) {</span>
+<span class="nc" id="L634">                    throw new IllegalArgumentException(&quot;Only Collection properties can be sorted&quot;);</span>
+                }
+<span class="pc bpc" id="L636" title="1 of 2 branches missed.">                if (!Comparable.class.isAssignableFrom(classToCheck)) {</span>
+<span class="nc" id="L637">                    throw new IllegalArgumentException(&quot;Only Collection properties containing Comparable elements can be sorted&quot;);</span>
+                }
+            }
+
+<span class="fc" id="L641">            checkNotNull(plugin, &quot;The property plugin has not been set&quot;);</span>
+<span class="fc" id="L642">            checkNotNull(dynamic, &quot;The property dynamism has not been set&quot;);</span>
+<span class="fc bfc" id="L643" title="All 2 branches covered.">            if (classToCheck == Duration.class) {</span>
+<span class="fc" id="L644">                checkNotNull(chronoUnit, &quot;The ChronoUnit for the Duration property has not been set&quot;);</span>
+<span class="pc bpc" id="L645" title="1 of 4 branches missed.">                if (!DURATION_TO_LONG.containsKey(chronoUnit) || !LONG_TO_DURATION.containsKey(chronoUnit)) {</span>
+<span class="fc" id="L646">                    throw new IllegalArgumentException(&quot;A Duration property cannot be saved with a ChronoUnit of &quot; + chronoUnit);</span>
+                }
+<span class="pc bpc" id="L648" title="1 of 2 branches missed.">            } else if (chronoUnit != null) {</span>
+<span class="nc" id="L649">                throw new IllegalArgumentException(&quot;Only properties of type Duration can have a ChronoUnit set&quot;);</span>
+            }
+<span class="fc bfc" id="L651" title="All 2 branches covered.">            if (minValue != null) {</span>
+<span class="pc bpc" id="L652" title="1 of 2 branches missed.">                if (!Comparable.class.isAssignableFrom(clazz)) {</span>
+<span class="nc" id="L653">                    throw new IllegalArgumentException(&quot;A minimum value can only be applied to properties that implement Comparable&quot;);</span>
+                }
+
+                //noinspection unchecked
+<span class="pc bpc" id="L657" title="2 of 4 branches missed.">                if (defaultValue != null &amp;&amp; ((Comparable&lt;T&gt;) minValue).compareTo(defaultValue) &gt; 0) {</span>
+<span class="nc" id="L658">                    throw new IllegalArgumentException(&quot;The minimum value cannot be more than the default value&quot;);</span>
+                }
+            }
+<span class="fc bfc" id="L661" title="All 2 branches covered.">            if (maxValue != null) {</span>
+<span class="pc bpc" id="L662" title="1 of 2 branches missed.">                if (!Comparable.class.isAssignableFrom(clazz)) {</span>
+<span class="nc" id="L663">                    throw new IllegalArgumentException(&quot;A maximum value can only be applied to properties that implement Comparable&quot;);</span>
+                }
+
+                //noinspection unchecked
+<span class="pc bpc" id="L667" title="2 of 4 branches missed.">                if (defaultValue != null &amp;&amp; ((Comparable&lt;T&gt;) maxValue).compareTo(defaultValue) &lt; 0) {</span>
+<span class="nc" id="L668">                    throw new IllegalArgumentException(&quot;The maximum value cannot be less than the default value&quot;);</span>
+                }
+            }
+<span class="fc bfc" id="L671" title="All 2 branches covered.">            if (classToCheck == Class.class) {</span>
+<span class="fc" id="L672">                checkNotNull(baseClass, &quot;The base class must be set for properties of type class&quot;);</span>
+            }
+<span class="fc" id="L674">            final SystemProperty&lt;T&gt; property = new SystemProperty&lt;&gt;(this);</span>
+<span class="fc" id="L675">            PROPERTIES.put(key, property);</span>
+<span class="fc" id="L676">            return property;</span>
+        }
+
+        @SuppressWarnings(&quot;unchecked&quot;)
+        public &lt;C&gt; SystemProperty&lt;List&lt;C&gt;&gt; buildList(final Class&lt;C&gt; listType) {
+<span class="pc bpc" id="L681" title="1 of 2 branches missed.">            if (clazz != List.class) {</span>
+<span class="nc" id="L682">                throw new IllegalArgumentException(&quot;Only list types can be built with buildList&quot;);</span>
+            }
+<span class="fc" id="L684">            checkCollectionType(listType);</span>
+<span class="fc" id="L685">            this.collectionType = listType;</span>
+<span class="fc" id="L686">            return (SystemProperty&lt;List&lt;C&gt;&gt;) build();</span>
+        }
+
+        @SuppressWarnings(&quot;unchecked&quot;)
+        public &lt;C&gt; SystemProperty&lt;Set&lt;C&gt;&gt; buildSet(final Class&lt;C&gt; listType) {
+<span class="pc bpc" id="L691" title="1 of 2 branches missed.">            if (clazz != Set.class) {</span>
+<span class="nc" id="L692">                throw new IllegalArgumentException(&quot;Only set types can be built with buildSet&quot;);</span>
+            }
+<span class="fc" id="L694">            checkCollectionType(listType);</span>
+<span class="fc" id="L695">            this.collectionType = listType;</span>
+<span class="fc" id="L696">            return (SystemProperty&lt;Set&lt;C&gt;&gt;) build();</span>
+        }
+
+        private void checkCollectionType(final Class collectionType) {
+<span class="pc bpc" id="L700" title="3 of 6 branches missed.">            if (!FROM_STRING.containsKey(collectionType) || !TO_STRING.containsKey(collectionType) || !TO_DISPLAY_STRING.containsKey(collectionType)) {</span>
+<span class="nc" id="L701">                throw new IllegalArgumentException(&quot;Cannot create a SystemProperty containing a collection of type &quot; + collectionType.getName());</span>
+            }
+<span class="pc bpc" id="L703" title="1 of 2 branches missed.">            if (Collections.class.isAssignableFrom(collectionType)) {</span>
+<span class="nc" id="L704">                throw new IllegalArgumentException(&quot;A collection cannot contain a collection&quot;);</span>
+            }
+<span class="fc" id="L706">        }</span>
+
+        private void checkNotNull(final Object value, final String s) {
+<span class="fc bfc" id="L709" title="All 2 branches covered.">            if (value == null) {</span>
+<span class="fc" id="L710">                throw new IllegalArgumentException(s);</span>
+            }
+<span class="fc" id="L712">        }</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

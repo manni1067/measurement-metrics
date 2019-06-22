@@ -1,0 +1,96 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>OpenfireWebSocketServlet.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.websocket</a> &gt; <span class="el_source">OpenfireWebSocketServlet.java</span></div><h1>OpenfireWebSocketServlet.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2015 Tom Evans. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.jivesoftware.openfire.websocket;
+
+import java.text.MessageFormat;
+
+import org.eclipse.jetty.websocket.common.extensions.compress.PerMessageDeflateExtension;
+import org.eclipse.jetty.websocket.servlet.ServletUpgradeRequest;
+import org.eclipse.jetty.websocket.servlet.ServletUpgradeResponse;
+import org.eclipse.jetty.websocket.servlet.WebSocketCreator;
+import org.eclipse.jetty.websocket.servlet.WebSocketServlet;
+import org.eclipse.jetty.websocket.servlet.WebSocketServletFactory;
+import org.jivesoftware.openfire.SessionManager;
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.session.ClientSession;
+import org.jivesoftware.openfire.session.LocalSession;
+import org.jivesoftware.util.JiveGlobals;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * This Servlet enables XMPP over WebSocket (RFC 7395) for Openfire.
+ * 
+ * The Jetty WebSocketServlet serves as a base class and enables easy integration into the
+ * BOSH (http-bind) web context. Each WebSocket request received at the &quot;/ws/&quot; URI will be
+ * forwarded to this plugin/servlet, which will in turn create a new {@link XmppWebSocket}
+ * for each new connection. 
+ */
+<span class="nc" id="L42">public class OpenfireWebSocketServlet extends WebSocketServlet {</span>
+
+    private static final long serialVersionUID = 7281841492829464605L;
+<span class="nc" id="L45">    private static final Logger Log = LoggerFactory.getLogger(OpenfireWebSocketServlet.class);</span>
+
+    @Override
+    public void destroy()
+    {
+        // terminate any active websocket sessions
+<span class="nc" id="L51">        SessionManager sm = XMPPServer.getInstance().getSessionManager();</span>
+<span class="nc bnc" id="L52" title="All 2 branches missed.">        for (ClientSession session : sm.getSessions()) {</span>
+<span class="nc bnc" id="L53" title="All 2 branches missed.">            if (session instanceof LocalSession) {</span>
+<span class="nc" id="L54">                Object ws = ((LocalSession) session).getSessionData(&quot;ws&quot;);</span>
+<span class="nc bnc" id="L55" title="All 4 branches missed.">                if (ws != null &amp;&amp; (Boolean) ws) {</span>
+<span class="nc" id="L56">                    Log.debug( &quot;Closing session as websocket servlet is being destroyed: {}&quot;, session );</span>
+<span class="nc" id="L57">                    session.close();</span>
+                }
+            }
+<span class="nc" id="L60">        }</span>
+
+<span class="nc" id="L62">        super.destroy();</span>
+<span class="nc" id="L63">    }</span>
+
+    @Override
+    public void configure(WebSocketServletFactory factory)
+    {
+<span class="nc bnc" id="L68" title="All 2 branches missed.">        if (XmppWebSocket.isCompressionEnabled()) {</span>
+<span class="nc" id="L69">            factory.getExtensionFactory().register(&quot;permessage-deflate&quot;, PerMessageDeflateExtension.class);</span>
+        }
+<span class="nc" id="L71">        final int messageSize = JiveGlobals.getIntProperty(&quot;xmpp.parser.buffer.size&quot;, 1048576);</span>
+<span class="nc" id="L72">        factory.getPolicy().setMaxTextMessageBufferSize(messageSize * 5);</span>
+<span class="nc" id="L73">        factory.getPolicy().setMaxTextMessageSize(messageSize);</span>
+<span class="nc" id="L74">        factory.setCreator(new WebSocketCreator() {</span>
+            @Override
+            public Object createWebSocket(ServletUpgradeRequest req, ServletUpgradeResponse resp)
+            {
+                try {
+<span class="nc bnc" id="L79" title="All 2 branches missed.">                    for (String subprotocol : req.getSubProtocols())</span>
+                    {
+<span class="nc bnc" id="L81" title="All 2 branches missed.">                        if (&quot;xmpp&quot;.equals(subprotocol))</span>
+                        {
+<span class="nc" id="L83">                            resp.setAcceptedSubProtocol(subprotocol);</span>
+<span class="nc" id="L84">                            return new XmppWebSocket();</span>
+                        }
+<span class="nc" id="L86">                    }</span>
+<span class="nc" id="L87">                } catch (Exception e) {</span>
+<span class="nc" id="L88">                    Log.warn(MessageFormat.format(&quot;Unable to load websocket factory: {0} ({1})&quot;, e.getClass().getName(), e.getMessage()));</span>
+<span class="nc" id="L89">                }</span>
+<span class="nc" id="L90">                Log.warn(&quot;Failed to create websocket for {}:{} make a request at {}&quot;, req.getRemoteAddress(), req.getRemotePort(), req.getRequestPath() );</span>
+<span class="nc" id="L91">                return null;</span>
+            }
+        });
+<span class="nc" id="L94">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

@@ -1,0 +1,374 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>UserMultiProvider.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.user</a> &gt; <span class="el_source">UserMultiProvider.java</span></div><h1>UserMultiProvider.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2016 IgniteRealtime.org
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.user;
+
+import org.jivesoftware.util.ClassUtils;
+import org.jivesoftware.util.JiveGlobals;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.util.*;
+
+/**
+ * A {@link UserProvider} that delegates to one or more 'backing' UserProvider.
+ *
+ * @author GUus der Kinderen, guus@goodbytes.nl
+ */
+<span class="nc" id="L31">public abstract class UserMultiProvider implements UserProvider</span>
+{
+<span class="nc" id="L33">    private final static Logger Log = LoggerFactory.getLogger( UserMultiProvider.class );</span>
+
+    /**
+     * Instantiates a UserProvider based on a property value (that is expected to be a class name). When the property
+     * is not set, this method returns null. When the property is set, but an exception occurs while instantiating
+     * the class, this method logs the error and returns null.
+     *
+     * UserProvider classes are required to have a public, no-argument constructor.
+     *
+     * @param propertyName A property name (cannot ben ull).
+     * @return A user provider (can be null).
+     */
+    public static UserProvider instantiate( String propertyName )
+    {
+<span class="nc" id="L47">        final String className = JiveGlobals.getProperty( propertyName );</span>
+<span class="nc bnc" id="L48" title="All 2 branches missed.">        if ( className == null )</span>
+        {
+<span class="nc" id="L50">            Log.debug( &quot;Property '{}' is undefined. Skipping.&quot;, propertyName );</span>
+<span class="nc" id="L51">            return null;</span>
+        }
+<span class="nc" id="L53">        Log.debug( &quot;About to to instantiate an UserProvider '{}' based on the value of property '{}'.&quot;, className, propertyName );</span>
+        try
+        {
+<span class="nc" id="L56">            final Class c = ClassUtils.forName( className );</span>
+<span class="nc" id="L57">            final UserProvider provider = (UserProvider) c.newInstance();</span>
+<span class="nc" id="L58">            Log.debug( &quot;Instantiated UserProvider '{}'&quot;, className );</span>
+<span class="nc" id="L59">            return provider;</span>
+        }
+<span class="nc" id="L61">        catch ( Exception e )</span>
+        {
+<span class="nc" id="L63">            Log.error( &quot;Unable to load UserProvider '{}'. Users in this provider will be disabled.&quot;, className, e );</span>
+<span class="nc" id="L64">            return null;</span>
+        }
+    }
+
+    /**
+     * Returns all UserProvider instances that serve as 'backing' providers.
+     *
+     * @return A collection of providers (never null).
+     */
+    abstract Collection&lt;UserProvider&gt; getUserProviders();
+
+    /**
+     * Returns the 'backing' provider that serves the provided user. Note that the user need not exist.
+     *
+     * Finds a suitable UserProvider for the user.
+     *
+     * Note that the provided username need not reflect a pre-existing user (the instance might be used to determine in
+     * which provider a new user is to be created).
+     *
+     * Implementations are expected to be able to find a UserProvider for any username. If an implementation fails to do
+     * so, such a failure is assumed to be the result of a problem in implementation or configuration.
+     *
+     * @param username A user identifier (cannot be null or empty).
+     * @return A UserProvider for the user (never null).
+     */
+    abstract UserProvider getUserProvider( String username );
+
+    @Override
+    public int getUserCount()
+    {
+<span class="nc" id="L94">        int total = 0;</span>
+        // TODO Make calls concurrent for improved throughput.
+<span class="nc bnc" id="L96" title="All 2 branches missed.">        for ( final UserProvider provider : getUserProviders() )</span>
+        {
+<span class="nc" id="L98">            total += provider.getUserCount();</span>
+<span class="nc" id="L99">        }</span>
+
+<span class="nc" id="L101">        return total;</span>
+    }
+
+    @Override
+    public Collection&lt;User&gt; getUsers()
+    {
+<span class="nc" id="L107">        final Collection&lt;User&gt; result = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L108" title="All 2 branches missed.">        for ( final UserProvider provider : getUserProviders() )</span>
+        {
+            // TODO Make calls concurrent for improved throughput.
+<span class="nc" id="L111">            result.addAll( provider.getUsers() );</span>
+<span class="nc" id="L112">        }</span>
+
+<span class="nc" id="L114">        return result;</span>
+    }
+
+    @Override
+    public Collection&lt;String&gt; getUsernames()
+    {
+<span class="nc" id="L120">        final Collection&lt;String&gt; result = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L121" title="All 2 branches missed.">        for ( final UserProvider provider : getUserProviders() )</span>
+        {
+            // TODO Make calls concurrent for improved throughput.
+<span class="nc" id="L124">            result.addAll( provider.getUsernames() );</span>
+<span class="nc" id="L125">        }</span>
+
+<span class="nc" id="L127">        return result;</span>
+    }
+
+    @Override
+    public Collection&lt;User&gt; getUsers( int startIndex, int numResults )
+    {
+<span class="nc" id="L133">        final List&lt;User&gt; userList = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L134">        int totalUserCount = 0;</span>
+
+<span class="nc bnc" id="L136" title="All 2 branches missed.">        for ( final UserProvider provider : getUserProviders() )</span>
+        {
+<span class="nc" id="L138">            final int providerStartIndex = Math.max( ( startIndex - totalUserCount ), 0 );</span>
+<span class="nc" id="L139">            totalUserCount += provider.getUserCount();</span>
+<span class="nc bnc" id="L140" title="All 2 branches missed.">            if ( startIndex &gt;= totalUserCount )</span>
+            {
+<span class="nc" id="L142">                continue;</span>
+            }
+<span class="nc" id="L144">            final int providerResultMax = numResults - userList.size();</span>
+<span class="nc" id="L145">            userList.addAll( provider.getUsers( providerStartIndex, providerResultMax ) );</span>
+<span class="nc bnc" id="L146" title="All 2 branches missed.">            if ( userList.size() &gt;= numResults )</span>
+            {
+<span class="nc" id="L148">                break;</span>
+            }
+<span class="nc" id="L150">        }</span>
+<span class="nc" id="L151">        return userList;</span>
+    }
+
+    /**
+     * Searches for users based on a set of fields and a query string. The fields must  be taken from the values
+     * returned by {@link #getSearchFields()}. The query can  include wildcards. For example, a search on the field
+     * &quot;Name&quot; with a query of &quot;Ma*&quot;  might return user's with the name &quot;Matt&quot;, &quot;Martha&quot; and &quot;Madeline&quot;.
+     *
+     * This method throws an UnsupportedOperationException when none of the backing providers support search.
+     *
+     * When fields are provided that are not supported by a particular provider, those fields are ignored by that
+     * provider (but can still be used by other providers).
+     *
+     * @param fields the fields to search on.
+     * @param query  the query string.
+     * @return a Collection of users that match the search.
+     * @throws UnsupportedOperationException When none of the providers support search.
+     */
+    @Override
+    public Collection&lt;User&gt; findUsers( Set&lt;String&gt; fields, String query ) throws UnsupportedOperationException
+    {
+<span class="nc" id="L172">        final List&lt;User&gt; userList = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L173">        int supportSearch = getUserProviders().size();</span>
+
+        // TODO Make calls concurrent for improved throughput.
+<span class="nc bnc" id="L176" title="All 2 branches missed.">        for ( final UserProvider provider : getUserProviders() )</span>
+        {
+            try
+            {
+                // Use only those fields that are supported by the provider.
+<span class="nc" id="L181">                final Set&lt;String&gt; supportedFields = new HashSet&lt;&gt;( fields );</span>
+<span class="nc" id="L182">                supportedFields.retainAll( provider.getSearchFields() );</span>
+
+<span class="nc" id="L184">                userList.addAll( provider.findUsers( supportedFields, query ) );</span>
+            }
+<span class="nc" id="L186">            catch ( UnsupportedOperationException uoe )</span>
+            {
+<span class="nc" id="L188">                Log.warn( &quot;UserProvider.findUsers is not supported by this UserProvider: {}. Its users are not returned as part of search queries.&quot;, provider.getClass().getName() );</span>
+<span class="nc" id="L189">                supportSearch--;</span>
+<span class="nc" id="L190">            }</span>
+<span class="nc" id="L191">        }</span>
+
+<span class="nc bnc" id="L193" title="All 2 branches missed.">        if ( supportSearch == 0 )</span>
+        {
+<span class="nc" id="L195">            throw new UnsupportedOperationException( &quot;None of the backing providers support this operation.&quot; );</span>
+        }
+<span class="nc" id="L197">        return userList;</span>
+    }
+
+    /**
+     * Searches for users based on a set of fields and a query string. The fields must  be taken from the values
+     * returned by {@link #getSearchFields()}. The query can  include wildcards. For example, a search on the field
+     * &quot;Name&quot; with a query of &quot;Ma*&quot;  might return user's with the name &quot;Matt&quot;, &quot;Martha&quot; and &quot;Madeline&quot;.
+     *
+     * This method throws an UnsupportedOperationException when none of the backing providers support search.
+     *
+     * When fields are provided that are not supported by a particular provider, those fields are ignored by that
+     * provider (but can still be used by other providers).
+     *
+     * The startIndex and numResults parameters are used to page through search results. For example, if the startIndex
+     * is 0 and numResults is 10, the first  10 search results will be returned. Note that numResults is a request for
+     * the number of results to return and that the actual number of results returned may be fewer.
+     *
+     * @param fields     the fields to search on.
+     * @param query      the query string.
+     * @param startIndex the starting index in the search result to return.
+     * @param numResults the number of users to return in the search result.
+     * @return a Collection of users that match the search.
+     * @throws UnsupportedOperationException When none of the providers support search.
+     */
+    @Override
+    public Collection&lt;User&gt; findUsers( Set&lt;String&gt; fields, String query, int startIndex, int numResults ) throws UnsupportedOperationException
+    {
+<span class="nc" id="L224">        final List&lt;User&gt; userList = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L225">        int supportSearch = getUserProviders().size();</span>
+<span class="nc" id="L226">        int totalMatchedUserCount = 0;</span>
+
+<span class="nc bnc" id="L228" title="All 2 branches missed.">        for ( final UserProvider provider : getUserProviders() )</span>
+        {
+            try
+            {
+                // Use only those fields that are supported by the provider.
+<span class="nc" id="L233">                final Set&lt;String&gt; supportedFields = new HashSet&lt;&gt;( fields );</span>
+<span class="nc" id="L234">                supportedFields.retainAll( provider.getSearchFields() );</span>
+
+                // Query the provider for sub-results.
+<span class="nc" id="L237">                final Collection&lt;User&gt; providerResults = provider.findUsers( fields, query );</span>
+
+                // Keep track of how many hits we have had so far.
+<span class="nc" id="L240">                totalMatchedUserCount += providerResults.size();</span>
+
+                // Check if this sub-result contains the start of the page of data that is searched for.
+<span class="nc bnc" id="L243" title="All 2 branches missed.">                if ( startIndex &gt;= totalMatchedUserCount )</span>
+                {
+<span class="nc" id="L245">                    continue;</span>
+                }
+
+                // From the sub-results, take those that are of interest.
+<span class="nc" id="L249">                final int providerStartIndex = Math.max( 0, startIndex - totalMatchedUserCount );</span>
+<span class="nc" id="L250">                final int providerResultMax = numResults - userList.size();</span>
+<span class="nc bnc" id="L251" title="All 2 branches missed.">                final List&lt;User&gt; providerList = providerResults instanceof List&lt;?&gt; ?</span>
+                        (List&lt;User&gt;) providerResults : new ArrayList&lt;&gt;( providerResults );
+<span class="nc" id="L253">                userList.addAll( providerList.subList( providerStartIndex, providerResultMax ) );</span>
+
+                // Check if we have enough results.
+<span class="nc bnc" id="L256" title="All 2 branches missed.">                if ( userList.size() &gt;= numResults )</span>
+                {
+<span class="nc" id="L258">                    break;</span>
+                }
+            }
+<span class="nc" id="L261">            catch ( UnsupportedOperationException uoe )</span>
+            {
+<span class="nc" id="L263">                Log.warn( &quot;UserProvider.findUsers is not supported by this UserProvider: &quot; + provider.getClass().getName() );</span>
+<span class="nc" id="L264">                supportSearch--;</span>
+<span class="nc" id="L265">            }</span>
+<span class="nc" id="L266">        }</span>
+
+<span class="nc bnc" id="L268" title="All 2 branches missed.">        if ( supportSearch == 0 )</span>
+        {
+<span class="nc" id="L270">            throw new UnsupportedOperationException( &quot;None of the backing providers support this operation.&quot; );</span>
+        }
+<span class="nc" id="L272">        return userList;</span>
+    }
+
+    /**
+     * Returns the combination of search fields supported by the backing providers. Note that the returned fields might
+     * not be supported by every backing provider.
+     *
+     * @throws UnsupportedOperationException If no search fields are returned, or when at least one of the providers throws UnsupportedOperationException when its #getSearchField() is invoked.
+     */
+    @Override
+    public Set&lt;String&gt; getSearchFields() throws UnsupportedOperationException
+    {
+<span class="nc" id="L284">        int supportSearch = getUserProviders().size();</span>
+<span class="nc" id="L285">        final Set&lt;String&gt; result = new HashSet&lt;&gt;();</span>
+
+        // TODO Make calls concurrent for improved throughput.
+<span class="nc bnc" id="L288" title="All 2 branches missed.">        for ( final UserProvider provider : getUserProviders() )</span>
+        {
+            try
+            {
+<span class="nc" id="L292">                result.addAll( provider.getSearchFields() );</span>
+            }
+<span class="nc" id="L294">            catch ( UnsupportedOperationException uoe )</span>
+            {
+<span class="nc" id="L296">                Log.warn( &quot;getSearchFields is not supported by this UserProvider: &quot; + provider.getClass().getName() );</span>
+<span class="nc" id="L297">                supportSearch--;</span>
+<span class="nc" id="L298">            }</span>
+<span class="nc" id="L299">        }</span>
+
+<span class="nc bnc" id="L301" title="All 2 branches missed.">        if ( supportSearch == 0 )</span>
+        {
+<span class="nc" id="L303">            throw new UnsupportedOperationException( &quot;None of the backing providers support this operation.&quot; );</span>
+        }
+<span class="nc" id="L305">        return result;</span>
+    }
+
+    /**
+     * Returns whether &lt;em&gt;all&lt;/em&gt; backing providers are read-only. When read-only, users can not be created, deleted,
+     * or modified. If at least one provider is not read-only, this method returns false.
+     *
+     * @return true when all backing providers are read-only, otherwise false.
+     */
+    @Override
+    public boolean isReadOnly()
+    {
+        // TODO Make calls concurrent for improved throughput.
+<span class="nc bnc" id="L318" title="All 2 branches missed.">        for ( final UserProvider provider : getUserProviders() )</span>
+        {
+            // If at least one provider is not readonly, neither is this proxy.
+<span class="nc bnc" id="L321" title="All 2 branches missed.">            if ( !provider.isReadOnly() )</span>
+            {
+<span class="nc" id="L323">                return false;</span>
+            }
+<span class="nc" id="L325">        }</span>
+
+<span class="nc" id="L327">        return true;</span>
+    }
+
+    /**
+     * Returns whether &lt;em&gt;all&lt;/em&gt; backing providers require a name to be set on User objects. If at least one proivder
+     * does not, this method returns false.
+     *
+     * @return true when all backing providers require a name to be set on User objects, otherwise false.
+     */
+    @Override
+    public boolean isNameRequired()
+    {
+        // TODO Make calls concurrent for improved throughput.
+<span class="nc bnc" id="L340" title="All 2 branches missed.">        for ( final UserProvider provider : getUserProviders() )</span>
+        {
+            // If at least one provider does not require a name, neither is this proxy.
+<span class="nc bnc" id="L343" title="All 2 branches missed.">            if ( !provider.isNameRequired() )</span>
+            {
+<span class="nc" id="L345">                return false;</span>
+            }
+<span class="nc" id="L347">        }</span>
+
+<span class="nc" id="L349">        return true;</span>
+    }
+
+    /**
+     * Returns whether &lt;em&gt;all&lt;/em&gt; backing providers require an email address to be set on User objects. If at least
+     * one proivder does not, this method returns false.
+     *
+     * @return true when all backing providers require an email address to be set on User objects, otherwise false.
+     */
+    @Override
+    public boolean isEmailRequired()
+    {
+        // TODO Make calls concurrent for improved throughput.
+<span class="nc bnc" id="L362" title="All 2 branches missed.">        for ( final UserProvider provider : getUserProviders() )</span>
+        {
+            // If at least one provider does not require an email, neither is this proxy.
+<span class="nc bnc" id="L365" title="All 2 branches missed.">            if ( !provider.isEmailRequired() )</span>
+            {
+<span class="nc" id="L367">                return false;</span>
+            }
+<span class="nc" id="L369">        }</span>
+
+<span class="nc" id="L371">        return true;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

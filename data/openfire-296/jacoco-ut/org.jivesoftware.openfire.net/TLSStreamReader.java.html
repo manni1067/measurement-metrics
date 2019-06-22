@@ -1,0 +1,202 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>TLSStreamReader.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.net</a> &gt; <span class="el_source">TLSStreamReader.java</span></div><h1>TLSStreamReader.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.net;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.net.Socket;
+import java.nio.ByteBuffer;
+import java.nio.channels.Channels;
+import java.nio.channels.ReadableByteChannel;
+
+/**
+ * A &lt;code&gt;TLSStreamReader&lt;/code&gt; that returns a special InputStream that hides the ByteBuffers
+ * used by the underlying Channels.
+ * 
+ * @author Hao Chen
+ */
+public class TLSStreamReader {
+
+    /**
+     * &lt;code&gt;TLSWrapper&lt;/code&gt; is a TLS wrapper for connections requiring TLS protocol.
+     */
+    private TLSWrapper wrapper;
+
+    private ReadableByteChannel rbc;
+
+    /**
+     * &lt;code&gt;inNetBB&lt;/code&gt; buffer keeps data read from socket.
+     */
+    private ByteBuffer inNetBB;
+
+    /**
+     * &lt;code&gt;inAppBB&lt;/code&gt; buffer keeps decypted data.
+     */
+    private ByteBuffer inAppBB;
+
+    private TLSStatus lastStatus;
+
+<span class="nc" id="L53">    public TLSStreamReader(TLSWrapper tlsWrapper, Socket socket) throws IOException {</span>
+<span class="nc" id="L54">        wrapper = tlsWrapper;</span>
+        // DANIELE: Add code to use directly the socket channel
+<span class="nc bnc" id="L56" title="All 2 branches missed.">        if (socket.getChannel() != null) {</span>
+<span class="nc" id="L57">            rbc = ServerTrafficCounter.wrapReadableChannel(socket.getChannel());</span>
+        }
+        else {
+<span class="nc" id="L60">            rbc = Channels.newChannel(</span>
+<span class="nc" id="L61">                    ServerTrafficCounter.wrapInputStream(socket.getInputStream()));</span>
+        }
+<span class="nc" id="L63">        inNetBB = ByteBuffer.allocate(wrapper.getNetBuffSize());</span>
+<span class="nc" id="L64">        inAppBB = ByteBuffer.allocate(wrapper.getAppBuffSize());</span>
+<span class="nc" id="L65">    }</span>
+
+    /*
+     * Read TLS encrpyted data from SocketChannel, and use &lt;code&gt;decrypt&lt;/code&gt; method to decypt.
+     */
+    private void doRead() throws IOException {
+        //System.out.println(&quot;doRead inNet position: &quot; + inNetBB.position() + &quot; capacity: &quot; + inNetBB.capacity() + &quot; (before read)&quot;);
+
+        // Read from the channel and fill inNetBB with the encrypted data
+<span class="nc" id="L74">        final int cnt = rbc.read(inNetBB);</span>
+<span class="nc bnc" id="L75" title="All 2 branches missed.">        if (cnt &gt; 0) {</span>
+            //System.out.println(&quot;doRead inNet position: &quot; + inNetBB.position() + &quot; capacity: &quot; + inNetBB.capacity() + &quot; (after read)&quot;);
+            //System.out.println(&quot;doRead inAppBB (before decrypt) position: &quot; + inAppBB.position() + &quot; limit: &quot; + inAppBB.limit() + &quot; capacity: &quot; + inAppBB.capacity());
+
+            // Decode encrypted data
+<span class="nc" id="L80">            inAppBB = decrypt(inNetBB, inAppBB);</span>
+
+            ///System.out.println(&quot;doRead inAppBB (after decrypt) position: &quot; + inAppBB.position() + &quot; limit: &quot; + inAppBB.limit() + &quot; capacity: &quot; + inAppBB.capacity() + &quot; lastStatus: &quot; + lastStatus);
+
+<span class="nc bnc" id="L84" title="All 2 branches missed.">            if (lastStatus == TLSStatus.OK) {</span>
+                // All the data contained in inNetBB was read and decrypted so we can safely
+                // set the position of inAppBB to 0 to process it.
+<span class="nc" id="L87">                inAppBB.flip();</span>
+            }
+            else {
+                // Some data in inNetBB was not decrypted since it is not complete. A
+                // bufferunderflow was detected since the TLS packet is not complete to be
+                // decrypted. We need to read more data from the channel to decrypt the whole
+                // TLS packet. The inNetBB byte buffer has been compacted so the read and
+                // decrypted is discarded and only the unread and encrypted data is left in the
+                // buffer. The inAppBB has been completed with the decrypted data and we must
+                // leave the position at the end of the written so that in the next doRead the
+                // decrypted data is appended to the end of the buffer.
+                //System.out.println(&quot;Reading more data from the channel (UNDERFLOW state)&quot;);
+<span class="nc" id="L99">                doRead();</span>
+            }
+        } else {
+<span class="nc bnc" id="L102" title="All 2 branches missed.">            if (cnt == -1) {</span>
+<span class="nc" id="L103">                inAppBB.flip();</span>
+<span class="nc" id="L104">                rbc.close();</span>
+            }
+        }
+<span class="nc" id="L107">    }</span>
+
+    /*
+     * This method uses &lt;code&gt;TLSWrapper&lt;/code&gt; to decrypt TLS encrypted data.
+     */
+    private ByteBuffer decrypt(ByteBuffer input, ByteBuffer output) throws IOException {
+<span class="nc" id="L113">        ByteBuffer out = output;</span>
+<span class="nc" id="L114">        input.flip();</span>
+        do {
+            // Decode SSL/TLS network data and place it in the app buffer
+<span class="nc" id="L117">            out = wrapper.unwrap(input, out);</span>
+
+<span class="nc" id="L119">            lastStatus = wrapper.getStatus();</span>
+        }
+<span class="nc bnc" id="L121" title="All 4 branches missed.">        while ((lastStatus == TLSStatus.NEED_READ || lastStatus == TLSStatus.OK) &amp;&amp;</span>
+<span class="nc bnc" id="L122" title="All 2 branches missed.">                input.hasRemaining());</span>
+
+<span class="nc bnc" id="L124" title="All 2 branches missed.">        if (input.hasRemaining()) {</span>
+            // Complete TLS packets have been read, decrypted and written to the output buffer.
+            // However, the input buffer contains incomplete TLS packets that cannot be decrpted.
+            // Discard the read data and keep the unread data in the input buffer. The channel will
+            // be read again to obtain the missing data to complete the TLS packet. So in the next
+            // round the TLS packet will be decrypted and written to the output buffer
+<span class="nc" id="L130">            input.compact();</span>
+        } else {
+            // All the encrypted data in the inpu buffer was decrypted so we can clear
+            // the input buffer.
+<span class="nc" id="L134">            input.clear();</span>
+        }
+
+<span class="nc" id="L137">        return out;</span>
+    }
+
+    public InputStream getInputStream() {
+<span class="nc" id="L141">        return createInputStream();</span>
+    }
+
+    /*
+     * Returns an input stream for a ByteBuffer. The read() methods use the relative ByteBuffer
+     * get() methods.
+     */
+    private InputStream createInputStream() {
+<span class="nc" id="L149">        return new InputStream() {</span>
+            @Override
+            public synchronized int read() throws IOException {
+<span class="nc" id="L152">                doRead();</span>
+<span class="nc bnc" id="L153" title="All 2 branches missed.">                if (!inAppBB.hasRemaining()) {</span>
+<span class="nc" id="L154">                    return -1;</span>
+                }
+<span class="nc" id="L156">                return inAppBB.get();</span>
+            }
+
+            @Override
+            public synchronized int read(byte[] bytes, int off, int len) throws IOException {
+                // Check if in the previous read the inAppBB ByteBuffer remained with unread data.
+                // If all the data was consumed then read from the socket channel. Otherwise,
+                // consume the data contained in the buffer.
+<span class="nc bnc" id="L164" title="All 2 branches missed.">                if (inAppBB.position() == 0) {</span>
+                    // Read from the channel the encrypted data, decrypt it and load it
+                    // into inAppBB
+<span class="nc" id="L167">                    doRead();</span>
+                }
+                else {
+                    //System.out.println(&quot;#createInputStream. Detected previously unread data. position: &quot; + inAppBB.position());
+
+                    // The inAppBB contains data from a previous read so set the position to 0
+                    // to consume it
+<span class="nc" id="L174">                    inAppBB.flip();</span>
+                }
+<span class="nc" id="L176">                len = Math.min(len, inAppBB.remaining());</span>
+<span class="nc bnc" id="L177" title="All 2 branches missed.">                if (len == 0) {</span>
+                    // Nothing was read so the end of stream should have been reached.
+<span class="nc" id="L179">                    return -1;</span>
+                }
+<span class="nc" id="L181">                inAppBB.get(bytes, off, len);</span>
+                // If the requested length is less than the limit of inAppBB then all the data
+                // inside inAppBB was not read. In that case we need to discard the read data and
+                // keep only the unread data to be consume the next time this method is called
+<span class="nc bnc" id="L185" title="All 2 branches missed.">                if (inAppBB.hasRemaining()) {</span>
+                    // Discard read data and move unread data to the begining of the buffer. Leave
+                    // the position at the end of the buffer as a way to indicate that there is
+                    // unread data
+<span class="nc" id="L189">                    inAppBB.compact();</span>
+
+                    //System.out.println(&quot;#createInputStream. Data left unread. inAppBB compacted. position: &quot; + inAppBB.position() + &quot; limit: &quot; + inAppBB.limit());
+                }
+                else {
+                    // Everything was read so reset the buffer
+<span class="nc" id="L195">                    inAppBB.clear();</span>
+                }
+<span class="nc" id="L197">                return len;</span>
+            }
+        };
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

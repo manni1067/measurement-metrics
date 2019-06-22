@@ -1,0 +1,533 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>IQRouter.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire</a> &gt; <span class="el_source">IQRouter.java</span></div><h1>IQRouter.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire;
+
+import org.dom4j.Element;
+import org.jivesoftware.openfire.container.BasicModule;
+import org.jivesoftware.openfire.handler.IQHandler;
+import org.jivesoftware.openfire.interceptor.InterceptorManager;
+import org.jivesoftware.openfire.interceptor.PacketRejectedException;
+import org.jivesoftware.openfire.privacy.PrivacyList;
+import org.jivesoftware.openfire.privacy.PrivacyListManager;
+import org.jivesoftware.openfire.session.ClientSession;
+import org.jivesoftware.openfire.session.DomainPair;
+import org.jivesoftware.openfire.session.LocalClientSession;
+import org.jivesoftware.openfire.session.Session;
+import org.jivesoftware.openfire.user.UserManager;
+import org.jivesoftware.util.LocaleUtils;
+import org.jivesoftware.util.TaskEngine;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmpp.component.IQResultListener;
+import org.xmpp.packet.*;
+
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+
+/**
+ * Routes iq packets throughout the server. Routing is based on the recipient
+ * and sender addresses. The typical packet will often be routed twice, once
+ * from the sender to some internal server component for handling or processing,
+ * and then back to the router to be delivered to it's final destination.
+ *
+ * @author Iain Shigeoka
+ */
+public class IQRouter extends BasicModule {
+
+<span class="fc" id="L51">    private static final Logger Log = LoggerFactory.getLogger(IQRouter.class);</span>
+
+    private RoutingTable routingTable;
+    private MulticastRouter multicastRouter;
+    private String serverName;
+<span class="nc" id="L56">    private List&lt;IQHandler&gt; iqHandlers = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L57">    private Map&lt;String, IQHandler&gt; namespace2Handlers = new ConcurrentHashMap&lt;&gt;();</span>
+<span class="nc" id="L58">    private Map&lt;String, IQResultListener&gt; resultListeners = new ConcurrentHashMap&lt;&gt;();</span>
+<span class="nc" id="L59">    private Map&lt;String, Long&gt; resultTimeout = new ConcurrentHashMap&lt;&gt;();</span>
+    private SessionManager sessionManager;
+    private UserManager userManager;
+
+    /**
+     * Creates a packet router.
+     */
+    public IQRouter() {
+<span class="nc" id="L67">        super(&quot;XMPP IQ Router&quot;);</span>
+<span class="nc" id="L68">    }</span>
+
+    /**
+     * &lt;p&gt;Performs the actual packet routing.&lt;/p&gt;
+     * &lt;p&gt;You routing is considered 'quick' and implementations may not take
+     * excessive amounts of time to complete the routing. If routing will take
+     * a long amount of time, the actual routing should be done in another thread
+     * so this method returns quickly.&lt;/p&gt;
+     * &lt;h2&gt;Warning&lt;/h2&gt;
+     * &lt;p&gt;Be careful to enforce concurrency DbC of concurrent by synchronizing
+     * any accesses to class resources.&lt;/p&gt;
+     *
+     * @param packet The packet to route
+     * @throws NullPointerException If the packet is null
+     */
+    public void route(IQ packet) {
+<span class="nc bnc" id="L84" title="All 2 branches missed.">        if (packet == null) {</span>
+<span class="nc" id="L85">            throw new NullPointerException();</span>
+        }
+<span class="nc" id="L87">        JID sender = packet.getFrom();</span>
+<span class="nc" id="L88">        ClientSession session = sessionManager.getSession(sender);</span>
+<span class="nc" id="L89">        Element childElement = packet.getChildElement(); // may be null</span>
+        try {
+            // Invoke the interceptors before we process the read packet
+<span class="nc" id="L92">            InterceptorManager.getInstance().invokeInterceptors(packet, session, true, false);</span>
+<span class="nc" id="L93">            JID to = packet.getTo();</span>
+<span class="nc bnc" id="L94" title="All 6 branches missed.">            if (session != null &amp;&amp; to != null &amp;&amp; session.getStatus() == Session.STATUS_CONNECTED &amp;&amp;</span>
+<span class="nc bnc" id="L95" title="All 2 branches missed.">                    !serverName.equals(to.toString())) {</span>
+                // User is requesting this server to authenticate for another server. Return
+                // a bad-request error
+<span class="nc" id="L98">                IQ reply = IQ.createResultIQ(packet);</span>
+<span class="nc bnc" id="L99" title="All 2 branches missed.">                if (childElement != null) {</span>
+<span class="nc" id="L100">                    reply.setChildElement(childElement.createCopy());</span>
+                }
+<span class="nc" id="L102">                reply.setError(PacketError.Condition.bad_request);</span>
+<span class="nc" id="L103">                session.process(reply);</span>
+<span class="nc" id="L104">                Log.warn(&quot;User tried to authenticate with this server using an unknown receipient: &quot; +</span>
+<span class="nc" id="L105">                        packet.toXML());</span>
+<span class="nc" id="L106">            }</span>
+<span class="nc bnc" id="L107" title="All 6 branches missed.">            else if (session == null || session.getStatus() == Session.STATUS_AUTHENTICATED || (</span>
+<span class="nc bnc" id="L108" title="All 2 branches missed.">                    childElement != null &amp;&amp; isLocalServer(to) &amp;&amp; (</span>
+<span class="nc bnc" id="L109" title="All 2 branches missed.">                        &quot;jabber:iq:auth&quot;.equals(childElement.getNamespaceURI()) ||</span>
+<span class="nc bnc" id="L110" title="All 2 branches missed.">                        &quot;jabber:iq:register&quot;.equals(childElement.getNamespaceURI()) ||</span>
+<span class="nc bnc" id="L111" title="All 2 branches missed.">                        &quot;urn:ietf:params:xml:ns:xmpp-bind&quot;.equals(childElement.getNamespaceURI())))) {</span>
+<span class="nc" id="L112">                handle(packet);</span>
+<span class="nc bnc" id="L113" title="All 4 branches missed.">            } else if (packet.getType() == IQ.Type.get || packet.getType() == IQ.Type.set) {</span>
+<span class="nc" id="L114">                IQ reply = IQ.createResultIQ(packet);</span>
+<span class="nc bnc" id="L115" title="All 2 branches missed.">                if (childElement != null) {</span>
+<span class="nc" id="L116">                    reply.setChildElement(childElement.createCopy());</span>
+                }
+<span class="nc" id="L118">                reply.setError(PacketError.Condition.not_authorized);</span>
+<span class="nc" id="L119">                session.process(reply);</span>
+            }
+            // Invoke the interceptors after we have processed the read packet
+<span class="nc" id="L122">            InterceptorManager.getInstance().invokeInterceptors(packet, session, true, true);</span>
+        }
+<span class="nc" id="L124">        catch (PacketRejectedException e) {</span>
+<span class="nc bnc" id="L125" title="All 2 branches missed.">            if (session != null) {</span>
+                // An interceptor rejected this packet so answer a not_allowed error
+<span class="nc" id="L127">                IQ reply = new IQ();</span>
+<span class="nc bnc" id="L128" title="All 2 branches missed.">                if (childElement != null) {</span>
+<span class="nc" id="L129">                    reply.setChildElement(childElement.createCopy());</span>
+                }
+<span class="nc" id="L131">                reply.setID(packet.getID());</span>
+<span class="nc" id="L132">                reply.setTo(session.getAddress());</span>
+<span class="nc" id="L133">                reply.setFrom(packet.getTo());</span>
+<span class="nc" id="L134">                reply.setError(PacketError.Condition.not_allowed);</span>
+<span class="nc" id="L135">                session.process(reply);</span>
+                // Check if a message notifying the rejection should be sent
+<span class="nc bnc" id="L137" title="All 4 branches missed.">                if (e.getRejectionMessage() != null &amp;&amp; e.getRejectionMessage().trim().length() &gt; 0) {</span>
+                    // A message for the rejection will be sent to the sender of the rejected packet
+<span class="nc" id="L139">                    Message notification = new Message();</span>
+<span class="nc" id="L140">                    notification.setTo(session.getAddress());</span>
+<span class="nc" id="L141">                    notification.setFrom(packet.getTo());</span>
+<span class="nc" id="L142">                    notification.setBody(e.getRejectionMessage());</span>
+<span class="nc" id="L143">                    session.process(notification);</span>
+                }
+            }
+<span class="nc" id="L146">        }</span>
+<span class="nc" id="L147">    }</span>
+
+    /**
+     * &lt;p&gt;Adds a new IQHandler to the list of registered handler. The new IQHandler will be
+     * responsible for handling IQ packet whose namespace matches the namespace of the
+     * IQHandler.&lt;/p&gt;
+     *
+     * An IllegalArgumentException may be thrown if the IQHandler to register was already provided
+     * by the server. The server provides a certain list of IQHandlers when the server is
+     * started up.
+     *
+     * @param handler the IQHandler to add to the list of registered handler.
+     */
+    public void addHandler(IQHandler handler) {
+<span class="nc bnc" id="L161" title="All 2 branches missed.">        if (iqHandlers.contains(handler)) {</span>
+<span class="nc" id="L162">            throw new IllegalArgumentException(&quot;IQHandler already provided by the server&quot;);</span>
+        }
+        // Ask the handler to be initialized
+<span class="nc" id="L165">        handler.initialize(XMPPServer.getInstance());</span>
+        // Register the handler as the handler of the namespace
+<span class="nc" id="L167">        namespace2Handlers.put(handler.getInfo().getNamespace(), handler);</span>
+<span class="nc" id="L168">    }</span>
+
+    /**
+     * &lt;p&gt;Removes an IQHandler from the list of registered handler. The IQHandler to remove was
+     * responsible for handling IQ packet whose namespace matches the namespace of the
+     * IQHandler.&lt;/p&gt;
+     *
+     * An IllegalArgumentException may be thrown if the IQHandler to remove was already provided
+     * by the server. The server provides a certain list of IQHandlers when the server is
+     * started up.
+     *
+     * @param handler the IQHandler to remove from the list of registered handler.
+     */
+    public void removeHandler(IQHandler handler) {
+<span class="nc bnc" id="L182" title="All 2 branches missed.">        if (iqHandlers.contains(handler)) {</span>
+<span class="nc" id="L183">            throw new IllegalArgumentException(&quot;Cannot remove an IQHandler provided by the server&quot;);</span>
+        }
+        // Unregister the handler as the handler of the namespace
+<span class="nc" id="L186">        namespace2Handlers.remove(handler.getInfo().getNamespace());</span>
+<span class="nc" id="L187">    }</span>
+
+    /**
+     * Adds an {@link IQResultListener} that will be invoked when an IQ result
+     * is sent to the server itself and is of type result or error. This is a
+     * nice way for the server to send IQ packets to other XMPP entities and be
+     * waked up when a response is received back.&lt;p&gt;
+     *
+     * Once an IQ result was received, the listener will be invoked and removed
+     * from the list of listeners.&lt;p&gt;
+     *
+     * If no result was received within one minute, the timeout method of the
+     * listener will be invoked and the listener will be removed from the list
+     * of listeners.
+     *
+     * @param id
+     *            the id of the IQ packet being sent from the server to an XMPP
+     *            entity.
+     * @param listener
+     *            the IQResultListener that will be invoked when an answer is
+     *            received
+     */
+    public void addIQResultListener(String id, IQResultListener listener) {
+<span class="nc" id="L210">        addIQResultListener(id, listener, 60 * 1000);</span>
+<span class="nc" id="L211">    }</span>
+
+    /**
+     * Adds an {@link IQResultListener} that will be invoked when an IQ result
+     * is sent to the server itself and is of type result or error. This is a
+     * nice way for the server to send IQ packets to other XMPP entities and be
+     * waked up when a response is received back.&lt;p&gt;
+     *
+     * Once an IQ result was received, the listener will be invoked and removed
+     * from the list of listeners.&lt;p&gt;
+     *
+     * If no result was received within the specified amount of milliseconds,
+     * the timeout method of the listener will be invoked and the listener will
+     * be removed from the list of listeners.&lt;p&gt;
+     *
+     * Note that the listener will remain active for &lt;em&gt;at least&lt;/em&gt; the
+     * specified timeout value. The listener will not be removed at the exact
+     * moment it times out. Instead, purging of timed out listeners is a
+     * periodic scheduled job.
+     *
+     * @param id
+     *            the id of the IQ packet being sent from the server to an XMPP
+     *            entity.
+     * @param listener
+     *            the IQResultListener that will be invoked when an answer is
+     *            received.
+     * @param timeoutmillis
+     *            The amount of milliseconds after which waiting for a response
+     *            should be stopped.
+     */
+    public void addIQResultListener(String id, IQResultListener listener, long timeoutmillis) {
+<span class="nc" id="L242">        resultListeners.put(id, listener);</span>
+<span class="nc" id="L243">        resultTimeout.put(id, System.currentTimeMillis() + timeoutmillis);</span>
+<span class="nc" id="L244">    }</span>
+
+    @Override
+    public void initialize(XMPPServer server) {
+<span class="nc" id="L248">        super.initialize(server);</span>
+<span class="nc" id="L249">        TaskEngine.getInstance().scheduleAtFixedRate(new TimeoutTask(), 5000, 5000);</span>
+<span class="nc" id="L250">        serverName = server.getServerInfo().getXMPPDomain();</span>
+<span class="nc" id="L251">        routingTable = server.getRoutingTable();</span>
+<span class="nc" id="L252">        multicastRouter = server.getMulticastRouter();</span>
+<span class="nc" id="L253">        iqHandlers.addAll(server.getIQHandlers());</span>
+<span class="nc" id="L254">        sessionManager = server.getSessionManager();</span>
+<span class="nc" id="L255">        userManager = server.getUserManager();</span>
+<span class="nc" id="L256">    }</span>
+
+    /**
+     * A JID is considered local if:
+     * 1) is null or
+     * 2) has no domain or domain is empty
+     * or
+     * if it's not a full JID and it was sent to the server itself.
+     *
+     * @param recipientJID address to check.
+     * @return true if the specified address belongs to the local server.
+     */
+    private boolean isLocalServer(JID recipientJID) {
+        // Check if no address was specified in the IQ packet
+<span class="nc bnc" id="L270" title="All 2 branches missed.">        boolean implicitServer =</span>
+<span class="nc bnc" id="L271" title="All 4 branches missed.">                recipientJID == null || recipientJID.getDomain() == null || &quot;&quot;.equals(recipientJID.getDomain());</span>
+<span class="nc bnc" id="L272" title="All 2 branches missed.">        if (!implicitServer) {</span>
+            // We found an address. Now check if it's a bare or full JID
+<span class="nc bnc" id="L274" title="All 4 branches missed.">            if (recipientJID.getNode() == null || recipientJID.getResource() == null) {</span>
+                // Address is a bare JID so check if it was sent to the server itself
+<span class="nc" id="L276">                return serverName.equals(recipientJID.getDomain());</span>
+            }
+            // Address is a full JID. IQ packets sent to full JIDs are not handle by the server
+<span class="nc" id="L279">            return false;</span>
+        }
+<span class="nc" id="L281">        return true;</span>
+    }
+
+    private void handle(IQ packet) {
+<span class="nc" id="L285">        JID recipientJID = packet.getTo();</span>
+        // Check if the packet was sent to the server hostname
+<span class="nc bnc" id="L287" title="All 4 branches missed.">        if (recipientJID != null &amp;&amp; recipientJID.getNode() == null &amp;&amp;</span>
+<span class="nc bnc" id="L288" title="All 4 branches missed.">                recipientJID.getResource() == null &amp;&amp; serverName.equals(recipientJID.getDomain())) {</span>
+<span class="nc" id="L289">            Element childElement = packet.getChildElement();</span>
+<span class="nc bnc" id="L290" title="All 4 branches missed.">            if (childElement != null &amp;&amp; childElement.element(&quot;addresses&quot;) != null) {</span>
+                // Packet includes multicast processing instructions. Ask the multicastRouter
+                // to route this packet
+<span class="nc" id="L293">                multicastRouter.route(packet);</span>
+<span class="nc" id="L294">                return;</span>
+            }
+        }
+<span class="nc bnc" id="L297" title="All 6 branches missed.">        if (packet.getID() != null &amp;&amp; (IQ.Type.result == packet.getType() || IQ.Type.error == packet.getType())) {</span>
+            // The server got an answer to an IQ packet that was sent from the server
+<span class="nc" id="L299">            IQResultListener iqResultListener = resultListeners.remove(packet.getID());</span>
+<span class="nc bnc" id="L300" title="All 2 branches missed.">            if (iqResultListener != null) {</span>
+<span class="nc" id="L301">                resultTimeout.remove(packet.getID());</span>
+<span class="nc bnc" id="L302" title="All 2 branches missed.">                if (iqResultListener != null) {</span>
+                    try {
+<span class="nc" id="L304">                        iqResultListener.receivedAnswer(packet);</span>
+                    }
+<span class="nc" id="L306">                    catch (Exception e) {</span>
+<span class="nc" id="L307">                        Log.error(</span>
+                                &quot;Error processing answer of remote entity. Answer: &quot;
+<span class="nc" id="L309">                                        + packet.toXML(), e);</span>
+<span class="nc" id="L310">                    }</span>
+<span class="nc" id="L311">                    return;</span>
+                }
+            }
+        }
+        try {
+            // Check for registered components, services or remote servers
+<span class="nc bnc" id="L317" title="All 2 branches missed.">            if (recipientJID != null &amp;&amp;</span>
+<span class="nc bnc" id="L318" title="All 4 branches missed.">                    (routingTable.hasComponentRoute(recipientJID) || routingTable.hasServerRoute(new DomainPair(packet.getFrom().getDomain(), recipientJID.getDomain())))) {</span>
+                // A component/service/remote server was found that can handle the Packet
+<span class="nc" id="L320">                routingTable.routePacket(recipientJID, packet, false);</span>
+<span class="nc" id="L321">                return;</span>
+            }
+
+<span class="nc bnc" id="L324" title="All 2 branches missed.">           if (isLocalServer(recipientJID)) {</span>
+                // Let the server handle the Packet
+<span class="nc" id="L326">                Element childElement = packet.getChildElement();</span>
+<span class="nc" id="L327">                String namespace = null;</span>
+<span class="nc bnc" id="L328" title="All 2 branches missed.">                if (childElement != null) {</span>
+<span class="nc" id="L329">                    namespace = childElement.getNamespaceURI();</span>
+                }
+<span class="nc bnc" id="L331" title="All 2 branches missed.">                if (namespace == null) {</span>
+<span class="nc bnc" id="L332" title="All 4 branches missed.">                    if (packet.getType() != IQ.Type.result &amp;&amp; packet.getType() != IQ.Type.error) {</span>
+                        // Do nothing. We can't handle queries outside of a valid namespace
+<span class="nc" id="L334">                        Log.warn(&quot;Unknown packet &quot; + packet.toXML());</span>
+                    }
+                }
+                else {
+                    // Check if communication to local users is allowed
+<span class="nc bnc" id="L339" title="All 4 branches missed.">                    if (recipientJID != null &amp;&amp; userManager.isRegisteredUser(recipientJID.getNode())) {</span>
+                        PrivacyList list =
+<span class="nc" id="L341">                                PrivacyListManager.getInstance().getDefaultPrivacyList(recipientJID.getNode());</span>
+<span class="nc bnc" id="L342" title="All 4 branches missed.">                        if (list != null &amp;&amp; list.shouldBlockPacket(packet)) {</span>
+                            // Communication is blocked
+<span class="nc bnc" id="L344" title="All 4 branches missed.">                            if (IQ.Type.set == packet.getType() || IQ.Type.get == packet.getType()) {</span>
+                                // Answer that the service is unavailable
+<span class="nc" id="L346">                                sendErrorPacket(packet, PacketError.Condition.service_unavailable);</span>
+                            }
+<span class="nc" id="L348">                            return;</span>
+                        }
+                    }
+<span class="nc" id="L351">                    IQHandler handler = getHandler(namespace);</span>
+<span class="nc bnc" id="L352" title="All 2 branches missed.">                    if (handler == null) {</span>
+<span class="nc bnc" id="L353" title="All 2 branches missed.">                        if (recipientJID == null) {</span>
+                            // Answer an error since the server can't handle the requested namespace
+<span class="nc" id="L355">                            sendErrorPacket(packet, PacketError.Condition.service_unavailable);</span>
+                        }
+<span class="nc bnc" id="L357" title="All 2 branches missed.">                        else if (recipientJID.getNode() == null ||</span>
+<span class="nc bnc" id="L358" title="All 2 branches missed.">                                &quot;&quot;.equals(recipientJID.getNode())) {</span>
+                            // Answer an error if JID is of the form &lt;domain&gt;
+<span class="nc" id="L360">                            sendErrorPacket(packet, PacketError.Condition.feature_not_implemented);</span>
+                        }
+                        else {
+                            // JID is of the form &lt;node@domain&gt;
+                            // Answer an error since the server can't handle packets sent to a node
+<span class="nc" id="L365">                            sendErrorPacket(packet, PacketError.Condition.service_unavailable);</span>
+                        }
+                    }
+                    else {
+<span class="nc" id="L369">                        handler.process(packet);</span>
+                    }
+                }
+<span class="nc" id="L372">            }</span>
+            else {
+
+                // RFC 6121 8.5.1.  No Such User http://xmpp.org/rfcs/rfc6121.html#rules-localpart-nosuchuser
+                // If the 'to' address specifies a bare JID &lt;localpart@domainpart&gt; or full JID &lt;localpart@domainpart/resourcepart&gt; where the domainpart of the JID matches a configured domain that is serviced by the server itself, the server MUST proceed as follows.
+                // If the user account identified by the 'to' attribute does not exist, how the stanza is processed depends on the stanza type.
+<span class="nc bnc" id="L378" title="All 14 branches missed.">                if (recipientJID != null &amp;&amp; recipientJID.getNode() != null &amp;&amp; serverName.equals(recipientJID.getDomain()) &amp;&amp; !userManager.isRegisteredUser(recipientJID.getNode()) &amp;&amp; sessionManager.getSession(recipientJID) == null &amp;&amp; (IQ.Type.set == packet.getType() || IQ.Type.get == packet.getType())) {</span>
+                    // For an IQ stanza, the server MUST return a &lt;service-unavailable/&gt; stanza error to the sender.
+<span class="nc" id="L380">                    sendErrorPacket(packet, PacketError.Condition.service_unavailable);</span>
+<span class="nc" id="L381">                    return;</span>
+                }
+
+<span class="nc" id="L384">                ClientSession session = sessionManager.getSession(packet.getFrom());</span>
+<span class="nc" id="L385">                boolean isAcceptable = true;</span>
+<span class="nc bnc" id="L386" title="All 2 branches missed.">                if (session instanceof LocalClientSession) {</span>
+                    // Check if we could process IQ stanzas from the recipient.
+                    // If not, return a not-acceptable error as per XEP-0016:
+                    // If the user attempts to send an outbound stanza to a contact and that stanza type is blocked, the user's server MUST NOT route the stanza to the contact but instead MUST return a &lt;not-acceptable/&gt; error
+<span class="nc" id="L390">                    IQ dummyIQ = packet.createCopy();</span>
+<span class="nc" id="L391">                    dummyIQ.setFrom(packet.getTo());</span>
+<span class="nc" id="L392">                    dummyIQ.setTo(packet.getFrom());</span>
+<span class="nc bnc" id="L393" title="All 2 branches missed.">                    if (!((LocalClientSession) session).canProcess(dummyIQ)) {</span>
+<span class="nc" id="L394">                        packet.setTo(session.getAddress());</span>
+<span class="nc" id="L395">                        packet.setFrom((JID) null);</span>
+<span class="nc" id="L396">                        packet.setError(PacketError.Condition.not_acceptable);</span>
+<span class="nc" id="L397">                        session.process(packet);</span>
+<span class="nc" id="L398">                        isAcceptable = false;</span>
+                    }
+                }
+
+<span class="nc bnc" id="L402" title="All 2 branches missed.">                if (isAcceptable) {</span>
+                    // JID is of the form &lt;node@domain/resource&gt; or belongs to a remote server
+                    // or to an uninstalled component
+<span class="nc" id="L405">                    routingTable.routePacket(recipientJID, packet, false);</span>
+                }
+            }
+        }
+<span class="nc" id="L409">        catch (Exception e) {</span>
+<span class="nc" id="L410">            Log.error(LocaleUtils.getLocalizedString(&quot;admin.error.routing&quot;), e);</span>
+<span class="nc" id="L411">            Session session = sessionManager.getSession(packet.getFrom());</span>
+<span class="nc bnc" id="L412" title="All 2 branches missed.">            if (session != null) {</span>
+<span class="nc" id="L413">                IQ reply = IQ.createResultIQ(packet);</span>
+<span class="nc" id="L414">                reply.setError(PacketError.Condition.internal_server_error);</span>
+<span class="nc" id="L415">                session.process(reply);</span>
+            }
+<span class="nc" id="L417">        }</span>
+<span class="nc" id="L418">    }</span>
+
+    private void sendErrorPacket(IQ originalPacket, PacketError.Condition condition) {
+<span class="nc bnc" id="L421" title="All 2 branches missed.">        if (IQ.Type.error == originalPacket.getType()) {</span>
+<span class="nc" id="L422">            Log.error(&quot;Cannot reply an IQ error to another IQ error: &quot; + originalPacket.toXML());</span>
+<span class="nc" id="L423">            return;</span>
+        }
+<span class="nc bnc" id="L425" title="All 2 branches missed.">        if (originalPacket.getFrom() == null) {</span>
+<span class="nc bnc" id="L426" title="All 2 branches missed.">            if (Log.isDebugEnabled()) {</span>
+<span class="nc" id="L427">                Log.debug(&quot;Original IQ has no sender for reply; dropped: &quot; + originalPacket.toXML());</span>
+            }
+<span class="nc" id="L429">            return;</span>
+        }
+<span class="nc" id="L431">        IQ reply = IQ.createResultIQ(originalPacket);</span>
+<span class="nc" id="L432">        reply.setChildElement(originalPacket.getChildElement().createCopy());</span>
+<span class="nc" id="L433">        reply.setError(condition);</span>
+        // Check if the server was the sender of the IQ
+<span class="nc bnc" id="L435" title="All 2 branches missed.">        if (serverName.equals(originalPacket.getFrom().toString())) {</span>
+            // Just let the IQ router process the IQ error reply
+<span class="nc" id="L437">            handle(reply);</span>
+<span class="nc" id="L438">            return;</span>
+        }
+        // Route the error packet to the original sender of the IQ.
+<span class="nc" id="L441">        routingTable.routePacket(reply.getTo(), reply, true);</span>
+<span class="nc" id="L442">    }</span>
+
+    /**
+     * Determines if this instance has support (formally: has a IQ Handler) for the provided namespace.
+     *
+     * @param namespace Identifier of functionality (cannot be null)
+     * @return true if the functionality identified by the namespace is supported, otherwise false.
+     */
+    public boolean supports( String namespace ) {
+<span class="nc bnc" id="L451" title="All 2 branches missed.">        return getHandler( namespace ) != null;</span>
+    }
+
+    private IQHandler getHandler(String namespace) {
+<span class="nc" id="L455">        IQHandler handler = namespace2Handlers.get(namespace);</span>
+<span class="nc bnc" id="L456" title="All 2 branches missed.">        if (handler == null) {</span>
+<span class="nc bnc" id="L457" title="All 2 branches missed.">            for (IQHandler handlerCandidate : iqHandlers) {</span>
+<span class="nc" id="L458">                IQHandlerInfo handlerInfo = handlerCandidate.getInfo();</span>
+<span class="nc bnc" id="L459" title="All 4 branches missed.">                if (handlerInfo != null &amp;&amp; namespace.equalsIgnoreCase(handlerInfo.getNamespace())) {</span>
+<span class="nc" id="L460">                    handler = handlerCandidate;</span>
+<span class="nc" id="L461">                    namespace2Handlers.put(namespace, handler);</span>
+<span class="nc" id="L462">                    break;</span>
+                }
+<span class="nc" id="L464">            }</span>
+        }
+<span class="nc" id="L466">        return handler;</span>
+    }
+
+    /**
+     * Notification message indicating that a packet has failed to be routed to the recipient.
+     *
+     * @param recipient address of the entity that failed to receive the packet.
+     * @param packet    IQ packet that failed to be sent to the recipient.
+     */
+    public void routingFailed( JID recipient, Packet packet )
+    {
+<span class="nc" id="L477">        Log.debug( &quot;IQ sent to unreachable address: &quot; + packet.toXML() );</span>
+<span class="nc" id="L478">        final IQ iq = (IQ) packet;</span>
+        // If a route to the target address was not found then try to answer a service_unavailable error code to the sender of the IQ packet
+<span class="nc bnc" id="L480" title="All 2 branches missed.">        if ( iq.isRequest() )</span>
+        {
+<span class="nc" id="L482">            sendErrorPacket( iq, PacketError.Condition.service_unavailable );</span>
+        }
+<span class="nc" id="L484">    }</span>
+
+    /**
+     * Timer task that will remove Listeners that wait for results to IQ stanzas
+     * that have timed out. Time out values can be set to each listener
+     * individually by adjusting the timeout value in the third parameter of
+     * {@link IQRouter#addIQResultListener(String, IQResultListener, long)}.
+     *
+     * @author Guus der Kinderen, guus@nimbuzz.com
+     */
+<span class="nc" id="L494">    private class TimeoutTask extends TimerTask {</span>
+
+        /**
+         * Iterates over and removes all timed out results.&lt;p&gt;
+         *
+         * The map that keeps track of timeout values is ordered by timeout
+         * date. This way, iteration can be stopped as soon as the first value
+         * has been found that didn't timeout yet.
+         */
+        @Override
+        public void run() {
+            // Use an Iterator to allow changes to the Map that is backing
+            // the Iterator.
+<span class="nc" id="L507">            final Iterator&lt;Map.Entry&lt;String, Long&gt;&gt; it = resultTimeout.entrySet().iterator();</span>
+
+<span class="nc bnc" id="L509" title="All 2 branches missed.">            while (it.hasNext()) {</span>
+<span class="nc" id="L510">                final Map.Entry&lt;String, Long&gt; pointer = it.next();</span>
+
+<span class="nc bnc" id="L512" title="All 2 branches missed.">                if (System.currentTimeMillis() &lt; pointer.getValue()) {</span>
+                    // This entry has not expired yet. Ignore it.
+<span class="nc" id="L514">                    continue;</span>
+                }
+
+<span class="nc" id="L517">                final String packetId = pointer.getKey();</span>
+
+                // remove this listener from the list
+<span class="nc" id="L520">                final IQResultListener listener = resultListeners.remove(packetId);</span>
+<span class="nc bnc" id="L521" title="All 2 branches missed.">                if (listener != null) {</span>
+                    // notify listener of the timeout.
+<span class="nc" id="L523">                    listener.answerTimeout(packetId);</span>
+                }
+
+                // remove the packet from the list that's used to track
+                // timeouts
+<span class="nc" id="L528">                it.remove();</span>
+<span class="nc" id="L529">            }</span>
+<span class="nc" id="L530">        }</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

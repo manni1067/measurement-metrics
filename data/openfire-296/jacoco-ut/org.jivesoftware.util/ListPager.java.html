@@ -1,0 +1,387 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>ListPager.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.util</a> &gt; <span class="el_source">ListPager.java</span></div><h1>ListPager.java</h1><pre class="source lang-java linenums">package org.jivesoftware.util;
+
+import java.io.UnsupportedEncodingException;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
+import java.util.Collections;
+import java.util.List;
+import java.util.function.Predicate;
+import java.util.stream.Collectors;
+
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
+import javax.servlet.http.HttpSession;
+
+import org.apache.commons.text.StringEscapeUtils;
+
+/**
+ * &lt;p&gt;
+ * This class provides an easy way to page through a filterable list of items from a JSP page.
+ * &lt;/p&gt;
+ *
+ * &lt;p&gt;
+ * It is up to the caller of the class to specify the filter, if required, in the form of a
+ * {@link java.util.function.Predicate predicate}. To ensure that search parameters are maintained when paging through
+ * the list, it's also necessary to supply a list of input field identifiers that should be included as part of the
+ * request when accessing another page. These field identifiers are used to extract the value of the field, and copy it
+ * to a hidden form that is used for the actual submission. This means each search criteria has two form fields
+ * associated with it - the visible field that the users types in, and in the hidden form that is submitted.
+ * &lt;/p&gt;
+ *
+ * &lt;p&gt;
+ * The reason for this is that the location of the input fields on the screen may not always be appropriate for a
+ * form - for example, if the fields are location within a table, the form must wrap the whole table, which would
+ * preclude the use of any other forms within cells in that table.
+ * &lt;/p&gt;
+ *
+ * &lt;p&gt;
+ * These input fields will also be modified so that pressing Enter/Return when the fields has focus will automatically
+ * submit the form.
+ * &lt;/p&gt;
+ *
+ * @param &lt;T&gt; The type of item being displayed
+ */
+public class ListPager&lt;T&gt; {
+
+    private static final String REQUEST_PARAMETER_KEY_PAGE_SIZE = &quot;listPagerPageSize&quot;;
+    private static final String REQUEST_PARAMETER_KEY_CURRENT_PAGE = &quot;listPagerCurrentPage&quot;;
+    private static final String PAGINATION_FORM_ID = &quot;paginationForm&quot;;
+    private static final int DEFAULT_PAGE_SIZE = 25;
+<span class="fc" id="L50">    private static final int[] PAGE_SIZES = {25, 50, 100, 1000};</span>
+
+
+    private final int totalItemCount;
+    private final List&lt;T&gt; itemsOnPage;
+    private final int filteredItemCount;
+    private final int pageSize;
+    private final int totalPages;
+    private final int currentPage;
+    private final int firstItemOnPage;
+    private final int lastItemOnPage;
+    private final String[] additionalFormFields;
+    private final HttpServletRequest request;
+
+    /**
+     * Creates a unfiltered list pager.
+     *
+     * @param request              the request object for the page in question
+     * @param response             the response object for the page in question
+     * @param items                the list of items to display on the page
+     * @param additionalFormFields 0 or more input field identifiers (&lt;strong&gt;NOT form field names&lt;/strong&gt;) to include in requests for other pages
+     */
+    public ListPager(final HttpServletRequest request, final HttpServletResponse response, final List&lt;T&gt; items, final String... additionalFormFields) {
+<span class="fc" id="L73">        this(request, response, items, item -&gt; true, additionalFormFields);</span>
+<span class="fc" id="L74">    }</span>
+
+    /**
+     * Creates a unfiltered list pager.
+     *
+     * @param request              the request object for the page in question
+     * @param response             the response object for the page in question
+     * @param items                the complete list of items to display on the page
+     * @param filter               the filter to apply to the complete list
+     * @param additionalFormFields 0 or more input field identifiers (&lt;strong&gt;NOT form field names&lt;/strong&gt;) to include in requests for other pages
+     */
+<span class="fc" id="L85">    public ListPager(final HttpServletRequest request, final HttpServletResponse response, final List&lt;T&gt; items, final Predicate&lt;T&gt; filter, final String... additionalFormFields) {</span>
+<span class="fc" id="L86">        final HttpSession session = request.getSession();</span>
+<span class="fc" id="L87">        final WebManager webManager = new WebManager();</span>
+<span class="fc" id="L88">        webManager.init(request, response, session, session.getServletContext());</span>
+<span class="fc" id="L89">        final String requestURI = request.getRequestURI();</span>
+<span class="fc" id="L90">        final int initialPageSize = webManager.getRowsPerPage(requestURI, DEFAULT_PAGE_SIZE);</span>
+<span class="fc" id="L91">        final List&lt;T&gt; filteredItems = items.stream().filter(filter).collect(Collectors.toList());</span>
+
+<span class="fc" id="L93">        this.request = request;</span>
+<span class="fc" id="L94">        this.totalItemCount = items.size();</span>
+<span class="fc" id="L95">        this.filteredItemCount = filteredItems.size();</span>
+<span class="fc" id="L96">        this.pageSize = bound(ParamUtils.getIntParameter(request, REQUEST_PARAMETER_KEY_PAGE_SIZE, initialPageSize), PAGE_SIZES[PAGE_SIZES.length - 1]);</span>
+        // Even with no filtered items, we want to display at least one page
+<span class="fc" id="L98">        this.totalPages = Math.max(1, (int) Math.ceil((double)filteredItemCount / (double)pageSize));</span>
+        // Bound the current page between 1 and the total number of pages
+<span class="fc" id="L100">        this.currentPage = bound(ParamUtils.getIntParameter(request, REQUEST_PARAMETER_KEY_CURRENT_PAGE, 1), totalPages);</span>
+<span class="fc bfc" id="L101" title="All 2 branches covered.">        this.firstItemOnPage = filteredItemCount == 0 ? 0 : (currentPage - 1) * pageSize + 1;</span>
+<span class="fc bfc" id="L102" title="All 2 branches covered.">        this.lastItemOnPage = filteredItemCount == 0 ? 0 : Math.min(currentPage * pageSize, filteredItemCount);</span>
+<span class="fc bfc" id="L103" title="All 2 branches covered.">        this.itemsOnPage = filteredItemCount == 0 ? Collections.emptyList() : filteredItems.subList(firstItemOnPage - 1, lastItemOnPage);</span>
+<span class="fc" id="L104">        this.additionalFormFields = additionalFormFields;</span>
+
+<span class="fc" id="L106">        webManager.setRowsPerPage(requestURI, pageSize);</span>
+<span class="fc" id="L107">    }</span>
+
+    private static int bound(final int value, final int maxValue) {
+<span class="fc" id="L110">        return Math.min(maxValue, Math.max(1, value));</span>
+    }
+
+    /**
+     * @return the total number unfiltered items
+     */
+    public int getTotalItemCount() {
+<span class="fc" id="L117">        return totalItemCount;</span>
+    }
+
+    /**
+     * @return the number of items after the filter has been applied
+     */
+    public int getFilteredItemCount() {
+<span class="fc" id="L124">        return filteredItemCount;</span>
+    }
+
+    /**
+     * @return the filtered items on the current page
+     */
+    public List&lt;T&gt; getItemsOnCurrentPage() {
+<span class="fc" id="L131">        return itemsOnPage;</span>
+    }
+
+    /**
+     * @return the current page
+     */
+    @SuppressWarnings(&quot;WeakerAccess&quot;)
+    public int getCurrentPageNumber() {
+<span class="fc" id="L139">        return currentPage;</span>
+    }
+
+    /**
+     * @return the maximum number of items on the page
+     */
+    @SuppressWarnings(&quot;unused&quot;)
+    public int getPageSize() {
+<span class="nc" id="L147">        return pageSize;</span>
+    }
+
+    /**
+     * @return the first item number on the page
+     */
+    public int getFirstItemNumberOnPage() {
+<span class="fc" id="L154">        return firstItemOnPage;</span>
+    }
+
+    /**
+     * @return the last item number on the page
+     */
+    public int getLastItemNumberOnPage() {
+<span class="fc" id="L161">        return lastItemOnPage;</span>
+    }
+
+    /**
+     * @return the total number of pages
+     */
+    public int getTotalPages() {
+<span class="fc" id="L168">        return totalPages;</span>
+    }
+
+    /**
+     * @return {@code true} if the the supplied filter has restricted the number of items to display, otherwise {@code false}
+     */
+    public boolean isFiltered() {
+<span class="fc bfc" id="L175" title="All 2 branches covered.">        return totalItemCount != filteredItemCount;</span>
+    }
+
+    /**
+     * @return a string that contains HTML for selecting the page size
+     */
+    public String getPageSizeSelection() {
+<span class="nc" id="L182">        final StringBuilder sb = new StringBuilder();</span>
+<span class="nc" id="L183">        sb.append(String.format(&quot;&lt;select name='%s' onchange='return setPageSize(this.value);'&gt;&quot;, REQUEST_PARAMETER_KEY_PAGE_SIZE));</span>
+<span class="nc bnc" id="L184" title="All 2 branches missed.">        for (final int optionSize : PAGE_SIZES) {</span>
+<span class="nc bnc" id="L185" title="All 2 branches missed.">            sb.append(String.format(&quot;&lt;option value='%d'%s&gt;%d&lt;/option&gt;&quot;, optionSize, pageSize == optionSize ? &quot; selected&quot; : &quot;&quot;, optionSize));</span>
+        }
+<span class="nc" id="L187">        sb.append(&quot;&lt;/select&gt;&quot;);</span>
+<span class="nc" id="L188">        return sb.toString();</span>
+    }
+
+    /**
+     * @return a string that contains links to other pages in the list
+     */
+    public String getPageLinks() {
+<span class="nc" id="L195">        final StringBuilder sb = new StringBuilder();</span>
+<span class="nc" id="L196">        final int beginningEndPage = Math.min(3, totalPages);</span>
+<span class="nc" id="L197">        appendLinkToPages(sb, 1, beginningEndPage);</span>
+
+<span class="nc" id="L199">        final int middleStartPage = Math.max(currentPage - 2, beginningEndPage + 1);</span>
+<span class="nc" id="L200">        final int middleEndPage = Math.min(currentPage + 2, totalPages);</span>
+
+<span class="nc bnc" id="L202" title="All 2 branches missed.">        if (middleStartPage &gt; (beginningEndPage + 1)) {</span>
+<span class="nc" id="L203">            sb.append(&quot;\n&lt;span&gt; ... &lt;/span&gt;&quot;);</span>
+        }
+<span class="nc" id="L205">        appendLinkToPages(sb, middleStartPage, middleEndPage);</span>
+
+<span class="nc" id="L207">        final int endStartPage = Math.max(totalPages - 2, middleEndPage + 1);</span>
+<span class="nc bnc" id="L208" title="All 2 branches missed.">        if (endStartPage &gt; (middleEndPage + 1)) {</span>
+<span class="nc" id="L209">            sb.append(&quot;\n&lt;span&gt; ... &lt;/span&gt;&quot;);</span>
+        }
+
+<span class="nc" id="L212">        appendLinkToPages(sb, endStartPage, totalPages);</span>
+
+<span class="nc" id="L214">        return sb.toString();</span>
+    }
+
+    private void appendLinkToPages(final StringBuilder sb, final int firstPage, final int lastPage) {
+<span class="nc bnc" id="L218" title="All 2 branches missed.">        for (int i = firstPage; i &lt;= lastPage; i++) {</span>
+<span class="nc" id="L219">            appendPageLink(sb, i);</span>
+        }
+<span class="nc" id="L221">    }</span>
+
+    private void appendPageLink(final StringBuilder sb, final int pageToLink) {
+        final String cssClass;
+<span class="nc bnc" id="L225" title="All 2 branches missed.">        if (currentPage == pageToLink) {</span>
+<span class="nc" id="L226">            cssClass = &quot; class='jive-current'&quot;;</span>
+        } else {
+<span class="nc" id="L228">            cssClass = &quot;&quot;;</span>
+        }
+
+<span class="nc" id="L231">        sb.append(String.format(&quot;\n&lt;a href='%s' onclick='return jumpToPage(%d)'%s&gt;%s&lt;/a&gt;&quot;,</span>
+<span class="nc" id="L232">            String.format(&quot;?%s=%d&quot;, REQUEST_PARAMETER_KEY_CURRENT_PAGE, pageToLink),</span>
+<span class="nc" id="L233">            pageToLink,</span>
+            cssClass,
+<span class="nc" id="L235">            pageToLink));</span>
+<span class="nc" id="L236">    }</span>
+
+    /**
+     * @return the list of hidden fields required to maintain the current list pager state
+     */
+    public String getHiddenFields() {
+<span class="nc" id="L242">        final StringBuilder sb = new StringBuilder(&quot;\n&quot;)</span>
+<span class="nc" id="L243">            .append(String.format(&quot;\t&lt;input type='hidden' name='%s' value='%d'&gt;\n&quot;, REQUEST_PARAMETER_KEY_PAGE_SIZE, pageSize))</span>
+<span class="nc" id="L244">            .append(String.format(&quot;\t&lt;input type='hidden' name='%s' value='%d'&gt;\n&quot;, REQUEST_PARAMETER_KEY_CURRENT_PAGE, currentPage));</span>
+<span class="nc bnc" id="L245" title="All 2 branches missed.">        for (final String additionalFormField : additionalFormFields) {</span>
+<span class="nc" id="L246">            final String formFieldValue = ParamUtils.getStringParameter(request, additionalFormField, &quot;&quot;);</span>
+<span class="nc bnc" id="L247" title="All 2 branches missed.">            sb.append(String.format(&quot;\t&lt;input type='hidden' name='%s' value='%s'%s&gt;\n&quot;, additionalFormField, StringEscapeUtils.escapeHtml4(formFieldValue), formFieldValue.isEmpty() ? &quot; disabled&quot; : &quot;&quot;));</span>
+        }
+<span class="nc" id="L249">        return sb.toString();</span>
+    }
+
+    /**
+     * @param request The request to retrieve the values from
+     * @param prefix The first char of the query string - either `?` or `&amp;amp;`
+     * @param additionalFormFields 0 or more form field names to include in requests for other pages
+     * @return a query string required to maintain the current list pager state
+     */
+    public static String getQueryString(final HttpServletRequest request, final char prefix, final String... additionalFormFields) {
+<span class="nc" id="L259">        final StringBuilder sb = new StringBuilder();</span>
+<span class="nc" id="L260">        char conjunction = prefix;</span>
+<span class="nc" id="L261">        final int currentPage = ParamUtils.getIntParameter(request, REQUEST_PARAMETER_KEY_CURRENT_PAGE, 1);</span>
+<span class="nc bnc" id="L262" title="All 2 branches missed.">        if (currentPage &gt; 1) {</span>
+<span class="nc" id="L263">            sb.append(conjunction)</span>
+<span class="nc" id="L264">                .append(String.format(&quot;%s=%d&quot;, REQUEST_PARAMETER_KEY_CURRENT_PAGE, currentPage));</span>
+<span class="nc" id="L265">            conjunction = '&amp;';</span>
+        }
+<span class="nc" id="L267">        final int pageSize = bound(ParamUtils.getIntParameter(request, REQUEST_PARAMETER_KEY_PAGE_SIZE, DEFAULT_PAGE_SIZE), PAGE_SIZES[PAGE_SIZES.length - 1]);</span>
+<span class="nc bnc" id="L268" title="All 2 branches missed.">        if (pageSize != DEFAULT_PAGE_SIZE) {</span>
+<span class="nc" id="L269">            sb.append(conjunction)</span>
+<span class="nc" id="L270">                .append(String.format(&quot;%s=%d&quot;, REQUEST_PARAMETER_KEY_PAGE_SIZE, pageSize));</span>
+<span class="nc" id="L271">            conjunction = '&amp;';</span>
+        }
+<span class="nc bnc" id="L273" title="All 2 branches missed.">        for (final String additionalFormField : additionalFormFields) {</span>
+<span class="nc" id="L274">            final String formFieldValue = ParamUtils.getStringParameter(request, additionalFormField, &quot;&quot;).trim();</span>
+<span class="nc bnc" id="L275" title="All 2 branches missed.">            if(!formFieldValue.isEmpty()) {</span>
+                String encodedValue;
+                try {
+<span class="nc" id="L278">                    encodedValue = URLEncoder.encode(formFieldValue, StandardCharsets.UTF_8.name());</span>
+<span class="nc" id="L279">                } catch (final UnsupportedEncodingException e) {</span>
+<span class="nc" id="L280">                   encodedValue = formFieldValue;</span>
+<span class="nc" id="L281">                }</span>
+<span class="nc" id="L282">                sb.append(conjunction)</span>
+<span class="nc" id="L283">                    .append(String.format(&quot;%s=%s&quot;, additionalFormField, encodedValue));</span>
+<span class="nc" id="L284">                conjunction = '&amp;';</span>
+            }
+        }
+<span class="nc" id="L287">        return sb.toString();</span>
+    }
+
+    /**
+     * @return a string with an HTML form containing hidden fields, used for navigating between pages
+     */
+    public String getJumpToPageForm() {
+<span class="nc" id="L294">        return &quot;\n&quot; +</span>
+<span class="nc" id="L295">            String.format(&quot;&lt;form id='%s'&gt;\n&quot;, PAGINATION_FORM_ID) +</span>
+<span class="nc" id="L296">            getHiddenFields() +</span>
+            &quot;&lt;/form&gt;\n&quot;;
+    }
+
+    /**
+     * @return a string containing JavaScript that helps with navigation between pages
+     */
+    public String getPageFunctions() {
+<span class="nc" id="L304">        final StringBuilder sb = new StringBuilder(&quot;\n&quot;)</span>
+<span class="nc" id="L305">            .append(&quot;\tvar additionalFormFields = [&quot;);</span>
+        // The list of additional form fields
+<span class="nc bnc" id="L307" title="All 2 branches missed.">        for (final String additionalFormField : additionalFormFields) {</span>
+<span class="nc bnc" id="L308" title="All 2 branches missed.">            if (!additionalFormField.equals(additionalFormFields[0])) {</span>
+<span class="nc" id="L309">                sb.append(&quot;, &quot;);</span>
+            }
+<span class="nc" id="L311">            sb.append(String.format(&quot;'%s'&quot;, additionalFormField));</span>
+        }
+<span class="nc" id="L313">        sb.append(&quot;];\n\n&quot;);</span>
+
+<span class="nc" id="L315">        sb.append(&quot;\tfunction jumpToPage(pageNumber) {\n&quot;)</span>
+            // Changes the current page number, and submits the form
+<span class="nc" id="L317">            .append(String.format(&quot;\t\tvar formObject = document.getElementById('%s');\n&quot;, PAGINATION_FORM_ID))</span>
+<span class="nc" id="L318">            .append(String.format(&quot;\t\tformObject.%s.value = pageNumber;\n&quot;, REQUEST_PARAMETER_KEY_CURRENT_PAGE))</span>
+<span class="nc" id="L319">            .append(&quot;\t\tsubmitForm();\n&quot;)</span>
+<span class="nc" id="L320">            .append(&quot;\t\treturn false;\n&quot;)</span>
+<span class="nc" id="L321">            .append(&quot;\t}\n&quot;)</span>
+<span class="nc" id="L322">            .append(&quot;\n&quot;);</span>
+
+<span class="nc" id="L324">        sb.append(&quot;\tfunction setPageSize(pageSize) {\n&quot;)</span>
+            // Changes the current page size, and submits the form
+<span class="nc" id="L326">            .append(String.format(&quot;\t\tvar formObject = document.getElementById('%s');\n&quot;, PAGINATION_FORM_ID))</span>
+<span class="nc" id="L327">            .append(String.format(&quot;\t\tformObject.%s.value = pageSize;\n&quot;, REQUEST_PARAMETER_KEY_PAGE_SIZE))</span>
+<span class="nc" id="L328">            .append(&quot;\t\tsubmitForm();\n&quot;)</span>
+<span class="nc" id="L329">            .append(&quot;\t\treturn false;\n&quot;)</span>
+<span class="nc" id="L330">            .append(&quot;\t}\n&quot;)</span>
+<span class="nc" id="L331">            .append(&quot;\n&quot;);</span>
+
+<span class="nc" id="L333">        sb.append(&quot;\tfunction submitForm() {\n&quot;)</span>
+            // Extracts any of the additional form field values, and adds them to the form before submitting it
+<span class="nc" id="L335">            .append(String.format(&quot;\t\tvar formObject = document.getElementById('%s');\n&quot;, PAGINATION_FORM_ID))</span>
+<span class="nc" id="L336">            .append(String.format(&quot;\t\tfor(var i = 0; i &lt; %d; i++) {\n&quot;, additionalFormFields.length))</span>
+<span class="nc" id="L337">            .append(&quot;\t\t\tvar field = document.getElementById(additionalFormFields[i]);\n&quot;)</span>
+<span class="nc" id="L338">            .append(&quot;\t\t\tif (field !== null) {\n&quot;)</span>
+<span class="nc" id="L339">            .append(&quot;\t\t\t\tvar formField = formObject[additionalFormFields[i]];\n&quot;)</span>
+<span class="nc" id="L340">            .append(&quot;\t\t\t\tif (typeof field !== 'object' || field.value === '') {\n&quot;)</span>
+<span class="nc" id="L341">            .append(&quot;\t\t\t\t\tformField.disabled = true;\n&quot;)</span>
+<span class="nc" id="L342">            .append(&quot;\t\t\t\t} else {\n&quot;)</span>
+<span class="nc" id="L343">            .append(&quot;\t\t\t\t\tformField.disabled = false;\n&quot;)</span>
+<span class="nc" id="L344">            .append(&quot;\t\t\t\t\tformField.value = field.value;\n&quot;)</span>
+<span class="nc" id="L345">            .append(&quot;\t\t\t\t}\n&quot;)</span>
+<span class="nc" id="L346">            .append(&quot;\t\t\t}\n&quot;)</span>
+<span class="nc" id="L347">            .append(&quot;\t\t}\n&quot;)</span>
+<span class="nc" id="L348">            .append(&quot;\t\t\n&quot;)</span>
+<span class="nc" id="L349">            .append(&quot;\t\tif (formObject['&quot;).append(REQUEST_PARAMETER_KEY_PAGE_SIZE).append(&quot;'].value === '&quot;).append(pageSize).append(&quot;') formObject['&quot;).append(REQUEST_PARAMETER_KEY_PAGE_SIZE).append(&quot;'].disabled=true;\n&quot;)</span>
+<span class="nc" id="L350">            .append(&quot;\t\tif (formObject['&quot;).append(REQUEST_PARAMETER_KEY_CURRENT_PAGE).append(&quot;'].value === '1') formObject['&quot;).append(REQUEST_PARAMETER_KEY_CURRENT_PAGE).append(&quot;'].disabled=true;\n&quot;)</span>
+<span class="nc" id="L351">            .append(&quot;\t\t\n&quot;)</span>
+<span class="nc" id="L352">            .append(&quot;\t\tformObject.submit();\n&quot;)</span>
+<span class="nc" id="L353">            .append(&quot;\t\treturn false;\n&quot;)</span>
+<span class="nc" id="L354">            .append(&quot;\t}\n&quot;)</span>
+<span class="nc" id="L355">            .append(&quot;\n&quot;);</span>
+
+        // Add mechanisms to auto-submit the form when hitting enter (two mechanisms for different browsers)
+<span class="nc" id="L358">        sb.append(&quot;\tfunction inputFieldOnKeyDownEventListener(e) {\n&quot;)</span>
+<span class="nc" id="L359">            .append(&quot;\t\tif (e.keyCode === 13) {\n&quot;)</span>
+<span class="nc" id="L360">            .append(&quot;\t\t\tsubmitForm();\n&quot;)</span>
+<span class="nc" id="L361">            .append(&quot;\t\t\treturn false;\n&quot;)</span>
+<span class="nc" id="L362">            .append(&quot;\t\t}\n&quot;)</span>
+<span class="nc" id="L363">            .append(&quot;\t}\n&quot;)</span>
+<span class="nc" id="L364">            .append(&quot;\n&quot;);</span>
+
+<span class="nc" id="L366">        sb.append(&quot;\tfunction inputFieldOnInputEventListener() {\n&quot;)</span>
+<span class="nc" id="L367">            .append(&quot;\t\tif (this.value === '') {\n&quot;)</span>
+<span class="nc" id="L368">            .append(&quot;\t\t\tsubmitFilterForm();\n&quot;)</span>
+<span class="nc" id="L369">            .append(&quot;\t\t\treturn false;\n&quot;)</span>
+<span class="nc" id="L370">            .append(&quot;\t\t}\n&quot;)</span>
+<span class="nc" id="L371">            .append(&quot;\t};\n&quot;)</span>
+<span class="nc" id="L372">            .append(&quot;\n&quot;);</span>
+
+        // Finally, bind the functions to the fields
+<span class="nc" id="L375">        sb.append(String.format(&quot;\tfor(var i = 0; i &lt; %d; i++) {\n&quot;, additionalFormFields.length))</span>
+<span class="nc" id="L376">            .append(&quot;\t\tvar field = document.getElementById(additionalFormFields[i]);\n&quot;)</span>
+<span class="nc" id="L377">            .append(&quot;\t\tif (field !== null &amp;&amp; typeof field === 'object') {\n&quot;)</span>
+<span class="nc" id="L378">            .append(&quot;\t\t\tfield.onkeydown = inputFieldOnKeyDownEventListener;\n&quot;)</span>
+<span class="nc" id="L379">            .append(&quot;\t\t\tfield.addEventListener('input', inputFieldOnInputEventListener);\n&quot;)</span>
+<span class="nc" id="L380">            .append(&quot;\t\t}\n&quot;)</span>
+<span class="nc" id="L381">            .append(&quot;\t}\n&quot;);</span>
+
+<span class="nc" id="L383">        return sb.toString();</span>
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

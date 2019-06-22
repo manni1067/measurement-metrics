@@ -1,0 +1,406 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>MXParser.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.net</a> &gt; <span class="el_source">MXParser.java</span></div><h1>MXParser.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.net;
+
+import org.xmlpull.v1.XmlPullParserException;
+import org.xmlpull.v1.XmlPullParser;
+
+import java.io.IOException;
+import java.io.Reader;
+
+/**
+ * MXParser that returns an IGNORABLE_WHITESPACE event when a whitespace character or a
+ * line feed is received. This parser is useful when not validating documents.
+ *
+ * @author Gaston Dombiak
+ */
+<span class="fc" id="L31">public class MXParser extends org.xmlpull.mxp1.MXParser {</span>
+
+    /**
+     * Last time a heartbeat was received. Hearbeats are represented as whitespaces
+     * or \n characters received when an XmlPullParser.END_TAG was parsed. Note that we
+     * can falsely detect heartbeats when parsing XHTML content but that is fine.
+     */
+<span class="fc" id="L38">    private long lastHeartbeat = 0;</span>
+
+    @Override
+    protected int nextImpl()
+        throws XmlPullParserException, IOException
+    {
+<span class="fc" id="L44">        text = null;</span>
+<span class="fc" id="L45">        pcEnd = pcStart = 0;</span>
+<span class="fc" id="L46">        usePC = false;</span>
+<span class="fc" id="L47">        bufStart = posEnd;</span>
+<span class="fc bfc" id="L48" title="All 2 branches covered.">        if(pastEndTag) {</span>
+<span class="fc" id="L49">            pastEndTag = false;</span>
+<span class="fc" id="L50">            --depth;</span>
+<span class="fc" id="L51">            namespaceEnd = elNamespaceCount[ depth ]; // less namespaces available</span>
+        }
+<span class="fc bfc" id="L53" title="All 2 branches covered.">        if(emptyElementTag) {</span>
+<span class="fc" id="L54">            emptyElementTag = false;</span>
+<span class="fc" id="L55">            pastEndTag = true;</span>
+<span class="fc" id="L56">            return eventType = END_TAG;</span>
+        }
+
+        // [1] document ::= prolog element Misc*
+<span class="fc bfc" id="L60" title="All 2 branches covered.">        if(depth &gt; 0) {</span>
+
+<span class="pc bpc" id="L62" title="1 of 2 branches missed.">            if(seenStartTag) {</span>
+<span class="nc" id="L63">                seenStartTag = false;</span>
+<span class="nc" id="L64">                return eventType = parseStartTag();</span>
+            }
+<span class="pc bpc" id="L66" title="1 of 2 branches missed.">            if(seenEndTag) {</span>
+<span class="nc" id="L67">                seenEndTag = false;</span>
+<span class="nc" id="L68">                return eventType = parseEndTag();</span>
+            }
+
+            // ASSUMPTION: we are _on_ first character of content or markup!!!!
+            // [43] content ::= CharData? ((element | Reference | CDSect | PI | Comment) CharData?)*
+            char ch;
+<span class="fc bfc" id="L74" title="All 2 branches covered.">            if(seenMarkup) {  // we have read ahead ...</span>
+<span class="fc" id="L75">                seenMarkup = false;</span>
+<span class="fc" id="L76">                ch = '&lt;';</span>
+<span class="pc bpc" id="L77" title="1 of 2 branches missed.">            } else if(seenAmpersand) {</span>
+<span class="nc" id="L78">                seenAmpersand = false;</span>
+<span class="nc" id="L79">                ch = '&amp;';</span>
+            } else {
+<span class="fc" id="L81">                ch = more();</span>
+            }
+<span class="fc" id="L83">            posStart = pos - 1; // VERY IMPORTANT: this is correct start of event!!!</span>
+
+            // when true there is some potential event TEXT to return - keep gathering
+<span class="fc" id="L86">            boolean hadCharData = false;</span>
+
+            // when true TEXT data is not continous (like &lt;![CDATA[text]]&gt;) and requires PC merging
+<span class="fc" id="L89">            boolean needsMerging = false;</span>
+
+            MAIN_LOOP:
+            while(true) {
+                // work on MARKUP
+<span class="fc bfc" id="L94" title="All 2 branches covered.">                if(ch == '&lt;') {</span>
+<span class="fc bfc" id="L95" title="All 2 branches covered.">                    if(hadCharData) {</span>
+                        //posEnd = pos - 1;
+<span class="pc bpc" id="L97" title="1 of 2 branches missed.">                        if(tokenize) {</span>
+<span class="fc" id="L98">                            seenMarkup = true;</span>
+<span class="fc" id="L99">                            return eventType = TEXT;</span>
+                        }
+                    }
+<span class="fc" id="L102">                    ch = more();</span>
+<span class="fc bfc" id="L103" title="All 2 branches covered.">                    if(ch == '/') {</span>
+<span class="pc bpc" id="L104" title="3 of 4 branches missed.">                        if(!tokenize &amp;&amp; hadCharData) {</span>
+<span class="nc" id="L105">                            seenEndTag = true;</span>
+                            //posEnd = pos - 2;
+<span class="nc" id="L107">                            return eventType = TEXT;</span>
+                        }
+<span class="fc" id="L109">                        return eventType = parseEndTag();</span>
+<span class="pc bpc" id="L110" title="1 of 2 branches missed.">                    } else if(ch == '!') {</span>
+<span class="nc" id="L111">                        ch = more();</span>
+<span class="nc bnc" id="L112" title="All 2 branches missed.">                        if(ch == '-') {</span>
+                            // note: if(tokenize == false) posStart/End is NOT changed!!!!
+<span class="nc" id="L114">                            parseComment();</span>
+<span class="nc bnc" id="L115" title="All 2 branches missed.">                            if(tokenize) return eventType = COMMENT;</span>
+<span class="nc bnc" id="L116" title="All 4 branches missed.">                            if( !usePC &amp;&amp; hadCharData ) {</span>
+<span class="nc" id="L117">                                needsMerging = true;</span>
+                            } else {
+<span class="nc" id="L119">                                posStart = pos;  //completely ignore comment</span>
+                            }
+<span class="nc bnc" id="L121" title="All 2 branches missed.">                        } else if(ch == '[') {</span>
+                            //posEnd = pos - 3;
+                            // must remeber previous posStart/End as it merges with content of CDATA
+                            //int oldStart = posStart + bufAbsoluteStart;
+                            //int oldEnd = posEnd + bufAbsoluteStart;
+<span class="nc" id="L126">                            parseCDSect(hadCharData);</span>
+<span class="nc bnc" id="L127" title="All 2 branches missed.">                            if(tokenize) return eventType = CDSECT;</span>
+<span class="nc" id="L128">                            final int cdStart = posStart;</span>
+<span class="nc" id="L129">                            final int cdEnd = posEnd;</span>
+<span class="nc" id="L130">                            final int cdLen = cdEnd - cdStart;</span>
+
+
+<span class="nc bnc" id="L133" title="All 2 branches missed.">                            if(cdLen &gt; 0) { // was there anything inside CDATA section?</span>
+<span class="nc" id="L134">                                hadCharData = true;</span>
+<span class="nc bnc" id="L135" title="All 2 branches missed.">                                if(!usePC) {</span>
+<span class="nc" id="L136">                                    needsMerging = true;</span>
+                                }
+                            }
+
+                            //                          posStart = oldStart;
+                            //                          posEnd = oldEnd;
+                            //                          if(cdLen &gt; 0) { // was there anything inside CDATA section?
+                            //                              if(hadCharData) {
+                            //                                  // do merging if there was anything in CDSect!!!!
+                            //                                  //                                    if(!usePC) {
+                            //                                  //                                        // posEnd is correct already!!!
+                            //                                  //                                        if(posEnd &gt; posStart) {
+                            //                                  //                                            joinPC();
+                            //                                  //                                        } else {
+                            //                                  //                                            usePC = true;
+                            //                                  //                                            pcStart = pcEnd = 0;
+                            //                                  //                                        }
+                            //                                  //                                    }
+                            //                                  //                                    if(pcEnd + cdLen &gt;= pc.length) ensurePC(pcEnd + cdLen);
+                            //                                  //                                    // copy [cdStart..cdEnd) into PC
+                            //                                  //                                    System.arraycopy(buf, cdStart, pc, pcEnd, cdLen);
+                            //                                  //                                    pcEnd += cdLen;
+                            //                                  if(!usePC) {
+                            //                                      needsMerging = true;
+                            //                                      posStart = cdStart;
+                            //                                      posEnd = cdEnd;
+                            //                                  }
+                            //                              } else {
+                            //                                  if(!usePC) {
+                            //                                      needsMerging = true;
+                            //                                      posStart = cdStart;
+                            //                                      posEnd = cdEnd;
+                            //                                      hadCharData = true;
+                            //                                  }
+                            //                              }
+                            //                              //hadCharData = true;
+                            //                          } else {
+                            //                              if( !usePC &amp;&amp; hadCharData ) {
+                            //                                  needsMerging = true;
+                            //                              }
+                            //                          }
+<span class="nc" id="L177">                        } else {</span>
+<span class="nc" id="L178">                            throw new XmlPullParserException(</span>
+<span class="nc" id="L179">                                &quot;unexpected character in markup &quot;+printable(ch), this, null);</span>
+                        }
+<span class="pc bpc" id="L181" title="1 of 2 branches missed.">                    } else if(ch == '?') {</span>
+<span class="nc" id="L182">                        parsePI();</span>
+<span class="nc bnc" id="L183" title="All 2 branches missed.">                        if(tokenize) return eventType = PROCESSING_INSTRUCTION;</span>
+<span class="nc bnc" id="L184" title="All 4 branches missed.">                        if( !usePC &amp;&amp; hadCharData ) {</span>
+<span class="nc" id="L185">                            needsMerging = true;</span>
+                        } else {
+<span class="nc" id="L187">                            posStart = pos;  //completely ignore PI</span>
+                        }
+
+<span class="pc bpc" id="L190" title="1 of 2 branches missed.">                    } else if( isNameStartChar(ch) ) {</span>
+<span class="pc bpc" id="L191" title="3 of 4 branches missed.">                        if(!tokenize &amp;&amp; hadCharData) {</span>
+<span class="nc" id="L192">                            seenStartTag = true;</span>
+                            //posEnd = pos - 2;
+<span class="nc" id="L194">                            return eventType = TEXT;</span>
+                        }
+<span class="fc" id="L196">                        return eventType = parseStartTag();</span>
+                    } else {
+<span class="nc" id="L198">                        throw new XmlPullParserException(</span>
+<span class="nc" id="L199">                            &quot;unexpected character in markup &quot;+printable(ch), this, null);</span>
+                    }
+                    // do content comapctation if it makes sense!!!!
+
+<span class="pc bpc" id="L203" title="1 of 2 branches missed.">                } else if(ch == '&amp;') {</span>
+                    // work on ENTITTY
+                    //posEnd = pos - 1;
+<span class="nc bnc" id="L206" title="All 4 branches missed.">                    if(tokenize &amp;&amp; hadCharData) {</span>
+<span class="nc" id="L207">                        seenAmpersand = true;</span>
+<span class="nc" id="L208">                        return eventType = TEXT;</span>
+                    }
+<span class="nc" id="L210">                    final int oldStart = posStart + bufAbsoluteStart;</span>
+<span class="nc" id="L211">                    final int oldEnd = posEnd + bufAbsoluteStart;</span>
+<span class="nc" id="L212">                    final char[] resolvedEntity = parseEntityRef();</span>
+<span class="nc bnc" id="L213" title="All 2 branches missed.">                    if(tokenize) return eventType = ENTITY_REF;</span>
+                    // check if replacement text can be resolved !!!
+<span class="nc bnc" id="L215" title="All 2 branches missed.">                    if(resolvedEntity == null) {</span>
+<span class="nc bnc" id="L216" title="All 2 branches missed.">                        if(entityRefName == null) {</span>
+<span class="nc" id="L217">                            entityRefName = newString(buf, posStart, posEnd - posStart);</span>
+                        }
+<span class="nc" id="L219">                        throw new XmlPullParserException(</span>
+<span class="nc" id="L220">                            &quot;could not resolve entity named '&quot;+printable(entityRefName)+&quot;'&quot;,</span>
+                            this, null);
+                    }
+                    //int entStart = posStart;
+                    //int entEnd = posEnd;
+<span class="nc" id="L225">                    posStart = oldStart - bufAbsoluteStart;</span>
+<span class="nc" id="L226">                    posEnd = oldEnd - bufAbsoluteStart;</span>
+<span class="nc bnc" id="L227" title="All 2 branches missed.">                    if(!usePC) {</span>
+<span class="nc bnc" id="L228" title="All 2 branches missed.">                        if(hadCharData) {</span>
+<span class="nc" id="L229">                            joinPC(); // posEnd is already set correctly!!!</span>
+<span class="nc" id="L230">                            needsMerging = false;</span>
+                        } else {
+<span class="nc" id="L232">                            usePC = true;</span>
+<span class="nc" id="L233">                            pcStart = pcEnd = 0;</span>
+                        }
+                    }
+                    //assert usePC == true;
+                    // write into PC replacement text - do merge for replacement text!!!!
+<span class="nc bnc" id="L238" title="All 2 branches missed.">                    for (int i = 0; i &lt; resolvedEntity.length; i++)</span>
+                    {
+<span class="nc bnc" id="L240" title="All 2 branches missed.">                        if(pcEnd &gt;= pc.length) ensurePC(pcEnd);</span>
+<span class="nc" id="L241">                        pc[pcEnd++] = resolvedEntity[ i ];</span>
+
+                    }
+<span class="nc" id="L244">                    hadCharData = true;</span>
+                    //assert needsMerging == false;
+<span class="nc" id="L246">                } else {</span>
+
+<span class="pc bpc" id="L248" title="1 of 2 branches missed.">                    if(needsMerging) {</span>
+                        //assert usePC == false;
+<span class="nc" id="L250">                        joinPC();  // posEnd is already set correctly!!!</span>
+                        //posStart = pos  -  1;
+<span class="nc" id="L252">                        needsMerging = false;</span>
+                    }
+
+
+                    //no MARKUP not ENTITIES so work on character data ...
+
+
+
+                    // [14] CharData ::=   [^&lt;&amp;]* - ([^&lt;&amp;]* ']]&gt;' [^&lt;&amp;]*)
+
+
+<span class="fc" id="L263">                    hadCharData = true;</span>
+
+<span class="fc" id="L265">                    boolean normalizedCR = false;</span>
+<span class="pc bpc" id="L266" title="2 of 4 branches missed.">                    final boolean normalizeInput = tokenize == false || roundtripSupported == false;</span>
+                    // use loop locality here!!!!
+<span class="fc" id="L268">                    boolean seenBracket = false;</span>
+<span class="fc" id="L269">                    boolean seenBracketBracket = false;</span>
+                    do {
+
+                        // check that ]]&gt; does not show in
+<span class="pc bpc" id="L273" title="5 of 8 branches missed.">                        if (eventType == XmlPullParser.END_TAG &amp;&amp;</span>
+                                (ch == ' ' || ch == '\n' || ch == '\t')) {
+                            // ** ADDED CODE (INCLUDING IF STATEMENT)
+<span class="fc" id="L276">                            lastHeartbeat = System.currentTimeMillis();</span>
+                        }
+<span class="pc bpc" id="L278" title="1 of 2 branches missed.">                        if(ch == ']') {</span>
+<span class="nc bnc" id="L279" title="All 2 branches missed.">                            if(seenBracket) {</span>
+<span class="nc" id="L280">                                seenBracketBracket = true;</span>
+                            } else {
+<span class="nc" id="L282">                                seenBracket = true;</span>
+                            }
+<span class="pc bpc" id="L284" title="3 of 4 branches missed.">                        } else if(seenBracketBracket &amp;&amp; ch == '&gt;') {</span>
+<span class="nc" id="L285">                            throw new XmlPullParserException(</span>
+                                &quot;characters ]]&gt; are not allowed in content&quot;, this, null);
+                        } else {
+<span class="pc bpc" id="L288" title="1 of 2 branches missed.">                            if(seenBracket) {</span>
+<span class="nc" id="L289">                                seenBracketBracket = seenBracket = false;</span>
+                            }
+                            // assert seenTwoBrackets == seenBracket == false;
+                        }
+<span class="pc bpc" id="L293" title="1 of 2 branches missed.">                        if(normalizeInput) {</span>
+                            // deal with normalization issues ...
+<span class="pc bpc" id="L295" title="1 of 2 branches missed.">                            if(ch == '\r') {</span>
+<span class="nc" id="L296">                                normalizedCR = true;</span>
+<span class="nc" id="L297">                                posEnd = pos -1;</span>
+                                // posEnd is alreadys set
+<span class="nc bnc" id="L299" title="All 2 branches missed.">                                if(!usePC) {</span>
+<span class="nc bnc" id="L300" title="All 2 branches missed.">                                    if(posEnd &gt; posStart) {</span>
+<span class="nc" id="L301">                                        joinPC();</span>
+                                    } else {
+<span class="nc" id="L303">                                        usePC = true;</span>
+<span class="nc" id="L304">                                        pcStart = pcEnd = 0;</span>
+                                    }
+                                }
+                                //assert usePC == true;
+<span class="nc bnc" id="L308" title="All 2 branches missed.">                                if(pcEnd &gt;= pc.length) ensurePC(pcEnd);</span>
+<span class="nc" id="L309">                                pc[pcEnd++] = '\n';</span>
+<span class="pc bpc" id="L310" title="1 of 2 branches missed.">                            } else if(ch == '\n') {</span>
+                                //   if(!usePC) {  joinPC(); } else { if(pcEnd &gt;= pc.length) ensurePC(); }
+<span class="nc bnc" id="L312" title="All 4 branches missed.">                                if(!normalizedCR &amp;&amp; usePC) {</span>
+<span class="nc bnc" id="L313" title="All 2 branches missed.">                                    if(pcEnd &gt;= pc.length) ensurePC(pcEnd);</span>
+<span class="nc" id="L314">                                    pc[pcEnd++] = '\n';</span>
+                                }
+<span class="nc" id="L316">                                normalizedCR = false;</span>
+                            } else {
+<span class="pc bpc" id="L318" title="1 of 2 branches missed.">                                if(usePC) {</span>
+<span class="nc bnc" id="L319" title="All 2 branches missed.">                                    if(pcEnd &gt;= pc.length) ensurePC(pcEnd);</span>
+<span class="nc" id="L320">                                    pc[pcEnd++] = ch;</span>
+                                }
+<span class="fc" id="L322">                                normalizedCR = false;</span>
+                            }
+                        }
+
+<span class="fc" id="L326">                        ch = more();</span>
+<span class="pc bpc" id="L327" title="1 of 4 branches missed.">                    } while(ch != '&lt;' &amp;&amp; ch != '&amp;');</span>
+<span class="fc" id="L328">                    posEnd = pos - 1;</span>
+<span class="fc" id="L329">                    continue MAIN_LOOP;  // skip ch = more() from below - we are alreayd ahead ...</span>
+                }
+<span class="nc" id="L331">                ch = more();</span>
+            } // endless while(true)
+        } else {
+<span class="pc bpc" id="L334" title="1 of 2 branches missed.">            if(seenRoot) {</span>
+<span class="nc" id="L335">                return parseEpilog();</span>
+            } else {
+<span class="fc" id="L337">                return parseProlog();</span>
+            }
+        }
+    }
+
+    /**
+     * Returns the last time a heartbeat was received. Hearbeats are represented as whitespaces
+     * or \n characters received when an XmlPullParser.END_TAG was parsed. Note that we
+     * can falsely detect heartbeats when parsing XHTML content but that is fine.
+     *
+     * @return the time in milliseconds when a heartbeat was received.
+     */
+    public long getLastHeartbeat() {
+<span class="nc" id="L350">        return lastHeartbeat;</span>
+    }
+
+    public void resetInput() {
+<span class="nc" id="L354">        Reader oldReader = reader;</span>
+<span class="nc" id="L355">        String oldEncoding = inputEncoding;</span>
+<span class="nc" id="L356">        reset();</span>
+<span class="nc" id="L357">        reader = oldReader;</span>
+<span class="nc" id="L358">        inputEncoding = oldEncoding;</span>
+<span class="nc" id="L359">    }</span>
+
+<span class="fc" id="L361">    private boolean highSurrogateSeen = false;</span>
+
+    /**
+     * Makes sure that each individual character is a valid XML character.
+     * 
+     * Note that when MXParser is being modified to handle multibyte chars correctly, this method needs to change (as
+     * then, there are more codepoints to check).
+     * 
+     */
+    @Override
+    protected char more() throws IOException, XmlPullParserException {
+<span class="fc" id="L372">        final char codePoint  = super.more(); // note - this does NOT return a codepoint now, but simply a (double byte) character!</span>
+<span class="fc" id="L373">        boolean validCodepoint = false;</span>
+<span class="fc" id="L374">        boolean isLowSurrogate = Character.isLowSurrogate(codePoint);</span>
+<span class="pc bpc" id="L375" title="10 of 16 branches missed.">        if ((codePoint == 0x0) ||  // 0x0 is not allowed, but flash clients insist on sending this as the very first character of a stream. We should stop allowing this codepoint after the first byte has been parsed.</span>
+                (codePoint == 0x9) ||
+                (codePoint == 0xA) ||
+                (codePoint == 0xD) ||
+                ((codePoint &gt;= 0x20) &amp;&amp; (codePoint &lt;= 0xD7FF)) ||
+                ((codePoint &gt;= 0xE000) &amp;&amp; (codePoint &lt;= 0xFFFD))) {
+<span class="fc" id="L381">            validCodepoint = true;</span>
+        }
+<span class="nc bnc" id="L383" title="All 2 branches missed.">        else if (highSurrogateSeen) {</span>
+<span class="nc bnc" id="L384" title="All 2 branches missed.">            if (isLowSurrogate) {</span>
+<span class="nc" id="L385">                validCodepoint = true;</span>
+            } else {
+<span class="nc" id="L387">                throw new XmlPullParserException(&quot;High surrogate followed by non low surrogate '0x&quot; + String.format(&quot;%x&quot;, (int) codePoint) + &quot;'&quot;);</span>
+            }
+        }
+<span class="nc bnc" id="L390" title="All 2 branches missed.">        else if (isLowSurrogate) {</span>
+<span class="nc" id="L391">            throw new XmlPullParserException(&quot;Low surrogate '0x &quot; + String.format(&quot;%x&quot;, (int) codePoint) + &quot; without preceeding high surrogate&quot;);</span>
+        }
+<span class="nc bnc" id="L393" title="All 2 branches missed.">        else if (Character.isHighSurrogate(codePoint)) {</span>
+<span class="nc" id="L394">            highSurrogateSeen = true;</span>
+            // Return here so that highSurrogateSeen is not reset
+<span class="nc" id="L396">            return codePoint;</span>
+        }
+        // Always reset high surrogate seen
+<span class="fc" id="L399">        highSurrogateSeen = false;</span>
+<span class="pc bpc" id="L400" title="1 of 2 branches missed.">        if (validCodepoint)</span>
+<span class="fc" id="L401">            return codePoint;</span>
+
+<span class="nc" id="L403">        throw new XmlPullParserException(&quot;Illegal XML character '0x&quot; + String.format(&quot;%x&quot;, (int) codePoint) + &quot;'&quot;);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

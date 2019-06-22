@@ -1,0 +1,165 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>PluginClassLoader.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.container</a> &gt; <span class="el_source">PluginClassLoader.java</span></div><h1>PluginClassLoader.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2004-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.container;
+
+import java.io.File;
+import java.io.FilenameFilter;
+import java.net.JarURLConnection;
+import java.net.MalformedURLException;
+import java.net.URL;
+import java.net.URLClassLoader;
+import java.net.URLConnection;
+import java.util.ArrayList;
+import java.util.List;
+
+import org.jivesoftware.openfire.XMPPServer;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * ClassLoader for plugins. It searches the plugin directory for classes
+ * and JAR files, then constructs a class loader for the resources found.
+ * Resources are loaded as follows:
+ * &lt;ul&gt;
+ * &lt;li&gt;Any JAR files in the {@code lib} will be added to the classpath.&lt;/li&gt;
+ * &lt;li&gt;Any files in the classes directory will be added to the classpath.&lt;/li&gt;
+ * &lt;/ul&gt;
+ *
+ * @author Derek DeMoro
+ */
+public class PluginClassLoader extends URLClassLoader {
+
+<span class="nc" id="L46">    private static final Logger Log = LoggerFactory.getLogger(PluginClassLoader.class);</span>
+<span class="nc" id="L47">    private List&lt;JarURLConnection&gt; cachedJarFiles = new ArrayList&lt;JarURLConnection&gt;();</span>
+    public PluginClassLoader() {
+<span class="nc" id="L49">        super(new URL[] {}, findParentClassLoader());</span>
+<span class="nc" id="L50">    }</span>
+
+    /**
+     * Adds a directory to the class loader.
+     *
+     * @param directory the directory.
+     * @param developmentMode true if the plugin is running in development mode. This
+     *      resolves classloader conflicts between the deployed plugin
+     * and development classes.
+     */
+    public void addDirectory(File directory, boolean developmentMode) {
+        try {
+            // Add classes directory to classpath.
+<span class="nc" id="L63">            File classesDir = new File(directory, &quot;classes&quot;);</span>
+<span class="nc bnc" id="L64" title="All 2 branches missed.">            if (classesDir.exists()) {</span>
+<span class="nc" id="L65">                addURL(classesDir.toURI().toURL());</span>
+            }
+
+            // Add i18n directory to classpath.
+<span class="nc" id="L69">            File databaseDir = new File(directory, &quot;database&quot;);</span>
+<span class="nc bnc" id="L70" title="All 2 branches missed.">            if(databaseDir.exists()){</span>
+<span class="nc" id="L71">                addURL(databaseDir.toURI().toURL());</span>
+            }
+
+            // Add i18n directory to classpath.
+<span class="nc" id="L75">            File i18nDir = new File(directory, &quot;i18n&quot;);</span>
+<span class="nc bnc" id="L76" title="All 2 branches missed.">            if(i18nDir.exists()){</span>
+<span class="nc" id="L77">                addURL(i18nDir.toURI().toURL());</span>
+            }
+
+            // Add web directory to classpath.
+<span class="nc" id="L81">            File webDir = new File(directory, &quot;web&quot;);</span>
+<span class="nc bnc" id="L82" title="All 2 branches missed.">            if(webDir.exists()){</span>
+<span class="nc" id="L83">                addURL(webDir.toURI().toURL());</span>
+            }
+
+            // Add lib directory to classpath.
+<span class="nc" id="L87">            File libDir = new File(directory, &quot;lib&quot;);</span>
+<span class="nc" id="L88">            File[] jars = libDir.listFiles(new FilenameFilter() {</span>
+                public boolean accept(File dir, String name) {
+<span class="nc bnc" id="L90" title="All 4 branches missed.">                    return name.endsWith(&quot;.jar&quot;) || name.endsWith(&quot;.zip&quot;);</span>
+                }
+            });
+<span class="nc bnc" id="L93" title="All 2 branches missed.">            if (jars != null) {</span>
+<span class="nc bnc" id="L94" title="All 2 branches missed.">                for (int i = 0; i &lt; jars.length; i++) {</span>
+<span class="nc bnc" id="L95" title="All 4 branches missed.">                    if (jars[i] != null &amp;&amp; jars[i].isFile()) {</span>
+<span class="nc" id="L96">                        String jarFileUri = jars[i].toURI().toString()  + &quot;!/&quot;;</span>
+<span class="nc bnc" id="L97" title="All 2 branches missed.">                        if (developmentMode) {</span>
+                            // Do not add plugin-pluginName.jar to classpath.
+<span class="nc bnc" id="L99" title="All 2 branches missed.">                            if (!jars[i].getName().equals(&quot;plugin-&quot; + directory.getName() + &quot;.jar&quot;)) {</span>
+<span class="nc" id="L100">                                addURLFile(new URL(&quot;jar&quot;, &quot;&quot;, -1, jarFileUri));</span>
+                            }
+                        } else {
+<span class="nc" id="L103">                            addURLFile(new URL(&quot;jar&quot;, &quot;&quot;, -1, jarFileUri));</span>
+                        }
+                    }
+                }
+            }
+        }
+<span class="nc" id="L109">        catch (MalformedURLException mue) {</span>
+<span class="nc" id="L110">            Log.error(mue.getMessage(), mue);</span>
+<span class="nc" id="L111">        }</span>
+<span class="nc" id="L112">    }</span>
+
+    /**
+     * Add the given URL to the classpath for this class loader, 
+     * caching the JAR file connection so it can be unloaded later
+     * 
+     * @param file URL for the JAR file or directory to append to classpath
+     */
+    public void addURLFile(URL file) {
+        try {
+            // open and cache JAR file connection 
+<span class="nc" id="L123">            URLConnection uc = file.openConnection();</span>
+<span class="nc bnc" id="L124" title="All 2 branches missed.">            if (uc instanceof JarURLConnection) {</span>
+<span class="nc" id="L125">                uc.setUseCaches(true);</span>
+<span class="nc" id="L126">                ((JarURLConnection) uc).getManifest();</span>
+<span class="nc" id="L127">                cachedJarFiles.add((JarURLConnection)uc);</span>
+            }
+<span class="nc" id="L129">        } catch (Exception e) {</span>
+<span class="nc" id="L130">            Log.warn(&quot;Failed to cache plugin JAR file: &quot; + file.toExternalForm());</span>
+<span class="nc" id="L131">        }</span>
+<span class="nc" id="L132">        addURL(file);</span>
+<span class="nc" id="L133">    }</span>
+    
+    /**
+     * Unload any JAR files that have been cached by this plugin
+     */
+    public void unloadJarFiles() {
+<span class="nc bnc" id="L139" title="All 2 branches missed.">        for (JarURLConnection url : cachedJarFiles) {</span>
+            try {
+<span class="nc" id="L141">                Log.info(&quot;Unloading plugin JAR file &quot; + url.getJarFile().getName());</span>
+<span class="nc" id="L142">                url.getJarFile().close();</span>
+<span class="nc" id="L143">            } catch (Exception e) {</span>
+<span class="nc" id="L144">                Log.error(&quot;Failed to unload JAR file&quot;, e);</span>
+<span class="nc" id="L145">            }</span>
+<span class="nc" id="L146">        }</span>
+<span class="nc" id="L147">    }</span>
+
+    /**
+     * Locates the best parent class loader based on context.
+     *
+     * @return the best parent classloader to use.
+     */
+    private static ClassLoader findParentClassLoader() {
+<span class="nc" id="L155">        ClassLoader parent = XMPPServer.class.getClassLoader();</span>
+<span class="nc bnc" id="L156" title="All 2 branches missed.">        if (parent == null) {</span>
+<span class="nc" id="L157">            parent = PluginClassLoader.class.getClassLoader();</span>
+        }
+<span class="nc bnc" id="L159" title="All 2 branches missed.">        if (parent == null) {</span>
+<span class="nc" id="L160">            parent = ClassLoader.getSystemClassLoader();</span>
+        }
+<span class="nc" id="L162">        return parent;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

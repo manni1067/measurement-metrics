@@ -1,0 +1,155 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>LdapAuthorizationMapping.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.ldap</a> &gt; <span class="el_source">LdapAuthorizationMapping.java</span></div><h1>LdapAuthorizationMapping.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2004-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.ldap;
+
+import javax.naming.NamingEnumeration;
+import javax.naming.directory.Attribute;
+import javax.naming.directory.Attributes;
+import javax.naming.directory.DirContext;
+import javax.naming.directory.SearchControls;
+import javax.naming.directory.SearchResult;
+
+import org.jivesoftware.openfire.auth.AuthorizationMapping;
+import org.jivesoftware.util.JiveGlobals;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+
+
+/**
+ * Provider for authorization mapping using LDAP. If the authenticated
+ * principal did not request a username, provide one via LDAP. Specify the
+ * lookup field in the system properties. An entry in that file would
+ * look like the following:
+ *
+ * &lt;ul&gt;
+ * &lt;li&gt;{@code ldap.princField = k5login}&lt;/li&gt;
+ * &lt;li&gt;{@code ldap.princSearchFilter = princField={0}}&lt;/li&gt;
+ * &lt;/ul&gt;
+ * &lt;p&gt;
+ * Each ldap object that represents a user is expcted to have exactly one of
+ * ldap.usernameField and ldap.princField, and they are both expected to be unique
+ * over the search base.  A search will be performed over all objects where 
+ * princField = principal, and the usernameField will be returned.
+ * Note that it is expected this search return exactly one object. (There can
+ * only be one default) If more than one is returned, the first entry 
+ * encountered will be used, and no sorting is performed or requested.
+ * If more control over the search is needed, you can specify the mapSearchFilter
+ * used to perform the LDAP query. 
+ * This implementation requires that LDAP be configured, obviously.
+ * &lt;/p&gt;
+ *
+ * @author Jay Kline
+ */
+public class LdapAuthorizationMapping implements AuthorizationMapping {
+
+<span class="nc" id="L60">    private static final Logger Log = LoggerFactory.getLogger(LdapAuthorizationMapping.class);</span>
+
+    private LdapManager manager;
+    private String usernameField;
+    private String princField;
+    private String princSearchFilter;
+
+<span class="nc" id="L67">    public LdapAuthorizationMapping() {</span>
+        // Convert XML based provider setup to Database based
+<span class="nc" id="L69">        JiveGlobals.migrateProperty(&quot;ldap.princField&quot;);</span>
+<span class="nc" id="L70">        JiveGlobals.migrateProperty(&quot;ldap.princSearchFilter&quot;);</span>
+
+<span class="nc" id="L72">        manager = LdapManager.getInstance();</span>
+<span class="nc" id="L73">        usernameField = manager.getUsernameField();</span>
+<span class="nc" id="L74">        princField = JiveGlobals.getProperty(&quot;ldap.princField&quot;, &quot;k5login&quot;);</span>
+<span class="nc" id="L75">        princSearchFilter = JiveGlobals.getProperty(&quot;ldap.princSearchFilter&quot;);</span>
+<span class="nc" id="L76">        StringBuilder filter = new StringBuilder();</span>
+<span class="nc bnc" id="L77" title="All 2 branches missed.">        if(princSearchFilter == null) {</span>
+<span class="nc" id="L78">            filter.append('(').append(princField).append(&quot;={0})&quot;);</span>
+        } else {
+<span class="nc" id="L80">            filter.append(&quot;(&amp;(&quot;).append(princField).append(&quot;={0})(&quot;);</span>
+<span class="nc" id="L81">            filter.append(princSearchFilter).append(&quot;))&quot;);</span>
+        }
+<span class="nc" id="L83">        princSearchFilter = filter.toString();</span>
+<span class="nc" id="L84">    }</span>
+
+    @Override
+    public String map(String principal) {
+<span class="nc" id="L88">        String username = principal;</span>
+<span class="nc" id="L89">        DirContext ctx = null;</span>
+        try {
+<span class="nc" id="L91">            Log.debug(&quot;LdapAuthorizationMapping: Starting LDAP search...&quot;);</span>
+<span class="nc" id="L92">            String usernameField = manager.getUsernameField();</span>
+            //String baseDN = manager.getBaseDN();
+<span class="nc" id="L94">            boolean subTreeSearch = manager.isSubTreeSearch();</span>
+<span class="nc" id="L95">            ctx = manager.getContext();</span>
+<span class="nc" id="L96">            SearchControls constraints = new SearchControls();</span>
+<span class="nc bnc" id="L97" title="All 2 branches missed.">            if (subTreeSearch) {</span>
+<span class="nc" id="L98">                constraints.setSearchScope</span>
+<span class="nc" id="L99">            (SearchControls.SUBTREE_SCOPE);</span>
+            }
+            // Otherwise, only search a single level.
+            else {
+<span class="nc" id="L103">                constraints.setSearchScope(SearchControls.ONELEVEL_SCOPE);</span>
+            }
+<span class="nc" id="L105">            constraints.setReturningAttributes(new String[] { usernameField });</span>
+
+<span class="nc" id="L107">            NamingEnumeration answer = ctx.search(&quot;&quot;, princSearchFilter, </span>
+<span class="nc" id="L108">                    new String[] {LdapManager.sanitizeSearchFilter(principal)},</span>
+                    constraints);
+<span class="nc" id="L110">            Log.debug(&quot;LdapAuthorizationMapping: ... search finished&quot;);</span>
+<span class="nc bnc" id="L111" title="All 4 branches missed.">            if (answer == null || !answer.hasMoreElements()) {</span>
+<span class="nc" id="L112">                Log.debug(&quot;LdapAuthorizationMapping: Username based on principal '&quot; + principal + &quot;' not found.&quot;);</span>
+<span class="nc" id="L113">                return principal;</span>
+            }
+<span class="nc" id="L115">            Attributes atrs = ((SearchResult)answer.next()).getAttributes();</span>
+<span class="nc" id="L116">            Attribute usernameAttribute = atrs.get(usernameField);</span>
+<span class="nc" id="L117">            username = (String) usernameAttribute.get();</span>
+        }
+<span class="nc" id="L119">        catch (Exception e) {</span>
+            // Ignore.
+        }
+        finally {
+<span class="nc" id="L123">            try {</span>
+<span class="nc bnc" id="L124" title="All 8 branches missed.">                if (ctx != null) {</span>
+<span class="nc" id="L125">                    ctx.close();</span>
+                }
+            }
+<span class="nc" id="L128">            catch (Exception ignored) {</span>
+                // Ignore.
+<span class="nc" id="L130">            }</span>
+<span class="nc" id="L131">        }</span>
+<span class="nc" id="L132">        return username;</span>
+    }
+
+    /**
+     * Returns the short name of the Policy
+     *
+     * @return The short name of the Policy
+     */
+    @Override
+    public String name() {
+<span class="nc" id="L142">        return &quot;LDAP Authorization Mapping&quot;;</span>
+    }
+
+    /**
+     * Returns a description of the Policy
+     *
+     * @return The description of the Policy.
+     */
+    @Override
+    public String description() {
+<span class="nc" id="L152">        return &quot;Provider for authorization using LDAP. Returns the principals default username using the attribute specified in ldap.princField.&quot;;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

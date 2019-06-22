@@ -1,0 +1,270 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>DefaultSecurityAuditProvider.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.security</a> &gt; <span class="el_source">DefaultSecurityAuditProvider.java</span></div><h1>DefaultSecurityAuditProvider.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.jivesoftware.openfire.security;
+
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.Date;
+import java.util.List;
+
+import org.jivesoftware.database.DbConnectionManager;
+import org.jivesoftware.database.SequenceManager;
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.util.JiveConstants;
+import org.jivesoftware.util.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * The default security audit provider stores the logs in a ofSecurityAuditLog table.
+ *
+ * @author Daniel Henninger
+ */
+public class DefaultSecurityAuditProvider implements SecurityAuditProvider {
+
+<span class="nc" id="L41">    private static final Logger Log = LoggerFactory.getLogger(DefaultSecurityAuditProvider.class);</span>
+
+    private static final String LOG_ENTRY =
+            &quot;INSERT INTO ofSecurityAuditLog(msgID,username,entryStamp,summary,node,details) VALUES(?,?,?,?,?,?)&quot;;
+    private static final String GET_EVENTS =
+            &quot;SELECT msgID,username,entryStamp,summary,node,details FROM ofSecurityAuditLog&quot;;
+    private static final String GET_EVENT =
+            &quot;SELECT msgID,username,entryStamp,summary,node,details FROM ofSecurityAuditLog WHERE msgID=?&quot;;
+    private static final String GET_EVENT_COUNT =
+            &quot;SELECT COUNT(msgID) FROM ofSecurityAuditLog&quot;;
+
+    /**
+     * Constructs a new DefaultSecurityAuditProvider
+     */
+<span class="nc" id="L55">    public DefaultSecurityAuditProvider() {</span>
+
+<span class="nc" id="L57">    }</span>
+
+    /**
+     * The default provider logs events into a ofSecurityAuditLog table in the database.
+     * @see org.jivesoftware.openfire.security.SecurityAuditProvider#logEvent(String, String, String)
+     */
+    @Override
+    public void logEvent(String username, String summary, String details) {
+<span class="nc" id="L65">        Connection con = null;</span>
+<span class="nc" id="L66">        PreparedStatement pstmt = null;</span>
+        try {
+<span class="nc" id="L68">            long msgID = SequenceManager.nextID(JiveConstants.SECURITY_AUDIT);</span>
+<span class="nc" id="L69">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L70">            pstmt = con.prepareStatement(LOG_ENTRY);</span>
+<span class="nc" id="L71">            pstmt.setLong(1, msgID);</span>
+<span class="nc" id="L72">            pstmt.setString(2, username);</span>
+<span class="nc" id="L73">            pstmt.setLong(3, new Date().getTime());</span>
+<span class="nc" id="L74">            pstmt.setString(4, StringUtils.abbreviate(summary, 250));</span>
+<span class="nc" id="L75">            pstmt.setString(5, XMPPServer.getInstance().getServerInfo().getHostname());</span>
+<span class="nc" id="L76">            pstmt.setString(6, details);</span>
+<span class="nc" id="L77">            pstmt.executeUpdate();</span>
+        }
+<span class="nc" id="L79">        catch (SQLException e) {</span>
+<span class="nc" id="L80">            Log.warn(&quot;Error trying to insert a new row in ofSecurityAuditLog: &quot;, e);</span>
+        }
+        finally {
+<span class="nc" id="L83">            DbConnectionManager.closeConnection(pstmt, con);</span>
+<span class="nc" id="L84">        }</span>
+<span class="nc" id="L85">    }</span>
+
+    /**
+     * The default provider retrieves events from a ofSecurityAuditLog table in the database.
+     * @see org.jivesoftware.openfire.security.SecurityAuditProvider#getEvents(String, Integer, Integer, java.util.Date, java.util.Date)
+     */
+    @Override
+    public List&lt;SecurityAuditEvent&gt; getEvents(String username, Integer skipEvents, Integer numEvents, Date startTime, Date endTime) {
+<span class="nc" id="L93">        List&lt;SecurityAuditEvent&gt; events = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L94">        Connection con = null;</span>
+<span class="nc" id="L95">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L96">        ResultSet rs = null;</span>
+<span class="nc" id="L97">        String sql = GET_EVENTS;</span>
+<span class="nc" id="L98">        boolean addedOne = false;</span>
+<span class="nc bnc" id="L99" title="All 2 branches missed.">        if (username != null) {</span>
+<span class="nc" id="L100">            sql += &quot; WHERE username = ?&quot;;</span>
+<span class="nc" id="L101">            addedOne = true;</span>
+        }
+<span class="nc bnc" id="L103" title="All 2 branches missed.">        if (startTime != null) {</span>
+<span class="nc bnc" id="L104" title="All 2 branches missed.">            if (!addedOne) {</span>
+<span class="nc" id="L105">                sql += &quot; WHERE&quot;;</span>
+            }
+            else {
+<span class="nc" id="L108">                sql += &quot; AND&quot;;</span>
+            }
+<span class="nc" id="L110">            sql += &quot; entryStamp &gt;= ?&quot;;</span>
+<span class="nc" id="L111">            addedOne = true;</span>
+        }
+<span class="nc bnc" id="L113" title="All 2 branches missed.">        if (endTime != null) {</span>
+<span class="nc bnc" id="L114" title="All 2 branches missed.">            if (!addedOne) {</span>
+<span class="nc" id="L115">                sql += &quot; WHERE&quot;;</span>
+            }
+            else {
+<span class="nc" id="L118">                sql += &quot; AND&quot;;</span>
+            }
+<span class="nc" id="L120">            sql += &quot; entryStamp &lt;= ?&quot;;</span>
+        }
+<span class="nc" id="L122">        sql += &quot; ORDER BY entryStamp DESC&quot;;</span>
+        try {
+<span class="nc" id="L124">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L125">            pstmt = DbConnectionManager.createScrollablePreparedStatement(con, sql);</span>
+            
+<span class="nc" id="L127">            int i = 1;</span>
+<span class="nc bnc" id="L128" title="All 2 branches missed.">            if (username != null) {</span>
+<span class="nc" id="L129">                pstmt.setString(i, username);</span>
+<span class="nc" id="L130">                i++;</span>
+            }
+<span class="nc bnc" id="L132" title="All 2 branches missed.">            if (startTime != null) {</span>
+<span class="nc" id="L133">                pstmt.setLong(i, startTime.getTime());</span>
+<span class="nc" id="L134">                i++;</span>
+            }
+<span class="nc bnc" id="L136" title="All 2 branches missed.">            if (endTime != null) {</span>
+<span class="nc" id="L137">                pstmt.setLong(i, endTime.getTime());</span>
+            }
+            
+<span class="nc" id="L140">            rs = pstmt.executeQuery();</span>
+<span class="nc bnc" id="L141" title="All 2 branches missed.">            if (skipEvents != null) {</span>
+<span class="nc" id="L142">                DbConnectionManager.scrollResultSet(rs, skipEvents);</span>
+            }
+<span class="nc bnc" id="L144" title="All 2 branches missed.">            if (numEvents != null) {</span>
+<span class="nc" id="L145">                DbConnectionManager.setFetchSize(rs, numEvents);</span>
+            }
+            
+<span class="nc" id="L148">            int count = 0;</span>
+<span class="nc bnc" id="L149" title="All 4 branches missed.">            while (rs.next() &amp;&amp; count &lt; numEvents) {</span>
+<span class="nc" id="L150">                SecurityAuditEvent event = new SecurityAuditEvent();</span>
+<span class="nc" id="L151">                event.setMsgID(rs.getLong(1));</span>
+<span class="nc" id="L152">                event.setUsername(rs.getString(2));</span>
+<span class="nc" id="L153">                event.setEventStamp(new Date(rs.getLong(3)));</span>
+<span class="nc" id="L154">                event.setSummary(rs.getString(4));</span>
+<span class="nc" id="L155">                event.setNode(rs.getString(5));</span>
+<span class="nc" id="L156">                event.setDetails(rs.getString(6));</span>
+<span class="nc" id="L157">                events.add(event);</span>
+<span class="nc" id="L158">                count++;</span>
+<span class="nc" id="L159">            }</span>
+        }
+<span class="nc" id="L161">        catch (SQLException e) {</span>
+<span class="nc" id="L162">            Log.error(e.getMessage(), e);</span>
+        }
+        finally {
+<span class="nc" id="L165">            DbConnectionManager.closeConnection(rs, pstmt, con);</span>
+<span class="nc" id="L166">        }</span>
+<span class="nc" id="L167">        return events;</span>
+    }
+
+    /**
+     * The default provider retrieves events from a ofSecurityAuditLog table in the database.
+     * @see org.jivesoftware.openfire.security.SecurityAuditProvider#getEvent(Integer)
+     */
+    @Override
+    public SecurityAuditEvent getEvent(Integer msgID) throws EventNotFoundException {
+<span class="nc" id="L176">        Connection con = null;</span>
+<span class="nc" id="L177">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L178">        ResultSet rs = null;</span>
+<span class="nc" id="L179">        SecurityAuditEvent event = null;</span>
+        try {
+<span class="nc" id="L181">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L182">            pstmt = con.prepareStatement(GET_EVENT);</span>
+<span class="nc" id="L183">            pstmt.setLong(1, msgID);</span>
+<span class="nc" id="L184">            rs = pstmt.executeQuery();</span>
+<span class="nc bnc" id="L185" title="All 2 branches missed.">            if (!rs.next()) {</span>
+<span class="nc" id="L186">                throw new EventNotFoundException();</span>
+            }
+<span class="nc" id="L188">            event = new SecurityAuditEvent();</span>
+<span class="nc" id="L189">            event.setMsgID(rs.getLong(1));</span>
+<span class="nc" id="L190">            event.setUsername(rs.getString(2));</span>
+<span class="nc" id="L191">            event.setEventStamp(new Date(rs.getLong(3)));</span>
+<span class="nc" id="L192">            event.setSummary(rs.getString(4));</span>
+<span class="nc" id="L193">            event.setNode(rs.getString(5));</span>
+<span class="nc" id="L194">            event.setDetails(rs.getString(6));</span>
+        }
+<span class="nc" id="L196">        catch (Exception e) {</span>
+<span class="nc" id="L197">            throw new EventNotFoundException();</span>
+        }
+        finally {
+<span class="nc" id="L200">            DbConnectionManager.closeConnection(rs, pstmt, con);</span>
+<span class="nc" id="L201">        }</span>
+
+<span class="nc" id="L203">        return event;</span>
+    }
+
+    /**
+     * The default provider counts the number of entries in the ofSecurityAuditLog table.
+     * @see org.jivesoftware.openfire.security.SecurityAuditProvider#getEventCount()
+     */
+    @Override
+    public Integer getEventCount() {
+<span class="nc" id="L212">        Connection con = null;</span>
+<span class="nc" id="L213">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L214">        ResultSet rs = null;</span>
+<span class="nc" id="L215">        Integer cnt = 0;</span>
+        try {
+<span class="nc" id="L217">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L218">            pstmt = con.prepareStatement(GET_EVENT_COUNT);</span>
+<span class="nc" id="L219">            rs = pstmt.executeQuery();</span>
+<span class="nc" id="L220">            cnt = rs.getInt(1);</span>
+        }
+<span class="nc" id="L222">        catch (Exception e) {</span>
+            // Hrm.  That should not occur.
+<span class="nc" id="L224">            Log.error(&quot;Error while looking up number of security audit events: &quot;, e);</span>
+        }
+        finally {
+<span class="nc" id="L227">            DbConnectionManager.closeConnection(rs, pstmt, con);</span>
+<span class="nc" id="L228">        }</span>
+
+<span class="nc" id="L230">        return cnt;</span>
+    }
+
+    /**
+     * The default provider writes logs into a local Openfire database.
+     * @see org.jivesoftware.openfire.security.SecurityAuditProvider#isWriteOnly()
+     */
+    @Override
+    public boolean isWriteOnly() {
+<span class="nc" id="L239">        return false;</span>
+    }
+
+    /**
+     * The default provider uses Openfire's own audit log viewer.
+     * @see org.jivesoftware.openfire.security.SecurityAuditProvider#getAuditURL()
+     */
+    @Override
+    public String getAuditURL() {
+<span class="nc" id="L248">        return null;</span>
+    }
+
+    /**
+     * The default provider logs user events.
+     * @see org.jivesoftware.openfire.security.SecurityAuditProvider#blockUserEvents()
+     */
+    @Override
+    public boolean blockUserEvents() {
+<span class="nc" id="L257">        return false;</span>
+    }
+
+    /**
+     * The default provider logs group events.
+     * @see org.jivesoftware.openfire.security.SecurityAuditProvider#blockGroupEvents()
+     */
+    @Override
+    public boolean blockGroupEvents() {
+<span class="nc" id="L266">        return false;</span>
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

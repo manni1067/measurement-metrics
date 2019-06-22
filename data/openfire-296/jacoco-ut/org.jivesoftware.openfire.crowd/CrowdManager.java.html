@@ -1,0 +1,466 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>CrowdManager.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.crowd</a> &gt; <span class="el_source">CrowdManager.java</span></div><h1>CrowdManager.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2012 Issa Gorissen &lt;issa-gorissen@usa.net&gt;. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.jivesoftware.openfire.crowd;
+
+import java.io.IOException;
+import java.io.StringWriter;
+import java.io.UnsupportedEncodingException;
+import java.net.URI;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
+import java.rmi.RemoteException;
+import java.util.ArrayList;
+import java.util.List;
+
+import javax.xml.bind.JAXB;
+
+import org.apache.http.Header;
+import org.apache.http.HttpHeaders;
+import org.apache.http.HttpHost;
+import org.apache.http.HttpStatus;
+import org.apache.http.StatusLine;
+import org.apache.http.auth.AuthScope;
+import org.apache.http.auth.UsernamePasswordCredentials;
+import org.apache.http.client.AuthCache;
+import org.apache.http.client.CredentialsProvider;
+import org.apache.http.client.config.RequestConfig;
+import org.apache.http.client.methods.CloseableHttpResponse;
+import org.apache.http.client.methods.HttpUriRequest;
+import org.apache.http.client.methods.RequestBuilder;
+import org.apache.http.client.protocol.HttpClientContext;
+import org.apache.http.conn.routing.HttpRoutePlanner;
+import org.apache.http.entity.StringEntity;
+import org.apache.http.impl.auth.BasicScheme;
+import org.apache.http.impl.client.BasicAuthCache;
+import org.apache.http.impl.client.BasicCredentialsProvider;
+import org.apache.http.impl.client.CloseableHttpClient;
+import org.apache.http.impl.client.HttpClientBuilder;
+import org.apache.http.impl.conn.DefaultProxyRoutePlanner;
+import org.apache.http.impl.conn.DefaultRoutePlanner;
+import org.apache.http.impl.conn.PoolingHttpClientConnectionManager;
+import org.apache.http.message.BasicHeader;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmpp.packet.JID;
+import org.apache.commons.lang3.StringUtils;
+
+import org.jivesoftware.openfire.crowd.jaxb.AuthenticatePost;
+import org.jivesoftware.openfire.crowd.jaxb.Group;
+import org.jivesoftware.openfire.crowd.jaxb.Groups;
+import org.jivesoftware.openfire.crowd.jaxb.User;
+import org.jivesoftware.openfire.crowd.jaxb.Users;
+
+
+
+public class CrowdManager {
+<span class="nc" id="L69">    private static final Logger LOG = LoggerFactory.getLogger(CrowdManager.class);</span>
+<span class="nc" id="L70">    private static final Object O = new Object();</span>
+    private static final String APPLICATION_XML = &quot;application/xml&quot;;
+<span class="nc" id="L72">    private static final Header HEADER_CONTENT_TYPE_APPLICATION_XML = new BasicHeader(HttpHeaders.CONTENT_TYPE, APPLICATION_XML);</span>
+<span class="nc" id="L73">    private static final Header HEADER_ACCEPT_APPLICATION_XML = new BasicHeader(HttpHeaders.ACCEPT, APPLICATION_XML);</span>
+<span class="nc" id="L74">    private static final Header HEADER_ACCEPT_CHARSET_UTF8 = new BasicHeader(HttpHeaders.ACCEPT_CHARSET, StandardCharsets.UTF_8.name());</span>
+
+    private static CrowdManager INSTANCE;
+    private CloseableHttpClient client;
+    private URI crowdServer;
+    private RequestConfig requestConfig;
+    private HttpClientContext clientContext;
+
+    public static CrowdManager getInstance() {
+<span class="nc bnc" id="L83" title="All 2 branches missed.">        if (INSTANCE == null) {</span>
+<span class="nc" id="L84">            synchronized (O) {</span>
+<span class="nc bnc" id="L85" title="All 2 branches missed.">                if (INSTANCE == null) {</span>
+<span class="nc" id="L86">                    INSTANCE = new CrowdManager();</span>
+                }
+<span class="nc" id="L88">            }</span>
+        }
+<span class="nc" id="L90">        return INSTANCE;</span>
+    }
+    
+<span class="nc" id="L93">    private CrowdManager() {</span>
+        try {
+            // loading crowd.properties file
+<span class="nc" id="L96">            CrowdProperties crowdProps = new CrowdProperties();</span>
+
+<span class="nc" id="L98">            crowdServer = new URI(crowdProps.getCrowdServerUrl()).resolve(&quot;rest/usermanagement/latest/&quot;);</span>
+<span class="nc" id="L99">            final HttpHost target = HttpHost.create(crowdServer.toString());</span>
+<span class="nc" id="L100">            final PoolingHttpClientConnectionManager connectionManager = new PoolingHttpClientConnectionManager();</span>
+<span class="nc" id="L101">            connectionManager.setDefaultMaxPerRoute(crowdProps.getHttpMaxConnections());</span>
+
+<span class="nc" id="L103">            final CredentialsProvider credentialsProvider = new BasicCredentialsProvider();</span>
+<span class="nc" id="L104">            credentialsProvider.setCredentials(</span>
+<span class="nc" id="L105">                new AuthScope(target.getHostName(), target.getPort()),</span>
+<span class="nc" id="L106">                new UsernamePasswordCredentials(crowdProps.getApplicationName(), crowdProps.getApplicationPassword()));</span>
+<span class="nc" id="L107">            final AuthCache authCache = new BasicAuthCache();</span>
+<span class="nc" id="L108">            authCache.put(target, new BasicScheme());</span>
+<span class="nc" id="L109">            clientContext = HttpClientContext.create();</span>
+<span class="nc" id="L110">            clientContext.setAuthCache(authCache);</span>
+
+
+            // setting Proxy config in place if needed
+            final String proxyString;
+            final HttpRoutePlanner httpRoutePlanner;
+<span class="nc bnc" id="L116" title="All 4 branches missed.">            if (StringUtils.isNotBlank(crowdProps.getHttpProxyHost()) &amp;&amp; crowdProps.getHttpProxyPort() &gt; 0) {</span>
+<span class="nc" id="L117">                final HttpHost proxyHost = new HttpHost(crowdProps.getHttpProxyHost(), crowdProps.getHttpProxyPort());</span>
+<span class="nc" id="L118">                httpRoutePlanner = new DefaultProxyRoutePlanner(proxyHost);</span>
+<span class="nc" id="L119">                proxyString = proxyHost.toString();</span>
+<span class="nc bnc" id="L120" title="All 4 branches missed.">                if (StringUtils.isNotBlank(crowdProps.getHttpProxyUsername()) || StringUtils.isNotBlank(crowdProps.getHttpProxyPassword())) {</span>
+<span class="nc" id="L121">                    credentialsProvider.setCredentials(new AuthScope(crowdProps.getHttpProxyHost(), crowdProps.getHttpProxyPort()),</span>
+<span class="nc" id="L122">                        new UsernamePasswordCredentials(crowdProps.getHttpProxyUsername(), crowdProps.getHttpProxyPassword()));</span>
+                }
+<span class="nc" id="L124">            } else {</span>
+<span class="nc" id="L125">                httpRoutePlanner =  new DefaultRoutePlanner(null);</span>
+<span class="nc" id="L126">                proxyString = &quot;&lt;none&gt;&quot;;</span>
+            }
+
+<span class="nc" id="L129">            client = HttpClientBuilder.create()</span>
+<span class="nc" id="L130">                .setConnectionManager(connectionManager)</span>
+<span class="nc" id="L131">                .setDefaultCredentialsProvider(credentialsProvider)</span>
+<span class="nc" id="L132">                .setRoutePlanner(httpRoutePlanner)</span>
+<span class="nc" id="L133">                .build();</span>
+
+<span class="nc" id="L135">            requestConfig = RequestConfig.custom()</span>
+<span class="nc" id="L136">                .setConnectTimeout(crowdProps.getHttpConnectionTimeout())</span>
+<span class="nc" id="L137">                .setSocketTimeout(crowdProps.getHttpSocketTimeout())</span>
+<span class="nc" id="L138">                .build();</span>
+
+
+<span class="nc bnc" id="L141" title="All 2 branches missed.">            if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L142">                LOG.debug(&quot;HTTP Client config&quot;);</span>
+<span class="nc" id="L143">                LOG.debug(crowdServer.toString());</span>
+<span class="nc" id="L144">                LOG.debug(&quot;Max connections: {}&quot;, connectionManager.getDefaultMaxPerRoute());</span>
+<span class="nc" id="L145">                LOG.debug(&quot;Socket timeout: {}&quot;, requestConfig.getSocketTimeout());</span>
+<span class="nc" id="L146">                LOG.debug(&quot;Connect timeout: {}&quot;, requestConfig.getConnectTimeout());</span>
+<span class="nc" id="L147">                LOG.debug(&quot;Proxy: {}&quot;, proxyString);</span>
+<span class="nc" id="L148">                LOG.debug(&quot;Crowd application name: {}&quot;, crowdProps.getApplicationName());</span>
+            }
+<span class="nc" id="L150">        } catch (Exception e) {</span>
+<span class="nc" id="L151">            LOG.error(&quot;Failure to load the Crowd manager&quot;, e);</span>
+<span class="nc" id="L152">        }</span>
+<span class="nc" id="L153">    }</span>
+    
+    
+    
+    /**
+     * Authenticates a user with crowd. If authentication failed, raises a &lt;code&gt;RemoteException&lt;/code&gt;
+     * @param username the username
+     * @param password the password
+     * @throws RemoteException if an exception occurred communicating with the crowd server
+     */
+    public void authenticate(String username, String password) throws RemoteException {
+<span class="nc" id="L164">        username = JID.unescapeNode(username);</span>
+<span class="nc" id="L165">        LOG.debug(&quot;authenticate '&quot; + String.valueOf(username) + &quot;'&quot;);</span>
+
+<span class="nc" id="L167">        final AuthenticatePost authenticatePost = new AuthenticatePost();</span>
+<span class="nc" id="L168">        authenticatePost.value = password;</span>
+<span class="nc" id="L169">        final StringWriter writer = new StringWriter();</span>
+<span class="nc" id="L170">        JAXB.marshal(authenticatePost, writer);</span>
+
+<span class="nc" id="L172">        final HttpUriRequest postRequest = RequestBuilder.post(crowdServer.resolve(&quot;authentication?username=&quot; + urlEncode(username)))</span>
+<span class="nc" id="L173">            .setConfig(requestConfig)</span>
+<span class="nc" id="L174">            .setEntity(new StringEntity(writer.toString(), StandardCharsets.UTF_8))</span>
+<span class="nc" id="L175">            .setHeader(HEADER_CONTENT_TYPE_APPLICATION_XML)</span>
+<span class="nc" id="L176">            .build();</span>
+
+<span class="nc" id="L178">        try(final CloseableHttpResponse response = client.execute(postRequest, clientContext)) {</span>
+
+<span class="nc bnc" id="L180" title="All 2 branches missed.">            if (response.getStatusLine().getStatusCode() != HttpStatus.SC_OK) {</span>
+<span class="nc" id="L181">                handleHTTPError(response);</span>
+            }
+            
+<span class="nc bnc" id="L184" title="All 8 branches missed.">        } catch (IOException ioe) {</span>
+<span class="nc" id="L185">            handleError(ioe);</span>
+<span class="nc" id="L186">        }</span>
+        
+<span class="nc" id="L188">        LOG.info(&quot;authenticated user:&quot; + username);</span>
+<span class="nc" id="L189">    }</span>
+    
+    
+    /**
+     * Get all the users from Crowd
+     * @return a List of User containing all the users stored in Crowd
+     * @throws RemoteException if an exception occurred communicating with the crowd server
+     */
+    public List&lt;User&gt; getAllUsers() throws RemoteException {
+<span class="nc" id="L198">        LOG.debug(&quot;fetching all crowd users&quot;);</span>
+        
+<span class="nc" id="L200">        int maxResults = 100;</span>
+<span class="nc" id="L201">        int startIndex = 0;</span>
+<span class="nc" id="L202">        List&lt;User&gt; results = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L203">        StringBuilder request = new StringBuilder(&quot;search?entity-type=user&amp;expand=user&amp;restriction=active%3dtrue&quot;)</span>
+<span class="nc" id="L204">            .append(&quot;&amp;max-results=&quot;).append(maxResults)</span>
+<span class="nc" id="L205">            .append(&quot;&amp;start-index=&quot;);</span>
+        
+        try {
+            while (true) {
+<span class="nc" id="L209">                final HttpUriRequest getRequest = RequestBuilder.get(crowdServer.resolve(request.toString() + startIndex))</span>
+<span class="nc" id="L210">                    .setConfig(requestConfig)</span>
+<span class="nc" id="L211">                    .addHeader(HEADER_ACCEPT_APPLICATION_XML)</span>
+<span class="nc" id="L212">                    .addHeader(HEADER_ACCEPT_CHARSET_UTF8)</span>
+<span class="nc" id="L213">                    .build();</span>
+
+<span class="nc" id="L215">                try(final CloseableHttpResponse response = client.execute(getRequest, clientContext)) {</span>
+<span class="nc bnc" id="L216" title="All 2 branches missed.">                    if (response.getStatusLine().getStatusCode() != HttpStatus.SC_OK) {</span>
+<span class="nc" id="L217">                        handleHTTPError(response);</span>
+                    }
+<span class="nc" id="L219">                    final Users users = JAXB.unmarshal(response.getEntity().getContent(), Users.class);</span>
+<span class="nc bnc" id="L220" title="All 4 branches missed.">                    if (users != null &amp;&amp; users.user != null) {</span>
+<span class="nc bnc" id="L221" title="All 2 branches missed.">                        for (final User user : users.user) {</span>
+<span class="nc" id="L222">                            user.name = JID.escapeNode(user.name);</span>
+<span class="nc" id="L223">                            results.add(user);</span>
+<span class="nc" id="L224">                        }</span>
+
+<span class="nc bnc" id="L226" title="All 2 branches missed.">                        if (users.user.size() != maxResults) {</span>
+                            break;
+                        } else {
+<span class="nc" id="L229">                            startIndex += maxResults;</span>
+                        }
+                    } else {
+                        break;
+                    }
+<span class="nc bnc" id="L234" title="All 16 branches missed.">                }</span>
+<span class="nc" id="L235">            }</span>
+            
+<span class="nc" id="L237">        } catch (IOException ioe) {</span>
+<span class="nc" id="L238">            handleError(ioe);</span>
+<span class="nc" id="L239">        }</span>
+        
+<span class="nc" id="L241">        return results;</span>
+    }
+    
+    
+    /**
+     * Get all the crowd groups
+     * @return a List of group names
+     * @throws RemoteException if an exception occurred communicating with the crowd server
+     */
+    public List&lt;String&gt; getAllGroupNames() throws RemoteException {
+<span class="nc" id="L251">        LOG.debug(&quot;fetch all crowd groups&quot;);</span>
+
+<span class="nc" id="L253">        int maxResults = 100;</span>
+<span class="nc" id="L254">        int startIndex = 0;</span>
+<span class="nc" id="L255">        List&lt;String&gt; results = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L256">        StringBuilder request = new StringBuilder(&quot;search?entity-type=group&amp;restriction=active%3dtrue&quot;)</span>
+<span class="nc" id="L257">            .append(&quot;&amp;max-results=&quot;).append(maxResults)</span>
+<span class="nc" id="L258">            .append(&quot;&amp;start-index=&quot;);</span>
+        
+        try {
+            while (true) {
+<span class="nc" id="L262">                final HttpUriRequest getRequest = RequestBuilder.get(crowdServer.resolve(request.toString() + startIndex))</span>
+<span class="nc" id="L263">                    .setConfig(requestConfig)</span>
+<span class="nc" id="L264">                    .addHeader(HEADER_ACCEPT_APPLICATION_XML)</span>
+<span class="nc" id="L265">                    .addHeader(HEADER_ACCEPT_CHARSET_UTF8)</span>
+<span class="nc" id="L266">                    .build();</span>
+
+<span class="nc" id="L268">                try (final CloseableHttpResponse response = client.execute(getRequest, clientContext)) {</span>
+<span class="nc bnc" id="L269" title="All 2 branches missed.">                    if (response.getStatusLine().getStatusCode() != HttpStatus.SC_OK) {</span>
+<span class="nc" id="L270">                        handleHTTPError(response);</span>
+                    }
+<span class="nc" id="L272">                    final Groups groups = JAXB.unmarshal(response.getEntity().getContent(), Groups.class);</span>
+<span class="nc bnc" id="L273" title="All 4 branches missed.">                    if (groups != null &amp;&amp; groups.group != null) {</span>
+<span class="nc bnc" id="L274" title="All 2 branches missed.">                        for (final Group group : groups.group) {</span>
+<span class="nc" id="L275">                            results.add(group.name);</span>
+<span class="nc" id="L276">                        }</span>
+
+<span class="nc bnc" id="L278" title="All 2 branches missed.">                        if (groups.group.size() != maxResults) {</span>
+                            break;
+                        } else {
+<span class="nc" id="L281">                            startIndex += maxResults;</span>
+                        }
+                    } else {
+                        break;
+                    }
+<span class="nc bnc" id="L286" title="All 16 branches missed.">                }</span>
+<span class="nc" id="L287">            }</span>
+            
+<span class="nc" id="L289">        } catch (IOException ioe) {</span>
+<span class="nc" id="L290">            handleError(ioe);</span>
+<span class="nc" id="L291">        }</span>
+        
+<span class="nc" id="L293">        return results;</span>
+    }
+    
+    
+    /**
+     * Get all the groups of a given username
+     * @param username the user
+     * @return a List of groups name
+     * @throws RemoteException if an exception occurred communicating with the crowd server
+     */
+    public List&lt;String&gt; getUserGroups(String username) throws RemoteException {
+<span class="nc" id="L304">        username = JID.unescapeNode(username);</span>
+<span class="nc" id="L305">        LOG.debug(&quot;fetch all crowd groups for user:&quot; + username);</span>
+        
+<span class="nc" id="L307">        int maxResults = 100;</span>
+<span class="nc" id="L308">        int startIndex = 0;</span>
+<span class="nc" id="L309">        List&lt;String&gt; results = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L310">        StringBuilder request = new StringBuilder(&quot;user/group/nested?username=&quot;).append(urlEncode(username))</span>
+<span class="nc" id="L311">            .append(&quot;&amp;max-results=&quot;).append(maxResults)</span>
+<span class="nc" id="L312">            .append(&quot;&amp;start-index=&quot;);</span>
+        
+        try {
+            while (true) {
+<span class="nc" id="L316">                final HttpUriRequest getRequest = RequestBuilder.get(crowdServer.resolve(request.toString() + startIndex))</span>
+<span class="nc" id="L317">                    .setConfig(requestConfig)</span>
+<span class="nc" id="L318">                    .addHeader(HEADER_ACCEPT_APPLICATION_XML)</span>
+<span class="nc" id="L319">                    .addHeader(HEADER_ACCEPT_CHARSET_UTF8)</span>
+<span class="nc" id="L320">                    .build();</span>
+
+<span class="nc" id="L322">                try (final CloseableHttpResponse response = client.execute(getRequest, clientContext)) {</span>
+<span class="nc bnc" id="L323" title="All 2 branches missed.">                    if (response.getStatusLine().getStatusCode() != HttpStatus.SC_OK) {</span>
+<span class="nc" id="L324">                        handleHTTPError(response);</span>
+                    }
+<span class="nc" id="L326">                    final Groups groups = JAXB.unmarshal(response.getEntity().getContent(), Groups.class);</span>
+
+<span class="nc bnc" id="L328" title="All 4 branches missed.">                    if (groups != null &amp;&amp; groups.group != null) {</span>
+<span class="nc bnc" id="L329" title="All 2 branches missed.">                        for (final Group group : groups.group) {</span>
+<span class="nc" id="L330">                            results.add(group.name);</span>
+<span class="nc" id="L331">                        }</span>
+
+<span class="nc bnc" id="L333" title="All 2 branches missed.">                        if (groups.group.size() != maxResults) {</span>
+                            break;
+                        } else {
+<span class="nc" id="L336">                            startIndex += maxResults;</span>
+                        }
+                    } else {
+                        break;
+                    }
+<span class="nc bnc" id="L341" title="All 16 branches missed.">                }</span>
+<span class="nc" id="L342">            }</span>
+            
+<span class="nc" id="L344">        } catch (IOException ioe) {</span>
+<span class="nc" id="L345">            handleError(ioe);</span>
+<span class="nc" id="L346">        }</span>
+        
+<span class="nc" id="L348">        return results;</span>
+    }
+    
+    
+    /**
+     * Get the description of a group from crowd
+     * @param groupName the name of the group
+     * @return a Group object
+     * @throws RemoteException if an exception occurred communicating with the crowd server
+     */
+    public Group getGroup(String groupName) throws RemoteException {
+<span class="nc" id="L359">        LOG.debug(&quot;Get group:&quot; + groupName + &quot; from crowd&quot;);</span>
+
+<span class="nc" id="L361">        final HttpUriRequest getRequest = RequestBuilder.get(crowdServer.resolve(&quot;group?groupname=&quot; + urlEncode(groupName)))</span>
+<span class="nc" id="L362">            .setConfig(requestConfig)</span>
+<span class="nc" id="L363">            .addHeader(HEADER_ACCEPT_APPLICATION_XML)</span>
+<span class="nc" id="L364">            .addHeader(HEADER_ACCEPT_CHARSET_UTF8)</span>
+<span class="nc" id="L365">            .build();</span>
+
+<span class="nc" id="L367">        Group group = null;</span>
+<span class="nc" id="L368">        try (final CloseableHttpResponse response = client.execute(getRequest, clientContext)) {</span>
+<span class="nc bnc" id="L369" title="All 2 branches missed.">            if (response.getStatusLine().getStatusCode() != HttpStatus.SC_OK) {</span>
+<span class="nc" id="L370">                handleHTTPError(response);</span>
+            }
+<span class="nc" id="L372">            group = JAXB.unmarshal(response.getEntity().getContent(), Group.class);</span>
+            
+<span class="nc bnc" id="L374" title="All 8 branches missed.">        } catch (IOException ioe) {</span>
+<span class="nc" id="L375">            handleError(ioe);</span>
+<span class="nc" id="L376">        }</span>
+<span class="nc" id="L377">        return group;</span>
+    }
+    
+    
+    /**
+     * Get the members of the given group
+     * @param groupName the name of the group
+     * @return a List of String with the usernames members of the given group
+     * @throws RemoteException if an exception occurred communicating with the crowd server
+     */
+    public List&lt;String&gt; getGroupMembers(String groupName) throws RemoteException {
+<span class="nc" id="L388">        LOG.debug(&quot;Get all members for group:&quot; + groupName);</span>
+        
+<span class="nc" id="L390">        int maxResults = 100;</span>
+<span class="nc" id="L391">        int startIndex = 0;</span>
+<span class="nc" id="L392">        List&lt;String&gt; results = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L393">        StringBuilder request = new StringBuilder(&quot;group/user/nested?groupname=&quot;).append(urlEncode(groupName))</span>
+<span class="nc" id="L394">            .append(&quot;&amp;max-results=&quot;).append(maxResults)</span>
+<span class="nc" id="L395">            .append(&quot;&amp;start-index=&quot;);</span>
+        
+        try {
+            while (true) {
+<span class="nc" id="L399">                final HttpUriRequest getRequest = RequestBuilder.get(crowdServer.resolve(request.toString() + startIndex))</span>
+<span class="nc" id="L400">                    .setConfig(requestConfig)</span>
+<span class="nc" id="L401">                    .addHeader(HEADER_ACCEPT_APPLICATION_XML)</span>
+<span class="nc" id="L402">                    .addHeader(HEADER_ACCEPT_CHARSET_UTF8)</span>
+<span class="nc" id="L403">                    .build();</span>
+
+<span class="nc" id="L405">                try (final CloseableHttpResponse response = client.execute(getRequest, clientContext)) {</span>
+<span class="nc bnc" id="L406" title="All 2 branches missed.">                    if (response.getStatusLine().getStatusCode() != HttpStatus.SC_OK) {</span>
+<span class="nc" id="L407">                        handleHTTPError(response);</span>
+                    }
+<span class="nc" id="L409">                    final Users users = JAXB.unmarshal(response.getEntity().getContent(), Users.class);</span>
+
+<span class="nc bnc" id="L411" title="All 4 branches missed.">                    if (users != null &amp;&amp; users.user != null) {</span>
+<span class="nc bnc" id="L412" title="All 2 branches missed.">                        for (final User user : users.user) {</span>
+<span class="nc" id="L413">                            results.add(JID.escapeNode(user.name));</span>
+<span class="nc" id="L414">                        }</span>
+
+<span class="nc bnc" id="L416" title="All 2 branches missed.">                        if (users.user.size() != maxResults) {</span>
+                            break;
+                        } else {
+<span class="nc" id="L419">                            startIndex += maxResults;</span>
+                        }
+                    } else {
+                        break;
+                    }
+<span class="nc bnc" id="L424" title="All 16 branches missed.">                }</span>
+<span class="nc" id="L425">            }</span>
+            
+<span class="nc" id="L427">        } catch (IOException ioe) {</span>
+<span class="nc" id="L428">            handleError(ioe);</span>
+<span class="nc" id="L429">        }</span>
+        
+<span class="nc" id="L431">        return results;</span>
+    }
+    
+    private String urlEncode(String str) {
+        try {
+<span class="nc" id="L436">            return URLEncoder.encode(str, &quot;UTF-8&quot;);</span>
+<span class="nc" id="L437">        } catch (UnsupportedEncodingException uee) {</span>
+<span class="nc" id="L438">            LOG.error(&quot;UTF-8 not supported ?&quot;, uee);</span>
+<span class="nc" id="L439">            return str;</span>
+        }
+    }
+    
+    
+    private void handleHTTPError(CloseableHttpResponse response) throws RemoteException {
+<span class="nc" id="L445">        final StatusLine statusLine = response.getStatusLine();</span>
+<span class="nc" id="L446">        final int status = statusLine.getStatusCode();</span>
+<span class="nc" id="L447">        final String statusText = statusLine.getReasonPhrase();</span>
+<span class="nc" id="L448">        final String body = response.getEntity().toString();</span>
+
+<span class="nc" id="L450">        StringBuilder strBuf = new StringBuilder();</span>
+<span class="nc" id="L451">        strBuf.append(&quot;Crowd returned HTTP error code:&quot;).append(status);</span>
+<span class="nc" id="L452">        strBuf.append(&quot; - &quot;).append(statusText);</span>
+<span class="nc bnc" id="L453" title="All 2 branches missed.">        if (StringUtils.isNotBlank(body)) {</span>
+<span class="nc" id="L454">            strBuf.append(&quot;\n&quot;).append(body);</span>
+        }
+        
+<span class="nc" id="L457">        throw new RemoteException(strBuf.toString());</span>
+    }
+    
+    private void handleError(Exception e) throws RemoteException {
+<span class="nc" id="L461">        LOG.error(&quot;Error occured while consuming Crowd REST service&quot;, e);</span>
+<span class="nc" id="L462">        throw new RemoteException(e.getMessage());</span>
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

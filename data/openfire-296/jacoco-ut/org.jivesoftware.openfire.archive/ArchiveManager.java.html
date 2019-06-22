@@ -1,0 +1,134 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>ArchiveManager.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.archive</a> &gt; <span class="el_source">ArchiveManager.java</span></div><h1>ArchiveManager.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2018 Ignite Realtime Foundation. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.jivesoftware.openfire.archive;
+
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.container.BasicModule;
+import org.jivesoftware.util.NamedThreadFactory;
+
+import java.time.Duration;
+import java.time.Instant;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
+/**
+ * A manager of tasks that write archives into storage.
+ *
+ * @author Guus der Kinderen, guus.der.kinderen@gmail.com
+ */
+public class ArchiveManager extends BasicModule
+{
+    /**
+     * A thread pool that writes messages to the database.
+     */
+    private ExecutorService executor;
+
+    /**
+     * Currently running tasks.
+     */
+<span class="nc" id="L44">    private final ConcurrentMap&lt;String, Archiver&gt; tasks = new ConcurrentHashMap&lt;&gt;();</span>
+
+    public ArchiveManager()
+    {
+<span class="nc" id="L48">        super( &quot;ArchiveManager&quot; );</span>
+<span class="nc" id="L49">    }</span>
+
+    /**
+     * Initializes the manager, by instantiating a thread pool that is used to process archiving tasks.
+     */
+    @Override
+    public void initialize( final XMPPServer server )
+    {
+<span class="nc bnc" id="L57" title="All 2 branches missed.">        if ( executor != null )</span>
+        {
+<span class="nc" id="L59">            throw new IllegalStateException( &quot;Already initialized.&quot; );</span>
+        }
+<span class="nc" id="L61">        executor = Executors.newCachedThreadPool( new NamedThreadFactory( &quot;archive-service-worker-&quot;, null, null, null ) );</span>
+<span class="nc" id="L62">    }</span>
+
+    /**
+     * Destroys the module, by shutting down the thread pool that is being used to process archiving tasks.
+     *
+     * No new archive tasks will be accepted any longer, although previously scheduled tasks can continue
+     * to be processed.
+     */
+    @Override
+    public void destroy()
+    {
+<span class="nc bnc" id="L73" title="All 2 branches missed.">        if ( executor != null )</span>
+        {
+<span class="nc" id="L75">            executor.shutdown();</span>
+<span class="nc" id="L76">            executor = null;</span>
+        }
+<span class="nc" id="L78">    }</span>
+
+    /**
+     * Adds a new task, that is started immediately.
+     *
+     * @param archiver The task to be added. Cannot be null.
+     */
+    public synchronized void add( final Archiver archiver )
+    {
+<span class="nc bnc" id="L87" title="All 2 branches missed.">        if (tasks.containsKey( archiver.getId() ) )</span>
+        {
+<span class="nc" id="L89">            throw new IllegalStateException( &quot;A task with ID &quot; + archiver.getId() + &quot; has already been added.&quot; );</span>
+        }
+
+<span class="nc" id="L92">        executor.submit( archiver );</span>
+<span class="nc" id="L93">        tasks.put( archiver.getId(), archiver );</span>
+<span class="nc" id="L94">    }</span>
+
+    /**
+     * Stops and removes an exiting task. No-op when the provided task is not managed by this manager.
+     *
+     * @param archiver The task to be added. Cannot be null.
+     */
+    public synchronized void remove( final Archiver archiver )
+    {
+<span class="nc" id="L103">        remove( archiver.getId() );</span>
+<span class="nc" id="L104">    }</span>
+
+    /**
+     * Stops and removes an exiting task. No-op when the provided task is not managed by this manager.
+     *
+     * @param id The identifier of task to be added. Cannot be null.
+     */
+    public synchronized void remove( final String id )
+    {
+<span class="nc" id="L113">        final Archiver task = tasks.remove( id );</span>
+<span class="nc bnc" id="L114" title="All 2 branches missed.">        if ( task != null )</span>
+        {
+<span class="nc" id="L116">            task.stop();</span>
+        }
+<span class="nc" id="L118">    }</span>
+
+    public Duration availabilityETAOnLocalNode( final String id, final Instant instant )
+    {
+<span class="nc" id="L122">        final Archiver task = tasks.get( id );</span>
+<span class="nc bnc" id="L123" title="All 2 branches missed.">        if (task == null )</span>
+        {
+            // When a node does not have a task, it has no pending data to write to it.
+<span class="nc" id="L126">            return Duration.ZERO;</span>
+        }
+        else
+        {
+<span class="nc" id="L130">            return task.availabilityETAOnLocalNode( instant );</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

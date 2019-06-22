@@ -1,0 +1,248 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>ConnectionHandler.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.nio</a> &gt; <span class="el_source">ConnectionHandler.java</span></div><h1>ConnectionHandler.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.nio;
+
+import org.apache.mina.core.service.IoHandlerAdapter;
+import org.apache.mina.core.session.IdleStatus;
+import org.apache.mina.core.session.IoSession;
+import org.dom4j.io.XMPPPacketReader;
+import org.jivesoftware.openfire.Connection;
+import org.jivesoftware.openfire.net.MXParser;
+import org.jivesoftware.openfire.net.ServerTrafficCounter;
+import org.jivesoftware.openfire.net.StanzaHandler;
+import org.jivesoftware.openfire.spi.ConnectionConfiguration;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmlpull.v1.XmlPullParserException;
+import org.xmlpull.v1.XmlPullParserFactory;
+import org.xmpp.packet.StreamError;
+
+import java.nio.charset.StandardCharsets;
+
+/**
+ * A ConnectionHandler is responsible for creating new sessions, destroying sessions and delivering
+ * received XML stanzas to the proper StanzaHandler.
+ *
+ * @author Gaston Dombiak
+ */
+public abstract class ConnectionHandler extends IoHandlerAdapter {
+
+<span class="nc" id="L44">    private static final Logger Log = LoggerFactory.getLogger(ConnectionHandler.class);</span>
+
+    static final String XML_PARSER = &quot;XML-PARSER&quot;;
+    static final String HANDLER = &quot;HANDLER&quot;;
+    static final String CONNECTION = &quot;CONNECTION&quot;;
+
+<span class="nc" id="L50">    private static final ThreadLocal&lt;XMPPPacketReader&gt; PARSER_CACHE = new ThreadLocal&lt;XMPPPacketReader&gt;()</span>
+<span class="nc" id="L51">            {</span>
+               @Override
+               protected XMPPPacketReader initialValue()
+               {
+<span class="nc" id="L55">                  final XMPPPacketReader parser = new XMPPPacketReader();</span>
+<span class="nc" id="L56">                  parser.setXPPFactory( factory );</span>
+<span class="nc" id="L57">                  return parser;</span>
+               }
+            };
+    /**
+     * Reuse the same factory for all the connections.
+     */
+<span class="nc" id="L63">    private static XmlPullParserFactory factory = null;</span>
+
+    static {
+        try {
+<span class="nc" id="L67">            factory = XmlPullParserFactory.newInstance(MXParser.class.getName(), null);</span>
+<span class="nc" id="L68">            factory.setNamespaceAware(true);</span>
+        }
+<span class="nc" id="L70">        catch (XmlPullParserException e) {</span>
+<span class="nc" id="L71">            Log.error(&quot;Error creating a parser factory&quot;, e);</span>
+<span class="nc" id="L72">        }</span>
+<span class="nc" id="L73">    }</span>
+
+    /**
+     * The configuration for new connections.
+     */
+    protected final ConnectionConfiguration configuration;
+
+<span class="nc" id="L80">    protected ConnectionHandler( ConnectionConfiguration configuration ) {</span>
+<span class="nc" id="L81">        this.configuration = configuration;</span>
+<span class="nc" id="L82">    }</span>
+
+    @Override
+    public void sessionOpened(IoSession session) throws Exception {
+        // Create a new XML parser for the new connection. The parser will be used by the XMPPDecoder filter.
+<span class="nc" id="L87">        final XMLLightweightParser parser = new XMLLightweightParser(StandardCharsets.UTF_8);</span>
+<span class="nc" id="L88">        session.setAttribute(XML_PARSER, parser);</span>
+        // Create a new NIOConnection for the new session
+<span class="nc" id="L90">        final NIOConnection connection = createNIOConnection(session);</span>
+<span class="nc" id="L91">        session.setAttribute(CONNECTION, connection);</span>
+<span class="nc" id="L92">        session.setAttribute(HANDLER, createStanzaHandler(connection));</span>
+        // Set the max time a connection can be idle before closing it. This amount of seconds
+        // is divided in two, as Openfire will ping idle clients first (at 50% of the max idle time)
+        // before disconnecting them (at 100% of the max idle time). This prevents Openfire from
+        // removing connections without warning.
+<span class="nc" id="L97">        final int idleTime = getMaxIdleTime() / 2;</span>
+<span class="nc bnc" id="L98" title="All 2 branches missed.">        if (idleTime &gt; 0) {</span>
+<span class="nc" id="L99">            session.getConfig().setIdleTime(IdleStatus.READER_IDLE, idleTime);</span>
+        }
+<span class="nc" id="L101">    }</span>
+
+    @Override
+    public void sessionClosed(IoSession session) throws Exception {
+<span class="nc" id="L105">        final Connection connection = (Connection) session.getAttribute(CONNECTION);</span>
+<span class="nc bnc" id="L106" title="All 2 branches missed.">        if ( connection != null ) {</span>
+<span class="nc" id="L107">            connection.close();</span>
+        }
+<span class="nc" id="L109">    }</span>
+
+    /**
+     * Invoked when a MINA session has been idle for half of the allowed XMPP
+     * session idle time as specified by {@link #getMaxIdleTime()}. This method
+     * will be invoked each time that such a period passes (even if no IO has
+     * occurred in between).
+     *
+     * Openfire will disconnect a session the second time this method is
+     * invoked, if no IO has occurred between the first and second invocation.
+     * This allows extensions of this class to use the first invocation to check
+     * for livelyness of the MINA session (e.g by polling the remote entity, as
+     * {@link ClientConnectionHandler} does).
+     *
+     * @see IoHandlerAdapter#sessionIdle(IoSession, IdleStatus)
+     */
+    @Override
+    public void sessionIdle(IoSession session, IdleStatus status) throws Exception {
+<span class="nc bnc" id="L127" title="All 2 branches missed.">        if (session.getIdleCount(status) &gt; 1) {</span>
+            // Get the connection for this session
+<span class="nc" id="L129">            final Connection connection = (Connection) session.getAttribute(CONNECTION);</span>
+<span class="nc bnc" id="L130" title="All 2 branches missed.">            if (connection != null) {</span>
+                // Close idle connection
+<span class="nc bnc" id="L132" title="All 2 branches missed.">                if (Log.isDebugEnabled()) {</span>
+<span class="nc" id="L133">                    Log.debug(&quot;ConnectionHandler: Closing connection that has been idle: &quot; + connection);</span>
+                }
+<span class="nc" id="L135">                connection.close();</span>
+            }
+        }
+<span class="nc" id="L138">    }</span>
+
+    @Override
+    public void exceptionCaught(IoSession session, Throwable cause) throws Exception {
+<span class="nc" id="L142">        Log.warn(&quot;Closing connection due to exception in session: &quot; + session, cause);</span>
+
+        try {
+            // OF-524: Determine stream:error message.
+            final StreamError error;
+<span class="nc bnc" id="L147" title="All 8 branches missed.">            if ( cause != null &amp;&amp; (cause instanceof XMLNotWellFormedException || (cause.getCause() != null &amp;&amp; cause.getCause() instanceof XMLNotWellFormedException) ) ) {</span>
+<span class="nc" id="L148">                error = new StreamError( StreamError.Condition.not_well_formed );</span>
+            } else {
+<span class="nc" id="L150">                error = new StreamError( StreamError.Condition.internal_server_error );</span>
+            }
+
+<span class="nc" id="L153">            final Connection connection = (Connection) session.getAttribute( CONNECTION );</span>
+<span class="nc" id="L154">            connection.deliverRawText( error.toXML() );</span>
+        } finally {
+<span class="nc" id="L156">            final Connection connection = (Connection) session.getAttribute( CONNECTION );</span>
+<span class="nc bnc" id="L157" title="All 4 branches missed.">            if (connection != null) {</span>
+<span class="nc" id="L158">                connection.close();</span>
+            }
+<span class="nc" id="L160">        }</span>
+<span class="nc" id="L161">    }</span>
+
+    @Override
+    public void messageReceived(IoSession session, Object message) throws Exception {
+        // Get the stanza handler for this session
+<span class="nc" id="L166">        StanzaHandler handler = (StanzaHandler) session.getAttribute(HANDLER);</span>
+        // Get the parser to use to process stanza. For optimization there is going
+        // to be a parser for each running thread. Each Filter will be executed
+        // by the Executor placed as the first Filter. So we can have a parser associated
+        // to each Thread
+<span class="nc" id="L171">        final XMPPPacketReader parser = PARSER_CACHE.get();</span>
+        // Update counter of read btyes
+<span class="nc" id="L173">        updateReadBytesCounter(session);</span>
+        //System.out.println(&quot;RCVD: &quot; + message);
+        // Let the stanza handler process the received stanza
+        try {
+<span class="nc" id="L177">            handler.process((String) message, parser);</span>
+<span class="nc" id="L178">        } catch (Exception e) {</span>
+<span class="nc" id="L179">            Log.error(&quot;Closing connection due to error while processing message: &quot; + message, e);</span>
+<span class="nc" id="L180">            final Connection connection = (Connection) session.getAttribute(CONNECTION);</span>
+<span class="nc bnc" id="L181" title="All 2 branches missed.">            if ( connection != null ) {</span>
+<span class="nc" id="L182">                connection.close();</span>
+            }
+
+<span class="nc" id="L185">        }</span>
+<span class="nc" id="L186">    }</span>
+
+    @Override
+    public void messageSent(IoSession session, Object message) throws Exception {
+<span class="nc" id="L190">        super.messageSent(session, message);</span>
+        // Update counter of written btyes
+<span class="nc" id="L192">        updateWrittenBytesCounter(session);</span>
+        //System.out.println(&quot;SENT: &quot; + Charset.forName(&quot;UTF-8&quot;).decode(((ByteBuffer)message).buf()));
+<span class="nc" id="L194">    }</span>
+
+    abstract NIOConnection createNIOConnection(IoSession session);
+
+    abstract StanzaHandler createStanzaHandler(NIOConnection connection);
+
+    /**
+     * Returns the max number of seconds a connection can be idle (both ways) before
+     * being closed.&lt;p&gt;
+     *
+     * @return the max number of seconds a connection can be idle.
+     */
+    abstract int getMaxIdleTime();
+
+    /**
+     * Updates the system counter of read bytes. This information is used by the incoming
+     * bytes statistic.
+     *
+     * @param session the session that read more bytes from the socket.
+     */
+    private void updateReadBytesCounter(IoSession session) {
+<span class="nc" id="L215">        long currentBytes = session.getReadBytes();</span>
+<span class="nc" id="L216">        Long prevBytes = (Long) session.getAttribute(&quot;_read_bytes&quot;);</span>
+        long delta;
+<span class="nc bnc" id="L218" title="All 2 branches missed.">        if (prevBytes == null) {</span>
+<span class="nc" id="L219">            delta = currentBytes;</span>
+        }
+        else {
+<span class="nc" id="L222">            delta = currentBytes - prevBytes;</span>
+        }
+<span class="nc" id="L224">        session.setAttribute(&quot;_read_bytes&quot;, currentBytes);</span>
+<span class="nc" id="L225">        ServerTrafficCounter.incrementIncomingCounter(delta);</span>
+<span class="nc" id="L226">    }</span>
+
+    /**
+     * Updates the system counter of written bytes. This information is used by the outgoing
+     * bytes statistic.
+     *
+     * @param session the session that wrote more bytes to the socket.
+     */
+    private void updateWrittenBytesCounter(IoSession session) {
+<span class="nc" id="L235">        long currentBytes = session.getWrittenBytes();</span>
+<span class="nc" id="L236">        Long prevBytes = (Long) session.getAttribute(&quot;_written_bytes&quot;);</span>
+        long delta;
+<span class="nc bnc" id="L238" title="All 2 branches missed.">        if (prevBytes == null) {</span>
+<span class="nc" id="L239">            delta = currentBytes;</span>
+        }
+        else {
+<span class="nc" id="L242">            delta = currentBytes - prevBytes;</span>
+        }
+<span class="nc" id="L244">        session.setAttribute(&quot;_written_bytes&quot;, currentBytes);</span>
+<span class="nc" id="L245">        ServerTrafficCounter.incrementOutgoingCounter(delta);</span>
+<span class="nc" id="L246">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

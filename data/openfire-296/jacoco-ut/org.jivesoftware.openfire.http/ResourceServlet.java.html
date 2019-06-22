@@ -1,0 +1,189 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>ResourceServlet.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.http</a> &gt; <span class="el_source">ResourceServlet.java</span></div><h1>ResourceServlet.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.jivesoftware.openfire.http;
+
+import org.jivesoftware.util.*;
+import org.jivesoftware.util.cache.Cache;
+import org.jivesoftware.util.cache.CacheFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import javax.servlet.http.HttpServlet;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
+import javax.servlet.ServletConfig;
+import javax.servlet.ServletException;
+import java.text.DateFormat;
+import java.text.SimpleDateFormat;
+import java.util.*;
+import java.util.zip.GZIPOutputStream;
+import java.io.*;
+
+/**
+ * Combines and serves resources, such as javascript or css files.
+ */
+<span class="nc" id="L38">public class ResourceServlet extends HttpServlet {</span>
+
+<span class="nc" id="L40">    private static final Logger Log = LoggerFactory.getLogger(ResourceServlet.class);</span>
+
+    //    private static String suffix = &quot;&quot;;    // Set to &quot;_src&quot; to use source version
+<span class="nc" id="L43">    private static long expiresOffset = 3600 * 24 * 10;	// 10 days util client cache expires</span>
+<span class="nc" id="L44">    private boolean debug = false;</span>
+<span class="nc" id="L45">    private boolean disableCompression = false;</span>
+<span class="nc" id="L46">    private static Cache&lt;String, byte[]&gt; cache = CacheFactory.createCache(&quot;Javascript Cache&quot;);</span>
+
+    @Override
+    public void init(ServletConfig config) throws ServletException {
+<span class="nc" id="L50">        super.init(config);</span>
+
+<span class="nc" id="L52">        debug = Boolean.valueOf(config.getInitParameter(&quot;debug&quot;));</span>
+<span class="nc" id="L53">        disableCompression = Boolean.valueOf(config.getInitParameter(&quot;disableCompression&quot;));</span>
+<span class="nc" id="L54">    }</span>
+
+    @Override
+    public void service(HttpServletRequest request, HttpServletResponse response) {
+<span class="nc" id="L58">        boolean compress = false;</span>
+
+<span class="nc" id="L60">        boolean javascript = request.getRequestURI().endsWith(&quot;scripts/&quot;);</span>
+
+<span class="nc bnc" id="L62" title="All 2 branches missed.">        if (!disableCompression) {</span>
+<span class="nc bnc" id="L63" title="All 2 branches missed.">            if (request.getHeader(&quot;accept-encoding&quot;) != null &amp;&amp;</span>
+<span class="nc bnc" id="L64" title="All 2 branches missed.">                    request.getHeader(&quot;accept-encoding&quot;).contains(&quot;gzip&quot;)) {</span>
+<span class="nc" id="L65">                compress = true;</span>
+            }
+<span class="nc bnc" id="L67" title="All 2 branches missed.">            else if (request.getHeader(&quot;---------------&quot;) != null) {</span>
+                // norton internet security
+<span class="nc" id="L69">                compress = true;</span>
+            }
+        }
+
+<span class="nc bnc" id="L73" title="All 2 branches missed.">        if(javascript) {</span>
+<span class="nc" id="L74">            response.setHeader(&quot;Content-type&quot;, &quot;text/javascript&quot;);</span>
+        }
+        else {
+<span class="nc" id="L77">            response.setHeader(&quot;Content-type&quot;, &quot;text/css&quot;);</span>
+        }
+<span class="nc" id="L79">        response.setHeader(&quot;Vary&quot;, &quot;Accept-Encoding&quot;); // Handle proxies</span>
+
+<span class="nc bnc" id="L81" title="All 2 branches missed.">        if (!debug) {</span>
+<span class="nc" id="L82">            DateFormat formatter = new SimpleDateFormat(&quot;d MMM yyyy HH:mm:ss 'GMT'&quot;, Locale.US);</span>
+<span class="nc" id="L83">            formatter.setTimeZone(TimeZone.getTimeZone(&quot;GMT&quot;));</span>
+<span class="nc" id="L84">            response.setHeader(&quot;Expires&quot;, formatter.format(new Date(System.currentTimeMillis()</span>
+                    + expiresOffset)));
+<span class="nc" id="L86">            response.setHeader(&quot;Cache-Control&quot;, &quot;max-age=&quot; + expiresOffset);</span>
+<span class="nc" id="L87">        }</span>
+        else {
+<span class="nc" id="L89">            response.setHeader(&quot;Expires&quot;, &quot;1&quot;);</span>
+<span class="nc" id="L90">            compress = false;</span>
+        }
+
+        try {
+            byte[] content;
+<span class="nc" id="L95">            String cacheKey = String.valueOf(compress + &quot; &quot; + javascript);</span>
+<span class="nc" id="L96">            content = cache.get(cacheKey);</span>
+<span class="nc bnc" id="L97" title="All 6 branches missed.">            if (javascript &amp;&amp; (debug || content == null)) {</span>
+<span class="nc" id="L98">                content = getJavaScriptContent(compress);</span>
+<span class="nc" id="L99">                cache.put(cacheKey, content);</span>
+            }
+<span class="nc bnc" id="L101" title="All 4 branches missed.">            else if(!javascript &amp;&amp; content == null) {</span>
+
+            }
+
+<span class="nc" id="L105">            response.setContentLength(content.length);</span>
+<span class="nc bnc" id="L106" title="All 2 branches missed.">            if (compress) {</span>
+<span class="nc" id="L107">                response.setHeader(&quot;Content-Encoding&quot;, &quot;gzip&quot;);</span>
+            }
+
+            // Write the content out
+<span class="nc" id="L111">            try (ByteArrayInputStream in = new ByteArrayInputStream(content)) {</span>
+<span class="nc" id="L112">                try (OutputStream out = response.getOutputStream()) {</span>
+
+                    // Use a 128K buffer.
+<span class="nc" id="L115">                    byte[] buf = new byte[128 * 1024];</span>
+                    int len;
+<span class="nc bnc" id="L117" title="All 2 branches missed.">                    while ((len = in.read(buf)) != -1) {</span>
+<span class="nc" id="L118">                        out.write(buf, 0, len);</span>
+                    }
+<span class="nc" id="L120">                    out.flush();</span>
+<span class="nc bnc" id="L121" title="All 8 branches missed.">                }</span>
+<span class="nc bnc" id="L122" title="All 8 branches missed.">            }</span>
+        }
+<span class="nc" id="L124">        catch (IOException e) {</span>
+<span class="nc" id="L125">            Log.error(e.getMessage(), e);</span>
+<span class="nc" id="L126">        }</span>
+<span class="nc" id="L127">    }</span>
+
+    private static byte[] getJavaScriptContent(boolean compress) throws IOException
+    {
+<span class="nc" id="L131">        StringWriter writer = new StringWriter();</span>
+<span class="nc bnc" id="L132" title="All 2 branches missed.">        for(String file : getJavascriptFiles()) {</span>
+<span class="nc" id="L133">            writer.write(getJavaScriptFile(file));</span>
+<span class="nc" id="L134">        }</span>
+        
+<span class="nc bnc" id="L136" title="All 2 branches missed.">        if (compress) {</span>
+<span class="nc" id="L137">            try (ByteArrayOutputStream baos = new ByteArrayOutputStream()) {</span>
+<span class="nc" id="L138">                try (GZIPOutputStream gzos = new GZIPOutputStream(baos)) {</span>
+<span class="nc" id="L139">                    gzos.write(writer.toString().getBytes());</span>
+<span class="nc" id="L140">                    gzos.finish();</span>
+<span class="nc" id="L141">                    gzos.flush();</span>
+<span class="nc" id="L142">                    return baos.toByteArray();</span>
+<span class="nc bnc" id="L143" title="All 8 branches missed.">                }</span>
+<span class="nc bnc" id="L144" title="All 8 branches missed.">            }</span>
+        }
+        else {
+<span class="nc" id="L147">            return writer.toString().getBytes();</span>
+        }
+    }
+
+    private static Collection&lt;String&gt; getJavascriptFiles() {
+<span class="nc" id="L152">        return Arrays.asList(&quot;prototype.js&quot;, &quot;getelementsbyselector.js&quot;, &quot;sarissa.js&quot;,</span>
+                &quot;connection.js&quot;, &quot;yahoo-min.js&quot;, &quot;dom-min.js&quot;, &quot;event-min.js&quot;, &quot;dragdrop-min.js&quot;,
+                &quot;yui-ext.js&quot;, &quot;spank.js&quot;);
+    }
+
+    private static String getJavaScriptFile(String path) {
+<span class="nc" id="L158">        StringBuilder sb = new StringBuilder();</span>
+<span class="nc" id="L159">        try (InputStream in = getResourceAsStream(path)) {</span>
+<span class="nc bnc" id="L160" title="All 2 branches missed.">            if (in == null) {</span>
+<span class="nc" id="L161">                Log.error(&quot;Unable to find javascript file: '&quot; + path + &quot;' in classpath&quot;);</span>
+<span class="nc" id="L162">                return &quot;&quot;;</span>
+            }
+
+<span class="nc" id="L165">            try (BufferedReader br = new BufferedReader(new InputStreamReader(in, &quot;ISO-8859-1&quot;))) {</span>
+                String line;
+<span class="nc bnc" id="L167" title="All 2 branches missed.">                while ((line = br.readLine()) != null) {</span>
+<span class="nc" id="L168">                    sb.append(line.trim()).append('\n');</span>
+                }
+<span class="nc bnc" id="L170" title="All 8 branches missed.">            }</span>
+<span class="nc bnc" id="L171" title="All 12 branches missed.">        } catch (Exception e) {</span>
+<span class="nc" id="L172">            Log.error(&quot;Error loading JavaScript file: '&quot; + path + &quot;'.&quot;, e);</span>
+<span class="nc" id="L173">        }</span>
+
+<span class="nc" id="L175">        return sb.toString();</span>
+    }
+
+    private static InputStream getResourceAsStream(String resourceName) {
+<span class="nc" id="L179">        File file = new File(JiveGlobals.getHomeDirectory() + File.separator +</span>
+                &quot;resources&quot; + File.separator + &quot;spank&quot; + File.separator + &quot;scripts&quot;, resourceName);
+        try {
+<span class="nc" id="L182">            return new FileInputStream(file);</span>
+        }
+<span class="nc" id="L184">        catch (FileNotFoundException e) {</span>
+<span class="nc" id="L185">            return null;</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

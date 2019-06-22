@@ -1,0 +1,223 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>TrustStore.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.keystore</a> &gt; <span class="el_source">TrustStore.java</span></div><h1>TrustStore.java</h1><pre class="source lang-java linenums">package org.jivesoftware.openfire.keystore;
+
+import org.jivesoftware.util.CertificateManager;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.io.IOException;
+import java.security.KeyStoreException;
+import java.security.cert.*;
+import java.util.*;
+
+/**
+ * A wrapper class for a store of certificates, its metadata (password, location) and related functionality that is
+ * used to &lt;em&gt;verify&lt;/em&gt; credentials, a &lt;em&gt;trust store&lt;/em&gt;
+ *
+ * The trust store should only contain certificates for the &quot;most-trusted&quot; Certificate Authorities (the store should not
+ * contain Intermediates&quot;). These certificates are referred to as &quot;Trust Anchors&quot;.
+ *
+ * @author Guus der Kinderen, guus.der.kinderen@gmail.com
+ */
+public class TrustStore extends CertificateStore
+{
+<span class="nc" id="L23">    private static final Logger Log = LoggerFactory.getLogger( TrustStore.class );</span>
+
+    public TrustStore( CertificateStoreConfiguration configuration, boolean createIfAbsent ) throws CertificateStoreConfigException
+    {
+<span class="nc" id="L27">        super( configuration, createIfAbsent );</span>
+<span class="nc" id="L28">    }</span>
+
+    /**
+     * Imports one certificate as a trust anchor into this store.
+     *
+     * Note that this method explicitly allows one to add invalid certificates.
+     *
+     * As this store is intended to contain certificates for &quot;most-trusted&quot; / root Certificate Authorities, this method
+     * will fail when the PEM representation contains more than one certificate.
+     *
+     * @param alias the name (key) under which the certificate is to be stored in the store (cannot be null or empty).
+     * @param pemRepresentation The PEM representation of the certificate to add (cannot be null or empty).
+     * @throws CertificateStoreConfigException if a single certificate could not be found
+     */
+    public void installCertificate( String alias, String pemRepresentation ) throws CertificateStoreConfigException
+    {
+        // Input validation
+<span class="nc bnc" id="L45" title="All 4 branches missed.">        if ( alias == null || alias.trim().isEmpty() )</span>
+        {
+<span class="nc" id="L47">            throw new IllegalArgumentException( &quot;Argument 'alias' cannot be null or an empty String.&quot; );</span>
+        }
+<span class="nc bnc" id="L49" title="All 2 branches missed.">        if ( pemRepresentation == null )</span>
+        {
+<span class="nc" id="L51">            throw new IllegalArgumentException( &quot;Argument 'pemRepresentation' cannot be null.&quot; );</span>
+        }
+<span class="nc" id="L53">        alias = alias.trim();</span>
+
+        // Check that there is a certificate for the specified alias
+        try
+        {
+<span class="nc bnc" id="L58" title="All 2 branches missed.">            if ( store.containsAlias( alias ) )</span>
+            {
+<span class="nc" id="L60">                throw new CertificateStoreConfigException( &quot;Certificate already exists for alias: &quot; + alias );</span>
+            }
+
+            // From their PEM representation, parse the certificates.
+<span class="nc" id="L64">            final Collection&lt;X509Certificate&gt; certificates = CertificateManager.parseCertificates( pemRepresentation );</span>
+
+<span class="nc bnc" id="L66" title="All 2 branches missed.">            if ( certificates.isEmpty() ) {</span>
+<span class="nc" id="L67">                throw new CertificateStoreConfigException( &quot;No certificate was found in the input.&quot;);</span>
+            }
+<span class="nc bnc" id="L69" title="All 2 branches missed.">            if ( certificates.size() != 1 ) {</span>
+<span class="nc" id="L70">                throw new CertificateStoreConfigException( &quot;More than one certificate was found in the input.&quot; );</span>
+            }
+
+<span class="nc" id="L73">            final X509Certificate certificate = certificates.iterator().next();</span>
+
+<span class="nc" id="L75">            store.setCertificateEntry(alias, certificate);</span>
+<span class="nc" id="L76">            persist();</span>
+        }
+<span class="nc" id="L78">        catch ( CertificateException | KeyStoreException | IOException e )</span>
+        {
+<span class="nc" id="L80">            throw new CertificateStoreConfigException( &quot;Unable to install a certificate into a trust store.&quot;, e );</span>
+        }
+        finally
+        {
+<span class="nc" id="L84">            reload(); // re-initialize store.</span>
+<span class="nc" id="L85">        }</span>
+<span class="nc" id="L86">    }</span>
+
+    /**
+     * Decide whether or not to trust the given supplied certificate chain. For certain failures, we SHOULD generate
+     * an exception - revocations and the like, but we currently do not.
+     *
+     * @param chain an array of X509Certificate where the first one is the endEntityCertificate.
+     * @return true if the content of this trust store allows the chain to be trusted, otherwise false.
+     */
+    public boolean isTrusted( Certificate chain[] )
+    {
+<span class="nc bnc" id="L97" title="All 2 branches missed.">        return getEndEntityCertificate( chain ) != null;</span>
+    }
+
+    /**
+     * Decide whether or not to trust the given supplied certificate chain, returning the
+     * End Entity Certificate in this case where it can, and null otherwise.
+     * A self-signed certificate will, for example, return null.
+     * For certain failures, we SHOULD generate an exception - revocations and the like,
+     * but we currently do not.
+     *
+     * @param chain an array of X509Certificate where the first one is the endEntityCertificate.
+     * @return trusted end-entity certificate, or null.
+     */
+    public X509Certificate getEndEntityCertificate( Certificate chain[] )
+    {
+<span class="nc bnc" id="L112" title="All 4 branches missed.">        if ( chain == null || chain.length == 0 )</span>
+        {
+<span class="nc" id="L114">            return null;</span>
+        }
+
+<span class="nc" id="L117">        final X509Certificate first = (X509Certificate) chain[ 0 ];</span>
+        try
+        {
+<span class="nc" id="L120">            first.checkValidity();</span>
+        }
+<span class="nc" id="L122">        catch ( CertificateException e )</span>
+        {
+<span class="nc" id="L124">            Log.warn( &quot;EE Certificate not valid: &quot; + e.getMessage() );</span>
+<span class="nc" id="L125">            return null;</span>
+<span class="nc" id="L126">        }</span>
+
+<span class="nc bnc" id="L128" title="All 4 branches missed.">        if ( chain.length == 1 &amp;&amp; first.getSubjectX500Principal().equals( first.getIssuerX500Principal() ) )</span>
+        {
+            // Chain is single cert, and self-signed.
+            try
+            {
+<span class="nc bnc" id="L133" title="All 2 branches missed.">                if ( store.getCertificateAlias( first ) != null )</span>
+                {
+                    // Interesting case: trusted self-signed cert.
+<span class="nc" id="L136">                    return first;</span>
+                }
+            }
+<span class="nc" id="L139">            catch ( KeyStoreException e )</span>
+            {
+<span class="nc" id="L141">                Log.warn( &quot;Keystore error while looking for self-signed cert; assuming untrusted.&quot; );</span>
+<span class="nc" id="L142">            }</span>
+<span class="nc" id="L143">            return null;</span>
+        }
+
+<span class="nc" id="L146">        final List&lt;Certificate&gt; allCerts = new ArrayList&lt;&gt;();</span>
+        try
+        {
+            // Add the trusted certs.
+<span class="nc bnc" id="L150" title="All 2 branches missed.">            for ( Enumeration&lt;String&gt; aliases = store.aliases(); aliases.hasMoreElements(); )</span>
+            {
+<span class="nc" id="L152">                String alias = aliases.nextElement();</span>
+<span class="nc bnc" id="L153" title="All 2 branches missed.">                if ( store.isCertificateEntry( alias ) )</span>
+                {
+<span class="nc" id="L155">                    X509Certificate cert = (X509Certificate) store.getCertificate( alias );</span>
+<span class="nc" id="L156">                    allCerts.add( cert );</span>
+                }
+<span class="nc" id="L158">            }</span>
+
+            // Finally, add all the certs in the chain:
+<span class="nc" id="L161">            allCerts.addAll( Arrays.asList( chain ) );</span>
+
+<span class="nc" id="L163">            final CertStore cs = CertStore.getInstance( &quot;Collection&quot;, new CollectionCertStoreParameters( allCerts ) );</span>
+<span class="nc" id="L164">            final X509CertSelector selector = new X509CertSelector();</span>
+<span class="nc" id="L165">            selector.setCertificate( first );</span>
+            // / selector.setSubject(first.getSubjectX500Principal());
+
+<span class="nc" id="L168">            final PKIXBuilderParameters params = new PKIXBuilderParameters( store, selector );</span>
+<span class="nc" id="L169">            params.addCertStore( cs );</span>
+<span class="nc" id="L170">            params.setDate( new Date() );</span>
+<span class="nc" id="L171">            params.setRevocationEnabled( false );</span>
+
+            /* Code here is the right way to do things. */
+<span class="nc" id="L174">            final CertPathBuilder pathBuilder = CertPathBuilder.getInstance( CertPathBuilder.getDefaultType() );</span>
+<span class="nc" id="L175">            final CertPath cp = pathBuilder.build( params ).getCertPath();</span>
+
+            /*
+             * This section is an alternative to using CertPathBuilder which is not as complete (or safe), but will emit
+             * much better errors. If things break, swap around the code.
+             *
+             **** COMMENTED OUT. ****
+             *
+            final List&lt;X509Certificate&gt; ls = new ArrayList&lt;&gt;();
+            for ( final Certificate cert : chain )
+            {
+                ls.add( (X509Certificate) cert );
+            }
+
+            for ( X509Certificate last = ls.get( ls.size() - 1 );
+                  !last.getIssuerX500Principal().equals( last.getSubjectX500Principal() );
+                  last = ls.get( ls.size() - 1 ) )
+            {
+                final X509CertSelector sel = new X509CertSelector();
+                sel.setSubject( last.getIssuerX500Principal() );
+                ls.add( (X509Certificate) cs.getCertificates( sel ).toArray()[ 0 ] );
+            }
+            final CertPath cp = CertificateFactory.getInstance( &quot;X.509&quot; ).generateCertPath( ls );
+             ****** END ALTERNATIVE. ****
+             */
+
+            // Not entirely sure if I need to do this with CertPathBuilder. Can't hurt.
+<span class="nc" id="L202">            final CertPathValidator pathValidator = CertPathValidator.getInstance( &quot;PKIX&quot; );</span>
+<span class="nc" id="L203">            pathValidator.validate( cp, params );</span>
+
+<span class="nc" id="L205">            return (X509Certificate) cp.getCertificates().get( 0 );</span>
+        }
+<span class="nc" id="L207">        catch ( CertPathBuilderException e )</span>
+        {
+<span class="nc" id="L209">            Log.warn( &quot;Path builder exception while validating certificate chain:&quot;, e );</span>
+        }
+<span class="nc" id="L211">        catch ( CertPathValidatorException e )</span>
+        {
+<span class="nc" id="L213">            Log.warn( &quot;Path exception while validating certificate chain:&quot;, e );</span>
+        }
+<span class="nc" id="L215">        catch ( Exception e )</span>
+        {
+<span class="nc" id="L217">            Log.warn( &quot;Unknown exception while validating certificate chain:&quot;, e );</span>
+<span class="nc" id="L218">        }</span>
+<span class="nc" id="L219">        return null;</span>
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

@@ -1,0 +1,1732 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>SessionManager.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire</a> &gt; <span class="el_source">SessionManager.java</span></div><h1>SessionManager.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire;
+
+import java.net.UnknownHostException;
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.Lock;
+import java.util.stream.Collectors;
+
+import org.jivesoftware.openfire.audit.AuditStreamIDFactory;
+import org.jivesoftware.openfire.auth.AuthToken;
+import org.jivesoftware.openfire.auth.UnauthorizedException;
+import org.jivesoftware.openfire.cluster.ClusterEventListener;
+import org.jivesoftware.openfire.cluster.ClusterManager;
+import org.jivesoftware.openfire.cluster.NodeID;
+import org.jivesoftware.openfire.container.BasicModule;
+import org.jivesoftware.openfire.event.SessionEventDispatcher;
+import org.jivesoftware.openfire.http.HttpConnection;
+import org.jivesoftware.openfire.http.HttpSession;
+import org.jivesoftware.openfire.multiplex.ConnectionMultiplexerManager;
+import org.jivesoftware.openfire.server.OutgoingSessionPromise;
+import org.jivesoftware.openfire.session.*;
+import org.jivesoftware.openfire.spi.BasicStreamIDFactory;
+import org.jivesoftware.openfire.user.UserManager;
+import org.jivesoftware.util.JiveGlobals;
+import org.jivesoftware.util.LocaleUtils;
+import org.jivesoftware.util.SystemProperty;
+import org.jivesoftware.util.TaskEngine;
+import org.jivesoftware.util.cache.Cache;
+import org.jivesoftware.util.cache.CacheFactory;
+import org.jivesoftware.util.cache.CacheUtil;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmpp.packet.JID;
+import org.xmpp.packet.Message;
+import org.xmpp.packet.Packet;
+import org.xmpp.packet.Presence;
+
+/**
+ * Manages the sessions associated with an account. The information
+ * maintained by the Session manager is entirely transient and does
+ * not need to be preserved between server restarts.
+ *
+ * @author Derek DeMoro
+ */
+public class SessionManager extends BasicModule implements ClusterEventListener
+{
+<span class="nc" id="L64">    private static final Logger Log = LoggerFactory.getLogger(SessionManager.class);</span>
+<span class="nc" id="L65">    private static final SystemProperty&lt;Integer&gt; CONFLICT_LIMIT = SystemProperty.Builder.ofType(Integer.class)</span>
+<span class="nc" id="L66">        .setKey(&quot;xmpp.session.conflict-limit&quot;)</span>
+<span class="nc" id="L67">        .setDynamic(true)</span>
+<span class="nc" id="L68">        .setDefaultValue(0)</span>
+<span class="nc" id="L69">        .setMinValue(-1)</span>
+<span class="nc" id="L70">        .build();</span>
+
+    public static final String COMPONENT_SESSION_CACHE_NAME = &quot;Components Sessions&quot;;
+    public static final String CM_CACHE_NAME = &quot;Connection Managers Sessions&quot;;
+    public static final String ISS_CACHE_NAME = &quot;Incoming Server Sessions&quot;;
+    public static final String HOSTNAME_SESSIONS_CACHE_NAME = &quot;Sessions by Hostname&quot;;
+    public static final String VALIDATED_DOMAINS_CACHE_NAME = &quot;Validated Domains&quot;;
+    public static final String C2S_INFO_CACHE_NAME = &quot;Client Session Info Cache&quot;;
+
+    public static final int NEVER_KICK = -1;
+
+    private XMPPServer server;
+    private PacketRouter router;
+    private String serverName;
+    private JID serverAddress;
+    private UserManager userManager;
+    private int conflictLimit;
+
+    /**
+     * Counter of user connections. A connection is counted just after it was created and not
+     * after the user became available. This counter only considers sessions local to this JVM.
+     * That means that when running inside of a cluster you will need to add up this counter
+     * for each cluster node.
+     */
+<span class="nc" id="L94">    private final AtomicInteger connectionsCounter = new AtomicInteger(0);</span>
+
+    /**
+     * Cache (unlimited, never expire) that holds information about client sessions (as soon as
+     * a resource has been bound). The cache is used by Remote sessions to avoid generating big
+     * number of remote calls.
+     * Key: full JID, Value: ClientSessionInfo
+     *
+     * Note that, unlike other caches, this cache is populated only when clustering is enabled.
+     */
+    private Cache&lt;String, ClientSessionInfo&gt; sessionInfoCache;
+
+    /**
+     * Cache (unlimited, never expire) that holds external component sessions.
+     * Key: component address, Value: identifier of each cluster node holding a local session
+     * to the component.
+     */
+    private Cache&lt;String, HashSet&lt;NodeID&gt;&gt; componentSessionsCache;
+
+    /**
+     * Cache (unlimited, never expire) that holds sessions of connection managers. For each
+     * socket connection of the CM to the server there is going to be an entry in the cache.
+     * Key: full address of the CM that identifies the socket, Value: nodeID
+     */
+    private Cache&lt;String, NodeID&gt; multiplexerSessionsCache;
+
+    /**
+     * Cache (unlimited, never expire) that holds incoming sessions of remote servers.
+     * Key: stream ID that identifies the socket/session, Value: nodeID
+     */
+    private Cache&lt;StreamID, NodeID&gt; incomingServerSessionsCache;
+
+    /**
+     * Cache (unlimited, never expire) that holds list of incoming sessions
+     * originated from the same remote server (domain/subdomain). For instance, jabber.org
+     * may have 2 connections to the server running in jivesoftware.com (one socket to
+     * jivesoftware.com and the other socket to conference.jivesoftware.com).
+     * Key: remote hostname (domain/subdomain), Value: list of stream IDs that identify each socket.
+     */
+    private Cache&lt;String, ArrayList&lt;StreamID&gt;&gt; hostnameSessionsCache;
+
+    /**
+     * Cache (unlimited, never expire) that holds domains, subdomains and virtual
+     * hostnames of the remote server that were validated with this server for each
+     * incoming server session.
+     * Key: stream ID, Value: Domains and subdomains of the remote server that were
+     * validated with this server.&lt;p&gt;
+     *
+     * This same information is stored in {@link LocalIncomingServerSession} but the
+     * reason for this duplication is that when running in a cluster other nodes
+     * will have access to this clustered cache even in the case of this node going
+     * down.
+     */
+    private Cache&lt;StreamID, HashSet&lt;String&gt;&gt; validatedDomainsCache;
+
+<span class="nc" id="L149">    private ClientSessionListener clientSessionListener = new ClientSessionListener();</span>
+<span class="nc" id="L150">    private IncomingServerSessionListener incomingServerListener = new IncomingServerSessionListener();</span>
+<span class="nc" id="L151">    private OutgoingServerSessionListener outgoingServerListener = new OutgoingServerSessionListener();</span>
+<span class="nc" id="L152">    private ConnectionMultiplexerSessionListener multiplexerSessionListener = new ConnectionMultiplexerSessionListener();</span>
+
+    /**
+     * Sessions contained in this Map are (client?) sessions which are detached.
+     * Sessions remaining here too long will be reaped, but they will be checked
+     * to see if they have in fact resumed since.
+     */
+<span class="nc" id="L159">    private final Map&lt;StreamID, LocalSession&gt; detachedSessions = new ConcurrentHashMap&lt;&gt;();</span>
+
+    /**
+     * Local session manager responsible for keeping sessions connected to this JVM that are not
+     * present in the routing table.
+     */
+    private LocalSessionManager localSessionManager;
+    /**
+     * &lt;p&gt;Session manager must maintain the routing table as sessions are added and
+     * removed.&lt;/p&gt;
+     */
+    private RoutingTable routingTable;
+
+    private StreamIDFactory streamIDFactory;
+
+    /**
+     * Returns the instance of &lt;CODE&gt;SessionManagerImpl&lt;/CODE&gt; being used by the XMPPServer.
+     *
+     * @return the instance of &lt;CODE&gt;SessionManagerImpl&lt;/CODE&gt; being used by the XMPPServer.
+     */
+    public static SessionManager getInstance() {
+<span class="nc" id="L180">        return XMPPServer.getInstance().getSessionManager();</span>
+    }
+
+    public SessionManager() {
+<span class="nc" id="L184">        super(&quot;Session Manager&quot;);</span>
+<span class="nc bnc" id="L185" title="All 2 branches missed.">        if (JiveGlobals.getBooleanProperty(&quot;xmpp.audit.active&quot;)) {</span>
+<span class="nc" id="L186">            streamIDFactory = new AuditStreamIDFactory();</span>
+        }
+        else {
+<span class="nc" id="L189">            streamIDFactory = new BasicStreamIDFactory();</span>
+        }
+<span class="nc" id="L191">        localSessionManager = new LocalSessionManager();</span>
+<span class="nc" id="L192">        conflictLimit = CONFLICT_LIMIT.getValue();</span>
+<span class="nc" id="L193">    }</span>
+
+    /**
+     * Record a session as being detached (ie, has no connection). This is idempotent.
+     * This should really only be called by the LocalSession itself when it detaches.
+     *
+     * @param localSession the LocalSession (this) to mark as detached.
+     */
+    public void addDetached(LocalSession localSession) {
+<span class="nc" id="L202">        this.detachedSessions.put(localSession.getStreamID(), localSession);</span>
+<span class="nc" id="L203">    }</span>
+
+    /**
+     * Remove a session as being detached. This is idempotent.
+     * This should be called by the LocalSession itself either when resumed or when
+     * closed.
+     *
+     * @param localSession the LocalSession (this) which has been resumed or closed.
+     */
+    public synchronized void removeDetached(LocalSession localSession) {
+<span class="nc" id="L213">        LocalSession other = this.detachedSessions.get(localSession.getStreamID());</span>
+<span class="nc bnc" id="L214" title="All 2 branches missed.">        if (other == localSession) {</span>
+<span class="nc" id="L215">            this.detachedSessions.remove(localSession.getStreamID());</span>
+        }
+<span class="nc" id="L217">    }</span>
+
+    /**
+     * Returns the session originated from the specified address or {@code null} if none was
+     * found. The specified address MUST contain a resource that uniquely identifies the session.
+     *
+     * A single connection manager should connect to the same node.
+     *
+     * @param address the address of the connection manager (including resource that identifies specific socket)
+     * @return the session originated from the specified address.
+     */
+    public ConnectionMultiplexerSession getConnectionMultiplexerSession(JID address) {
+        // Search in the list of CMs connected to this JVM
+<span class="nc" id="L230">        LocalConnectionMultiplexerSession session =</span>
+<span class="nc" id="L231">                localSessionManager.getConnnectionManagerSessions().get(address.toString());</span>
+<span class="nc bnc" id="L232" title="All 4 branches missed.">        if (session == null &amp;&amp; server.getRemoteSessionLocator() != null) {</span>
+            // Search in the list of CMs connected to other cluster members
+<span class="nc" id="L234">            final NodeID nodeID = multiplexerSessionsCache.get(address.toString());</span>
+<span class="nc bnc" id="L235" title="All 2 branches missed.">            if (nodeID != null) {</span>
+<span class="nc" id="L236">                return server.getRemoteSessionLocator().getConnectionMultiplexerSession(nodeID.toByteArray(), address);</span>
+            }
+        }
+<span class="nc" id="L239">        return null;</span>
+    }
+
+    /**
+     * Returns all sessions originated from connection managers.
+     *
+     * @return all sessions originated from connection managers.
+     */
+    public List&lt;ConnectionMultiplexerSession&gt; getConnectionMultiplexerSessions() {
+<span class="nc" id="L248">        List&lt;ConnectionMultiplexerSession&gt; sessions = new ArrayList&lt;&gt;();</span>
+        // Add sessions of CMs connected to this JVM
+<span class="nc" id="L250">        sessions.addAll(localSessionManager.getConnnectionManagerSessions().values());</span>
+        // Add sessions of CMs connected to other cluster nodes
+<span class="nc" id="L252">        RemoteSessionLocator locator = server.getRemoteSessionLocator();</span>
+<span class="nc bnc" id="L253" title="All 2 branches missed.">        if (locator != null) {</span>
+<span class="nc bnc" id="L254" title="All 2 branches missed.">            for (Map.Entry&lt;String, NodeID&gt; entry : multiplexerSessionsCache.entrySet()) {</span>
+<span class="nc bnc" id="L255" title="All 2 branches missed.">                if (!server.getNodeID().equals(entry.getValue())) {</span>
+<span class="nc" id="L256">                    sessions.add(locator.getConnectionMultiplexerSession(entry.getValue().toByteArray(), new JID(entry.getKey())));</span>
+                }
+<span class="nc" id="L258">            }</span>
+        }
+<span class="nc" id="L260">        return sessions;</span>
+    }
+
+    /**
+     * Returns a collection with all the sessions originated from the connection manager
+     * whose domain matches the specified domain. If there is no connection manager with
+     * the specified domain then an empty list is going to be returned.
+     *
+     * @param domain the domain of the connection manager.
+     * @return a collection with all the sessions originated from the connection manager
+     *         whose domain matches the specified domain.
+     */
+    public List&lt;ConnectionMultiplexerSession&gt; getConnectionMultiplexerSessions(String domain) {
+<span class="nc" id="L273">        List&lt;ConnectionMultiplexerSession&gt; sessions = new ArrayList&lt;&gt;();</span>
+        // Add sessions of CMs connected to this JVM
+<span class="nc bnc" id="L275" title="All 2 branches missed.">        for (String address : localSessionManager.getConnnectionManagerSessions().keySet()) {</span>
+<span class="nc" id="L276">            JID jid = new JID(address);</span>
+<span class="nc bnc" id="L277" title="All 2 branches missed.">            if (domain.equals(jid.getDomain())) {</span>
+<span class="nc" id="L278">                sessions.add(localSessionManager.getConnnectionManagerSessions().get(address));</span>
+            }
+<span class="nc" id="L280">        }</span>
+        // Add sessions of CMs connected to other cluster nodes
+<span class="nc" id="L282">        RemoteSessionLocator locator = server.getRemoteSessionLocator();</span>
+<span class="nc bnc" id="L283" title="All 2 branches missed.">        if (locator != null) {</span>
+<span class="nc bnc" id="L284" title="All 2 branches missed.">            for (Map.Entry&lt;String, NodeID&gt; entry : multiplexerSessionsCache.entrySet()) {</span>
+<span class="nc bnc" id="L285" title="All 2 branches missed.">                if (!server.getNodeID().equals(entry.getValue())) {</span>
+<span class="nc" id="L286">                    JID jid = new JID(entry.getKey());</span>
+<span class="nc bnc" id="L287" title="All 2 branches missed.">                    if (domain.equals(jid.getDomain())) {</span>
+<span class="nc" id="L288">                        sessions.add(</span>
+<span class="nc" id="L289">                                locator.getConnectionMultiplexerSession(entry.getValue().toByteArray(), new JID(entry.getKey())));</span>
+                    }
+                }
+<span class="nc" id="L292">            }</span>
+        }
+<span class="nc" id="L294">        return sessions;</span>
+    }
+
+    /**
+     * Creates a new {@code ConnectionMultiplexerSession}.
+     *
+     * @param conn the connection to create the session from.
+     * @param address the JID (may include a resource) of the connection manager's session.
+     * @return a newly created session.
+     */
+    public LocalConnectionMultiplexerSession createMultiplexerSession(Connection conn, JID address) {
+<span class="nc bnc" id="L305" title="All 2 branches missed.">        if (serverName == null) {</span>
+<span class="nc" id="L306">            throw new IllegalStateException(&quot;Server not initialized&quot;);</span>
+        }
+<span class="nc" id="L308">        StreamID id = nextStreamID();</span>
+<span class="nc" id="L309">        LocalConnectionMultiplexerSession session = new LocalConnectionMultiplexerSession(serverName, conn, id);</span>
+<span class="nc" id="L310">        conn.init(session);</span>
+        // Register to receive close notification on this session so we can
+        // figure out when users that were using this connection manager may become unavailable
+<span class="nc" id="L313">        conn.registerCloseListener(multiplexerSessionListener, session);</span>
+
+        // Add to connection multiplexer session.
+<span class="nc" id="L316">        boolean firstConnection = getConnectionMultiplexerSessions(address.getDomain()).isEmpty();</span>
+<span class="nc" id="L317">        localSessionManager.getConnnectionManagerSessions().put(address.toString(), session);</span>
+        // Keep track of the cluster node hosting the new CM connection
+<span class="nc" id="L319">        multiplexerSessionsCache.put(address.toString(), server.getNodeID());</span>
+<span class="nc bnc" id="L320" title="All 2 branches missed.">        if (firstConnection) {</span>
+            // Notify ConnectionMultiplexerManager that a new connection manager
+            // is available
+<span class="nc" id="L323">            ConnectionMultiplexerManager.getInstance().multiplexerAvailable(address.getDomain());</span>
+        }
+<span class="nc" id="L325">        return session;</span>
+    }
+
+    /**
+     * Returns a randomly created ID to be used in a stream element.
+     *
+     * @return a randomly created ID to be used in a stream element.
+     */
+    public StreamID nextStreamID() {
+<span class="nc" id="L334">        return streamIDFactory.createStreamID();</span>
+    }
+
+    /**
+     * Creates a new {@code ClientSession}. The new Client session will have a newly created
+     * stream ID.
+     *
+     * @param conn the connection to create the session from.
+     * @param language The language to use for the new session.
+     * @return a newly created session.
+     */
+    public LocalClientSession createClientSession(Connection conn, Locale language) {
+<span class="nc" id="L346">        return createClientSession(conn, nextStreamID(), language);</span>
+    }
+
+    /**
+     * Creates a new {@code ClientSession} with the specified streamID.
+     *
+     * @param conn the connection to create the session from.
+     * @param id the streamID to use for the new session.
+     * @return a newly created session.
+     */
+    public LocalClientSession createClientSession(Connection conn, StreamID id) {
+<span class="nc" id="L357">        return createClientSession( conn, id, null);</span>
+    }
+
+    /**
+     * Creates a new {@code ClientSession} with the specified streamID.
+     *
+     * @param conn the connection to create the session from.
+     * @param id the streamID to use for the new session.
+     * @param language The language to use for the new session.
+     * @return a newly created session.
+     */
+    public LocalClientSession createClientSession(Connection conn, StreamID id, Locale language) {
+<span class="nc bnc" id="L369" title="All 2 branches missed.">        if (serverName == null) {</span>
+<span class="nc" id="L370">            throw new IllegalStateException(&quot;Server not initialized&quot;);</span>
+        }
+<span class="nc" id="L372">        LocalClientSession session = new LocalClientSession(serverName, conn, id, language);</span>
+<span class="nc" id="L373">        conn.init(session);</span>
+        // Register to receive close notification on this session so we can
+        // remove  and also send an unavailable presence if it wasn't
+        // sent before
+<span class="nc" id="L377">        conn.registerCloseListener(clientSessionListener, session);</span>
+
+        // Add to pre-authenticated sessions.
+<span class="nc" id="L380">        localSessionManager.getPreAuthenticatedSessions().put(session.getAddress().getResource(), session);</span>
+        // Increment the counter of user sessions
+<span class="nc" id="L382">        connectionsCounter.incrementAndGet();</span>
+<span class="nc" id="L383">        return session;</span>
+    }
+
+    /**
+     * Creates a new {@code ClientSession} with the specified streamID.
+     *
+     * @param connection the connection to create the session from.
+     * @param id the streamID to use for the new session.
+     * @param language The language to use for the session
+     * @return a newly created session.
+     * @throws UnauthorizedException if the server has not been initialised
+     * @throws UnknownHostException if no IP address for the peer could be found,
+     */
+    public HttpSession createClientHttpSession(StreamID id, HttpConnection connection, Locale language)
+        throws UnauthorizedException, UnknownHostException
+    {
+<span class="nc bnc" id="L399" title="All 2 branches missed.">        if (serverName == null) {</span>
+<span class="nc" id="L400">            throw new UnauthorizedException(&quot;Server not initialized&quot;);</span>
+        }
+<span class="nc" id="L402">        PacketDeliverer backupDeliverer = server.getPacketDeliverer();</span>
+<span class="nc" id="L403">        HttpSession session = new HttpSession(backupDeliverer, serverName, id, connection, language);</span>
+<span class="nc" id="L404">        Connection conn = session.getConnection();</span>
+<span class="nc" id="L405">        conn.init(session);</span>
+<span class="nc" id="L406">        conn.registerCloseListener(clientSessionListener, session);</span>
+<span class="nc" id="L407">        localSessionManager.getPreAuthenticatedSessions().put(session.getAddress().getResource(), session);</span>
+<span class="nc" id="L408">        connectionsCounter.incrementAndGet();</span>
+<span class="nc" id="L409">        return session;</span>
+    }
+
+    public LocalComponentSession createComponentSession(JID address, Connection conn) {
+<span class="nc bnc" id="L413" title="All 2 branches missed.">        if (serverName == null) {</span>
+<span class="nc" id="L414">            throw new IllegalStateException(&quot;Server not initialized&quot;);</span>
+        }
+<span class="nc" id="L416">        StreamID id = nextStreamID();</span>
+<span class="nc" id="L417">        LocalComponentSession session = new LocalComponentSession(serverName, conn, id);</span>
+<span class="nc" id="L418">        conn.init(session);</span>
+
+        // Set the bind address as the address of the session
+<span class="nc" id="L421">        session.setAddress(address);</span>
+
+        // Add to component session.
+<span class="nc" id="L424">        localSessionManager.getComponentsSessions().add(session);</span>
+
+        // Keep track of the cluster node hosting the new external component
+<span class="nc" id="L427">        CacheUtil.addValueToMultiValuedCache( componentSessionsCache, address.toString(), server.getNodeID(), HashSet::new );</span>
+
+<span class="nc" id="L429">        return session;</span>
+    }
+
+    public void removeComponentSession( LocalComponentSession session )
+    {
+        // Remove the session
+<span class="nc" id="L435">        localSessionManager.getComponentsSessions().remove(session);</span>
+
+        // Remove track of the cluster node hosting the external component.
+<span class="nc" id="L438">        CacheUtil.removeValueFromMultiValuedCache( componentSessionsCache, session.getAddress().toString(), server.getNodeID() );</span>
+<span class="nc" id="L439">    }</span>
+
+    /**
+     * Creates a session for a remote server. The session should be created only after the
+     * remote server has been authenticated either using &quot;server dialback&quot; or SASL.
+     *
+     * @param conn the connection to the remote server.
+     * @param id the stream ID used in the stream element when authenticating the server.
+     * @param fromDomain The originating domain
+     * @return the newly created {@link IncomingServerSession}.
+     * @throws UnauthorizedException if the local server has not been initialized yet.
+     */
+    public LocalIncomingServerSession createIncomingServerSession(Connection conn, StreamID id, String fromDomain)
+            throws UnauthorizedException {
+<span class="nc bnc" id="L453" title="All 2 branches missed.">        if (serverName == null) {</span>
+<span class="nc" id="L454">            throw new UnauthorizedException(&quot;Server not initialized&quot;);</span>
+        }
+<span class="nc" id="L456">        LocalIncomingServerSession session = new LocalIncomingServerSession(serverName, conn, id, fromDomain);</span>
+<span class="nc" id="L457">        conn.init(session);</span>
+        // Register to receive close notification on this session so we can
+        // remove its route from the sessions set
+<span class="nc" id="L460">        conn.registerCloseListener(incomingServerListener, session);</span>
+
+<span class="nc" id="L462">        return session;</span>
+    }
+
+    /**
+     * Notification message that a new OutgoingServerSession has been created. Register a listener
+     * that will react when the connection gets closed.
+     *
+     * @param session the newly created OutgoingServerSession.
+     */
+    public void outgoingServerSessionCreated(LocalOutgoingServerSession session) {
+        // Register to receive close notification on this session so we can
+        // remove its route from the sessions set
+<span class="nc" id="L474">        session.getConnection().registerCloseListener(outgoingServerListener, session);</span>
+<span class="nc" id="L475">    }</span>
+
+    /**
+     * Registers that a server session originated by a remote server is hosting a given hostname.
+     * Notice that the remote server may be hosting several subdomains as well as virtual hosts so
+     * the same IncomingServerSession may be associated with many keys. If the remote server
+     * creates many sessions to this server (eg. one for each subdomain) then associate all
+     * the sessions with the originating server that created all the sessions.
+     *
+     * @param hostname the hostname that is being served by the remote server.
+     * @param session the incoming server session to the remote server.
+     */
+    public void registerIncomingServerSession(String hostname, LocalIncomingServerSession session) {
+        // Keep local track of the incoming server session connected to this JVM
+<span class="nc" id="L489">        StreamID streamID = session.getStreamID();</span>
+<span class="nc" id="L490">        localSessionManager.addIncomingServerSessions(streamID, session);</span>
+        // Keep track of the nodeID hosting the incoming server session
+<span class="nc" id="L492">        incomingServerSessionsCache.put(streamID, server.getNodeID());</span>
+        // Update list of sockets/sessions coming from the same remote hostname
+<span class="nc" id="L494">        Lock lock = CacheFactory.getLock(hostname, hostnameSessionsCache);</span>
+        try {
+<span class="nc" id="L496">            lock.lock();</span>
+<span class="nc" id="L497">            ArrayList&lt;StreamID&gt; streamIDs = hostnameSessionsCache.get(hostname);</span>
+<span class="nc bnc" id="L498" title="All 2 branches missed.">            if (streamIDs == null) {</span>
+<span class="nc" id="L499">                streamIDs = new ArrayList&lt;&gt;();</span>
+            }
+<span class="nc" id="L501">            streamIDs.add(streamID);</span>
+<span class="nc" id="L502">            hostnameSessionsCache.put(hostname, streamIDs);</span>
+        }
+        finally {
+<span class="nc" id="L505">            lock.unlock();</span>
+<span class="nc" id="L506">        }</span>
+        // Add to clustered cache
+<span class="nc" id="L508">        lock = CacheFactory.getLock(streamID, validatedDomainsCache);</span>
+        try {
+<span class="nc" id="L510">            lock.lock();</span>
+<span class="nc" id="L511">            HashSet&lt;String&gt; validatedDomains = validatedDomainsCache.get(streamID);</span>
+<span class="nc bnc" id="L512" title="All 2 branches missed.">            if (validatedDomains == null) {</span>
+<span class="nc" id="L513">                validatedDomains = new HashSet&lt;&gt;();</span>
+            }
+<span class="nc" id="L515">            boolean added = validatedDomains.add(hostname);</span>
+<span class="nc bnc" id="L516" title="All 2 branches missed.">            if (added) {</span>
+<span class="nc" id="L517">                validatedDomainsCache.put(streamID, validatedDomains);</span>
+            }
+        } finally {
+<span class="nc" id="L520">            lock.unlock();</span>
+<span class="nc" id="L521">        }</span>
+<span class="nc" id="L522">    }</span>
+
+    /**
+     * Unregisters the specified remote server session originiated by the specified remote server.
+     *
+     * @param hostname the hostname that is being served by the remote server.
+     * @param session the session to unregiser.
+     */
+    public void unregisterIncomingServerSession(String hostname, IncomingServerSession session) {
+        // Remove local track of the incoming server session connected to this JVM
+<span class="nc" id="L532">        StreamID streamID = session.getStreamID();</span>
+<span class="nc" id="L533">        localSessionManager.removeIncomingServerSessions(streamID);</span>
+        // Remove track of the nodeID hosting the incoming server session
+<span class="nc" id="L535">        incomingServerSessionsCache.remove(streamID);</span>
+
+<span class="nc" id="L537">        unregisterIncomingServerSession( Collections.singleton( streamID ) );</span>
+<span class="nc" id="L538">    }</span>
+
+    /**
+     * One or more incoming server session can become unavailable for a number of reasons:
+     * &lt;ul&gt;
+     *     &lt;li&gt;It's connection got terminated.&lt;/li&gt;
+     *     &lt;li&gt;The cluster node on which it is connected become disconnected&lt;/li&gt;
+     * &lt;/ul&gt;
+     *
+     * When a incoming server session is unavailable, a cleanup of associated
+     * metadata is needed.
+     *
+     * This method removes metadata from the following caches, based on the
+     * stream identifiers of incoming server sessions:
+     * &lt;ul&gt;
+     *     &lt;li&gt;'sockets/sessions coming from the same remote hostname'&lt;/li&gt;
+     *     &lt;li&gt;'validated domains'&lt;/li&gt;
+     * &lt;/ul&gt;
+     *
+     * @param streamIDs References to incoming server sessions that are no longer available (cannot be null, can be empty).
+     */
+    private void unregisterIncomingServerSession( final Collection&lt;StreamID&gt; streamIDs )
+    {
+        // Update the collection of 'sockets/sessions coming from the same remote hostname' as well as the collection of 'validated domains' to reflect the loss of incoming server sessions.
+<span class="nc bnc" id="L562" title="All 2 branches missed.">        for ( final StreamID streamID : streamIDs )</span>
+        {
+<span class="nc" id="L564">            final Map&lt;Boolean, Map&lt;String, ArrayList&lt;StreamID&gt;&gt;&gt; modifiedHostnameSessions = CacheUtil.removeValueFromMultiValuedCache( hostnameSessionsCache, streamID );</span>
+<span class="nc" id="L565">            final Set&lt;String&gt; removedHostnameSessions = modifiedHostnameSessions.get( false ).keySet();</span>
+<span class="nc" id="L566">            removedHostnameSessions.forEach( removedHostname -&gt; CacheUtil.removeValueFromMultiValuedCache( validatedDomainsCache, removedHostname ) );</span>
+<span class="nc" id="L567">        }</span>
+<span class="nc" id="L568">    }</span>
+
+    /**
+     * Returns a collection with all the domains, subdomains and virtual hosts that where
+     * validated. The remote server is allowed to send packets from any of these domains,
+     * subdomains and virtual hosts.&lt;p&gt;
+     *
+     * Content is stored in a clustered cache so that even in the case of the node hosting
+     * the sessions is lost we can still have access to this info to be able to perform
+     * proper clean up logic.
+     *
+     * @param streamID id that uniquely identifies the session.
+     * @return domains, subdomains and virtual hosts that where validated.
+     */
+    public Collection&lt;String&gt; getValidatedDomains(StreamID streamID) {
+<span class="nc" id="L583">        Lock lock = CacheFactory.getLock(streamID, validatedDomainsCache);</span>
+        try {
+<span class="nc" id="L585">            lock.lock();</span>
+<span class="nc" id="L586">            Set&lt;String&gt; validatedDomains = validatedDomainsCache.get(streamID);</span>
+<span class="nc bnc" id="L587" title="All 2 branches missed.">            if (validatedDomains == null) {</span>
+<span class="nc" id="L588">                return Collections.emptyList();</span>
+            }
+<span class="nc" id="L590">            return Collections.unmodifiableCollection(validatedDomains);</span>
+        } finally {
+<span class="nc" id="L592">            lock.unlock();</span>
+<span class="nc" id="L593">        }</span>
+    }
+
+    /**
+     * Add a new session to be managed. The session has been authenticated and resource
+     * binding has been done.
+     *
+     * @param session the session that was authenticated.
+     */
+    public void addSession(LocalClientSession session) {
+        // Add session to the routing table (routing table will know session is not available yet)
+<span class="nc" id="L604">        routingTable.addClientRoute(session.getAddress(), session);</span>
+        // Remove the pre-Authenticated session but remember to use the temporary ID as the key
+<span class="nc" id="L606">        localSessionManager.getPreAuthenticatedSessions().remove(session.getStreamID().toString());</span>
+<span class="nc bnc" id="L607" title="All 2 branches missed.">        SessionEventDispatcher.EventType event = session.getAuthToken().isAnonymous() ?</span>
+                SessionEventDispatcher.EventType.anonymous_session_created :
+                SessionEventDispatcher.EventType.session_created;
+        // Fire session created event.
+<span class="nc" id="L611">        SessionEventDispatcher.dispatchEvent(session, event);</span>
+<span class="nc bnc" id="L612" title="All 2 branches missed.">        if (ClusterManager.isClusteringStarted()) {</span>
+            // Track information about the session and share it with other cluster nodes
+<span class="nc" id="L614">            sessionInfoCache.put(session.getAddress().toString(), new ClientSessionInfo(session));</span>
+        }
+<span class="nc" id="L616">    }</span>
+
+    /**
+     * Notification message sent when a client sent an available presence for the session. Making
+     * the session available means that the session is now eligible for receiving messages from
+     * other clients. Sessions whose presence is not available may only receive packets (IQ packets)
+     * from the server. Therefore, an unavailable session remains invisible to other clients.
+     *
+     * @param session the session that receieved an available presence.
+     * @param presence the presence for the session.
+     */
+    public void sessionAvailable(LocalClientSession session, Presence presence) {
+<span class="nc bnc" id="L628" title="All 2 branches missed.">        if (session.getAuthToken().isAnonymous()) {</span>
+            // Anonymous session always have resources so we only need to add one route. That is
+            // the route to the anonymous session
+<span class="nc" id="L631">            routingTable.addClientRoute(session.getAddress(), session);</span>
+        }
+        else {
+            // A non-anonymous session is now available
+            // Add route to the new session
+<span class="nc" id="L636">            routingTable.addClientRoute(session.getAddress(), session);</span>
+            // Broadcast presence between the user's resources
+<span class="nc" id="L638">            broadcastPresenceOfOtherResource(session);</span>
+        }
+<span class="nc" id="L640">    }</span>
+
+    /**
+     * Returns true if the session should broadcast presences to all other resources for the
+     * current client. When disabled it is not possible to broadcast presence packets to another
+     * resource of the connected user. This is desirable if you have a use case where you have
+     * many resources attached to the same user account.
+     *
+     * @return true if presence should be broadcast to other resources of the same account
+     */
+    public static boolean isOtherResourcePresenceEnabled() {
+<span class="nc" id="L651">        return JiveGlobals.getBooleanProperty(&quot;xmpp.client.other-resource.presence&quot;, true);</span>
+    }
+
+    /**
+     * Sends the presences of other connected resources to the resource that just connected.
+     *
+     * @param session the newly created session.
+     */
+    private void broadcastPresenceOfOtherResource(LocalClientSession session) {
+<span class="nc bnc" id="L660" title="All 2 branches missed.">        if (!SessionManager.isOtherResourcePresenceEnabled()) {</span>
+<span class="nc" id="L661">            return;</span>
+        }
+        Presence presence;
+        // Get list of sessions of the same user
+<span class="nc" id="L665">        JID searchJID = new JID(session.getAddress().getNode(), session.getAddress().getDomain(), null);</span>
+<span class="nc" id="L666">        List&lt;JID&gt; addresses = routingTable.getRoutes(searchJID, null);</span>
+<span class="nc bnc" id="L667" title="All 2 branches missed.">        for (JID address : addresses) {</span>
+<span class="nc bnc" id="L668" title="All 2 branches missed.">            if (address.equals(session.getAddress())) {</span>
+<span class="nc" id="L669">                continue;</span>
+            }
+            // Send the presence of an existing session to the session that has just changed
+            // the presence
+<span class="nc" id="L673">            ClientSession userSession = routingTable.getClientRoute(address);</span>
+<span class="nc" id="L674">            presence = userSession.getPresence().createCopy();</span>
+<span class="nc" id="L675">            presence.setTo(session.getAddress());</span>
+<span class="nc" id="L676">            session.process(presence);</span>
+<span class="nc" id="L677">        }</span>
+<span class="nc" id="L678">    }</span>
+
+    /**
+     * @param originatingResource The JID broadcasting the presence
+     * @param presence The presence to broadcast
+     * @deprecated Use {@link #broadcastPresenceToResources(JID, Presence)} instead.
+     */
+    @Deprecated
+    public void broadcastPresenceToOtherResources(JID originatingResource, Presence presence)
+    {
+<span class="nc" id="L688">        broadcastPresenceToResources(originatingResource, presence);</span>
+<span class="nc" id="L689">    }</span>
+
+    /**
+     * Broadcasts presence updates from the originating user's resource to any of the user's
+     * existing available resources (including the resource from where the update originates).
+     *
+     * @param originatingResource the full JID of the session that sent the presence update.
+     * @param presence the presence.
+     */
+    public void broadcastPresenceToResources( JID originatingResource, Presence presence) {
+        // RFC 6121 4.4.2 says we always send to the originating resource.
+        // Also RFC 6121 4.2.2 for updates.
+<span class="nc" id="L701">        presence.setTo(originatingResource);</span>
+<span class="nc" id="L702">        routingTable.routePacket(originatingResource, presence, false);</span>
+<span class="nc bnc" id="L703" title="All 2 branches missed.">        if (!SessionManager.isOtherResourcePresenceEnabled()) {</span>
+<span class="nc" id="L704">            return;</span>
+        }
+        // Get list of sessions of the same user
+<span class="nc" id="L707">        JID searchJID = new JID(originatingResource.getNode(), originatingResource.getDomain(), null);</span>
+<span class="nc" id="L708">        List&lt;JID&gt; addresses = routingTable.getRoutes(searchJID, null);</span>
+<span class="nc bnc" id="L709" title="All 2 branches missed.">        for (JID address : addresses) {</span>
+<span class="nc bnc" id="L710" title="All 2 branches missed.">            if (!originatingResource.equals(address)) {</span>
+                // Send the presence of the session whose presence has changed to
+                // this user's other session(s)
+<span class="nc" id="L713">                presence.setTo(address);</span>
+<span class="nc" id="L714">                routingTable.routePacket(address, presence, false);</span>
+            }
+<span class="nc" id="L716">        }</span>
+<span class="nc" id="L717">    }</span>
+
+    /**
+     * Notification message sent when a client sent an unavailable presence for the session. Making
+     * the session unavailable means that the session is not eligible for receiving messages from
+     * other clients.
+     *
+     * @param session the session that received an unavailable presence.
+     */
+    public void sessionUnavailable(LocalClientSession session) {
+<span class="nc bnc" id="L727" title="All 4 branches missed.">        if (session.getAddress() != null &amp;&amp; routingTable != null &amp;&amp;</span>
+<span class="nc bnc" id="L728" title="All 2 branches missed.">                session.getAddress().toBareJID().trim().length() != 0) {</span>
+            // Update route to unavailable session (anonymous or not)
+<span class="nc" id="L730">            routingTable.addClientRoute(session.getAddress(), session);</span>
+        }
+<span class="nc" id="L732">    }</span>
+
+    /**
+     * Change the priority of a session, that was already available, associated with the sender.
+     *
+     * @param session   The session whose presence priority has been modified
+     * @param oldPriority The old priority for the session
+     */
+    public void changePriority(LocalClientSession session, int oldPriority) {
+<span class="nc bnc" id="L741" title="All 2 branches missed.">        if (session.getAuthToken().isAnonymous()) {</span>
+            // Do nothing if the session belongs to an anonymous user
+<span class="nc" id="L743">            return;</span>
+        }
+<span class="nc" id="L745">        int newPriority = session.getPresence().getPriority();</span>
+<span class="nc bnc" id="L746" title="All 4 branches missed.">        if (newPriority &lt; 0 || oldPriority &gt;= 0) {</span>
+            // Do nothing if new presence priority is not positive and old presence negative
+<span class="nc" id="L748">            return;</span>
+        }
+
+        // Check presence's priority of other available resources
+<span class="nc" id="L752">        JID searchJID = session.getAddress().asBareJID();</span>
+<span class="nc bnc" id="L753" title="All 2 branches missed.">        for (JID address : routingTable.getRoutes(searchJID, null)) {</span>
+<span class="nc bnc" id="L754" title="All 2 branches missed.">            if (address.equals(session.getAddress())) {</span>
+<span class="nc" id="L755">                continue;</span>
+            }
+<span class="nc" id="L757">            ClientSession otherSession = routingTable.getClientRoute(address);</span>
+<span class="nc bnc" id="L758" title="All 2 branches missed.">            if (otherSession.getPresence().getPriority() &gt;= 0) {</span>
+<span class="nc" id="L759">                return;</span>
+            }
+<span class="nc" id="L761">        }</span>
+
+        // User sessions had negative presence before this change so deliver messages
+<span class="nc bnc" id="L764" title="All 4 branches missed.">        if (!session.isAnonymousUser() &amp;&amp; session.canFloodOfflineMessages()) {</span>
+<span class="nc" id="L765">            OfflineMessageStore messageStore = server.getOfflineMessageStore();</span>
+<span class="nc" id="L766">            Collection&lt;OfflineMessage&gt; messages = messageStore.getMessages(session.getAuthToken().getUsername(), true);</span>
+<span class="nc bnc" id="L767" title="All 2 branches missed.">            for (Message message : messages) {</span>
+<span class="nc" id="L768">                session.process(message);</span>
+<span class="nc" id="L769">            }</span>
+        }
+<span class="nc" id="L771">    }</span>
+
+    public boolean isAnonymousRoute(String username) {
+        // JID's node and resource are the same for anonymous sessions
+<span class="nc" id="L775">        return isAnonymousRoute(new JID(username, serverName, username, true));</span>
+    }
+
+    public boolean isAnonymousRoute(JID address) {
+        // JID's node and resource are the same for anonymous sessions
+<span class="nc" id="L780">        return routingTable.isAnonymousRoute(address);</span>
+    }
+
+    public boolean isActiveRoute(String username, String resource) {
+<span class="nc" id="L784">        boolean hasRoute = false;</span>
+<span class="nc" id="L785">        Session session = routingTable.getClientRoute(new JID(username, serverName, resource));</span>
+        // Makes sure the session is still active
+<span class="nc bnc" id="L787" title="All 4 branches missed.">        if (session != null &amp;&amp; !session.isClosed()) {</span>
+<span class="nc" id="L788">            hasRoute = session.validate();</span>
+        }
+
+<span class="nc" id="L791">        return hasRoute;</span>
+    }
+
+    /**
+     * Returns the session responsible for this JID data. The returned Session may have never sent
+     * an available presence (thus not have a route) or could be a Session that hasn't
+     * authenticated yet (i.e. preAuthenticatedSessions).
+     *
+     * @param from the sender of the packet.
+     * @return the &lt;code&gt;Session&lt;/code&gt; associated with the JID.
+     */
+    public ClientSession getSession(JID from) {
+        // Return null if the JID is null or belongs to a foreign server. If the server is
+        // shutting down then serverName will be null so answer null too in this case.
+<span class="nc bnc" id="L805" title="All 6 branches missed.">        if (from == null || serverName == null || !serverName.equals(from.getDomain())) {</span>
+<span class="nc" id="L806">            return null;</span>
+        }
+
+        // Initially Check preAuthenticated Sessions
+<span class="nc bnc" id="L810" title="All 2 branches missed.">        if (from.getResource() != null) {</span>
+<span class="nc" id="L811">            ClientSession session = localSessionManager.getPreAuthenticatedSessions().get(from.getResource());</span>
+<span class="nc bnc" id="L812" title="All 2 branches missed.">            if (session != null) {</span>
+<span class="nc" id="L813">                return session;</span>
+            }
+        }
+
+<span class="nc bnc" id="L817" title="All 4 branches missed.">        if (from.getResource() == null || from.getNode() == null) {</span>
+<span class="nc" id="L818">            return null;</span>
+        }
+
+<span class="nc" id="L821">        return routingTable.getClientRoute(from);</span>
+    }
+
+    /**
+     * Returns a list that contains all authenticated client sessions connected to the server.
+     * The list contains sessions of anonymous and non-anonymous users.
+     *
+     * @return a list that contains all client sessions connected to the server.
+     */
+    public Collection&lt;ClientSession&gt; getSessions() {
+<span class="nc" id="L831">        return routingTable.getClientsRoutes(false);</span>
+    }
+
+
+    public Collection&lt;ClientSession&gt; getSessions(SessionResultFilter filter) {
+<span class="nc" id="L836">        List&lt;ClientSession&gt; results = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L837" title="All 2 branches missed.">        if (filter != null) {</span>
+            // Grab all the matching sessions
+<span class="nc" id="L839">            results.addAll(getSessions());</span>
+
+            // Now we have a copy of the references so we can spend some time
+            // doing the rest of the filtering without locking out session access
+            // so let's iterate and filter each session one by one
+<span class="nc" id="L844">            List&lt;ClientSession&gt; filteredResults = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L845" title="All 2 branches missed.">            for (ClientSession session : results) {</span>
+                // Now filter on creation date if needed
+<span class="nc" id="L847">                filteredResults.add(session);</span>
+<span class="nc" id="L848">            }</span>
+
+            // Sort list.
+<span class="nc" id="L851">            Collections.sort(filteredResults, filter.getSortComparator());</span>
+
+<span class="nc" id="L853">            int maxResults = filter.getNumResults();</span>
+<span class="nc bnc" id="L854" title="All 2 branches missed.">            if (maxResults == SessionResultFilter.NO_RESULT_LIMIT) {</span>
+<span class="nc" id="L855">                maxResults = filteredResults.size();</span>
+            }
+
+            // Now generate the final list. I believe it's faster to to build up a new
+            // list than it is to remove items from head and tail of the sorted tree
+<span class="nc" id="L860">            List&lt;ClientSession&gt; finalResults = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L861">            int startIndex = filter.getStartIndex();</span>
+<span class="nc" id="L862">            Iterator&lt;ClientSession&gt; sortedIter = filteredResults.iterator();</span>
+<span class="nc bnc" id="L863" title="All 4 branches missed.">            for (int i = 0; sortedIter.hasNext() &amp;&amp; finalResults.size() &lt; maxResults; i++) {</span>
+<span class="nc" id="L864">                ClientSession result = sortedIter.next();</span>
+<span class="nc bnc" id="L865" title="All 2 branches missed.">                if (i &gt;= startIndex) {</span>
+<span class="nc" id="L866">                    finalResults.add(result);</span>
+                }
+            }
+<span class="nc" id="L869">            return finalResults;</span>
+        }
+<span class="nc" id="L871">        return results;</span>
+    }
+
+    /**
+     * Returns the incoming server session hosted by this JVM that matches the specified stream ID.
+     *
+     * @param streamID the stream ID that identifies the incoming server session hosted by this JVM.
+     * @return the incoming server session hosted by this JVM or null if none was found.
+     */
+    public LocalIncomingServerSession getIncomingServerSession(StreamID streamID) {
+<span class="nc" id="L881">        return localSessionManager.getIncomingServerSession(streamID);</span>
+    }
+
+    /**
+     * Returns the list of sessions that were originated by a remote server. The list will be
+     * ordered chronologically.  IncomingServerSession can only receive packets from the remote
+     * server but are not capable of sending packets to the remote server.
+     *
+     * @param hostname the name of the remote server.
+     * @return the sessions that were originated by a remote server.
+     */
+    public List&lt;IncomingServerSession&gt; getIncomingServerSessions(String hostname) {
+        List&lt;StreamID&gt; streamIDs;
+        // Get list of sockets/sessions coming from the remote hostname
+<span class="nc" id="L895">        Lock lock = CacheFactory.getLock(hostname, hostnameSessionsCache);</span>
+        try {
+<span class="nc" id="L897">            lock.lock();</span>
+<span class="nc" id="L898">            streamIDs = hostnameSessionsCache.get(hostname);</span>
+        }
+        finally {
+<span class="nc" id="L901">            lock.unlock();</span>
+<span class="nc" id="L902">        }</span>
+
+<span class="nc bnc" id="L904" title="All 2 branches missed.">        if (streamIDs == null) {</span>
+<span class="nc" id="L905">            return Collections.emptyList();</span>
+        }
+        else {
+            // Collect the sessions associated to the found stream IDs
+<span class="nc" id="L909">            List&lt;IncomingServerSession&gt; sessions = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L910" title="All 2 branches missed.">            for (StreamID streamID : streamIDs) {</span>
+                // Search in local hosted sessions
+<span class="nc" id="L912">                IncomingServerSession session = localSessionManager.getIncomingServerSession(streamID);</span>
+<span class="nc" id="L913">                RemoteSessionLocator locator = server.getRemoteSessionLocator();</span>
+<span class="nc bnc" id="L914" title="All 4 branches missed.">                if (session == null &amp;&amp; locator != null) {</span>
+                    // Get the node hosting this session
+<span class="nc" id="L916">                    NodeID nodeID = incomingServerSessionsCache.get(streamID);</span>
+<span class="nc bnc" id="L917" title="All 2 branches missed.">                    if (nodeID != null) {</span>
+<span class="nc" id="L918">                        session = locator.getIncomingServerSession(nodeID.toByteArray(), streamID);</span>
+                    }
+                }
+<span class="nc bnc" id="L921" title="All 2 branches missed.">                if (session != null) {</span>
+<span class="nc" id="L922">                    sessions.add(session);</span>
+                }
+<span class="nc" id="L924">            }</span>
+<span class="nc" id="L925">            return sessions;</span>
+        }
+    }
+
+    /**
+     * Returns a session that was originated from this server to a remote server.
+     * OutgoingServerSession an only send packets to the remote server but are not capable of
+     * receiving packets from the remote server.
+     *
+     * @param pair DomainPair describing the local and remote servers.
+     * @return a session that was originated from this server to a remote server.
+     */
+    public OutgoingServerSession getOutgoingServerSession(DomainPair pair) {
+<span class="nc" id="L938">        return routingTable.getServerRoute(pair);</span>
+    }
+    public List&lt;OutgoingServerSession&gt; getOutgoingServerSessions(String host) {
+<span class="nc" id="L941">        List&lt;OutgoingServerSession&gt; sessions = new LinkedList&lt;&gt;();</span>
+<span class="nc bnc" id="L942" title="All 2 branches missed.">        for (DomainPair pair : routingTable.getServerRoutes()) {</span>
+<span class="nc bnc" id="L943" title="All 2 branches missed.">            if (pair.getRemote().equals(host)) {</span>
+<span class="nc" id="L944">                sessions.add(routingTable.getServerRoute(pair));</span>
+            }
+<span class="nc" id="L946">        }</span>
+<span class="nc" id="L947">        return sessions;</span>
+    }
+
+    public Collection&lt;ClientSession&gt; getSessions(String username) {
+<span class="nc" id="L951">        List&lt;ClientSession&gt; sessionList = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L952" title="All 4 branches missed.">        if (username != null &amp;&amp; serverName != null) {</span>
+<span class="nc" id="L953">            List&lt;JID&gt; addresses = routingTable.getRoutes(new JID(username, serverName, null, true), null);</span>
+<span class="nc bnc" id="L954" title="All 2 branches missed.">            for (JID address : addresses) {</span>
+<span class="nc" id="L955">                sessionList.add(routingTable.getClientRoute(address));</span>
+<span class="nc" id="L956">            }</span>
+        }
+<span class="nc" id="L958">        return sessionList;</span>
+    }
+
+    /**
+     * Returns number of client sessions that are connected to the server. Sessions that
+     * are authenticated and not authenticated will be included
+     *
+     * @param onlyLocal true if only sessions connected to this JVM will be considered. Otherwise count cluster wise.
+     * @return number of client sessions that are connected to the server.
+     */
+    public int getConnectionsCount(boolean onlyLocal) {
+<span class="nc" id="L969">        int total = connectionsCounter.get();</span>
+<span class="nc bnc" id="L970" title="All 2 branches missed.">        if (!onlyLocal) {</span>
+<span class="nc" id="L971">            Collection&lt;Integer&gt; results =</span>
+<span class="nc" id="L972">                    CacheFactory.doSynchronousClusterTask(new GetSessionsCountTask(false), false);</span>
+<span class="nc bnc" id="L973" title="All 2 branches missed.">            for (Integer result : results) {</span>
+<span class="nc bnc" id="L974" title="All 2 branches missed.">                if (result == null) {</span>
+<span class="nc" id="L975">                    continue;</span>
+                }
+<span class="nc" id="L977">                total = total + result;</span>
+<span class="nc" id="L978">            }</span>
+        }
+<span class="nc" id="L980">        return total;</span>
+    }
+
+    /**
+     * Returns number of client sessions that are authenticated with the server. This includes
+     * anonymous and non-anoymous users.
+     *
+     * @param onlyLocal true if only sessions connected to this JVM will be considered. Otherwise count cluster wise.
+     * @return number of client sessions that are authenticated with the server.
+     */
+    public int getUserSessionsCount(boolean onlyLocal) {
+<span class="nc" id="L991">        int total = routingTable.getClientsRoutes(true).size();</span>
+<span class="nc bnc" id="L992" title="All 2 branches missed.">        if (!onlyLocal) {</span>
+<span class="nc" id="L993">            Collection&lt;Integer&gt; results =</span>
+<span class="nc" id="L994">                    CacheFactory.doSynchronousClusterTask(new GetSessionsCountTask(true), false);</span>
+<span class="nc bnc" id="L995" title="All 2 branches missed.">            for (Integer result : results) {</span>
+<span class="nc bnc" id="L996" title="All 2 branches missed.">                if (result == null) {</span>
+<span class="nc" id="L997">                    continue;</span>
+                }
+<span class="nc" id="L999">                total = total + result;</span>
+<span class="nc" id="L1000">            }</span>
+        }
+<span class="nc" id="L1002">        return total;</span>
+    }
+
+    /**
+     * Returns number of sessions coming from remote servers. &lt;i&gt;Current implementation is only counting
+     * sessions connected to this JVM and not adding up sessions connected to other cluster nodes.&lt;/i&gt;
+     *
+     * @param onlyLocal true if only sessions connected to this JVM will be considered. Otherwise count cluster wise.
+     * @return number of sessions coming from remote servers.
+     */
+    public int getIncomingServerSessionsCount(boolean onlyLocal) {
+<span class="nc" id="L1013">        int total = localSessionManager.getIncomingServerSessions().size();</span>
+<span class="nc bnc" id="L1014" title="All 2 branches missed.">        if (!onlyLocal) {</span>
+            // TODO Implement this when needed
+        }
+<span class="nc" id="L1017">        return total;</span>
+    }
+
+    /**
+     * Returns the number of sessions for a user that are available. For the count
+     * of all sessions for the user, including sessions that are just starting
+     * or closed.
+     *
+     * @see #getConnectionsCount(boolean)
+     * @param username the user.
+     * @return number of available sessions for a user.
+     */
+    public int getActiveSessionCount(String username) {
+<span class="nc" id="L1030">        return routingTable.getRoutes(new JID(username, serverName, null, true), null).size();</span>
+    }
+
+    public int getSessionCount(String username) {
+        // TODO Count ALL sessions not only available
+<span class="nc" id="L1035">        return routingTable.getRoutes(new JID(username, serverName, null, true), null).size();</span>
+    }
+
+    /**
+     * Returns a collection with the established sessions from external components.
+     *
+     * @return a collection with the established sessions from external components.
+     */
+    public Collection&lt;ComponentSession&gt; getComponentSessions() {
+<span class="nc" id="L1044">        List&lt;ComponentSession&gt; sessions = new ArrayList&lt;&gt;();</span>
+        // Add sessions of external components connected to this JVM
+<span class="nc" id="L1046">        sessions.addAll(localSessionManager.getComponentsSessions());</span>
+        // Add sessions of external components connected to other cluster nodes
+<span class="nc" id="L1048">        RemoteSessionLocator locator = server.getRemoteSessionLocator();</span>
+<span class="nc bnc" id="L1049" title="All 2 branches missed.">        if (locator != null) {</span>
+<span class="nc bnc" id="L1050" title="All 2 branches missed.">            for (Map.Entry&lt;String, HashSet&lt;NodeID&gt;&gt; entry : componentSessionsCache.entrySet()) {</span>
+<span class="nc bnc" id="L1051" title="All 2 branches missed.">                for (NodeID nodeID : entry.getValue()) {</span>
+<span class="nc bnc" id="L1052" title="All 2 branches missed.">                    if (!server.getNodeID().equals(nodeID)) {</span>
+<span class="nc" id="L1053">                        sessions.add(locator.getComponentSession(nodeID.toByteArray(), new JID(entry.getKey())));</span>
+                    }
+<span class="nc" id="L1055">                }</span>
+<span class="nc" id="L1056">            }</span>
+        }
+<span class="nc" id="L1058">        return sessions;</span>
+    }
+
+    /**
+     * Returns the session of the component whose domain matches the specified domain.
+     *
+     * @param domain the domain of the component session to look for.
+     * @return the session of the component whose domain matches the specified domain.
+     */
+    public ComponentSession getComponentSession(String domain) {
+        // Search in the external components connected to this JVM
+<span class="nc bnc" id="L1069" title="All 2 branches missed.">        for (ComponentSession session : localSessionManager.getComponentsSessions()) {</span>
+<span class="nc bnc" id="L1070" title="All 2 branches missed.">            if (domain.equals(session.getAddress().getDomain())) {</span>
+<span class="nc" id="L1071">                return session;</span>
+            }
+<span class="nc" id="L1073">        }</span>
+        // Search in the external components connected to other cluster nodes
+<span class="nc" id="L1075">        RemoteSessionLocator locator = server.getRemoteSessionLocator();</span>
+<span class="nc bnc" id="L1076" title="All 2 branches missed.">        if (locator != null) {</span>
+<span class="nc" id="L1077">            Set&lt;NodeID&gt; nodeIDs = componentSessionsCache.get(domain);</span>
+<span class="nc bnc" id="L1078" title="All 2 branches missed.">            if (nodeIDs != null) {</span>
+<span class="nc bnc" id="L1079" title="All 2 branches missed.">                for (NodeID nodeID : nodeIDs ) {</span>
+                    // TODO Think of a better way to pick a component.
+<span class="nc" id="L1081">                    return locator.getComponentSession( nodeID.toByteArray(), new JID(domain) );</span>
+                }
+            }
+        }
+<span class="nc" id="L1085">        return null;</span>
+    }
+
+    /**
+     * Returns a collection with the hostnames of the remote servers that currently have an
+     * incoming server connection to this server.
+     *
+     * @return a collection with the hostnames of the remote servers that currently have an
+     *         incoming server connection to this server.
+     */
+    public Collection&lt;String&gt; getIncomingServers() {
+<span class="nc" id="L1096">        return hostnameSessionsCache.keySet();</span>
+    }
+
+    /**
+     * Returns a collection with the hostnames of the remote servers that currently may receive
+     * packets sent from this server.
+     *
+     * @return a collection with the hostnames of the remote servers that currently may receive
+     *         packets sent from this server.
+     */
+    public Collection&lt;String&gt; getOutgoingServers() {
+<span class="nc" id="L1107">        return routingTable.getServerHostnames();</span>
+    }
+    public Collection&lt;DomainPair&gt; getOutgoingDomainPairs() {
+<span class="nc" id="L1110">        return routingTable.getServerRoutes();</span>
+    }
+
+    /**
+     * Broadcasts the given data to all connected sessions. Excellent
+     * for server administration messages.
+     *
+     * @param packet the packet to be broadcast.
+     */
+    public void broadcast(Message packet) {
+<span class="nc" id="L1120">        routingTable.broadcastPacket(packet, false);</span>
+<span class="nc" id="L1121">    }</span>
+
+    /**
+     * Broadcasts the given data to all connected sessions for a particular
+     * user. Excellent for updating all connected resources for users such as
+     * roster pushes.
+     *
+     * @param username the user to send the boradcast to.
+     * @param packet the packet to be broadcast.
+     * @throws PacketException if a packet exception occurs.
+     */
+    public void userBroadcast(String username, Packet packet) throws PacketException {
+        // TODO broadcast to ALL sessions of the user and not only available
+<span class="nc bnc" id="L1134" title="All 2 branches missed.">        for (JID address : routingTable.getRoutes(new JID(username, serverName, null), null)) {</span>
+<span class="nc" id="L1135">            packet.setTo(address);</span>
+<span class="nc" id="L1136">            routingTable.routePacket(address, packet, true);</span>
+<span class="nc" id="L1137">        }</span>
+<span class="nc" id="L1138">    }</span>
+
+    /**
+     * Removes a session.
+     *
+     * @param session the session.
+     * @return true if the requested session was successfully removed.
+     */
+    public boolean removeSession(LocalClientSession session) {
+        // Do nothing if session is null or if the server is shutting down. Note: When the server
+        // is shutting down the serverName will be null.
+<span class="nc bnc" id="L1149" title="All 4 branches missed.">        if (session == null || serverName == null) {</span>
+<span class="nc" id="L1150">            return false;</span>
+        }
+
+<span class="nc" id="L1153">        AuthToken authToken = session.getAuthToken();</span>
+        // Consider session anonymous (for this matter) if we are closing a session that never authenticated
+<span class="nc bnc" id="L1155" title="All 4 branches missed.">        boolean anonymous = authToken == null || authToken.isAnonymous();</span>
+<span class="nc" id="L1156">        return removeSession(session, session.getAddress(), anonymous, false);</span>
+    }
+
+    /**
+     * Removes a session.
+     *
+     * @param session the session or null when session is derived from fullJID.
+     * @param fullJID the address of the session.
+     * @param anonymous true if the authenticated user is anonymous.
+     * @param forceUnavailable true if an unavailable presence must be created and routed.
+     * @return true if the requested session was successfully removed.
+     */
+    public boolean removeSession(ClientSession session, JID fullJID, boolean anonymous, boolean forceUnavailable) {
+        // Do nothing if server is shutting down. Note: When the server
+        // is shutting down the serverName will be null.
+<span class="nc bnc" id="L1171" title="All 2 branches missed.">        if (serverName == null) {</span>
+<span class="nc" id="L1172">            return false;</span>
+        }
+
+<span class="nc bnc" id="L1175" title="All 2 branches missed.">        if (session == null) {</span>
+<span class="nc" id="L1176">            session = getSession(fullJID);</span>
+        }
+
+        // Remove route to the removed session (anonymous or not)
+<span class="nc" id="L1180">        boolean removed = routingTable.removeClientRoute(fullJID);</span>
+
+<span class="nc bnc" id="L1182" title="All 2 branches missed.">        if (removed) {</span>
+            // Fire session event.
+<span class="nc bnc" id="L1184" title="All 2 branches missed.">            if (anonymous) {</span>
+<span class="nc" id="L1185">                SessionEventDispatcher</span>
+<span class="nc" id="L1186">                        .dispatchEvent(session, SessionEventDispatcher.EventType.anonymous_session_destroyed);</span>
+            }
+            else {
+<span class="nc" id="L1189">                SessionEventDispatcher.dispatchEvent(session, SessionEventDispatcher.EventType.session_destroyed);</span>
+
+            }
+        }
+
+        // Remove the session from the pre-Authenticated sessions list (if present)
+<span class="nc" id="L1195">        boolean preauth_removed =</span>
+<span class="nc bnc" id="L1196" title="All 2 branches missed.">                localSessionManager.getPreAuthenticatedSessions().remove(fullJID.getResource()) != null;</span>
+        // If the user is still available then send an unavailable presence
+<span class="nc bnc" id="L1198" title="All 4 branches missed.">        if (forceUnavailable || session.getPresence().isAvailable()) {</span>
+<span class="nc" id="L1199">            Presence offline = new Presence();</span>
+<span class="nc" id="L1200">            offline.setFrom(fullJID);</span>
+<span class="nc" id="L1201">            offline.setTo(new JID(null, serverName, null, true));</span>
+<span class="nc" id="L1202">            offline.setType(Presence.Type.unavailable);</span>
+<span class="nc" id="L1203">            router.route(offline);</span>
+        }
+
+        // Stop tracking information about the session and share it with other cluster nodes.
+        // Note that, unlike other caches, this cache is populated only when clustering is enabled.
+<span class="nc" id="L1208">        sessionInfoCache.remove(fullJID.toString());</span>
+
+<span class="nc bnc" id="L1210" title="All 4 branches missed.">        if (removed || preauth_removed) {</span>
+            // Decrement the counter of user sessions
+<span class="nc" id="L1212">            connectionsCounter.decrementAndGet();</span>
+<span class="nc" id="L1213">            return true;</span>
+        }
+<span class="nc" id="L1215">        return false;</span>
+    }
+
+    /**
+     * Removes a session that existed on a remote cluster node.
+     *
+     * This method was designed to be used only in case of cluster nodes disappearing.
+     *
+     * This method takes responsibility for cleaning up the state in RoutingTableImpl
+     * as well as SessionManager.
+     *
+     * @param fullJID the address of the session.
+     */
+    public void removeRemoteClientSession( JID fullJID )
+    {
+        // Remove route to the removed session.
+<span class="nc" id="L1231">        routingTable.removeClientRoute(fullJID);</span>
+
+        // Existing behavior when this implementation was introduced was to not dispatch SessionEvents
+        // for destroyed remote sessions.
+
+        // Non-local sessions cannot exist in the pre-Authenticated sessions list. No need to clean that up.
+
+        // TODO only sent an unavailable presence if the user was 'available'. Unsure if this can be checked when the remote node is shut down.
+<span class="nc" id="L1239">        Presence offline = new Presence();</span>
+<span class="nc" id="L1240">        offline.setFrom(fullJID);</span>
+<span class="nc" id="L1241">        offline.setTo(new JID(null, serverName, null, true));</span>
+<span class="nc" id="L1242">        offline.setType(Presence.Type.unavailable);</span>
+<span class="nc" id="L1243">        router.route(offline);</span>
+
+        // Stop tracking information about the session and share it with other cluster nodes.
+        // Note that, unlike other caches, this cache is populated only when clustering is enabled.
+<span class="nc" id="L1247">        sessionInfoCache.remove(fullJID.toString());</span>
+
+        // connectionsCounter tracks only local sessions. No need to decrement it here.
+<span class="nc" id="L1250">    }</span>
+
+    public int getConflictKickLimit() {
+<span class="nc" id="L1253">        return conflictLimit;</span>
+    }
+
+    /**
+     * Returns the temporary keys used by the sessions that has not been authenticated yet. This
+     * is an utility method useful for debugging situations.
+     *
+     * @return the temporary keys used by the sessions that has not been authenticated yet.
+     */
+    public Collection&lt;String&gt; getPreAuthenticatedKeys() {
+<span class="nc" id="L1263">        return localSessionManager.getPreAuthenticatedSessions().keySet();</span>
+    }
+
+    /**
+     * Returns true if the specified address belongs to a preauthenticated session. Preauthenticated
+     * sessions are only available to the local cluster node when running inside of a cluster.
+     *
+     * @param address the address of the session.
+     * @return true if the specified address belongs to a preauthenticated session.
+     */
+    public boolean isPreAuthenticatedSession(JID address) {
+<span class="nc bnc" id="L1274" title="All 2 branches missed.">        return serverName.equals(address.getDomain()) &amp;&amp;</span>
+<span class="nc bnc" id="L1275" title="All 2 branches missed.">                localSessionManager.getPreAuthenticatedSessions().containsKey(address.getResource());</span>
+    }
+
+    public void setConflictKickLimit(int limit) {
+<span class="nc" id="L1279">        conflictLimit = limit;</span>
+<span class="nc" id="L1280">        CONFLICT_LIMIT.setValue(limit);</span>
+<span class="nc" id="L1281">    }</span>
+
+<span class="nc" id="L1283">    private class ClientSessionListener implements ConnectionCloseListener {</span>
+        /**
+         * Handle a session that just closed.
+         *
+         * @param handback The session that just closed
+         */
+        @Override
+        public void onConnectionClose(Object handback) {
+            try {
+<span class="nc" id="L1292">                LocalClientSession session = (LocalClientSession) handback;</span>
+<span class="nc bnc" id="L1293" title="All 2 branches missed.">                if (session.isDetached()) {</span>
+<span class="nc" id="L1294">                    Log.debug(&quot;Closing session is detached already.&quot;);</span>
+<span class="nc" id="L1295">                    return;</span>
+                }
+<span class="nc bnc" id="L1297" title="All 2 branches missed.">                if (session.getStreamManager().getResume()) {</span>
+<span class="nc" id="L1298">                    Log.debug(&quot;Closing session has SM enabled; detaching.&quot;);</span>
+<span class="nc" id="L1299">                    session.setDetached();</span>
+<span class="nc" id="L1300">                    return;</span>
+                }
+                try {
+<span class="nc bnc" id="L1303" title="All 4 branches missed.">                    if ((session.getPresence().isAvailable() || !session.wasAvailable()) &amp;&amp;</span>
+<span class="nc bnc" id="L1304" title="All 2 branches missed.">                            routingTable.hasClientRoute(session.getAddress())) {</span>
+                        // Send an unavailable presence to the user's subscribers
+                        // Note: This gives us a chance to send an unavailable presence to the
+                        // entities that the user sent directed presences
+<span class="nc" id="L1308">                        Presence presence = new Presence();</span>
+<span class="nc" id="L1309">                        presence.setType(Presence.Type.unavailable);</span>
+<span class="nc" id="L1310">                        presence.setFrom(session.getAddress());</span>
+<span class="nc" id="L1311">                        router.route(presence);</span>
+                    }
+
+<span class="nc" id="L1314">                    session.getStreamManager().onClose(router, serverAddress);</span>
+                }
+                finally {
+                    // Remove the session
+<span class="nc" id="L1318">                    removeSession(session);</span>
+<span class="nc" id="L1319">                }</span>
+            }
+<span class="nc" id="L1321">            catch (Exception e) {</span>
+                // Can't do anything about this problem...
+<span class="nc" id="L1323">                Log.error(LocaleUtils.getLocalizedString(&quot;admin.error.close&quot;), e);</span>
+<span class="nc" id="L1324">            }</span>
+<span class="nc" id="L1325">        }</span>
+    }
+
+<span class="nc" id="L1328">    private class IncomingServerSessionListener implements ConnectionCloseListener {</span>
+        /**
+         * Handle a session that just closed.
+         *
+         * @param handback The session that just closed
+         */
+        @Override
+        public void onConnectionClose(Object handback) {
+<span class="nc" id="L1336">            IncomingServerSession session = (IncomingServerSession)handback;</span>
+            // Remove all the hostnames that were registered for this server session
+<span class="nc bnc" id="L1338" title="All 2 branches missed.">            for (String hostname : session.getValidatedDomains()) {</span>
+<span class="nc" id="L1339">                unregisterIncomingServerSession(hostname, session);</span>
+<span class="nc" id="L1340">            }</span>
+<span class="nc" id="L1341">        }</span>
+    }
+
+<span class="nc" id="L1344">    private class OutgoingServerSessionListener implements ConnectionCloseListener {</span>
+        /**
+         * Handle a session that just closed.
+         *
+         * @param handback The session that just closed
+         */
+        @Override
+        public void onConnectionClose(Object handback) {
+<span class="nc" id="L1352">            OutgoingServerSession session = (OutgoingServerSession)handback;</span>
+            // Remove all the hostnames that were registered for this server session
+<span class="nc bnc" id="L1354" title="All 2 branches missed.">            for (DomainPair domainPair : session.getOutgoingDomainPairs()) {</span>
+                // Remove the route to the session using the hostname
+<span class="nc" id="L1356">                server.getRoutingTable().removeServerRoute(domainPair);</span>
+<span class="nc" id="L1357">            }</span>
+<span class="nc" id="L1358">        }</span>
+    }
+
+<span class="nc" id="L1361">    private class ConnectionMultiplexerSessionListener implements ConnectionCloseListener {</span>
+        /**
+         * Handle a session that just closed.
+         *
+         * @param handback The session that just closed
+         */
+        @Override
+        public void onConnectionClose(Object handback) {
+<span class="nc" id="L1369">            ConnectionMultiplexerSession session = (ConnectionMultiplexerSession)handback;</span>
+            // Remove all the hostnames that were registered for this server session
+<span class="nc" id="L1371">            String domain = session.getAddress().getDomain();</span>
+<span class="nc" id="L1372">            localSessionManager.getConnnectionManagerSessions().remove(session.getAddress().toString());</span>
+            // Remove track of the cluster node hosting the CM connection
+<span class="nc" id="L1374">            multiplexerSessionsCache.remove(session.getAddress().toString());</span>
+<span class="nc bnc" id="L1375" title="All 2 branches missed.">            if (getConnectionMultiplexerSessions(domain).isEmpty()) {</span>
+                // Terminate ClientSessions originated from this connection manager
+                // that are still active since the connection manager has gone down
+<span class="nc" id="L1378">                ConnectionMultiplexerManager.getInstance().multiplexerUnavailable(domain);</span>
+            }
+<span class="nc" id="L1380">        }</span>
+    }
+
+    @Override
+    public void initialize(XMPPServer server) {
+<span class="nc" id="L1385">        super.initialize(server);</span>
+<span class="nc" id="L1386">        this.server = server;</span>
+<span class="nc" id="L1387">        router = server.getPacketRouter();</span>
+<span class="nc" id="L1388">        userManager = server.getUserManager();</span>
+<span class="nc" id="L1389">        routingTable = server.getRoutingTable();</span>
+<span class="nc" id="L1390">        serverName = server.getServerInfo().getXMPPDomain();</span>
+<span class="nc" id="L1391">        serverAddress = new JID(serverName);</span>
+
+<span class="nc bnc" id="L1393" title="All 2 branches missed.">        if (JiveGlobals.getBooleanProperty(&quot;xmpp.audit.active&quot;)) {</span>
+<span class="nc" id="L1394">            streamIDFactory = new AuditStreamIDFactory();</span>
+        }
+        else {
+<span class="nc" id="L1397">            streamIDFactory = new BasicStreamIDFactory();</span>
+        }
+
+        // Initialize caches.
+<span class="nc" id="L1401">        componentSessionsCache = CacheFactory.createCache(COMPONENT_SESSION_CACHE_NAME);</span>
+<span class="nc" id="L1402">        multiplexerSessionsCache = CacheFactory.createCache(CM_CACHE_NAME);</span>
+<span class="nc" id="L1403">        incomingServerSessionsCache = CacheFactory.createCache(ISS_CACHE_NAME);</span>
+<span class="nc" id="L1404">        hostnameSessionsCache = CacheFactory.createCache(HOSTNAME_SESSIONS_CACHE_NAME);</span>
+<span class="nc" id="L1405">        validatedDomainsCache = CacheFactory.createCache(VALIDATED_DOMAINS_CACHE_NAME);</span>
+<span class="nc" id="L1406">        sessionInfoCache = CacheFactory.createCache(C2S_INFO_CACHE_NAME);</span>
+
+        // Listen to cluster events
+<span class="nc" id="L1409">        ClusterManager.addListener(this);</span>
+<span class="nc" id="L1410">    }</span>
+
+
+    /**
+     * Sends a message with a given subject and body to all the active user sessions in the server.
+     *
+     * @param subject the subject to broadcast.
+     * @param body    the body to broadcast.
+     */
+    public void sendServerMessage(String subject, String body) {
+<span class="nc" id="L1420">        sendServerMessage(null, subject, body);</span>
+<span class="nc" id="L1421">    }</span>
+
+    /**
+     * Sends a message with a given subject and body to one or more user sessions related to the
+     * specified address. If address is null or the address's node is null then the message will be
+     * sent to all the user sessions. But if the address includes a node but no resource then
+     * the message will be sent to all the user sessions of the requeted user (defined by the node).
+     * Finally, if the address is a full JID then the message will be sent to the session associated
+     * to the full JID. If no session is found then the message is not sent.
+     *
+     * @param address the address that defines the sessions that will receive the message.
+     * @param subject the subject to broadcast.
+     * @param body    the body to broadcast.
+     */
+    public void sendServerMessage(JID address, String subject, String body) {
+<span class="nc" id="L1436">        Message packet = createServerMessage(subject, body);</span>
+<span class="nc bnc" id="L1437" title="All 6 branches missed.">        if (address == null || address.getNode() == null || !userManager.isRegisteredUser(address)) {</span>
+<span class="nc" id="L1438">            broadcast(packet);</span>
+        }
+<span class="nc bnc" id="L1440" title="All 4 branches missed.">        else if (address.getResource() == null || address.getResource().length() &lt; 1) {</span>
+<span class="nc" id="L1441">            userBroadcast(address.getNode(), packet);</span>
+        }
+        else {
+<span class="nc" id="L1444">            routingTable.routePacket(address, packet, true);</span>
+        }
+<span class="nc" id="L1446">    }</span>
+
+    private Message createServerMessage(String subject, String body) {
+<span class="nc" id="L1449">        Message message = new Message();</span>
+<span class="nc" id="L1450">        message.setFrom(serverAddress);</span>
+<span class="nc bnc" id="L1451" title="All 2 branches missed.">        if (subject != null) {</span>
+<span class="nc" id="L1452">            message.setSubject(subject);</span>
+        }
+<span class="nc" id="L1454">        message.setBody(body);</span>
+<span class="nc" id="L1455">        return message;</span>
+    }
+
+    @Override
+    public void start() throws IllegalStateException {
+<span class="nc" id="L1460">        super.start();</span>
+<span class="nc" id="L1461">        localSessionManager.start();</span>
+        // Run through the server sessions every 3 minutes after a 3 minutes server startup delay (default values)
+<span class="nc" id="L1463">        int period = 3 * 60 * 1000;</span>
+<span class="nc" id="L1464">        TaskEngine.getInstance().scheduleAtFixedRate(new DetachedCleanupTask(), period, period);</span>
+<span class="nc" id="L1465">    }</span>
+
+    @Override
+    public void stop() {
+<span class="nc" id="L1469">        Log.debug(&quot;SessionManager: Stopping server&quot;);</span>
+        // Stop threads that are sending packets to remote servers
+<span class="nc" id="L1471">        OutgoingSessionPromise.getInstance().shutdown();</span>
+<span class="nc bnc" id="L1472" title="All 2 branches missed.">        if (JiveGlobals.getBooleanProperty(&quot;shutdownMessage.enabled&quot;)) {</span>
+<span class="nc" id="L1473">            sendServerMessage(null, LocaleUtils.getLocalizedString(&quot;admin.shutdown.now&quot;));</span>
+        }
+<span class="nc" id="L1475">        localSessionManager.stop();</span>
+<span class="nc" id="L1476">        serverName = null;</span>
+
+        try
+        {
+            // Purge our own components from the cache for the benefit of other cluster nodes.
+<span class="nc" id="L1481">            CacheUtil.removeValueFromMultiValuedCache( componentSessionsCache, XMPPServer.getInstance().getNodeID() );</span>
+        }
+<span class="nc" id="L1483">        catch ( Exception e )</span>
+        {
+<span class="nc" id="L1485">            Log.warn( &quot;An exception occurred while trying to remove locally connected external components from the clustered cache. Other cluster nodes might continue to see our external components, even though we this instance is stopping.&quot;, e );</span>
+<span class="nc" id="L1486">        }</span>
+<span class="nc" id="L1487">    }</span>
+
+    /**
+     * Returns true if remote servers are allowed to have more than one connection to this
+     * server. Having more than one connection may improve number of packets that can be
+     * transfered per second. This setting only used by the server dialback mehod.&lt;p&gt;
+     *
+     * It is highly recommended that {@link #getServerSessionTimeout()} is enabled so that
+     * dead connections to this server can be easily discarded.
+     *
+     * @return true if remote servers are allowed to have more than one connection to this
+     *         server.
+     */
+    public boolean isMultipleServerConnectionsAllowed() {
+<span class="nc" id="L1501">        return JiveGlobals.getBooleanProperty(&quot;xmpp.server.session.allowmultiple&quot;, true);</span>
+    }
+
+    /**
+     * Sets if remote servers are allowed to have more than one connection to this
+     * server. Having more than one connection may improve number of packets that can be
+     * transfered per second. This setting only used by the server dialback mehod.&lt;p&gt;
+     *
+     * It is highly recommended that {@link #getServerSessionTimeout()} is enabled so that
+     * dead connections to this server can be easily discarded.
+     *
+     * @param allowed true if remote servers are allowed to have more than one connection to this
+     *        server.
+     */
+    public void setMultipleServerConnectionsAllowed(boolean allowed) {
+<span class="nc" id="L1516">        JiveGlobals.setProperty(&quot;xmpp.server.session.allowmultiple&quot;, Boolean.toString(allowed));</span>
+<span class="nc bnc" id="L1517" title="All 4 branches missed.">        if (allowed &amp;&amp; JiveGlobals.getIntProperty(&quot;xmpp.server.session.idle&quot;, 10 * 60 * 1000) &lt;= 0)</span>
+        {
+<span class="nc" id="L1519">            Log.warn(&quot;Allowing multiple S2S connections for each domain, without setting a &quot; +</span>
+                    &quot;maximum idle timeout for these connections, is unrecommended! Either &quot; +
+                    &quot;set xmpp.server.session.allowmultiple to 'false' or change &quot; +
+                    &quot;xmpp.server.session.idle to a (large) positive value.&quot;);
+        }
+<span class="nc" id="L1524">    }</span>
+
+    /******************************************************
+     * Clean up code
+     *****************************************************/
+    /**
+     * Sets the number of milliseconds to elapse between clearing of idle server sessions.
+     *
+     * @param timeout the number of milliseconds to elapse between clearings.
+     */
+    public void setServerSessionTimeout(int timeout) {
+<span class="nc bnc" id="L1535" title="All 2 branches missed.">        if (getServerSessionTimeout() == timeout) {</span>
+<span class="nc" id="L1536">            return;</span>
+        }
+        // Set the new property value
+<span class="nc" id="L1539">        JiveGlobals.setProperty(&quot;xmpp.server.session.timeout&quot;, Integer.toString(timeout));</span>
+<span class="nc" id="L1540">    }</span>
+
+    /**
+     * Returns the number of milliseconds to elapse between clearing of idle server sessions.
+     *
+     * @return the number of milliseconds to elapse between clearing of idle server sessions.
+     */
+    public int getServerSessionTimeout() {
+<span class="nc" id="L1548">        return JiveGlobals.getIntProperty(&quot;xmpp.server.session.timeout&quot;, 5 * 60 * 1000);</span>
+    }
+
+    public void setServerSessionIdleTime(int idleTime) {
+<span class="nc bnc" id="L1552" title="All 2 branches missed.">        if (getServerSessionIdleTime() == idleTime) {</span>
+<span class="nc" id="L1553">            return;</span>
+        }
+        // Set the new property value
+<span class="nc" id="L1556">        JiveGlobals.setProperty(&quot;xmpp.server.session.idle&quot;, Integer.toString(idleTime));</span>
+
+<span class="nc bnc" id="L1558" title="All 4 branches missed.">        if (idleTime &lt;= 0 &amp;&amp; isMultipleServerConnectionsAllowed() )</span>
+        {
+<span class="nc" id="L1560">            Log.warn(&quot;Allowing multiple S2S connections for each domain, without setting a &quot; +</span>
+                &quot;maximum idle timeout for these connections, is unrecommended! Either &quot; +
+                &quot;set xmpp.server.session.allowmultiple to 'false' or change &quot; +
+                &quot;xmpp.server.session.idle to a (large) positive value.&quot;);
+        }
+<span class="nc" id="L1565">    }</span>
+
+    public int getServerSessionIdleTime() {
+<span class="nc" id="L1568">        return JiveGlobals.getIntProperty(&quot;xmpp.server.session.idle&quot;, 10 * 60 * 1000);</span>
+    }
+
+    public void setSessionDetachTime(int idleTime) {
+<span class="nc bnc" id="L1572" title="All 2 branches missed.">        if (getSessionDetachTime() == idleTime) {</span>
+<span class="nc" id="L1573">            return;</span>
+        }
+        // Set the new property value
+<span class="nc" id="L1576">        JiveGlobals.setProperty(&quot;xmpp.session.detach.timeout&quot;, Integer.toString(idleTime));</span>
+<span class="nc" id="L1577">    }</span>
+
+    public int getSessionDetachTime() {
+<span class="nc" id="L1580">        return JiveGlobals.getIntProperty(&quot;xmpp.session.detach.timeout&quot;, 10 * 60 * 1000);</span>
+    }
+
+    // Note that, unlike other caches, this cache is populated only when clustering is enabled.
+    public Cache&lt;String, ClientSessionInfo&gt; getSessionInfoCache() {
+<span class="nc" id="L1585">        return sessionInfoCache;</span>
+    }
+
+    @Override
+    public void joinedCluster()
+    {
+        // Upon joining a cluster, the server can get a new ID. Here, all old IDs are replaced with the new identity.
+<span class="nc" id="L1592">        final NodeID defaultNodeID = server.getDefaultNodeID();</span>
+<span class="nc" id="L1593">        final NodeID nodeID = server.getNodeID();</span>
+<span class="nc bnc" id="L1594" title="All 2 branches missed.">        if ( !defaultNodeID.equals( nodeID ) ) // In more recent versions of Openfire, the ID does not change.</span>
+        {
+<span class="nc" id="L1596">            CacheUtil.replaceValueInMultivaluedCache( componentSessionsCache, defaultNodeID, nodeID );</span>
+<span class="nc" id="L1597">            CacheUtil.replaceValueInCache( multiplexerSessionsCache, defaultNodeID, nodeID );</span>
+<span class="nc" id="L1598">            CacheUtil.replaceValueInCache( incomingServerSessionsCache, defaultNodeID, nodeID );</span>
+        }
+        // Track information about local sessions and share it with other cluster nodes.
+        // Note that, unlike other caches, this cache is populated only when clustering is enabled.
+<span class="nc bnc" id="L1602" title="All 2 branches missed.">        for (ClientSession session : routingTable.getClientsRoutes(true)) {</span>
+<span class="nc" id="L1603">            sessionInfoCache.put(session.getAddress().toString(), new ClientSessionInfo((LocalClientSession)session));</span>
+<span class="nc" id="L1604">        }</span>
+<span class="nc" id="L1605">    }</span>
+
+    @Override
+    public void joinedCluster(byte[] nodeID) {
+        // Do nothing
+<span class="nc" id="L1610">    }</span>
+
+    @Override
+    public void leftCluster() {
+<span class="nc bnc" id="L1614" title="All 2 branches missed.">        if (!XMPPServer.getInstance().isShuttingDown()) {</span>
+            // Upon leaving a cluster, the server uses its non-clustered/default ID again. Here, all clustered IDs are replaced with the new identity.
+<span class="nc" id="L1616">            final NodeID defaultNodeID = server.getDefaultNodeID();</span>
+<span class="nc" id="L1617">            final NodeID nodeID = server.getNodeID();</span>
+<span class="nc bnc" id="L1618" title="All 2 branches missed.">            if ( !defaultNodeID.equals( nodeID ) ) // In more recent versions of Openfire, the ID does not change.</span>
+            {
+<span class="nc" id="L1620">                CacheUtil.replaceValueInMultivaluedCache( componentSessionsCache, nodeID, defaultNodeID );</span>
+<span class="nc" id="L1621">                CacheUtil.replaceValueInCache( multiplexerSessionsCache, nodeID, defaultNodeID );</span>
+<span class="nc" id="L1622">                CacheUtil.replaceValueInCache( incomingServerSessionsCache, nodeID, defaultNodeID );</span>
+            }
+
+            // The local cluster node left the cluster.
+            //
+            // Determine what entities were available only on other cluster nodes than the local one.
+            // These need to be cleaned up, as they're no longer available to the local cluster node.
+
+            // All entities that were connected to other cluster nodes are no longer available.
+<span class="nc" id="L1631">            CacheUtil.retainValueInMultiValuedCache( componentSessionsCache, defaultNodeID );</span>
+<span class="nc" id="L1632">            CacheUtil.retainValueInCache( multiplexerSessionsCache, defaultNodeID );</span>
+<span class="nc" id="L1633">            final Set&lt;StreamID&gt; removedStreamIDs = CacheUtil.retainValueInCache( incomingServerSessionsCache, defaultNodeID );</span>
+
+            // Update the collection of 'sockets/sessions coming from the same remote hostname' as well as the collection of 'validated domains' to reflect the loss of incoming server sessions.
+<span class="nc bnc" id="L1636" title="All 2 branches missed.">            if ( !removedStreamIDs.isEmpty() )</span>
+            {
+<span class="nc" id="L1638">                Log.debug( &quot;The local cluster node left the cluster. The incoming server sessions with IDs '{}' were living on one (or more) other cluster nodes, and are no longer available.&quot;,</span>
+<span class="nc" id="L1639">                           String.join( &quot;, &quot;, removedStreamIDs.stream().map( StreamID::getID ).collect( Collectors.toSet() ) ) );</span>
+<span class="nc" id="L1640">                unregisterIncomingServerSession( removedStreamIDs );</span>
+            }
+
+            // Note that the cleanup of client state in this class is triggered by a call from RoutingTableImpl#leftCluster() to SessionManager#removeRemoteClientSession().
+        }
+<span class="nc" id="L1645">    }</span>
+
+    @Override
+    public void leftCluster(byte[] nodeID) {
+        // Another node left the cluster.
+        //
+        // If the cluster node leaves in an orderly fashion, it might have cleaned up
+        // caches itself. This cannot be depended on, as the cluster node
+        // might have disconnected unexpectedly (as a result of a crash or network issue).
+        //
+        // Determine what entities were available only on that node, and remove them.
+        // If the cluster node exited cleanly, we won't find any entries to work on. If
+        // it did not exit cleanly, all remaining cluster nodes will be in a race to
+        // clean up the same data. The implementation below accounts for that, by
+        // being thread- and cluster safe.
+
+        // All entities that were connected to other cluster nodes are no longer available.
+<span class="nc" id="L1662">        CacheUtil.removeValueFromMultiValuedCache( componentSessionsCache, NodeID.getInstance( nodeID ) );</span>
+<span class="nc" id="L1663">        CacheUtil.removeValueFromCache( multiplexerSessionsCache, NodeID.getInstance( nodeID )  );</span>
+<span class="nc" id="L1664">        final Set&lt;StreamID&gt; removedStreamIDs = CacheUtil.removeValueFromCache( incomingServerSessionsCache, NodeID.getInstance( nodeID ) );</span>
+
+        // Update the collection of 'sockets/sessions coming from the same remote hostname' as well as the collection of 'validated domains' to reflect the loss of incoming server sessions.
+<span class="nc bnc" id="L1667" title="All 2 branches missed.">        if ( !removedStreamIDs.isEmpty() )</span>
+        {
+<span class="nc" id="L1669">            Log.debug( &quot;Cluster node {} just left the cluster, and was the node where incoming server sessions with IDs '{}' were living. They are no longer available.&quot;,</span>
+<span class="nc" id="L1670">                       NodeID.getInstance( nodeID ),</span>
+<span class="nc" id="L1671">                       String.join( &quot;, &quot;, removedStreamIDs.stream().map( StreamID::getID ).collect( Collectors.toSet() ) ) );</span>
+<span class="nc" id="L1672">            unregisterIncomingServerSession( removedStreamIDs );</span>
+        }
+
+        // Note that the cleanup of client state in this class is triggered by a call from RoutingTableImpl#leftCluster() to SessionManager#removeRemoteClientSession().
+<span class="nc" id="L1676">    }</span>
+
+    @Override
+    public void markedAsSeniorClusterMember() {
+        // Do nothing
+<span class="nc" id="L1681">    }</span>
+
+    /**
+     * Task that closes detached client sessions.
+     */
+<span class="nc" id="L1686">    private class DetachedCleanupTask extends TimerTask {</span>
+        /**
+         * Close detached client sessions that haven't seen activity in more than
+         * 30 minutes by default.
+         */
+        @Override
+        public void run() {
+<span class="nc" id="L1693">            int idleTime = getSessionDetachTime();</span>
+<span class="nc bnc" id="L1694" title="All 2 branches missed.">            if (idleTime == -1) {</span>
+<span class="nc" id="L1695">                return;</span>
+            }
+<span class="nc" id="L1697">            final long deadline = System.currentTimeMillis() - idleTime;</span>
+<span class="nc bnc" id="L1698" title="All 2 branches missed.">            for (LocalSession session : detachedSessions.values()) {</span>
+                try {
+<span class="nc bnc" id="L1700" title="All 2 branches missed.">                    if (session.getLastActiveDate().getTime() &lt; deadline) {</span>
+<span class="nc" id="L1701">                        removeDetached(session);</span>
+<span class="nc" id="L1702">                        LocalClientSession clientSession = (LocalClientSession)session;</span>
+<span class="nc bnc" id="L1703" title="All 2 branches missed.">                        if (clientSession != null) {</span>
+                            try {
+<span class="nc bnc" id="L1705" title="All 4 branches missed.">                                if ((clientSession.getPresence().isAvailable() || !clientSession.wasAvailable()) &amp;&amp;</span>
+<span class="nc bnc" id="L1706" title="All 2 branches missed.">                                    routingTable.hasClientRoute(session.getAddress())) {</span>
+                                    // Send an unavailable presence to the user's subscribers
+                                    // Note: This gives us a chance to send an unavailable presence to the
+                                    // entities that the user sent directed presences
+<span class="nc" id="L1710">                                    Presence presence = new Presence();</span>
+<span class="nc" id="L1711">                                    presence.setType(Presence.Type.unavailable);</span>
+<span class="nc" id="L1712">                                    presence.setFrom(session.getAddress());</span>
+<span class="nc" id="L1713">                                    router.route(presence);</span>
+                                }
+
+<span class="nc" id="L1716">                                session.getStreamManager().onClose(router, serverAddress);</span>
+                            } finally {
+                                // Remove the session
+<span class="nc" id="L1719">                                removeSession(clientSession);</span>
+<span class="nc" id="L1720">                            }</span>
+                        }
+                    }
+                }
+<span class="nc" id="L1724">                catch (Throwable e) {</span>
+<span class="nc" id="L1725">                    Log.error(LocaleUtils.getLocalizedString(&quot;admin.error&quot;), e);</span>
+<span class="nc" id="L1726">                }</span>
+<span class="nc" id="L1727">            }</span>
+<span class="nc" id="L1728">        }</span>
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

@@ -1,0 +1,477 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>ResultSet.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.resultsetmanager</a> &gt; <span class="el_source">ResultSet.java</span></div><h1>ResultSet.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.jivesoftware.openfire.resultsetmanager;
+
+import org.dom4j.DocumentHelper;
+import org.dom4j.Element;
+import org.dom4j.QName;
+
+import java.util.*;
+
+/**
+ * A result set representation as described in XEP-0059. A result set is a
+ * collection of objects that each have a unique identifier (UID).
+ * 
+ * It's expected that some implementations will have the complete result set
+ * loaded into memory, whereas more complex implementations might keep
+ * references to partial sets only. This latter would have considerable
+ * advantages if the result set is extremely large, or if the operation to get
+ * all results in the set is expensive.
+ * 
+ * @author Guus der Kinderen, guus@nimbuzz.com
+ * 
+ * @param &lt;E&gt;
+ *            Each result set should be a collection of instances of the exact
+ *            same class. This class must implement the {@link Result}
+ *            interface.
+ * @deprecated Replaced by {@link org.xmpp.resultsetmanagement.ResultSet}            
+ */
+@Deprecated
+<span class="nc" id="L43">public abstract class ResultSet&lt;E extends Result&gt; extends AbstractCollection&lt;E&gt; {</span>
+
+    /**
+     * A list of field names that are valid in jabber:iq:search
+     */
+<span class="nc" id="L48">    private final static Collection&lt;String&gt; validRequestFields = new ArrayList&lt;&gt;();</span>
+    static {
+<span class="nc" id="L50">        validRequestFields.add(&quot;max&quot;); // required</span>
+<span class="nc" id="L51">        validRequestFields.add(&quot;before&quot;);</span>
+<span class="nc" id="L52">        validRequestFields.add(&quot;after&quot;);</span>
+<span class="nc" id="L53">        validRequestFields.add(&quot;index&quot;);</span>
+<span class="nc" id="L54">    }</span>
+
+    /**
+     * The namespace that identifies Result Set Management functionality.
+     */
+    public static final String NAMESPACE_RESULT_SET_MANAGEMENT = &quot;http://jabber.org/protocol/rsm&quot;;
+
+    /**
+     * Returns a List of results starting with the first result after the
+     * provided result (the returned List is exclusive).
+     * 
+     * The lenght of the list is equal to 'maxAmount', unless there are no more
+     * elements available (in which case the length of the result will be
+     * truncated).
+     * 
+     * @param result
+     *            The element that is right before the first element in the
+     *            result.
+     * @param maxAmount
+     *            The maximum number of elements to return.
+     * @return A List of elements the are exactly after the element that is
+     *         provided as a parameter.
+     * @throws NullPointerException
+     *             if the result does not exist in the result set.
+     */
+    public List&lt;E&gt; getAfter(E result, int maxAmount) {
+<span class="nc" id="L80">        return getAfter(result.getUID(), maxAmount);</span>
+    }
+
+    /**
+     * Returns a List of results starting with the first result after the result
+     * that's identified by the provided UID (the returned List is exclusive).
+     * 
+     * The lenght of the list is equal to 'maxAmount', unless there are no more
+     * elements available (in which case the length of the result will be
+     * truncated).
+     * 
+     * @param uid
+     *            The UID of the element that is right before the first element
+     *            in the result.
+     * @param maxAmount
+     *            The maximum number of elements to return.
+     * @return A List of elements the are exactly after the element that is
+     *         provided as a parameter.
+     * @throws NullPointerException
+     *             if there is no result in the result set that matches the UID.
+     */
+    public abstract List&lt;E&gt; getAfter(String uid, int maxAmount);
+
+    /**
+     * Returns a list of results ending with the element right before the
+     * provided result (the returned List is exclusive).
+     * 
+     * At most 'maxAmount' elements are in the returned List, but the lenght of
+     * the result might be smaller if no more applicable elements are available.
+     * 
+     * Note that the order of the result is equal to the order of the results of
+     * other methods of this class: the last element in the returned List
+     * immediately preceeds the element denoted by the 'result' parameter.
+     * 
+     * @param result
+     *            The element preceding the last element returned by this
+     *            function.
+     * @param maxAmount
+     *            The length of the List that is being returned.
+     * @return A List of elements that are exactly before the element that's
+     *         provided as a parameter.
+     * @throws NullPointerException
+     *             if the result does not exist in the result set.
+     * 
+     */
+    public List&lt;E&gt; getBefore(E result, int maxAmount) {
+<span class="nc" id="L126">        return getBefore(result.getUID(), maxAmount);</span>
+    }
+
+    /**
+     * Returns a list of results ending with the element right before the
+     * element identified by the provided UID (the returned List is exclusive).
+     * 
+     * At most 'maxAmount' elements are in the returned List, but the lenght of
+     * the result might be smaller if no more applicable elements are available.
+     * 
+     * Note that the order of the result is equal to the order of the results of
+     * other methods of this class: the last element in the returned List
+     * immediately preceeds the element denoted by the 'result' parameter.
+     * 
+     * @param uid
+     *            The UID of the element preceding the last element returned by
+     *            this function.
+     * @param maxAmount
+     *            The length of the List that is being returned.
+     * @return A List of elements that are exactly before the element that's
+     *         provided as a parameter.
+     * @throws NullPointerException
+     *             if there is no result in the result set that matches the UID.
+     */
+    public abstract List&lt;E&gt; getBefore(String uid, int maxAmount);
+
+    /**
+     * Returns the first elements from this result set.
+     * 
+     * @param maxAmount
+     *            the number of elements to return.
+     * @return the last 'maxAmount' elements of this result set.
+     */
+    public abstract List&lt;E&gt; getFirst(int maxAmount);
+
+    /**
+     * Returns the last elements from this result set.
+     * 
+     * @param maxAmount
+     *            the number of elements to return.
+     * @return the last 'maxAmount' elements of this result set.
+     */
+    public abstract List&lt;E&gt; getLast(int maxAmount);
+
+    /**
+     * Returns the element denoted by the index.
+     * 
+     * @param index
+     *            Index of the element to be returned
+     * @return the Element at 'index'.
+     */
+    public abstract E get(int index);
+
+    /**
+     * Returns a list of results, starting with the result that's at the
+     * specified index. If the difference between the startIndex and the index
+     * of the last element in the entire resultset is smaller than the size
+     * supplied in the 'amount' parameter, the length of the returned list will
+     * be smaller than the 'amount' paramater. If the supplied index is equal
+     * to, or larger than the size of the result set, an empty List is returned.
+     * 
+     * @param fromIndex
+     *            The index of the first element to be returned.
+     * @param maxAmount
+     *            The maximum number of elements to return.
+     * @return A list of elements starting with (inclusive) the element
+     *         referenced by 'fromIndex'. An empty List if startIndex is equal
+     *         to or bigger than the size of this entire result set.
+     */
+    public abstract List&lt;E&gt; get(int fromIndex, int maxAmount);
+
+    /**
+     * Returns the UID of the object at the specified index in this result set.
+     * 
+     * @param index
+     *            The index of the UID to be returned.
+     * @return UID of the object on the specified index.
+     */
+    public String getUID(int index) {
+<span class="nc" id="L205">        return get(index).getUID();</span>
+    }
+
+    /**
+     * Returns the index in the full resultset of the element identified by the
+     * UID in te supplied argument.
+     * 
+     * @param uid
+     *            The UID of the element to search for
+     * @return The index of the element.
+     * @throws NullPointerException
+     *             if there is no result in the result set that matches the UID.
+     * 
+     */
+    public abstract int indexOf(String uid);
+
+    /**
+     * Returns the index in the full resultset of the supplied argument.
+     * 
+     * @param element
+     *            The element to search for
+     * @return The index of the element.
+     */
+    public int indexOf(E element) {
+<span class="nc" id="L229">        return indexOf(element.getUID());</span>
+    }
+
+    /*
+     * (non-Javadoc)
+     * 
+     * @see java.util.AbstractCollection#iterator()
+     */
+    @Override
+    public Iterator&lt;E&gt; iterator() {
+<span class="nc" id="L239">        return new Itr();</span>
+    }
+
+    /**
+     * Applies the 'result set management' directives to this result set, and
+     * returns a list of Results that matches the directives. Note that the
+     * orignal set is untouched. Instead, a new List is returned.
+     * 
+     * @param rsmElement
+     *            The XML element that contains the 'result set management'
+     *            directives.
+     * @return a list of Results that matches the directives.
+     */
+    public List&lt;E&gt; applyRSMDirectives(Element rsmElement) {
+<span class="nc bnc" id="L253" title="All 4 branches missed.">        if (rsmElement == null || !isValidRSMRequest(rsmElement)) {</span>
+<span class="nc" id="L254">            throw new IllegalArgumentException(</span>
+                    &quot;The 'rsmElement' argument must be a valid, non-null RSM element.&quot;);
+        }
+
+<span class="nc" id="L258">        final int max = Integer.parseInt(rsmElement.element(&quot;max&quot;).getText());</span>
+
+<span class="nc bnc" id="L260" title="All 2 branches missed.">        if (max == 0) {</span>
+            // this is a request for a resultset count.
+<span class="nc" id="L262">            return Collections.emptyList();</span>
+        }
+
+        // optional elements
+<span class="nc" id="L266">        final Element afterElement = rsmElement.element(&quot;after&quot;);</span>
+<span class="nc" id="L267">        final Element beforeElement = rsmElement.element(&quot;before&quot;);</span>
+<span class="nc" id="L268">        final Element indexElement = rsmElement.element(&quot;index&quot;);</span>
+
+        // Identify the pointer object in this set. This is the object before
+        // (or after) the first (respectivly last) element of the subset that
+        // should be returned. If no pointer is specified, the pointer is said
+        // to be before or after the first respectivly last element of the set.
+<span class="nc" id="L274">        String pointerUID = null; // by default, the pointer is before the</span>
+        // first element of the set.
+
+        // by default, the search list is forward oriented.
+<span class="nc" id="L278">        boolean isForwardOriented = true;</span>
+
+<span class="nc bnc" id="L280" title="All 2 branches missed.">        if (afterElement != null) {</span>
+<span class="nc" id="L281">            pointerUID = afterElement.getText();</span>
+<span class="nc bnc" id="L282" title="All 2 branches missed.">        } else if (beforeElement != null) {</span>
+<span class="nc" id="L283">            pointerUID = beforeElement.getText();</span>
+<span class="nc" id="L284">            isForwardOriented = false;</span>
+<span class="nc bnc" id="L285" title="All 2 branches missed.">        } else if (indexElement != null) {</span>
+<span class="nc" id="L286">            final int index = Integer.parseInt(indexElement.getText());</span>
+<span class="nc bnc" id="L287" title="All 2 branches missed.">            if (index &gt; 0) {</span>
+<span class="nc" id="L288">                pointerUID = getUID(index - 1);</span>
+            }
+        }
+
+<span class="nc bnc" id="L292" title="All 4 branches missed.">        if (pointerUID != null &amp;&amp; pointerUID.equals(&quot;&quot;)) {</span>
+<span class="nc" id="L293">            pointerUID = null;</span>
+        }
+
+<span class="nc bnc" id="L296" title="All 2 branches missed.">        if (isForwardOriented) {</span>
+<span class="nc bnc" id="L297" title="All 2 branches missed.">            if (pointerUID == null) {</span>
+<span class="nc" id="L298">                return getFirst(max);</span>
+            }
+<span class="nc" id="L300">            return getAfter(pointerUID, max);</span>
+        }
+
+<span class="nc bnc" id="L303" title="All 2 branches missed.">        if (pointerUID == null) {</span>
+<span class="nc" id="L304">            return getLast(max);</span>
+        }
+<span class="nc" id="L306">        return getBefore(pointerUID, max);</span>
+    }
+
+    /**
+     * Generates a Result Set Management 'set' element that describes the parto
+     * of the result set that was generated. You typically would use the List
+     * that was returned by {@link #applyRSMDirectives(Element)} as an argument
+     * to this method.
+     * 
+     * @param returnedResults
+     *            The subset of Results that is returned by the current query.
+     * @return An Element named 'set' that can be included in the result IQ
+     *         stanza, which returns the subset of results.
+     */
+    public Element generateSetElementFromResults(List&lt;E&gt; returnedResults) {
+<span class="nc bnc" id="L321" title="All 2 branches missed.">        if (returnedResults == null) {</span>
+<span class="nc" id="L322">            throw new IllegalArgumentException(</span>
+                    &quot;Argument 'returnedResults' cannot be null.&quot;);
+        }
+<span class="nc" id="L325">        final Element setElement = DocumentHelper.createElement(QName.get(</span>
+                &quot;set&quot;, ResultSet.NAMESPACE_RESULT_SET_MANAGEMENT));
+        // the size element contains the size of this entire result set.
+<span class="nc" id="L328">        setElement.addElement(&quot;count&quot;).setText(String.valueOf(size()));</span>
+
+        // if the query wasn't a 'count only' query, add two more elements
+<span class="nc bnc" id="L331" title="All 2 branches missed.">        if (returnedResults.size() &gt; 0) {</span>
+<span class="nc" id="L332">            final Element firstElement = setElement.addElement(&quot;first&quot;);</span>
+<span class="nc" id="L333">            firstElement.addText(returnedResults.get(0).getUID());</span>
+<span class="nc" id="L334">            firstElement.addAttribute(&quot;index&quot;, String</span>
+<span class="nc" id="L335">                    .valueOf(indexOf(returnedResults.get(0))));</span>
+
+<span class="nc" id="L337">            setElement.addElement(&quot;last&quot;).addText(</span>
+<span class="nc" id="L338">                    returnedResults.get(returnedResults.size() - 1).getUID());</span>
+        }
+
+<span class="nc" id="L341">        return setElement;</span>
+    }
+
+    /**
+     * Checks if the Element that has been passed as an argument is a valid
+     * Result Set Management element, in a request context.
+     * 
+     * @param rsmElement
+     *            The Element to check.
+     * @return ''true'' if this is a valid RSM query representation, ''false''
+     *         otherwise.
+     */
+    // Dom4J doesn't do generics, sadly.
+    @SuppressWarnings(&quot;unchecked&quot;)
+    public static boolean isValidRSMRequest(Element rsmElement) {
+<span class="nc bnc" id="L356" title="All 2 branches missed.">        if (rsmElement == null) {</span>
+<span class="nc" id="L357">            throw new IllegalArgumentException(</span>
+                    &quot;The argument 'rsmElement' cannot be null.&quot;);
+        }
+
+<span class="nc bnc" id="L361" title="All 2 branches missed.">        if (!rsmElement.getName().equals(&quot;set&quot;)) {</span>
+            // the name of the element must be &quot;set&quot;.
+<span class="nc" id="L363">            return false;</span>
+        }
+
+<span class="nc bnc" id="L366" title="All 2 branches missed.">        if (!rsmElement.getNamespaceURI().equals(</span>
+                NAMESPACE_RESULT_SET_MANAGEMENT)) {
+            // incorrect namespace
+<span class="nc" id="L369">            return false;</span>
+        }
+
+<span class="nc" id="L372">        final Element maxElement = rsmElement.element(&quot;max&quot;);</span>
+<span class="nc bnc" id="L373" title="All 2 branches missed.">        if (maxElement == null) {</span>
+            // The 'max' element in an RSM request must be available
+<span class="nc" id="L375">            return false;</span>
+        }
+
+<span class="nc" id="L378">        final String sMax = maxElement.getText();</span>
+<span class="nc bnc" id="L379" title="All 4 branches missed.">        if (sMax == null || sMax.length() == 0) {</span>
+            // max element must contain a value.
+<span class="nc" id="L381">            return false;</span>
+        }
+
+        try {
+<span class="nc bnc" id="L385" title="All 2 branches missed.">            if (Integer.parseInt(sMax) &lt; 0) {</span>
+                // must be a postive integer.
+<span class="nc" id="L387">                return false;</span>
+            }
+<span class="nc" id="L389">        } catch (NumberFormatException e) {</span>
+            // the value of 'max' must be an integer value.
+<span class="nc" id="L391">            return false;</span>
+<span class="nc" id="L392">        }</span>
+
+<span class="nc" id="L394">        List&lt;Element&gt; allElements = rsmElement.elements();</span>
+<span class="nc" id="L395">        int optionalElements = 0;</span>
+<span class="nc bnc" id="L396" title="All 2 branches missed.">        for (Element element : allElements) {</span>
+<span class="nc" id="L397">            final String name = element.getName();</span>
+<span class="nc bnc" id="L398" title="All 2 branches missed.">            if (!validRequestFields.contains(name)) {</span>
+                // invalid element.
+<span class="nc" id="L400">                return false;</span>
+            }
+
+<span class="nc bnc" id="L403" title="All 2 branches missed.">            if (!name.equals(&quot;max&quot;)) {</span>
+<span class="nc" id="L404">                optionalElements++;</span>
+            }
+
+<span class="nc bnc" id="L407" title="All 2 branches missed.">            if (optionalElements &gt; 1) {</span>
+                // only one optional element is allowed.
+<span class="nc" id="L409">                return false;</span>
+            }
+
+<span class="nc bnc" id="L412" title="All 2 branches missed.">            if (name.equals(&quot;index&quot;)) {</span>
+<span class="nc" id="L413">                final String value = element.getText();</span>
+<span class="nc bnc" id="L414" title="All 4 branches missed.">                if (value == null || value.equals(&quot;&quot;)) {</span>
+                    // index elements must have a numberic value.
+<span class="nc" id="L416">                    return false;</span>
+                }
+                try {
+<span class="nc bnc" id="L419" title="All 2 branches missed.">                    if (Integer.parseInt(value) &lt; 0) {</span>
+                        // index values must be positive.
+<span class="nc" id="L421">                        return false;</span>
+                    }
+<span class="nc" id="L423">                } catch (NumberFormatException e) {</span>
+                    // index values must be numeric.
+<span class="nc" id="L425">                    return false;</span>
+<span class="nc" id="L426">                }</span>
+            }
+<span class="nc" id="L428">        }</span>
+
+<span class="nc" id="L430">        return true;</span>
+    }
+
+    /**
+     * Basic Iterator implementation. Forward scrolling only. Does not support
+     * modification.
+     * 
+     * @author Guus der Kinderen, guus@nimbuzz.com
+     * 
+     */
+<span class="nc" id="L440">    class Itr implements Iterator&lt;E&gt; {</span>
+        /**
+         * Index of element to be returned by subsequent call to next.
+         */
+<span class="nc" id="L444">        int cursor = 0;</span>
+
+        /*
+         * (non-Javadoc)
+         * 
+         * @see java.util.Iterator#hasNext()
+         */
+        @Override
+        public boolean hasNext() {
+<span class="nc bnc" id="L453" title="All 2 branches missed.">            return cursor != size();</span>
+        }
+
+        /*
+         * (non-Javadoc)
+         * 
+         * @see java.util.Iterator#next()
+         */
+        @Override
+        public E next() {
+<span class="nc" id="L463">            return get(cursor++);</span>
+        }
+
+        /*
+         * (non-Javadoc)
+         * 
+         * @see java.util.Iterator#remove()
+         */
+        @Override
+        public void remove() {
+<span class="nc" id="L473">            throw new UnsupportedOperationException();</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

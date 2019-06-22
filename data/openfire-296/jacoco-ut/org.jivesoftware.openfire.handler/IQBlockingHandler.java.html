@@ -1,0 +1,451 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>IQBlockingHandler.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.handler</a> &gt; <span class="el_source">IQBlockingHandler.java</span></div><h1>IQBlockingHandler.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2018 Ignite Realtime Foundation. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.handler;
+
+import org.dom4j.DocumentFactory;
+import org.dom4j.DocumentHelper;
+import org.dom4j.Element;
+import org.dom4j.QName;
+import org.jivesoftware.openfire.IQHandlerInfo;
+import org.jivesoftware.openfire.PresenceManager;
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.auth.UnauthorizedException;
+import org.jivesoftware.openfire.disco.ServerFeaturesProvider;
+import org.jivesoftware.openfire.privacy.PrivacyList;
+import org.jivesoftware.openfire.privacy.PrivacyListManager;
+import org.jivesoftware.openfire.privacy.PrivacyListProvider;
+import org.jivesoftware.openfire.session.ClientSession;
+import org.jivesoftware.openfire.user.User;
+import org.jivesoftware.openfire.user.UserManager;
+import org.jivesoftware.openfire.user.UserNotFoundException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmpp.packet.IQ;
+import org.xmpp.packet.JID;
+import org.xmpp.packet.PacketError;
+import org.xmpp.packet.Presence;
+
+import java.util.*;
+
+/**
+ * Implementation of XEP-0191 &quot;Blocking Command&quot;.
+ *
+ * This implementation uses the default privacy list of a user to store its blocklist.
+ *
+ * @author Guus der Kinderen, guus.der.kinderen@gmail.com
+ */
+public class IQBlockingHandler extends IQHandler implements ServerFeaturesProvider
+{
+<span class="nc" id="L53">    private static final Logger Log = LoggerFactory.getLogger( IQBlockingHandler.class );</span>
+
+    public IQBlockingHandler()
+    {
+<span class="nc" id="L57">        super( &quot;XEP-0191 Blocking Command handler&quot; );</span>
+<span class="nc" id="L58">    }</span>
+
+    @Override
+    public IQHandlerInfo getInfo()
+    {
+<span class="nc" id="L63">        return new IQHandlerInfo( &quot;blocklist&quot;, &quot;urn:xmpp:blocking&quot; );</span>
+    }
+
+
+    @Override
+    public Iterator&lt;String&gt; getFeatures()
+    {
+<span class="nc" id="L70">        return Collections.singletonList( &quot;urn:xmpp:blocking&quot; ).iterator();</span>
+    }
+
+    @Override
+    public IQ handleIQ( IQ iq ) throws UnauthorizedException
+    {
+<span class="nc bnc" id="L76" title="All 2 branches missed.">        if ( iq.isResponse() )</span>
+        {
+<span class="nc" id="L78">            return null;</span>
+        }
+
+<span class="nc" id="L81">        final JID requester = iq.getFrom();</span>
+
+<span class="nc bnc" id="L83" title="All 2 branches missed.">        if ( !XMPPServer.getInstance().getUserManager().isRegisteredUser( requester ) )</span>
+        {
+<span class="nc" id="L85">            final IQ error = IQ.createResultIQ( iq );</span>
+<span class="nc" id="L86">            error.setError( PacketError.Condition.not_authorized );</span>
+<span class="nc" id="L87">            return error;</span>
+        }
+
+        final User user;
+        try
+        {
+<span class="nc" id="L93">            user = UserManager.getInstance().getUser( requester.getNode() );</span>
+        }
+<span class="nc" id="L95">        catch ( UserNotFoundException e )</span>
+        {
+<span class="nc" id="L97">            Log.error( &quot;Unable to retrieve user '{}' that was verified to be an existing user!&quot;, requester.getNode(), e );</span>
+<span class="nc" id="L98">            final IQ error = IQ.createResultIQ( iq );</span>
+<span class="nc" id="L99">            error.setError( PacketError.Condition.internal_server_error );</span>
+<span class="nc" id="L100">            return error;</span>
+<span class="nc" id="L101">        }</span>
+
+        try
+        {
+<span class="nc bnc" id="L105" title="All 4 branches missed.">            if ( iq.getType().equals( IQ.Type.get ) &amp;&amp; &quot;blocklist&quot;.equals( iq.getChildElement().getName() ) )</span>
+            {
+<span class="nc" id="L107">                final Set&lt;JID&gt; blocklist = getBlocklist( user );</span>
+<span class="nc" id="L108">                final IQ response = IQ.createResultIQ( iq );</span>
+
+<span class="nc" id="L110">                final Element blocklistElement = DocumentHelper.createElement( QName.get( getInfo().getName(), getInfo().getNamespace() ) );</span>
+<span class="nc bnc" id="L111" title="All 2 branches missed.">                for ( final JID blocked : blocklist )</span>
+                {
+<span class="nc" id="L113">                    blocklistElement.addElement( &quot;item&quot; ).addAttribute( &quot;jid&quot;, blocked.toString() );</span>
+<span class="nc" id="L114">                }</span>
+<span class="nc" id="L115">                response.setChildElement( blocklistElement );</span>
+
+<span class="nc" id="L117">                sessionManager.getSession( iq.getFrom() ).setHasRequestedBlocklist( true );</span>
+<span class="nc" id="L118">                return response;</span>
+            }
+<span class="nc bnc" id="L120" title="All 4 branches missed.">            else if ( iq.getType().equals( IQ.Type.set ) &amp;&amp; &quot;block&quot;.equals( iq.getChildElement().getName() ) )</span>
+            {
+<span class="nc" id="L122">                final List&lt;Element&gt; items = iq.getChildElement().elements( &quot;item&quot; );</span>
+<span class="nc bnc" id="L123" title="All 4 branches missed.">                if ( items == null || items.isEmpty() )</span>
+                {
+<span class="nc" id="L125">                    final IQ error = IQ.createResultIQ( iq );</span>
+<span class="nc" id="L126">                    error.setError( PacketError.Condition.bad_request );</span>
+<span class="nc" id="L127">                    return error;</span>
+                }
+
+<span class="nc" id="L130">                final List&lt;JID&gt; toBlocks = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L131" title="All 2 branches missed.">                for ( final Element item : items )</span>
+                {
+<span class="nc" id="L133">                    toBlocks.add( new JID( item.attributeValue( &quot;jid&quot; ) ) );</span>
+<span class="nc" id="L134">                }</span>
+
+<span class="nc" id="L136">                addToBlockList( user, toBlocks );</span>
+<span class="nc" id="L137">                pushBlocklistUpdates( user, toBlocks );</span>
+
+<span class="nc" id="L139">                return IQ.createResultIQ( iq );</span>
+            }
+<span class="nc bnc" id="L141" title="All 4 branches missed.">            else if ( iq.getType().equals( IQ.Type.set ) &amp;&amp; &quot;unblock&quot;.equals( iq.getChildElement().getName() ) )</span>
+            {
+                final Set&lt;JID&gt; unblocked;
+<span class="nc" id="L144">                final List&lt;Element&gt; items = iq.getChildElement().elements( &quot;item&quot; );</span>
+<span class="nc bnc" id="L145" title="All 4 branches missed.">                if ( items == null || items.isEmpty() )</span>
+                {
+<span class="nc" id="L147">                    unblocked = removeAllFromBlocklist( user );</span>
+                }
+                else
+                {
+<span class="nc" id="L151">                    final Collection&lt;JID&gt; toUnblocks = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L152" title="All 2 branches missed.">                    for ( final Element item : items )</span>
+                    {
+<span class="nc" id="L154">                        toUnblocks.add( new JID( item.attributeValue( &quot;jid&quot; ) ) );</span>
+<span class="nc" id="L155">                    }</span>
+<span class="nc" id="L156">                    unblocked = removeFromBlockList( user, toUnblocks );</span>
+                }
+
+<span class="nc" id="L159">                pushBlocklistUpdates( user, unblocked );</span>
+<span class="nc" id="L160">                sendPresence( user, unblocked );</span>
+
+<span class="nc" id="L162">                return IQ.createResultIQ( iq );</span>
+            }
+            else
+            {
+<span class="nc" id="L166">                final IQ error = IQ.createResultIQ( iq );</span>
+<span class="nc" id="L167">                error.setError( PacketError.Condition.feature_not_implemented );</span>
+<span class="nc" id="L168">                return error;</span>
+            }
+        }
+<span class="nc" id="L171">        catch ( Exception e )</span>
+        {
+<span class="nc" id="L173">            Log.warn( &quot;An exception occurred while trying to process an IQ block request from '{}':&quot;, iq.getFrom(), e );</span>
+<span class="nc" id="L174">            final IQ error = IQ.createResultIQ( iq );</span>
+<span class="nc" id="L175">            error.setError( PacketError.Condition.internal_server_error );</span>
+<span class="nc" id="L176">            return error;</span>
+        }
+    }
+
+    /**
+     * Retrieves all of the JIDs that are on the blocklist of the provided user.
+     *
+     * @param user The use for which to retrieve the blocklist (cannot be null).
+     * @return The JIDs that are on the blocklist (possibly empty, but never null).
+     */
+    protected Set&lt;JID&gt; getBlocklist( User user )
+    {
+<span class="nc" id="L188">        Log.debug( &quot;Retrieving all JIDs that are on the blocklist of user '{}'.&quot;, user.getUsername() );</span>
+<span class="nc" id="L189">        final PrivacyList defaultPrivacyList = PrivacyListManager.getInstance().getDefaultPrivacyList( user.getUsername() );</span>
+<span class="nc bnc" id="L190" title="All 2 branches missed.">        if ( defaultPrivacyList == null )</span>
+        {
+<span class="nc" id="L192">            return Collections.emptySet();</span>
+        }
+
+<span class="nc" id="L195">        return defaultPrivacyList.getBlockedJIDs();</span>
+    }
+
+    /**
+     * Sends current presence information of the local user to the a collection of JIDs, if appropriate.
+     *
+     * @param user       The use for which to send presence (cannot be null).
+     * @param recipients The entities to which information is send (cannot be null, can be empty)
+     */
+    private void sendPresence( User user, Set&lt;JID&gt; recipients )
+    {
+<span class="nc bnc" id="L206" title="All 2 branches missed.">        if ( recipients.isEmpty() )</span>
+        {
+<span class="nc" id="L208">            return;</span>
+        }
+
+<span class="nc" id="L211">        final PresenceManager presenceManager = XMPPServer.getInstance().getPresenceManager();</span>
+<span class="nc" id="L212">        final Presence presence = presenceManager.getPresence( user );</span>
+<span class="nc bnc" id="L213" title="All 2 branches missed.">        if ( presence == null )</span>
+        {
+<span class="nc" id="L215">            return;</span>
+        }
+
+<span class="nc bnc" id="L218" title="All 2 branches missed.">        for ( final JID recipient : recipients )</span>
+        {
+            try
+            {
+<span class="nc bnc" id="L222" title="All 2 branches missed.">                if ( presenceManager.canProbePresence( recipient, user.getUsername() ) )</span>
+                {
+<span class="nc" id="L224">                    presenceManager.probePresence( recipient.asBareJID(), XMPPServer.getInstance().createJID( user.getUsername(), null ) );</span>
+                }
+            }
+<span class="nc" id="L227">            catch ( UserNotFoundException e )</span>
+            {
+<span class="nc" id="L229">                Log.error( &quot;Unable to send presence information of user '{}' to unblocked entity '{}' as local user is not found.&quot;, user.getUsername(), recipient );</span>
+<span class="nc" id="L230">            }</span>
+<span class="nc" id="L231">        }</span>
+<span class="nc" id="L232">    }</span>
+
+    /**
+     * Adds a collection of JIDs to the blocklist of the provided user.
+     *
+     * This method adds the JIDs to the default privacy list, creating a new privacy list (and setting it as default)
+     * if the user does not have a default privacy list.
+     *
+     * The newly added JIDs are push on the front end of the list. The order of pre-existing list items is modified.
+     *
+     * @param user     The owner of the blocklist to which JIDs are to be added (cannot be null).
+     * @param toBlocks The JIDs to be added (can be null, which results in a noop).
+     */
+    protected void addToBlockList( User user, List&lt;JID&gt; toBlocks )
+    {
+<span class="nc bnc" id="L247" title="All 4 branches missed.">        if ( toBlocks == null || toBlocks.isEmpty() )</span>
+        {
+<span class="nc" id="L249">            return;</span>
+        }
+
+<span class="nc" id="L252">        Log.debug( &quot;Obtain or create a the default privacy list for '{}'&quot;, user.getUsername() );</span>
+<span class="nc" id="L253">        PrivacyList defaultPrivacyList = PrivacyListManager.getInstance().getDefaultPrivacyList( user.getUsername() );</span>
+<span class="nc bnc" id="L254" title="All 2 branches missed.">        if ( defaultPrivacyList == null )</span>
+        {
+<span class="nc" id="L256">            final Element listElement = DocumentFactory.getInstance().createDocument().addElement( &quot;list&quot;, &quot;jabber:iq:privacy&quot; );</span>
+<span class="nc" id="L257">            listElement.addAttribute( &quot;name&quot;, &quot;blocklist&quot; );</span>
+
+<span class="nc" id="L259">            defaultPrivacyList = PrivacyListManager.getInstance().createPrivacyList( user.getUsername(), &quot;blocklist&quot;, listElement );</span>
+<span class="nc" id="L260">            PrivacyListManager.getInstance().changeDefaultList( user.getUsername(), defaultPrivacyList, null );</span>
+        }
+
+<span class="nc" id="L263">        Log.debug( &quot;Adding {} JIDs as blocked items to the beginning of list '{}' (belonging to '{}')&quot;, toBlocks.size(), defaultPrivacyList.getName(), user.getUsername() );</span>
+<span class="nc" id="L264">        final Element listElement = defaultPrivacyList.asElement();</span>
+<span class="nc bnc" id="L265" title="All 2 branches missed.">        for ( int i = 0; i &lt; toBlocks.size(); i++ )</span>
+        {
+<span class="nc" id="L267">            final Element element = DocumentHelper.createElement( &quot;item&quot; )</span>
+<span class="nc" id="L268">                .addAttribute( &quot;type&quot;, &quot;jid&quot; )</span>
+<span class="nc" id="L269">                .addAttribute( &quot;value&quot;, toBlocks.get( i ).toString() )</span>
+<span class="nc" id="L270">                .addAttribute( &quot;action&quot;, &quot;deny&quot; )</span>
+<span class="nc" id="L271">                .addAttribute( &quot;order&quot;, Integer.toString( i ) );</span>
+<span class="nc" id="L272">            listElement.elements().add( i, element );</span>
+        }
+
+<span class="nc" id="L275">        Log.debug( &quot;Iterating over all items of list '{}' (belonging to '{}'), to ensure that their 'order' value is unique.&quot;, defaultPrivacyList.getName(), user.getUsername() );</span>
+<span class="nc" id="L276">        final List&lt;Element&gt; elements = listElement.elements();</span>
+<span class="nc bnc" id="L277" title="All 2 branches missed.">        for ( int i = 0; i &lt; elements.size(); i++ )</span>
+        {
+<span class="nc" id="L279">            elements.get( i ).attribute( &quot;order&quot; ).setValue( Integer.toString( i ) );</span>
+        }
+
+<span class="nc" id="L282">        defaultPrivacyList.updateList( listElement );</span>
+<span class="nc" id="L283">        PrivacyListProvider.getInstance().updatePrivacyList( user.getUsername(), defaultPrivacyList );</span>
+<span class="nc" id="L284">    }</span>
+
+    /**
+     * Sends an IQ-set with the newly blocked JIDs to all resources of the user that have requested the blocklist.
+     *
+     * @param user      The for which updates are to be broadcasted (cannot be null).
+     * @param newBlocks The JIDs for which an update needs to be sent (cannot be null, can be empty).
+     */
+    protected void pushBlocklistUpdates( User user, List&lt;JID&gt; newBlocks )
+    {
+<span class="nc bnc" id="L294" title="All 2 branches missed.">        if ( newBlocks.isEmpty() )</span>
+        {
+<span class="nc" id="L296">            return;</span>
+        }
+
+<span class="nc" id="L299">        Log.debug( &quot;Pushing blocklist updates to all resources of user '{}' that have previously requested the blocklist.&quot;, user.getUsername() );</span>
+
+<span class="nc" id="L301">        final Collection&lt;ClientSession&gt; sessions = sessionManager.getSessions( user.getUsername() );</span>
+<span class="nc bnc" id="L302" title="All 2 branches missed.">        for ( final ClientSession session : sessions )</span>
+        {
+<span class="nc bnc" id="L304" title="All 2 branches missed.">            if ( session.hasRequestedBlocklist() )</span>
+            {
+<span class="nc" id="L306">                final IQ iq = new IQ( IQ.Type.set );</span>
+<span class="nc" id="L307">                iq.setTo( session.getAddress() );</span>
+<span class="nc" id="L308">                final Element block = iq.setChildElement( &quot;block&quot;, &quot;urn:xmpp:blocking&quot; );</span>
+<span class="nc bnc" id="L309" title="All 2 branches missed.">                for ( final JID newBlock : newBlocks )</span>
+                {
+<span class="nc" id="L311">                    block.addElement( &quot;item&quot; ).addAttribute( &quot;jid&quot;, newBlock.toString() );</span>
+<span class="nc" id="L312">                }</span>
+
+<span class="nc" id="L314">                XMPPServer.getInstance().getPacketRouter().route( iq );</span>
+            }
+<span class="nc" id="L316">        }</span>
+<span class="nc" id="L317">    }</span>
+
+    /**
+     * Removes all JIDs from the blocklist of the provided user.
+     *
+     * This method removes the JIDs to the default privacy list. When no default privacy list exists for this user, this
+     * method does nothing.
+     *
+     * @param user The owner of the blocklist to which JIDs are to be added (cannot be null).
+     * @return The JIDs that are removed (never null, possibly empty).
+     */
+    private Set&lt;JID&gt; removeAllFromBlocklist( User user )
+    {
+<span class="nc" id="L330">        Log.debug( &quot;Obtain the default privacy list for '{}'&quot;, user.getUsername() );</span>
+<span class="nc" id="L331">        final Set&lt;JID&gt; result = new HashSet&lt;&gt;();</span>
+<span class="nc" id="L332">        PrivacyList defaultPrivacyList = PrivacyListManager.getInstance().getDefaultPrivacyList( user.getUsername() );</span>
+<span class="nc bnc" id="L333" title="All 2 branches missed.">        if ( defaultPrivacyList == null )</span>
+        {
+<span class="nc" id="L335">            return result;</span>
+        }
+
+<span class="nc" id="L338">        Log.debug( &quot;Removing all JIDs from blocklist '{}' (belonging to '{}')&quot;, defaultPrivacyList.getName(), user.getUsername() );</span>
+<span class="nc" id="L339">        final Element listElement = defaultPrivacyList.asElement();</span>
+<span class="nc" id="L340">        final Set&lt;Element&gt; toRemove = new HashSet&lt;&gt;();</span>
+<span class="nc bnc" id="L341" title="All 2 branches missed.">        for ( final Element element : listElement.elements( &quot;item&quot; ) )</span>
+        {
+<span class="nc bnc" id="L343" title="All 2 branches missed.">            if ( &quot;jid&quot;.equals( element.attributeValue( &quot;type&quot; ) )</span>
+<span class="nc bnc" id="L344" title="All 2 branches missed.">                &amp;&amp; &quot;deny&quot;.equals( element.attributeValue( &quot;action&quot; ) ) )</span>
+            {
+<span class="nc" id="L346">                toRemove.add( element );</span>
+<span class="nc" id="L347">                result.add( new JID( element.attributeValue( &quot;value&quot; ) ) );</span>
+            }
+<span class="nc" id="L349">        }</span>
+
+<span class="nc bnc" id="L351" title="All 2 branches missed.">        if ( !toRemove.isEmpty() )</span>
+        {
+<span class="nc bnc" id="L353" title="All 2 branches missed.">            for ( final Element remove : toRemove )</span>
+            {
+<span class="nc" id="L355">                listElement.remove( remove );</span>
+<span class="nc" id="L356">            }</span>
+
+<span class="nc" id="L358">            defaultPrivacyList.updateList( listElement );</span>
+<span class="nc" id="L359">            PrivacyListProvider.getInstance().updatePrivacyList( user.getUsername(), defaultPrivacyList );</span>
+        }
+<span class="nc" id="L361">        return result;</span>
+    }
+
+    /**
+     * Removes a collection of JIDs from the blocklist of the provided user.
+     *
+     * This method removes the JIDs to the default privacy list. When no default privacy list exists for this user, this
+     * method does nothing.
+     *
+     * @param user       The owner of the blocklist to which JIDs are to be added (cannot be null).
+     * @param toUnblocks The JIDs to be removed (can be null, which results in a noop).
+     * @return The JIDs that are removed (never null, possibly empty).
+     */
+    protected Set&lt;JID&gt; removeFromBlockList( User user, Collection&lt;JID&gt; toUnblocks )
+    {
+<span class="nc" id="L376">        final Set&lt;JID&gt; result = new HashSet&lt;&gt;();</span>
+<span class="nc bnc" id="L377" title="All 4 branches missed.">        if ( toUnblocks == null || toUnblocks.isEmpty() )</span>
+        {
+<span class="nc" id="L379">            return result;</span>
+        }
+
+<span class="nc" id="L382">        Log.debug( &quot;Obtain the default privacy list for '{}'&quot;, user.getUsername() );</span>
+<span class="nc" id="L383">        PrivacyList defaultPrivacyList = PrivacyListManager.getInstance().getDefaultPrivacyList( user.getUsername() );</span>
+<span class="nc bnc" id="L384" title="All 2 branches missed.">        if ( defaultPrivacyList == null )</span>
+        {
+<span class="nc" id="L386">            return result;</span>
+        }
+
+<span class="nc" id="L389">        Log.debug( &quot;Removing {} JIDs as blocked items from list '{}' (belonging to '{}')&quot;, toUnblocks.size(), defaultPrivacyList.getName(), user.getUsername() );</span>
+<span class="nc" id="L390">        final Element listElement = defaultPrivacyList.asElement();</span>
+<span class="nc" id="L391">        final Set&lt;Element&gt; toRemove = new HashSet&lt;&gt;();</span>
+<span class="nc bnc" id="L392" title="All 2 branches missed.">        for ( final Element element : listElement.elements( &quot;item&quot; ) )</span>
+        {
+<span class="nc" id="L394">            final JID jid = new JID( element.attributeValue( &quot;value&quot; ) );</span>
+<span class="nc bnc" id="L395" title="All 2 branches missed.">            if ( &quot;jid&quot;.equals( element.attributeValue( &quot;type&quot; ) )</span>
+<span class="nc bnc" id="L396" title="All 2 branches missed.">                &amp;&amp; &quot;deny&quot;.equals( element.attributeValue( &quot;action&quot; ) )</span>
+<span class="nc bnc" id="L397" title="All 2 branches missed.">                &amp;&amp; toUnblocks.contains( jid ) )</span>
+            {
+<span class="nc" id="L399">                toRemove.add( element );</span>
+<span class="nc" id="L400">                result.add( jid );</span>
+            }
+<span class="nc" id="L402">        }</span>
+
+<span class="nc bnc" id="L404" title="All 2 branches missed.">        if ( !toRemove.isEmpty() )</span>
+        {
+<span class="nc bnc" id="L406" title="All 2 branches missed.">            for ( final Element remove : toRemove )</span>
+            {
+<span class="nc" id="L408">                listElement.remove( remove );</span>
+<span class="nc" id="L409">            }</span>
+
+<span class="nc" id="L411">            defaultPrivacyList.updateList( listElement );</span>
+<span class="nc" id="L412">            PrivacyListProvider.getInstance().updatePrivacyList( user.getUsername(), defaultPrivacyList );</span>
+        }
+
+<span class="nc" id="L415">        return result;</span>
+    }
+
+    /**
+     * Sends an IQ-set with the newly blocked JIDs to all resources of the user that have requested the blocklist.
+     *
+     * @param user      The for which updates are to be broadcasted (cannot be null).
+     * @param newBlocks The JIDs for which an update needs to be sent (cannot be null, can be empty).
+     */
+    protected void pushBlocklistUpdates( User user, Collection&lt;JID&gt; newBlocks )
+    {
+<span class="nc bnc" id="L426" title="All 2 branches missed.">        if ( newBlocks.isEmpty() )</span>
+        {
+<span class="nc" id="L428">            return;</span>
+        }
+
+<span class="nc" id="L431">        Log.debug( &quot;Pushing blocklist updates to all resources of user '{}' that have previously requested the blocklist.&quot;, user.getUsername() );</span>
+
+<span class="nc" id="L433">        final Collection&lt;ClientSession&gt; sessions = sessionManager.getSessions( user.getUsername() );</span>
+<span class="nc bnc" id="L434" title="All 2 branches missed.">        for ( final ClientSession session : sessions )</span>
+        {
+<span class="nc bnc" id="L436" title="All 2 branches missed.">            if ( session.hasRequestedBlocklist() )</span>
+            {
+<span class="nc" id="L438">                final IQ iq = new IQ( IQ.Type.set );</span>
+<span class="nc" id="L439">                iq.setTo( session.getAddress() );</span>
+<span class="nc" id="L440">                final Element block = iq.setChildElement( &quot;unblock&quot;, &quot;urn:xmpp:blocking&quot; );</span>
+<span class="nc bnc" id="L441" title="All 2 branches missed.">                for ( final JID newBlock : newBlocks )</span>
+                {
+<span class="nc" id="L443">                    block.addElement( &quot;item&quot; ).addAttribute( &quot;jid&quot;, newBlock.toString() );</span>
+<span class="nc" id="L444">                }</span>
+
+<span class="nc" id="L446">                XMPPServer.getInstance().getPacketRouter().route( iq );</span>
+            }
+<span class="nc" id="L448">        }</span>
+<span class="nc" id="L449">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

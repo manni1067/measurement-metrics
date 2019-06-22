@@ -1,0 +1,200 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>DefaultLockOutProvider.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.lockout</a> &gt; <span class="el_source">DefaultLockOutProvider.java</span></div><h1>DefaultLockOutProvider.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.jivesoftware.openfire.lockout;
+
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Types;
+import java.util.Date;
+
+import org.jivesoftware.database.DbConnectionManager;
+import org.jivesoftware.util.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * The DefaultLockOutProvider works with the ofUserFlag table to maintain a list of disabled/locked out
+ * accounts., and as the name implies, is the default LockOutProvider implementation.
+ *
+ * @author Daniel Henninger
+ */
+public class DefaultLockOutProvider implements LockOutProvider {
+
+<span class="nc" id="L38">    private static final Logger Log = LoggerFactory.getLogger(DefaultLockOutProvider.class);</span>
+
+    private static final String FLAG_ID = &quot;lockout&quot;;
+    private static final String DELETE_FLAG =
+            &quot;DELETE FROM ofUserFlag WHERE username=? AND name='&quot;+FLAG_ID+&quot;'&quot;;
+    private static final String ADD_FLAG =
+            &quot;INSERT INTO ofUserFlag VALUES(?,'&quot;+FLAG_ID+&quot;',?,?)&quot;;
+    private static final String RETRIEVE_FLAG =
+            &quot;SELECT name,startTime,endTime FROM ofUserFlag WHERE username=? AND name='&quot;+FLAG_ID+&quot;'&quot;;
+
+    /**
+     * Constructs a new DefaultLockOutProvider
+     */
+<span class="nc" id="L51">    public DefaultLockOutProvider() {</span>
+
+<span class="nc" id="L53">    }</span>
+
+    /**
+     * Default provider retrieves disabled status from ofUserFlag table.
+     * @see org.jivesoftware.openfire.lockout.LockOutProvider#getDisabledStatus(String)
+     */
+    @Override
+    public LockOutFlag getDisabledStatus(String username) {
+<span class="nc" id="L61">        Connection con = null;</span>
+<span class="nc" id="L62">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L63">        ResultSet rs = null;</span>
+<span class="nc" id="L64">        LockOutFlag ret = null;</span>
+        try {
+<span class="nc" id="L66">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L67">            pstmt = con.prepareStatement(RETRIEVE_FLAG);</span>
+<span class="nc" id="L68">            pstmt.setString(1, username);</span>
+<span class="nc" id="L69">            rs = pstmt.executeQuery();</span>
+<span class="nc bnc" id="L70" title="All 2 branches missed.">            if (!rs.next()) {</span>
+<span class="nc" id="L71">                return null;</span>
+            }
+<span class="nc" id="L73">            Date startTime = null;</span>
+<span class="nc bnc" id="L74" title="All 2 branches missed.">            if (rs.getString(2) != null) {</span>
+<span class="nc" id="L75">                startTime = new Date(Long.parseLong(rs.getString(2).trim()));</span>
+            }
+<span class="nc" id="L77">            Date endTime = null;</span>
+<span class="nc bnc" id="L78" title="All 2 branches missed.">            if (rs.getString(3) != null) {</span>
+<span class="nc" id="L79">                endTime = new Date(Long.parseLong(rs.getString(3).trim()));</span>
+            }
+
+<span class="nc" id="L82">            ret = new LockOutFlag(username, startTime, endTime);</span>
+        }
+<span class="nc" id="L84">        catch (Exception e) {</span>
+<span class="nc" id="L85">            Log.error(&quot;Error loading lockout information from DB&quot;, e);</span>
+<span class="nc" id="L86">            return null;</span>
+        }
+        finally {
+<span class="nc" id="L89">            DbConnectionManager.closeConnection(rs, pstmt, con);</span>
+<span class="nc" id="L90">        }</span>
+
+<span class="nc" id="L92">        return ret;</span>
+    }
+
+    /**
+     * Default provider deletes existing flag, if it exists, and adds new described flag in ofUserFlag table.
+     * @see org.jivesoftware.openfire.lockout.LockOutProvider#setDisabledStatus(LockOutFlag)
+     */
+    @Override
+    public void setDisabledStatus(LockOutFlag flag) {
+<span class="nc" id="L101">        Connection con = null;</span>
+<span class="nc" id="L102">        PreparedStatement pstmt = null;</span>
+        try {
+<span class="nc" id="L104">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L105">            pstmt = con.prepareStatement(DELETE_FLAG);</span>
+<span class="nc" id="L106">            pstmt.setString(1, flag.getUsername());</span>
+<span class="nc" id="L107">            pstmt.executeUpdate();</span>
+        }
+<span class="nc" id="L109">        catch (SQLException sqle) {</span>
+            // Nothing to do.
+        }
+        finally {
+<span class="nc" id="L113">            DbConnectionManager.closeConnection(pstmt, con);</span>
+<span class="nc" id="L114">        }</span>
+        try {
+<span class="nc" id="L116">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L117">            pstmt = con.prepareStatement(ADD_FLAG);</span>
+<span class="nc" id="L118">            pstmt.setString(1, flag.getUsername());</span>
+<span class="nc bnc" id="L119" title="All 2 branches missed.">            if (flag.getStartTime() != null) {</span>
+<span class="nc" id="L120">                pstmt.setString(2, StringUtils.dateToMillis(flag.getStartTime()));</span>
+            }
+            else {
+<span class="nc" id="L123">                pstmt.setNull(2, Types.VARCHAR);</span>
+            }
+<span class="nc bnc" id="L125" title="All 2 branches missed.">            if (flag.getEndTime() != null) {</span>
+<span class="nc" id="L126">                pstmt.setString(3, StringUtils.dateToMillis(flag.getEndTime()));</span>
+            }
+            else {
+<span class="nc" id="L129">                pstmt.setNull(3, Types.VARCHAR);</span>
+            }
+<span class="nc" id="L131">            pstmt.executeUpdate();</span>
+        }
+<span class="nc" id="L133">        catch (SQLException sqle) {</span>
+            // Nothing to do.
+        }
+        finally {
+<span class="nc" id="L137">            DbConnectionManager.closeConnection(pstmt, con);</span>
+<span class="nc" id="L138">        }</span>
+<span class="nc" id="L139">    }</span>
+
+    /**
+     * Default provider deletes existing flag from ofUserFlag table.
+     * @see org.jivesoftware.openfire.lockout.LockOutProvider#unsetDisabledStatus(String)
+     */
+    @Override
+    public void unsetDisabledStatus(String username) {
+<span class="nc" id="L147">        Connection con = null;</span>
+<span class="nc" id="L148">        PreparedStatement pstmt = null;</span>
+        try {
+<span class="nc" id="L150">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L151">            pstmt = con.prepareStatement(DELETE_FLAG);</span>
+<span class="nc" id="L152">            pstmt.setString(1, username);</span>
+<span class="nc" id="L153">            pstmt.executeUpdate();</span>
+        }
+<span class="nc" id="L155">        catch (SQLException sqle) {</span>
+            // Nothing to do.
+        }
+        finally {
+<span class="nc" id="L159">            DbConnectionManager.closeConnection(pstmt, con);</span>
+<span class="nc" id="L160">        }</span>
+<span class="nc" id="L161">    }</span>
+
+    /**
+     * Default provider allows editing of disabled status.
+     * @see org.jivesoftware.openfire.lockout.LockOutProvider#isReadOnly()
+     */
+    @Override
+    public boolean isReadOnly() {
+<span class="nc" id="L169">        return false;</span>
+    }
+
+    /**
+     * Default provider allows delayed start to disabled status.
+     * @see org.jivesoftware.openfire.lockout.LockOutProvider#isDelayedStartSupported()
+     */
+    @Override
+    public boolean isDelayedStartSupported() {
+<span class="nc" id="L178">        return true;</span>
+    }
+
+    /**
+     * Default provider allows timeout of disabled status.
+     * @see org.jivesoftware.openfire.lockout.LockOutProvider#isTimeoutSupported()
+     */
+    @Override
+    public boolean isTimeoutSupported() {
+<span class="nc" id="L187">        return true;</span>
+    }
+
+    /**
+     * Default provider should be cached.
+     * @see org.jivesoftware.openfire.lockout.LockOutProvider#shouldNotBeCached()
+     */
+    @Override
+    public boolean shouldNotBeCached() {
+<span class="nc" id="L196">        return false;</span>
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

@@ -1,0 +1,1990 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>PubSubPersistenceManager.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.pubsub</a> &gt; <span class="el_source">PubSubPersistenceManager.java</span></div><h1>PubSubPersistenceManager.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.pubsub;
+
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.Random;
+import java.util.StringTokenizer;
+import java.util.TimerTask;
+import java.util.concurrent.locks.Lock;
+
+import org.jivesoftware.database.DbConnectionManager;
+import org.jivesoftware.database.DbConnectionManager.DatabaseType;
+import org.jivesoftware.openfire.cluster.ClusterManager;
+import org.jivesoftware.openfire.pubsub.cluster.FlushTask;
+import org.jivesoftware.openfire.pubsub.models.AccessModel;
+import org.jivesoftware.openfire.pubsub.models.PublisherModel;
+import org.jivesoftware.util.JiveGlobals;
+import org.jivesoftware.util.LinkedList;
+import org.jivesoftware.util.LinkedListNode;
+import org.jivesoftware.util.StringUtils;
+import org.jivesoftware.util.TaskEngine;
+import org.jivesoftware.util.cache.Cache;
+import org.jivesoftware.util.cache.CacheFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmpp.packet.JID;
+
+/**
+ * A manager responsible for ensuring node persistence.
+ *
+ * @author Matt Tucker
+ */
+<span class="nc" id="L57">public class PubSubPersistenceManager {</span>
+
+<span class="nc" id="L59">    private static final Logger log = LoggerFactory.getLogger(PubSubPersistenceManager.class);</span>
+
+    private static final String PERSISTENT_NODES = &quot;SELECT serviceID, nodeID, maxItems &quot; +
+            &quot;FROM ofPubsubNode WHERE leaf=1 AND persistItems=1 AND maxItems &gt; 0&quot;;
+    
+    private static final String PURGE_FOR_SIZE =
+            &quot;DELETE FROM ofPubsubItem LEFT JOIN &quot; +
+            &quot;(SELECT id FROM ofPubsubItem WHERE serviceID=? AND nodeID=? &quot; +
+            &quot;ORDER BY creationDate DESC LIMIT ?) AS noDelete &quot; +
+            &quot;ON ofPubsubItem.id = noDelete.id WHERE noDelete.id IS NULL AND &quot; +
+            &quot;ofPubsubItem.serviceID = ? AND nodeID = ?&quot;;
+
+    private static final String PURGE_FOR_SIZE_ORACLE =
+            &quot;DELETE from ofPubsubItem where id in &quot; +
+            &quot;(select ofPubsubItem.id FROM ofPubsubItem LEFT JOIN &quot; +
+            &quot;(SELECT * from (SELECT id FROM ofPubsubItem WHERE serviceID=? AND nodeID=? &quot; +
+            &quot;ORDER BY creationDate DESC) where rownum &lt; ? order by rownum) noDelete &quot; +
+            &quot;ON ofPubsubItem.id = noDelete.id WHERE noDelete.id IS NULL &quot; +
+            &quot;AND ofPubsubItem.serviceID = ? AND nodeID = ?)&quot;;
+
+    private static final String PURGE_FOR_SIZE_SQLSERVER =
+            &quot;DELETE from ofPubsubItem where id in &quot; +
+            &quot;(select ofPubsubItem.id FROM ofPubsubItem LEFT JOIN &quot; +
+            &quot;(SELECT TOP (?) id FROM ofPubsubItem WHERE serviceID=? AND nodeID=? &quot; +
+            &quot;ORDER BY creationDate DESC) AS noDelete &quot; +
+            &quot;ON ofPubsubItem.id = noDelete.id WHERE noDelete.id IS NULL &quot; +
+            &quot;AND ofPubsubItem.serviceID = ? AND nodeID = ?)&quot;;
+
+    private static final String PURGE_FOR_SIZE_MYSQL =
+            &quot;DELETE ofPubsubItem FROM ofPubsubItem LEFT JOIN &quot; +
+            &quot;(SELECT id FROM ofPubsubItem WHERE serviceID=? AND nodeID=? &quot; +
+            &quot;ORDER BY creationDate DESC LIMIT ?) AS noDelete &quot; +
+            &quot;ON ofPubsubItem.id = noDelete.id WHERE noDelete.id IS NULL AND &quot; +
+            &quot;ofPubsubItem.serviceID = ? AND nodeID = ?&quot;;
+
+    private static final String PURGE_FOR_SIZE_POSTGRESQL = 
+            &quot;DELETE from ofPubsubItem where id in &quot; +
+            &quot;(select ofPubsubItem.id FROM ofPubsubItem LEFT JOIN &quot; +
+            &quot;(SELECT id FROM ofPubsubItem WHERE serviceID=? AND nodeID=? &quot; +
+            &quot;ORDER BY creationDate DESC LIMIT ?) AS noDelete &quot; +
+            &quot;ON ofPubsubItem.id = noDelete.id WHERE noDelete.id IS NULL &quot; +
+            &quot;AND ofPubsubItem.serviceID = ? AND nodeID = ?)&quot;;
+
+    private static final String PURGE_FOR_SIZE_HSQLDB = &quot;DELETE FROM ofPubsubItem WHERE serviceID=? AND nodeID=? AND id NOT IN &quot;
+            + &quot;(SELECT id FROM ofPubsubItem WHERE serviceID=? AND nodeID=? ORDER BY creationDate DESC LIMIT ?)&quot;;
+
+    private static final String LOAD_NODES =
+            &quot;SELECT nodeID, leaf, creationDate, modificationDate, parent, deliverPayloads, &quot; +
+            &quot;maxPayloadSize, persistItems, maxItems, notifyConfigChanges, notifyDelete, &quot; +
+            &quot;notifyRetract, presenceBased, sendItemSubscribe, publisherModel, &quot; +
+            &quot;subscriptionEnabled, configSubscription, accessModel, payloadType, &quot; +
+            &quot;bodyXSLT, dataformXSLT, creator, description, language, name, &quot; +
+            &quot;replyPolicy, associationPolicy, maxLeafNodes FROM ofPubsubNode &quot; +
+ &quot;WHERE serviceID=?&quot;;
+
+    private static final String LOAD_NODE = LOAD_NODES + &quot; AND nodeID=?&quot;;
+
+    private static final String UPDATE_NODE =
+            &quot;UPDATE ofPubsubNode SET modificationDate=?, parent=?, deliverPayloads=?, &quot; +
+            &quot;maxPayloadSize=?, persistItems=?, maxItems=?, &quot; +
+            &quot;notifyConfigChanges=?, notifyDelete=?, notifyRetract=?, presenceBased=?, &quot; +
+            &quot;sendItemSubscribe=?, publisherModel=?, subscriptionEnabled=?, configSubscription=?, &quot; +
+            &quot;accessModel=?, payloadType=?, bodyXSLT=?, dataformXSLT=?, description=?, &quot; +
+            &quot;language=?, name=?, replyPolicy=?, associationPolicy=?, maxLeafNodes=? &quot; +
+            &quot;WHERE serviceID=? AND nodeID=?&quot;;
+    private static final String ADD_NODE =
+            &quot;INSERT INTO ofPubsubNode (serviceID, nodeID, leaf, creationDate, modificationDate, &quot; +
+            &quot;parent, deliverPayloads, maxPayloadSize, persistItems, maxItems, &quot; +
+            &quot;notifyConfigChanges, notifyDelete, notifyRetract, presenceBased, &quot; +
+            &quot;sendItemSubscribe, publisherModel, subscriptionEnabled, configSubscription, &quot; +
+            &quot;accessModel, payloadType, bodyXSLT, dataformXSLT, creator, description, &quot; +
+            &quot;language, name, replyPolicy, associationPolicy, maxLeafNodes) &quot; +
+            &quot;VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)&quot;;
+    private static final String DELETE_NODE =
+            &quot;DELETE FROM ofPubsubNode WHERE serviceID=? AND nodeID=?&quot;;
+
+    private static final String LOAD_NODES_JIDS =
+            &quot;SELECT nodeID, jid, associationType FROM ofPubsubNodeJIDs WHERE serviceID=?&quot;;
+    private static final String LOAD_NODE_JIDS = &quot;SELECT nodeID, jid, associationType FROM ofPubsubNodeJIDs WHERE serviceID=? AND nodeID=?&quot;;
+    private static final String ADD_NODE_JIDS =
+            &quot;INSERT INTO ofPubsubNodeJIDs (serviceID, nodeID, jid, associationType) &quot; +
+            &quot;VALUES (?,?,?,?)&quot;;
+    private static final String DELETE_NODE_JIDS =
+            &quot;DELETE FROM ofPubsubNodeJIDs WHERE serviceID=? AND nodeID=?&quot;;
+
+    private static final String LOAD_NODES_GROUPS =
+            &quot;SELECT nodeID, rosterGroup FROM ofPubsubNodeGroups WHERE serviceID=?&quot;;
+    private static final String LOAD_NODE_GROUPS = &quot;SELECT nodeID, rosterGroup FROM ofPubsubNodeGroups WHERE serviceID=? AND nodeID=?&quot;;
+    private static final String ADD_NODE_GROUPS =
+            &quot;INSERT INTO ofPubsubNodeGroups (serviceID, nodeID, rosterGroup) &quot; +
+            &quot;VALUES (?,?,?)&quot;;
+    private static final String DELETE_NODE_GROUPS =
+            &quot;DELETE FROM ofPubsubNodeGroups WHERE serviceID=? AND nodeID=?&quot;;
+
+    private static final String LOAD_AFFILIATIONS =
+            &quot;SELECT nodeID,jid,affiliation FROM ofPubsubAffiliation WHERE serviceID=? &quot; +
+            &quot;ORDER BY nodeID&quot;;
+    private static final String LOAD_NODE_AFFILIATIONS = &quot;SELECT nodeID,jid,affiliation FROM ofPubsubAffiliation WHERE serviceID=? AND nodeID=?&quot;;
+    private static final String ADD_AFFILIATION =
+            &quot;INSERT INTO ofPubsubAffiliation (serviceID,nodeID,jid,affiliation) VALUES (?,?,?,?)&quot;;
+    private static final String UPDATE_AFFILIATION =
+            &quot;UPDATE ofPubsubAffiliation SET affiliation=? WHERE serviceID=? AND nodeID=? AND jid=?&quot;;
+    private static final String DELETE_AFFILIATION =
+            &quot;DELETE FROM ofPubsubAffiliation WHERE serviceID=? AND nodeID=? AND jid=?&quot;;
+    private static final String DELETE_AFFILIATIONS =
+            &quot;DELETE FROM ofPubsubAffiliation WHERE serviceID=? AND nodeID=?&quot;;
+
+    private static final String LOAD_SUBSCRIPTIONS_BASE = &quot;SELECT nodeID, id, jid, owner, state, deliver, digest, digest_frequency, &quot;
+            + &quot;expire, includeBody, showValues, subscriptionType, subscriptionDepth, &quot;
+            + &quot;keyword FROM ofPubsubSubscription WHERE serviceID=? &quot;;
+    private static final String LOAD_NODE_SUBSCRIPTION = LOAD_SUBSCRIPTIONS_BASE + &quot;AND nodeID=? AND id=?&quot;;
+    private static final String LOAD_NODE_SUBSCRIPTIONS = LOAD_SUBSCRIPTIONS_BASE + &quot;AND nodeID=?&quot;;
+    private static final String LOAD_SUBSCRIPTIONS = LOAD_SUBSCRIPTIONS_BASE + &quot;ORDER BY nodeID&quot;;
+
+    private static final String ADD_SUBSCRIPTION =
+            &quot;INSERT INTO ofPubsubSubscription (serviceID, nodeID, id, jid, owner, state, &quot; +
+            &quot;deliver, digest, digest_frequency, expire, includeBody, showValues, &quot; +
+            &quot;subscriptionType, subscriptionDepth, keyword) &quot; +
+            &quot;VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)&quot;;
+    private static final String UPDATE_SUBSCRIPTION =
+            &quot;UPDATE ofPubsubSubscription SET owner=?, state=?, deliver=?, digest=?, &quot; +
+            &quot;digest_frequency=?, expire=?, includeBody=?, showValues=?, subscriptionType=?, &quot; +
+            &quot;subscriptionDepth=?, keyword=? WHERE serviceID=? AND nodeID=? AND id=?&quot;;
+    private static final String DELETE_SUBSCRIPTION =
+            &quot;DELETE FROM ofPubsubSubscription WHERE serviceID=? AND nodeID=? AND id=?&quot;;
+    private static final String DELETE_SUBSCRIPTIONS =
+            &quot;DELETE FROM ofPubsubSubscription WHERE serviceID=? AND nodeID=?&quot;;
+    private static final String LOAD_ITEMS =
+            &quot;SELECT id,jid,creationDate,payload FROM ofPubsubItem &quot; +
+            &quot;WHERE serviceID=? AND nodeID=? ORDER BY creationDate DESC&quot;;
+    private static final String LOAD_ITEM =
+            &quot;SELECT jid,creationDate,payload FROM ofPubsubItem &quot; +
+            &quot;WHERE serviceID=? AND nodeID=? AND id=?&quot;;
+    private static final String LOAD_LAST_ITEM =
+            &quot;SELECT id,jid,creationDate,payload FROM ofPubsubItem &quot; +
+            &quot;WHERE serviceID=? AND nodeID=? ORDER BY creationDate DESC&quot;;
+    private static final String ADD_ITEM =
+            &quot;INSERT INTO ofPubsubItem (serviceID,nodeID,id,jid,creationDate,payload) &quot; +
+            &quot;VALUES (?,?,?,?,?,?)&quot;;
+    private static final String DELETE_ITEM =
+            &quot;DELETE FROM ofPubsubItem WHERE serviceID=? AND nodeID=? AND id=?&quot;;
+    private static final String DELETE_ITEMS =
+            &quot;DELETE FROM ofPubsubItem WHERE serviceID=? AND nodeID=?&quot;;
+
+    private static final String LOAD_DEFAULT_CONF =
+            &quot;SELECT deliverPayloads, maxPayloadSize, persistItems, maxItems, &quot; +
+            &quot;notifyConfigChanges, notifyDelete, notifyRetract, presenceBased, &quot; +
+            &quot;sendItemSubscribe, publisherModel, subscriptionEnabled, accessModel, language, &quot; +
+            &quot;replyPolicy, associationPolicy, maxLeafNodes &quot; +
+            &quot;FROM ofPubsubDefaultConf WHERE serviceID=? AND leaf=?&quot;;
+    private static final String UPDATE_DEFAULT_CONF =
+            &quot;UPDATE ofPubsubDefaultConf SET deliverPayloads=?, maxPayloadSize=?, persistItems=?, &quot; +
+            &quot;maxItems=?, notifyConfigChanges=?, notifyDelete=?, notifyRetract=?, &quot; +
+            &quot;presenceBased=?, sendItemSubscribe=?, publisherModel=?, subscriptionEnabled=?, &quot; +
+            &quot;accessModel=?, language=?, replyPolicy=?, associationPolicy=?, maxLeafNodes=? &quot; +
+            &quot;WHERE serviceID=? AND leaf=?&quot;;
+    private static final String ADD_DEFAULT_CONF =
+            &quot;INSERT INTO ofPubsubDefaultConf (serviceID, leaf, deliverPayloads, maxPayloadSize, &quot; +
+            &quot;persistItems, maxItems, notifyConfigChanges, notifyDelete, notifyRetract, &quot; +
+            &quot;presenceBased, sendItemSubscribe, publisherModel, subscriptionEnabled, &quot; +
+            &quot;accessModel, language, replyPolicy, associationPolicy, maxLeafNodes) &quot; +
+            &quot;VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)&quot;;
+
+    /**
+     * Pseudo-random number generator is used to offset timing for scheduled tasks
+     * within a cluster (so they don't run at the same time on all members).
+     */
+<span class="nc" id="L226">    private static Random prng = new Random();</span>
+    
+    /**
+     * Flush timer delay is configurable, but not less than 20 seconds (default: 2 mins)
+     */
+<span class="nc" id="L231">    private static long flushTimerDelay = Math.max(20000, </span>
+<span class="nc" id="L232">            JiveGlobals.getIntProperty(&quot;xmpp.pubsub.flush.timer&quot;, 120)*1000);</span>
+
+    /**
+     * Purge timer delay is configurable, but not less than 60 seconds (default: 5 mins)
+     */
+<span class="nc" id="L237">    private static long purgeTimerDelay = Math.max(60000, </span>
+<span class="nc" id="L238">            JiveGlobals.getIntProperty(&quot;xmpp.pubsub.purge.timer&quot;, 300)*1000);</span>
+
+    /**
+     * Maximum number of published items allowed in the write cache
+     * before being flushed to the database.
+     */
+<span class="nc" id="L244">    private static final int MAX_ITEMS_FLUSH = JiveGlobals.getIntProperty(&quot;xmpp.pubsub.flush.max&quot;, 1000);</span>
+
+    /**
+     * Maximum number of rows that will be fetched from the published items table.
+     */
+<span class="nc" id="L249">    private static final int MAX_ROWS_FETCH = JiveGlobals.getIntProperty(&quot;xmpp.pubsub.fetch.max&quot;, 2000);</span>
+
+    /**
+     * Number of retry attempts we will make trying to write an item to the DB
+     */
+<span class="nc" id="L254">    private static final int MAX_ITEM_RETRY = JiveGlobals.getIntProperty(&quot;xmpp.pubsub.item.retry&quot;, 1);</span>
+    
+    /**
+     * Queue that holds the (wrapped) items that need to be added to the database.
+     */
+<span class="nc" id="L259">    private static LinkedList&lt;RetryWrapper&gt; itemsToAdd = new LinkedList&lt;&gt;();</span>
+
+    /**
+     * Queue that holds the items that need to be deleted from the database.
+     */
+<span class="nc" id="L264">    private static LinkedList&lt;PublishedItem&gt; itemsToDelete = new LinkedList&lt;&gt;();</span>
+
+    /**
+     * Keeps reference to published items that haven't been persisted yet so they 
+     * can be removed before being deleted. Note these items are wrapped via the 
+     * RetryWrapper to allow multiple persistence attempts when needed.
+     */
+<span class="nc" id="L271">    private static final HashMap&lt;String, LinkedListNode&lt;RetryWrapper&gt;&gt; itemsPending = new HashMap&lt;&gt;();</span>
+    
+    /**
+     * Cache name for recently accessed published items.
+     */
+    private static final String ITEM_CACHE = &quot;Published Items&quot;;
+
+    /**
+     * Cache for recently accessed published items.
+     */
+<span class="nc" id="L281">    private static final Cache&lt;String, PublishedItem&gt; itemCache = CacheFactory.createCache(ITEM_CACHE);</span>
+    
+    static {
+        try {
+<span class="nc bnc" id="L285" title="All 2 branches missed.">            if (MAX_ITEMS_FLUSH &gt; 0) {</span>
+<span class="nc" id="L286">                TaskEngine.getInstance().schedule(new TimerTask() {</span>
+                    @Override
+<span class="nc" id="L288">                    public void run() { flushPendingItems(false); } // this member only</span>
+<span class="nc" id="L289">                }, Math.abs(prng.nextLong())%flushTimerDelay, flushTimerDelay);</span>
+            }
+
+            // increase the timer delay when running in cluster mode
+            // because other members are also running the purge task
+<span class="nc bnc" id="L294" title="All 2 branches missed.">            if (ClusterManager.isClusteringEnabled()) {</span>
+<span class="nc" id="L295">                purgeTimerDelay = purgeTimerDelay*2;</span>
+            }
+<span class="nc" id="L297">            TaskEngine.getInstance().schedule(new TimerTask() {</span>
+                @Override
+<span class="nc" id="L299">                public void run() { purgeItems(); }</span>
+<span class="nc" id="L300">            }, Math.abs(prng.nextLong())%purgeTimerDelay, purgeTimerDelay);</span>
+            
+<span class="nc" id="L302">        } catch (Exception ex) {</span>
+<span class="nc" id="L303">            log.error(&quot;Failed to initialize pubsub maintentence tasks&quot;, ex);</span>
+<span class="nc" id="L304">        }</span>
+        
+<span class="nc" id="L306">    }</span>
+
+    /**
+     * Creates and stores the node configuration in the database.
+     *
+     * @param node The newly created node.
+     */
+    public static void createNode(Node node) {
+<span class="nc" id="L314">        Connection con = null;</span>
+<span class="nc" id="L315">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L316">        boolean abortTransaction = false;</span>
+        try {
+<span class="nc" id="L318">            con = DbConnectionManager.getTransactionConnection();</span>
+<span class="nc" id="L319">            pstmt = con.prepareStatement(ADD_NODE);</span>
+<span class="nc" id="L320">            pstmt.setString(1, node.getService().getServiceID());</span>
+<span class="nc" id="L321">            pstmt.setString(2, encodeNodeID(node.getNodeID()));</span>
+<span class="nc bnc" id="L322" title="All 2 branches missed.">            pstmt.setInt(3, (node.isCollectionNode() ? 0 : 1));</span>
+<span class="nc" id="L323">            pstmt.setString(4, StringUtils.dateToMillis(node.getCreationDate()));</span>
+<span class="nc" id="L324">            pstmt.setString(5, StringUtils.dateToMillis(node.getModificationDate()));</span>
+<span class="nc bnc" id="L325" title="All 2 branches missed.">            pstmt.setString(6, node.getParent() != null ? encodeNodeID(node.getParent().getNodeID()) : null);</span>
+<span class="nc bnc" id="L326" title="All 2 branches missed.">            pstmt.setInt(7, (node.isPayloadDelivered() ? 1 : 0));</span>
+<span class="nc bnc" id="L327" title="All 2 branches missed.">            if (!node.isCollectionNode()) {</span>
+<span class="nc" id="L328">                pstmt.setInt(8, ((LeafNode) node).getMaxPayloadSize());</span>
+<span class="nc bnc" id="L329" title="All 2 branches missed.">                pstmt.setInt(9, (((LeafNode) node).isPersistPublishedItems() ? 1 : 0));</span>
+<span class="nc" id="L330">                pstmt.setInt(10, ((LeafNode) node).getMaxPublishedItems());</span>
+            }
+            else {
+<span class="nc" id="L333">                pstmt.setInt(8, 0);</span>
+<span class="nc" id="L334">                pstmt.setInt(9, 0);</span>
+<span class="nc" id="L335">                pstmt.setInt(10, 0);</span>
+            }
+<span class="nc bnc" id="L337" title="All 2 branches missed.">            pstmt.setInt(11, (node.isNotifiedOfConfigChanges() ? 1 : 0));</span>
+<span class="nc bnc" id="L338" title="All 2 branches missed.">            pstmt.setInt(12, (node.isNotifiedOfDelete() ? 1 : 0));</span>
+<span class="nc bnc" id="L339" title="All 2 branches missed.">            pstmt.setInt(13, (node.isNotifiedOfRetract() ? 1 : 0));</span>
+<span class="nc bnc" id="L340" title="All 2 branches missed.">            pstmt.setInt(14, (node.isPresenceBasedDelivery() ? 1 : 0));</span>
+<span class="nc bnc" id="L341" title="All 2 branches missed.">            pstmt.setInt(15, (node.isSendItemSubscribe() ? 1 : 0));</span>
+<span class="nc" id="L342">            pstmt.setString(16, node.getPublisherModel().getName());</span>
+<span class="nc bnc" id="L343" title="All 2 branches missed.">            pstmt.setInt(17, (node.isSubscriptionEnabled() ? 1 : 0));</span>
+<span class="nc bnc" id="L344" title="All 2 branches missed.">            pstmt.setInt(18, (node.isSubscriptionConfigurationRequired() ? 1 : 0));</span>
+<span class="nc" id="L345">            pstmt.setString(19, node.getAccessModel().getName());</span>
+<span class="nc" id="L346">            pstmt.setString(20, node.getPayloadType());</span>
+<span class="nc" id="L347">            pstmt.setString(21, node.getBodyXSLT());</span>
+<span class="nc" id="L348">            pstmt.setString(22, node.getDataformXSLT());</span>
+<span class="nc" id="L349">            pstmt.setString(23, node.getCreator().toString());</span>
+<span class="nc" id="L350">            pstmt.setString(24, node.getDescription());</span>
+<span class="nc" id="L351">            pstmt.setString(25, node.getLanguage());</span>
+<span class="nc" id="L352">            pstmt.setString(26, node.getName());</span>
+<span class="nc bnc" id="L353" title="All 2 branches missed.">            if (node.getReplyPolicy() != null) {</span>
+<span class="nc" id="L354">                pstmt.setString(27, node.getReplyPolicy().name());</span>
+            }
+            else {
+<span class="nc" id="L357">                pstmt.setString(27, null);</span>
+            }
+<span class="nc bnc" id="L359" title="All 2 branches missed.">            if (node.isCollectionNode()) {</span>
+<span class="nc" id="L360">                pstmt.setString(28, ((CollectionNode)node).getAssociationPolicy().name());</span>
+<span class="nc" id="L361">                pstmt.setInt(29, ((CollectionNode)node).getMaxLeafNodes());</span>
+            }
+            else {
+<span class="nc" id="L364">                pstmt.setString(28, null);</span>
+<span class="nc" id="L365">                pstmt.setInt(29, 0);</span>
+            }
+<span class="nc" id="L367">            pstmt.executeUpdate();</span>
+
+            // Save associated JIDs and roster groups
+<span class="nc" id="L370">            saveAssociatedElements(con, node);</span>
+        }
+<span class="nc" id="L372">        catch (SQLException sqle) {</span>
+<span class="nc" id="L373">            log.error(sqle.getMessage(), sqle);</span>
+<span class="nc" id="L374">            abortTransaction = true;</span>
+        }
+        finally {
+<span class="nc" id="L377">            DbConnectionManager.closeStatement(pstmt);</span>
+<span class="nc" id="L378">            DbConnectionManager.closeTransactionConnection(con, abortTransaction);</span>
+<span class="nc" id="L379">        }</span>
+<span class="nc" id="L380">    }</span>
+
+    /**
+     * Updates the node configuration in the database.
+     *
+     * @param node The updated node.
+     */
+    public static void updateNode(Node node) {
+<span class="nc" id="L388">        Connection con = null;</span>
+<span class="nc" id="L389">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L390">        boolean abortTransaction = false;</span>
+        try {
+<span class="nc" id="L392">            con = DbConnectionManager.getTransactionConnection();</span>
+<span class="nc" id="L393">            pstmt = con.prepareStatement(UPDATE_NODE);</span>
+<span class="nc" id="L394">            pstmt.setString(1, StringUtils.dateToMillis(node.getModificationDate()));</span>
+<span class="nc bnc" id="L395" title="All 2 branches missed.">            pstmt.setString(2, node.getParent() != null ? encodeNodeID(node.getParent().getNodeID()) : null);</span>
+<span class="nc bnc" id="L396" title="All 2 branches missed.">            pstmt.setInt(3, (node.isPayloadDelivered() ? 1 : 0));</span>
+<span class="nc bnc" id="L397" title="All 2 branches missed.">            if (!node.isCollectionNode()) {</span>
+<span class="nc" id="L398">                pstmt.setInt(4, ((LeafNode) node).getMaxPayloadSize());</span>
+<span class="nc bnc" id="L399" title="All 2 branches missed.">                pstmt.setInt(5, (((LeafNode) node).isPersistPublishedItems() ? 1 : 0));</span>
+<span class="nc" id="L400">                pstmt.setInt(6, ((LeafNode) node).getMaxPublishedItems());</span>
+            }
+            else {
+<span class="nc" id="L403">                pstmt.setInt(4, 0);</span>
+<span class="nc" id="L404">                pstmt.setInt(5, 0);</span>
+<span class="nc" id="L405">                pstmt.setInt(6, 0);</span>
+            }
+<span class="nc bnc" id="L407" title="All 2 branches missed.">            pstmt.setInt(7, (node.isNotifiedOfConfigChanges() ? 1 : 0));</span>
+<span class="nc bnc" id="L408" title="All 2 branches missed.">            pstmt.setInt(8, (node.isNotifiedOfDelete() ? 1 : 0));</span>
+<span class="nc bnc" id="L409" title="All 2 branches missed.">            pstmt.setInt(9, (node.isNotifiedOfRetract() ? 1 : 0));</span>
+<span class="nc bnc" id="L410" title="All 2 branches missed.">            pstmt.setInt(10, (node.isPresenceBasedDelivery() ? 1 : 0));</span>
+<span class="nc bnc" id="L411" title="All 2 branches missed.">            pstmt.setInt(11, (node.isSendItemSubscribe() ? 1 : 0));</span>
+<span class="nc" id="L412">            pstmt.setString(12, node.getPublisherModel().getName());</span>
+<span class="nc bnc" id="L413" title="All 2 branches missed.">            pstmt.setInt(13, (node.isSubscriptionEnabled() ? 1 : 0));</span>
+<span class="nc bnc" id="L414" title="All 2 branches missed.">            pstmt.setInt(14, (node.isSubscriptionConfigurationRequired() ? 1 : 0));</span>
+<span class="nc" id="L415">            pstmt.setString(15, node.getAccessModel().getName());</span>
+<span class="nc" id="L416">            pstmt.setString(16, node.getPayloadType());</span>
+<span class="nc" id="L417">            pstmt.setString(17, node.getBodyXSLT());</span>
+<span class="nc" id="L418">            pstmt.setString(18, node.getDataformXSLT());</span>
+<span class="nc" id="L419">            pstmt.setString(19, node.getDescription());</span>
+<span class="nc" id="L420">            pstmt.setString(20, node.getLanguage());</span>
+<span class="nc" id="L421">            pstmt.setString(21, node.getName());</span>
+<span class="nc bnc" id="L422" title="All 2 branches missed.">            if (node.getReplyPolicy() != null) {</span>
+<span class="nc" id="L423">                pstmt.setString(22, node.getReplyPolicy().name());</span>
+            }
+            else {
+<span class="nc" id="L426">                pstmt.setString(22, null);</span>
+            }
+<span class="nc bnc" id="L428" title="All 2 branches missed.">            if (node.isCollectionNode()) {</span>
+<span class="nc" id="L429">                pstmt.setString(23, ((CollectionNode) node).getAssociationPolicy().name());</span>
+<span class="nc" id="L430">                pstmt.setInt(24, ((CollectionNode) node).getMaxLeafNodes());</span>
+            }
+            else {
+<span class="nc" id="L433">                pstmt.setString(23, null);</span>
+<span class="nc" id="L434">                pstmt.setInt(24, 0);</span>
+            }
+<span class="nc" id="L436">            pstmt.setString(25, node.getService().getServiceID());</span>
+<span class="nc" id="L437">            pstmt.setString(26, encodeNodeID(node.getNodeID()));</span>
+<span class="nc" id="L438">            pstmt.executeUpdate();</span>
+<span class="nc" id="L439">            DbConnectionManager.fastcloseStmt(pstmt);</span>
+
+            // Remove existing JIDs associated with the the node
+<span class="nc" id="L442">            pstmt = con.prepareStatement(DELETE_NODE_JIDS);</span>
+<span class="nc" id="L443">            pstmt.setString(1, node.getService().getServiceID());</span>
+<span class="nc" id="L444">            pstmt.setString(2, encodeNodeID(node.getNodeID()));</span>
+<span class="nc" id="L445">            pstmt.executeUpdate();</span>
+<span class="nc" id="L446">            DbConnectionManager.fastcloseStmt(pstmt);</span>
+
+            // Remove roster groups associated with the the node being deleted
+<span class="nc" id="L449">            pstmt = con.prepareStatement(DELETE_NODE_GROUPS);</span>
+<span class="nc" id="L450">            pstmt.setString(1, node.getService().getServiceID());</span>
+<span class="nc" id="L451">            pstmt.setString(2, encodeNodeID(node.getNodeID()));</span>
+<span class="nc" id="L452">            pstmt.executeUpdate();</span>
+
+            // Save associated JIDs and roster groups
+<span class="nc" id="L455">            saveAssociatedElements(con, node);</span>
+        }
+<span class="nc" id="L457">        catch (SQLException sqle) {</span>
+<span class="nc" id="L458">            log.error(sqle.getMessage(), sqle);</span>
+<span class="nc" id="L459">            abortTransaction = true;</span>
+        }
+        finally {
+<span class="nc" id="L462">            DbConnectionManager.closeStatement(pstmt);</span>
+<span class="nc" id="L463">            DbConnectionManager.closeTransactionConnection(con, abortTransaction);</span>
+<span class="nc" id="L464">        }</span>
+<span class="nc" id="L465">    }</span>
+
+    private static void saveAssociatedElements(Connection con, Node node) throws SQLException {
+        // Add new JIDs associated with the the node
+<span class="nc" id="L469">        PreparedStatement pstmt = con.prepareStatement(ADD_NODE_JIDS);</span>
+        try {
+<span class="nc bnc" id="L471" title="All 2 branches missed.">            for (JID jid : node.getContacts()) {</span>
+<span class="nc" id="L472">                pstmt.setString(1, node.getService().getServiceID());</span>
+<span class="nc" id="L473">                pstmt.setString(2, encodeNodeID(node.getNodeID()));</span>
+<span class="nc" id="L474">                pstmt.setString(3, jid.toString());</span>
+<span class="nc" id="L475">                pstmt.setString(4, &quot;contacts&quot;);</span>
+<span class="nc" id="L476">                pstmt.executeUpdate();</span>
+<span class="nc" id="L477">            }</span>
+<span class="nc bnc" id="L478" title="All 2 branches missed.">            for (JID jid : node.getReplyRooms()) {</span>
+<span class="nc" id="L479">                pstmt.setString(1, node.getService().getServiceID());</span>
+<span class="nc" id="L480">                pstmt.setString(2, encodeNodeID(node.getNodeID()));</span>
+<span class="nc" id="L481">                pstmt.setString(3, jid.toString());</span>
+<span class="nc" id="L482">                pstmt.setString(4, &quot;replyRooms&quot;);</span>
+<span class="nc" id="L483">                pstmt.executeUpdate();</span>
+<span class="nc" id="L484">            }</span>
+<span class="nc bnc" id="L485" title="All 2 branches missed.">            for (JID jid : node.getReplyTo()) {</span>
+<span class="nc" id="L486">                pstmt.setString(1, node.getService().getServiceID());</span>
+<span class="nc" id="L487">                pstmt.setString(2, encodeNodeID(node.getNodeID()));</span>
+<span class="nc" id="L488">                pstmt.setString(3, jid.toString());</span>
+<span class="nc" id="L489">                pstmt.setString(4, &quot;replyTo&quot;);</span>
+<span class="nc" id="L490">                pstmt.executeUpdate();</span>
+<span class="nc" id="L491">            }</span>
+<span class="nc bnc" id="L492" title="All 2 branches missed.">            if (node.isCollectionNode()) {</span>
+<span class="nc bnc" id="L493" title="All 2 branches missed.">                for (JID jid : ((CollectionNode) node).getAssociationTrusted()) {</span>
+<span class="nc" id="L494">                    pstmt.setString(1, node.getService().getServiceID());</span>
+<span class="nc" id="L495">                    pstmt.setString(2, encodeNodeID(node.getNodeID()));</span>
+<span class="nc" id="L496">                    pstmt.setString(3, jid.toString());</span>
+<span class="nc" id="L497">                    pstmt.setString(4, &quot;associationTrusted&quot;);</span>
+<span class="nc" id="L498">                    pstmt.executeUpdate();</span>
+<span class="nc" id="L499">                }</span>
+            }
+<span class="nc" id="L501">            DbConnectionManager.fastcloseStmt(pstmt);</span>
+            // Add new roster groups associated with the the node
+<span class="nc" id="L503">            pstmt = con.prepareStatement(ADD_NODE_GROUPS);</span>
+<span class="nc bnc" id="L504" title="All 2 branches missed.">            for (String groupName : node.getRosterGroupsAllowed()) {</span>
+<span class="nc" id="L505">                pstmt.setString(1, node.getService().getServiceID());</span>
+<span class="nc" id="L506">                pstmt.setString(2, encodeNodeID(node.getNodeID()));</span>
+<span class="nc" id="L507">                pstmt.setString(3, groupName);</span>
+<span class="nc" id="L508">                pstmt.executeUpdate();</span>
+<span class="nc" id="L509">            }</span>
+        }
+        finally {
+<span class="nc" id="L512">            DbConnectionManager.closeStatement(pstmt);</span>
+<span class="nc" id="L513">        }</span>
+<span class="nc" id="L514">    }</span>
+
+    /**
+     * Removes the specified node from the DB.
+     *
+     * @param node The node that is being deleted.
+     * @return true If the operation was successful.
+     */
+    public static boolean removeNode(Node node) {
+<span class="nc" id="L523">        Connection con = null;</span>
+<span class="nc" id="L524">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L525">        boolean abortTransaction = false;</span>
+        try {
+<span class="nc" id="L527">            con = DbConnectionManager.getTransactionConnection();</span>
+            // Remove the affiliate from the table of node affiliates
+<span class="nc" id="L529">            pstmt = con.prepareStatement(DELETE_NODE);</span>
+<span class="nc" id="L530">            pstmt.setString(1, node.getService().getServiceID());</span>
+<span class="nc" id="L531">            pstmt.setString(2, encodeNodeID(node.getNodeID()));</span>
+<span class="nc" id="L532">            pstmt.executeUpdate();</span>
+<span class="nc" id="L533">            DbConnectionManager.fastcloseStmt(pstmt);</span>
+
+            // Remove JIDs associated with the the node being deleted
+<span class="nc" id="L536">            pstmt = con.prepareStatement(DELETE_NODE_JIDS);</span>
+<span class="nc" id="L537">            pstmt.setString(1, node.getService().getServiceID());</span>
+<span class="nc" id="L538">            pstmt.setString(2, encodeNodeID(node.getNodeID()));</span>
+<span class="nc" id="L539">            pstmt.executeUpdate();</span>
+<span class="nc" id="L540">            DbConnectionManager.fastcloseStmt(pstmt);</span>
+
+            // Remove roster groups associated with the the node being deleted
+<span class="nc" id="L543">            pstmt = con.prepareStatement(DELETE_NODE_GROUPS);</span>
+<span class="nc" id="L544">            pstmt.setString(1, node.getService().getServiceID());</span>
+<span class="nc" id="L545">            pstmt.setString(2, encodeNodeID(node.getNodeID()));</span>
+<span class="nc" id="L546">            pstmt.executeUpdate();</span>
+<span class="nc" id="L547">            DbConnectionManager.fastcloseStmt(pstmt);</span>
+
+            // Remove published items of the node being deleted
+<span class="nc bnc" id="L550" title="All 2 branches missed.">            if (node instanceof LeafNode)</span>
+            {
+<span class="nc" id="L552">                purgeNode((LeafNode) node, con);</span>
+            }
+
+            // Remove all affiliates from the table of node affiliates
+<span class="nc" id="L556">            pstmt = con.prepareStatement(DELETE_AFFILIATIONS);</span>
+<span class="nc" id="L557">            pstmt.setString(1, node.getService().getServiceID());</span>
+<span class="nc" id="L558">            pstmt.setString(2, encodeNodeID(node.getNodeID()));</span>
+<span class="nc" id="L559">            pstmt.executeUpdate();</span>
+<span class="nc" id="L560">            DbConnectionManager.fastcloseStmt(pstmt);</span>
+
+            // Remove users that were subscribed to the node
+<span class="nc" id="L563">            pstmt = con.prepareStatement(DELETE_SUBSCRIPTIONS);</span>
+<span class="nc" id="L564">            pstmt.setString(1, node.getService().getServiceID());</span>
+<span class="nc" id="L565">            pstmt.setString(2, encodeNodeID(node.getNodeID()));</span>
+<span class="nc" id="L566">            pstmt.executeUpdate();</span>
+        }
+<span class="nc" id="L568">        catch (SQLException sqle) {</span>
+<span class="nc" id="L569">            log.error(sqle.getMessage(), sqle);</span>
+<span class="nc" id="L570">            abortTransaction = true;</span>
+        }
+        finally {
+<span class="nc" id="L573">            DbConnectionManager.closeStatement(pstmt);</span>
+<span class="nc" id="L574">            DbConnectionManager.closeTransactionConnection(con, abortTransaction);</span>
+<span class="nc" id="L575">        }</span>
+<span class="nc bnc" id="L576" title="All 2 branches missed.">        return !abortTransaction;</span>
+    }
+
+    /**
+     * Loads all nodes from the database and adds them to the PubSub service.
+     *
+     * @param service the pubsub service that is hosting the nodes.
+     */
+    public static void loadNodes(PubSubService service) {
+<span class="nc" id="L585">        Connection con = null;</span>
+<span class="nc" id="L586">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L587">        ResultSet rs = null;</span>
+<span class="nc" id="L588">        Map&lt;String, Node&gt; nodes = new HashMap&lt;&gt;();</span>
+        try {
+<span class="nc" id="L590">            con = DbConnectionManager.getConnection();</span>
+            // Get all non-leaf nodes (to ensure parent nodes are loaded before their children)
+<span class="nc" id="L592">            pstmt = con.prepareStatement(LOAD_NODES);</span>
+<span class="nc" id="L593">            pstmt.setString(1, service.getServiceID());</span>
+<span class="nc" id="L594">            rs = pstmt.executeQuery();</span>
+            
+<span class="nc" id="L596">            Map&lt;String, String&gt; parentMappings = new HashMap&lt;&gt;();</span>
+            
+            // Rebuild loaded non-leaf nodes
+<span class="nc bnc" id="L599" title="All 2 branches missed.">            while(rs.next()) {</span>
+<span class="nc" id="L600">                loadNode(service, nodes, parentMappings, rs);</span>
+            }
+<span class="nc" id="L602">            DbConnectionManager.fastcloseStmt(rs, pstmt);</span>
+
+<span class="nc bnc" id="L604" title="All 2 branches missed.">            if (nodes.size() == 0) {</span>
+<span class="nc" id="L605">                log.info(&quot;No nodes found in pubsub&quot;);</span>
+<span class="nc" id="L606">                return;</span>
+            }
+            
+<span class="nc bnc" id="L609" title="All 2 branches missed.">            for (Map.Entry&lt;String, String&gt; entry : parentMappings.entrySet()) {</span>
+<span class="nc" id="L610">                Node child = nodes.get(entry.getKey());</span>
+<span class="nc" id="L611">                CollectionNode parent = (CollectionNode) nodes.get(entry.getValue());</span>
+                
+<span class="nc bnc" id="L613" title="All 2 branches missed.">                if (parent == null) {</span>
+<span class="nc" id="L614">                    log.error(&quot;Could not find parent node &quot; + entry.getValue() + &quot; for node &quot; + entry.getKey());</span>
+                }
+                else {
+<span class="nc" id="L617">                    child.changeParent(parent);</span>
+                }
+<span class="nc" id="L619">            }</span>
+            // Get JIDs associated with all nodes
+<span class="nc" id="L621">            pstmt = con.prepareStatement(LOAD_NODES_JIDS);</span>
+<span class="nc" id="L622">            pstmt.setString(1, service.getServiceID());</span>
+<span class="nc" id="L623">            rs = pstmt.executeQuery();</span>
+            // Add to each node the associated JIDs
+<span class="nc bnc" id="L625" title="All 2 branches missed.">            while(rs.next()) {</span>
+<span class="nc" id="L626">                loadAssociatedJIDs(nodes, rs);</span>
+            }
+<span class="nc" id="L628">            DbConnectionManager.fastcloseStmt(rs, pstmt);</span>
+
+            // Get roster groups associateds with all nodes
+<span class="nc" id="L631">            pstmt = con.prepareStatement(LOAD_NODES_GROUPS);</span>
+<span class="nc" id="L632">            pstmt.setString(1, service.getServiceID());</span>
+<span class="nc" id="L633">            rs = pstmt.executeQuery();</span>
+            // Add to each node the associated Groups
+<span class="nc bnc" id="L635" title="All 2 branches missed.">            while(rs.next()) {</span>
+<span class="nc" id="L636">                loadAssociatedGroups(nodes, rs);</span>
+            }
+<span class="nc" id="L638">            DbConnectionManager.fastcloseStmt(rs, pstmt);</span>
+
+            // Get affiliations of all nodes
+<span class="nc" id="L641">            pstmt = con.prepareStatement(LOAD_AFFILIATIONS);</span>
+<span class="nc" id="L642">            pstmt.setString(1, service.getServiceID());</span>
+<span class="nc" id="L643">            rs = pstmt.executeQuery();</span>
+            // Add to each node the correspondiding affiliates
+<span class="nc bnc" id="L645" title="All 2 branches missed.">            while(rs.next()) {</span>
+<span class="nc" id="L646">                loadAffiliations(nodes, rs);</span>
+            }
+<span class="nc" id="L648">            DbConnectionManager.fastcloseStmt(rs, pstmt);</span>
+
+            // Get subscriptions to all nodes
+<span class="nc" id="L651">            pstmt = con.prepareStatement(LOAD_SUBSCRIPTIONS);</span>
+<span class="nc" id="L652">            pstmt.setString(1, service.getServiceID());</span>
+<span class="nc" id="L653">            rs = pstmt.executeQuery();</span>
+            // Add to each node the correspondiding subscriptions
+<span class="nc bnc" id="L655" title="All 2 branches missed.">            while(rs.next()) {</span>
+<span class="nc" id="L656">                loadSubscriptions(service, nodes, rs);</span>
+            }
+<span class="nc" id="L658">            DbConnectionManager.fastcloseStmt(rs, pstmt);</span>
+        }
+<span class="nc" id="L660">        catch (SQLException sqle) {</span>
+<span class="nc" id="L661">            log.error(sqle.getMessage(), sqle);</span>
+        }
+        finally {
+<span class="nc" id="L664">            DbConnectionManager.closeConnection(rs, pstmt, con);</span>
+<span class="nc" id="L665">        }</span>
+
+<span class="nc bnc" id="L667" title="All 2 branches missed.">        for (Node node : nodes.values()) {</span>
+            // Set now that the node is persistent in the database. Note: We need to
+            // set this now since otherwise the node's affiliations will be saved to the database
+            // &quot;again&quot; while adding them to the node!
+<span class="nc" id="L671">            node.setSavedToDB(true);</span>
+            // Add the node to the service
+<span class="nc" id="L673">            service.addNode(node);</span>
+<span class="nc" id="L674">        }</span>
+<span class="nc" id="L675">    }</span>
+
+    /**
+     * Loads a node from the database and adds them to the PubSub service.
+     *
+     * @param service
+     *            the pubsub service that is hosting the nodes.
+     * @param nodeId the specific node to load
+     */
+    public static void loadNode(PubSubService service, String nodeId)
+    {
+<span class="nc" id="L686">        Connection con = null;</span>
+<span class="nc" id="L687">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L688">        ResultSet rs = null;</span>
+<span class="nc" id="L689">        Map&lt;String, Node&gt; nodes = new HashMap&lt;&gt;();</span>
+        try
+        {
+<span class="nc" id="L692">            con = DbConnectionManager.getConnection();</span>
+            // Get all non-leaf nodes (to ensure parent nodes are loaded before
+            // their children)
+<span class="nc" id="L695">            pstmt = con.prepareStatement(LOAD_NODE);</span>
+<span class="nc" id="L696">            pstmt.setString(1, service.getServiceID());</span>
+<span class="nc" id="L697">            pstmt.setString(2, nodeId);</span>
+<span class="nc" id="L698">            rs = pstmt.executeQuery();</span>
+<span class="nc" id="L699">            Map&lt;String, String&gt; parentMapping = new HashMap&lt;&gt;();</span>
+            
+            // Rebuild loaded non-leaf nodes
+<span class="nc bnc" id="L702" title="All 2 branches missed.">            if (rs.next())</span>
+            {
+<span class="nc" id="L704">                loadNode(service, nodes, parentMapping, rs);</span>
+            }
+<span class="nc" id="L706">            DbConnectionManager.fastcloseStmt(rs, pstmt);</span>
+<span class="nc" id="L707">            String parentId = parentMapping.get(nodeId);</span>
+            
+<span class="nc bnc" id="L709" title="All 2 branches missed.">            if (parentId != null) {</span>
+<span class="nc" id="L710">                CollectionNode parent = (CollectionNode) service.getNode(parentId);</span>
+                
+<span class="nc bnc" id="L712" title="All 2 branches missed.">                if (parent == null) {</span>
+<span class="nc" id="L713">                    log.error(&quot;Could not find parent node &quot; + parentId + &quot; for node &quot; + nodeId);</span>
+                }
+                else {
+<span class="nc" id="L716">                    nodes.get(nodeId).changeParent(parent);</span>
+                }
+            }
+                
+            // Get JIDs associated with all nodes
+<span class="nc" id="L721">            pstmt = con.prepareStatement(LOAD_NODE_JIDS);</span>
+<span class="nc" id="L722">            pstmt.setString(1, service.getServiceID());</span>
+<span class="nc" id="L723">            pstmt.setString(2, nodeId);</span>
+<span class="nc" id="L724">            rs = pstmt.executeQuery();</span>
+            // Add to each node the associated JIDs
+<span class="nc bnc" id="L726" title="All 2 branches missed.">            while (rs.next())</span>
+            {
+<span class="nc" id="L728">                loadAssociatedJIDs(nodes, rs);</span>
+            }
+<span class="nc" id="L730">            DbConnectionManager.fastcloseStmt(rs, pstmt);</span>
+
+            // Get roster groups associated with all nodes
+<span class="nc" id="L733">            pstmt = con.prepareStatement(LOAD_NODE_GROUPS);</span>
+<span class="nc" id="L734">            pstmt.setString(1, service.getServiceID());</span>
+<span class="nc" id="L735">            pstmt.setString(2, nodeId);</span>
+<span class="nc" id="L736">            rs = pstmt.executeQuery();</span>
+            // Add to each node the associated Groups
+<span class="nc bnc" id="L738" title="All 2 branches missed.">            while (rs.next())</span>
+            {
+<span class="nc" id="L740">                loadAssociatedGroups(nodes, rs);</span>
+            }
+<span class="nc" id="L742">            DbConnectionManager.fastcloseStmt(rs, pstmt);</span>
+
+            // Get affiliations of all nodes
+<span class="nc" id="L745">            pstmt = con.prepareStatement(LOAD_NODE_AFFILIATIONS);</span>
+<span class="nc" id="L746">            pstmt.setString(1, service.getServiceID());</span>
+<span class="nc" id="L747">            pstmt.setString(2, nodeId);</span>
+<span class="nc" id="L748">            rs = pstmt.executeQuery();</span>
+            // Add to each node the corresponding affiliates
+<span class="nc bnc" id="L750" title="All 2 branches missed.">            while (rs.next())</span>
+            {
+<span class="nc" id="L752">                loadAffiliations(nodes, rs);</span>
+            }
+<span class="nc" id="L754">            DbConnectionManager.fastcloseStmt(rs, pstmt);</span>
+
+            // Get subscriptions to all nodes
+<span class="nc" id="L757">            pstmt = con.prepareStatement(LOAD_NODE_SUBSCRIPTIONS);</span>
+<span class="nc" id="L758">            pstmt.setString(1, service.getServiceID());</span>
+<span class="nc" id="L759">            pstmt.setString(2, nodeId);</span>
+<span class="nc" id="L760">            rs = pstmt.executeQuery();</span>
+            // Add to each node the corresponding subscriptions
+<span class="nc bnc" id="L762" title="All 2 branches missed.">            while (rs.next())</span>
+            {
+<span class="nc" id="L764">                loadSubscriptions(service, nodes, rs);</span>
+            }
+<span class="nc" id="L766">            DbConnectionManager.fastcloseStmt(rs, pstmt);</span>
+        }
+<span class="nc" id="L768">        catch (SQLException sqle)</span>
+        {
+<span class="nc" id="L770">            log.error(sqle.getMessage(), sqle);</span>
+        }
+        finally
+        {
+<span class="nc" id="L774">            DbConnectionManager.closeConnection(rs, pstmt, con);</span>
+<span class="nc" id="L775">        }</span>
+
+<span class="nc bnc" id="L777" title="All 2 branches missed.">        for (Node node : nodes.values())</span>
+        {
+            // Set now that the node is persistent in the database. Note: We
+            // need to
+            // set this now since otherwise the node's affiliations will be
+            // saved to the database
+            // &quot;again&quot; while adding them to the node!
+<span class="nc" id="L784">            node.setSavedToDB(true);</span>
+            // Add the node to the service
+<span class="nc" id="L786">            service.addNode(node);</span>
+<span class="nc" id="L787">        }</span>
+<span class="nc" id="L788">    }</span>
+
+    private static void loadNode(PubSubService service, Map&lt;String, Node&gt; loadedNodes, Map&lt;String, String&gt; parentMappings, ResultSet rs) {
+        Node node;
+        try {
+<span class="nc" id="L793">            String nodeID = decodeNodeID(rs.getString(1));</span>
+<span class="nc bnc" id="L794" title="All 2 branches missed.">            boolean leaf = rs.getInt(2) == 1;</span>
+<span class="nc" id="L795">            String parent = decodeNodeID(rs.getString(5));</span>
+<span class="nc" id="L796">            JID creator = new JID(rs.getString(22));</span>
+            
+<span class="nc bnc" id="L798" title="All 2 branches missed.">            if (parent != null) {</span>
+<span class="nc" id="L799">                parentMappings.put(nodeID, parent);</span>
+            }
+
+<span class="nc bnc" id="L802" title="All 2 branches missed.">            if (leaf) {</span>
+                // Retrieving a leaf node
+<span class="nc" id="L804">                node = new LeafNode(service, null, nodeID, creator);</span>
+            }
+            else {
+                // Retrieving a collection node
+<span class="nc" id="L808">                node = new CollectionNode(service, null, nodeID, creator);</span>
+            }
+<span class="nc" id="L810">            node.setCreationDate(new Date(Long.parseLong(rs.getString(3).trim())));</span>
+<span class="nc" id="L811">            node.setModificationDate(new Date(Long.parseLong(rs.getString(4).trim())));</span>
+<span class="nc bnc" id="L812" title="All 2 branches missed.">            node.setPayloadDelivered(rs.getInt(6) == 1);</span>
+<span class="nc bnc" id="L813" title="All 2 branches missed.">            if (leaf) {</span>
+<span class="nc" id="L814">                ((LeafNode) node).setMaxPayloadSize(rs.getInt(7));</span>
+<span class="nc bnc" id="L815" title="All 2 branches missed.">                ((LeafNode) node).setPersistPublishedItems(rs.getInt(8) == 1);</span>
+<span class="nc" id="L816">                ((LeafNode) node).setMaxPublishedItems(rs.getInt(9));</span>
+<span class="nc bnc" id="L817" title="All 2 branches missed.">                ((LeafNode) node).setSendItemSubscribe(rs.getInt(14) == 1);</span>
+            }
+<span class="nc bnc" id="L819" title="All 2 branches missed.">            node.setNotifiedOfConfigChanges(rs.getInt(10) == 1);</span>
+<span class="nc bnc" id="L820" title="All 2 branches missed.">            node.setNotifiedOfDelete(rs.getInt(11) == 1);</span>
+<span class="nc bnc" id="L821" title="All 2 branches missed.">            node.setNotifiedOfRetract(rs.getInt(12) == 1);</span>
+<span class="nc bnc" id="L822" title="All 2 branches missed.">            node.setPresenceBasedDelivery(rs.getInt(13) == 1);</span>
+<span class="nc" id="L823">            node.setPublisherModel(PublisherModel.valueOf(rs.getString(15)));</span>
+<span class="nc bnc" id="L824" title="All 2 branches missed.">            node.setSubscriptionEnabled(rs.getInt(16) == 1);</span>
+<span class="nc bnc" id="L825" title="All 2 branches missed.">            node.setSubscriptionConfigurationRequired(rs.getInt(17) == 1);</span>
+<span class="nc" id="L826">            node.setAccessModel(AccessModel.valueOf(rs.getString(18)));</span>
+<span class="nc" id="L827">            node.setPayloadType(rs.getString(19));</span>
+<span class="nc" id="L828">            node.setBodyXSLT(rs.getString(20));</span>
+<span class="nc" id="L829">            node.setDataformXSLT(rs.getString(21));</span>
+<span class="nc" id="L830">            node.setDescription(rs.getString(23));</span>
+<span class="nc" id="L831">            node.setLanguage(rs.getString(24));</span>
+<span class="nc" id="L832">            node.setName(rs.getString(25));</span>
+<span class="nc bnc" id="L833" title="All 2 branches missed.">            if (rs.getString(26) != null) {</span>
+<span class="nc" id="L834">                node.setReplyPolicy(Node.ItemReplyPolicy.valueOf(rs.getString(26)));</span>
+            }
+<span class="nc bnc" id="L836" title="All 2 branches missed.">            if (!leaf) {</span>
+<span class="nc" id="L837">                ((CollectionNode) node).setAssociationPolicy(</span>
+<span class="nc" id="L838">                        CollectionNode.LeafNodeAssociationPolicy.valueOf(rs.getString(27)));</span>
+<span class="nc" id="L839">                ((CollectionNode) node).setMaxLeafNodes(rs.getInt(28));</span>
+            }
+
+            // Add the load to the list of loaded nodes
+<span class="nc" id="L843">            loadedNodes.put(node.getNodeID(), node);</span>
+        }
+<span class="nc" id="L845">        catch (SQLException sqle) {</span>
+<span class="nc" id="L846">            log.error(sqle.getMessage(), sqle);</span>
+<span class="nc" id="L847">        }</span>
+<span class="nc" id="L848">    }</span>
+
+    private static void loadAssociatedJIDs(Map&lt;String, Node&gt; nodes, ResultSet rs) {
+        try {
+<span class="nc" id="L852">            String nodeID = decodeNodeID(rs.getString(1));</span>
+<span class="nc" id="L853">            Node node = nodes.get(nodeID);</span>
+<span class="nc bnc" id="L854" title="All 2 branches missed.">            if (node == null) {</span>
+<span class="nc" id="L855">                log.warn(&quot;JID associated to a non-existent node: &quot; + nodeID);</span>
+<span class="nc" id="L856">                return;</span>
+            }
+<span class="nc" id="L858">            JID jid = new JID(rs.getString(2));</span>
+<span class="nc" id="L859">            String associationType = rs.getString(3);</span>
+<span class="nc bnc" id="L860" title="All 2 branches missed.">            if (&quot;contacts&quot;.equals(associationType)) {</span>
+<span class="nc" id="L861">                node.addContact(jid);</span>
+            }
+<span class="nc bnc" id="L863" title="All 2 branches missed.">            else if (&quot;replyRooms&quot;.equals(associationType)) {</span>
+<span class="nc" id="L864">                node.addReplyRoom(jid);</span>
+            }
+<span class="nc bnc" id="L866" title="All 2 branches missed.">            else if (&quot;replyTo&quot;.equals(associationType)) {</span>
+<span class="nc" id="L867">                node.addReplyTo(jid);</span>
+            }
+<span class="nc bnc" id="L869" title="All 2 branches missed.">            else if (&quot;associationTrusted&quot;.equals(associationType)) {</span>
+<span class="nc" id="L870">                ((CollectionNode) node).addAssociationTrusted(jid);</span>
+            }
+        }
+<span class="nc" id="L873">        catch (Exception ex) {</span>
+<span class="nc" id="L874">            log.error(ex.getMessage(), ex);</span>
+<span class="nc" id="L875">        }</span>
+<span class="nc" id="L876">    }</span>
+
+    private static void loadAssociatedGroups(Map&lt;String, Node&gt; nodes, ResultSet rs) {
+        try {
+<span class="nc" id="L880">            String nodeID = decodeNodeID(rs.getString(1));</span>
+<span class="nc" id="L881">            Node node = nodes.get(nodeID);</span>
+<span class="nc bnc" id="L882" title="All 2 branches missed.">            if (node == null) {</span>
+<span class="nc" id="L883">                log.warn(&quot;Roster Group associated to a non-existent node: &quot; + nodeID);</span>
+<span class="nc" id="L884">                return;</span>
+            }
+<span class="nc" id="L886">            node.addAllowedRosterGroup(rs.getString(2));</span>
+        }
+<span class="nc" id="L888">        catch (SQLException ex) {</span>
+<span class="nc" id="L889">            log.error(ex.getMessage(), ex);</span>
+<span class="nc" id="L890">        }</span>
+<span class="nc" id="L891">    }</span>
+
+    private static void loadAffiliations(Map&lt;String, Node&gt; nodes, ResultSet rs) {
+        try {
+<span class="nc" id="L895">            String nodeID = decodeNodeID(rs.getString(1));</span>
+<span class="nc" id="L896">            Node node = nodes.get(nodeID);</span>
+<span class="nc bnc" id="L897" title="All 2 branches missed.">            if (node == null) {</span>
+<span class="nc" id="L898">                log.warn(&quot;Affiliations found for a non-existent node: &quot; + nodeID);</span>
+<span class="nc" id="L899">                return;</span>
+            }
+<span class="nc" id="L901">            NodeAffiliate affiliate = new NodeAffiliate(node, new JID(rs.getString(2)));</span>
+<span class="nc" id="L902">            affiliate.setAffiliation(NodeAffiliate.Affiliation.valueOf(rs.getString(3)));</span>
+<span class="nc" id="L903">            node.addAffiliate(affiliate);</span>
+        }
+<span class="nc" id="L905">        catch (SQLException sqle) {</span>
+<span class="nc" id="L906">            log.error(sqle.getMessage(), sqle);</span>
+<span class="nc" id="L907">        }</span>
+<span class="nc" id="L908">    }</span>
+
+    public static void loadSubscription(PubSubService service, Node node, String subId)
+    {
+<span class="nc" id="L912">        Connection con = null;</span>
+<span class="nc" id="L913">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L914">        ResultSet rs = null;</span>
+<span class="nc" id="L915">        Map&lt;String, Node&gt; nodes = new HashMap&lt;&gt;();</span>
+<span class="nc" id="L916">        nodes.put(node.getNodeID(), node);</span>
+
+        try
+        {
+<span class="nc" id="L920">            con = DbConnectionManager.getConnection();</span>
+
+            // Get subscriptions to all nodes
+<span class="nc" id="L923">            pstmt = con.prepareStatement(LOAD_NODE_SUBSCRIPTION);</span>
+<span class="nc" id="L924">            pstmt.setString(1, service.getServiceID());</span>
+<span class="nc" id="L925">            pstmt.setString(2, node.getNodeID());</span>
+<span class="nc" id="L926">            pstmt.setString(3, subId);</span>
+<span class="nc" id="L927">            rs = pstmt.executeQuery();</span>
+
+            // Add to each node the corresponding subscription
+<span class="nc bnc" id="L930" title="All 2 branches missed.">            if (rs.next())</span>
+            {
+<span class="nc" id="L932">                loadSubscriptions(service, nodes, rs);</span>
+            }
+        }
+<span class="nc" id="L935">        catch (SQLException sqle)</span>
+        {
+<span class="nc" id="L937">            log.error(sqle.getMessage(), sqle);</span>
+        }
+        finally
+        {
+<span class="nc" id="L941">            DbConnectionManager.closeConnection(rs, pstmt, con);</span>
+<span class="nc" id="L942">        }</span>
+<span class="nc" id="L943">    }</span>
+
+    private static void loadSubscriptions(PubSubService service, Map&lt;String, Node&gt; nodes, ResultSet rs) {
+        try {
+<span class="nc" id="L947">            String nodeID = decodeNodeID(rs.getString(1));</span>
+<span class="nc" id="L948">            Node node = nodes.get(nodeID);</span>
+<span class="nc bnc" id="L949" title="All 2 branches missed.">            if (node == null) {</span>
+<span class="nc" id="L950">                log.warn(&quot;Subscription found for a non-existent node: &quot; + nodeID);</span>
+<span class="nc" id="L951">                return;</span>
+            }
+<span class="nc" id="L953">            String subID = rs.getString(2);</span>
+<span class="nc" id="L954">            JID subscriber = new JID(rs.getString(3));</span>
+<span class="nc" id="L955">            JID owner = new JID(rs.getString(4));</span>
+<span class="nc bnc" id="L956" title="All 2 branches missed.">            if (node.getAffiliate(owner) == null) {</span>
+<span class="nc" id="L957">                log.warn(&quot;Subscription found for a non-existent affiliate: &quot; + owner +</span>
+                        &quot; in node: &quot; + nodeID);
+<span class="nc" id="L959">                return;</span>
+            }
+<span class="nc" id="L961">            NodeSubscription.State state = NodeSubscription.State.valueOf(rs.getString(5));</span>
+<span class="nc" id="L962">            NodeSubscription subscription = new NodeSubscription(node, owner, subscriber, state, subID);</span>
+<span class="nc bnc" id="L963" title="All 2 branches missed.">            subscription.setShouldDeliverNotifications(rs.getInt(6) == 1);</span>
+<span class="nc bnc" id="L964" title="All 2 branches missed.">            subscription.setUsingDigest(rs.getInt(7) == 1);</span>
+<span class="nc" id="L965">            subscription.setDigestFrequency(rs.getInt(8));</span>
+<span class="nc bnc" id="L966" title="All 2 branches missed.">            if (rs.getString(9) != null) {</span>
+<span class="nc" id="L967">                subscription.setExpire(new Date(Long.parseLong(rs.getString(9).trim())));</span>
+            }
+<span class="nc bnc" id="L969" title="All 2 branches missed.">            subscription.setIncludingBody(rs.getInt(10) == 1);</span>
+<span class="nc" id="L970">            subscription.setPresenceStates(decodeWithComma(rs.getString(11)));</span>
+<span class="nc" id="L971">            subscription.setType(NodeSubscription.Type.valueOf(rs.getString(12)));</span>
+<span class="nc" id="L972">            subscription.setDepth(rs.getInt(13));</span>
+<span class="nc" id="L973">            subscription.setKeyword(rs.getString(14));</span>
+            // Indicate the subscription that is has already been saved to the database
+<span class="nc" id="L975">            subscription.setSavedToDB(true);</span>
+<span class="nc" id="L976">            node.addSubscription(subscription);</span>
+        }
+<span class="nc" id="L978">        catch (SQLException sqle) {</span>
+<span class="nc" id="L979">            log.error(sqle.getMessage(), sqle);</span>
+<span class="nc" id="L980">        }</span>
+<span class="nc" id="L981">    }</span>
+
+    /**
+     * Update the DB with the new affiliation of the user in the node.
+     *
+     * @param node      The node where the affiliation of the user was updated.
+     * @param affiliate The new affiliation of the user in the node.
+     * @param create    True if this is a new affiliate.
+     */
+    public static void saveAffiliation(Node node, NodeAffiliate affiliate, boolean create) {
+<span class="nc" id="L991">        Connection con = null;</span>
+<span class="nc" id="L992">        PreparedStatement pstmt = null;</span>
+        try {
+<span class="nc" id="L994">            con = DbConnectionManager.getConnection();</span>
+<span class="nc bnc" id="L995" title="All 2 branches missed.">            if (create) {</span>
+                // Add the user to the generic affiliations table
+<span class="nc" id="L997">                pstmt = con.prepareStatement(ADD_AFFILIATION);</span>
+<span class="nc" id="L998">                pstmt.setString(1, node.getService().getServiceID());</span>
+<span class="nc" id="L999">                pstmt.setString(2, encodeNodeID(node.getNodeID()));</span>
+<span class="nc" id="L1000">                pstmt.setString(3, affiliate.getJID().toString());</span>
+<span class="nc" id="L1001">                pstmt.setString(4, affiliate.getAffiliation().name());</span>
+<span class="nc" id="L1002">                pstmt.executeUpdate();</span>
+            }
+            else {
+                // Update the affiliate's data in the backend store
+<span class="nc" id="L1006">                pstmt = con.prepareStatement(UPDATE_AFFILIATION);</span>
+<span class="nc" id="L1007">                pstmt.setString(1, affiliate.getAffiliation().name());</span>
+<span class="nc" id="L1008">                pstmt.setString(2, node.getService().getServiceID());</span>
+<span class="nc" id="L1009">                pstmt.setString(3, encodeNodeID(node.getNodeID()));</span>
+<span class="nc" id="L1010">                pstmt.setString(4, affiliate.getJID().toString());</span>
+<span class="nc" id="L1011">                pstmt.executeUpdate();</span>
+            }
+        }
+<span class="nc" id="L1014">        catch (SQLException sqle) {</span>
+<span class="nc" id="L1015">            log.error(sqle.getMessage(), sqle);</span>
+        }
+        finally {
+<span class="nc" id="L1018">            DbConnectionManager.closeConnection(pstmt, con);</span>
+<span class="nc" id="L1019">        }</span>
+<span class="nc" id="L1020">    }</span>
+
+    /**
+     * Removes the affiliation and subsription state of the user from the DB.
+     *
+     * @param node      The node where the affiliation of the user was updated.
+     * @param affiliate The existing affiliation and subsription state of the user in the node.
+     */
+    public static void removeAffiliation(Node node, NodeAffiliate affiliate) {
+<span class="nc" id="L1029">        Connection con = null;</span>
+<span class="nc" id="L1030">        PreparedStatement pstmt = null;</span>
+        try {
+<span class="nc" id="L1032">            con = DbConnectionManager.getConnection();</span>
+            // Remove the affiliate from the table of node affiliates
+<span class="nc" id="L1034">            pstmt = con.prepareStatement(DELETE_AFFILIATION);</span>
+<span class="nc" id="L1035">            pstmt.setString(1, node.getService().getServiceID());</span>
+<span class="nc" id="L1036">            pstmt.setString(2, encodeNodeID(node.getNodeID()));</span>
+<span class="nc" id="L1037">            pstmt.setString(3, affiliate.getJID().toString());</span>
+<span class="nc" id="L1038">            pstmt.executeUpdate();</span>
+        }
+<span class="nc" id="L1040">        catch (SQLException sqle) {</span>
+<span class="nc" id="L1041">            log.error(sqle.getMessage(), sqle);</span>
+        }
+        finally {
+<span class="nc" id="L1044">            DbConnectionManager.closeConnection(pstmt, con);</span>
+<span class="nc" id="L1045">        }</span>
+<span class="nc" id="L1046">    }</span>
+
+    /**
+     * Updates the DB with the new subsription of the user to the node.
+     *
+     * @param node      The node where the user has subscribed to.
+     * @param subscription The new subscription of the user to the node.
+     * @param create    True if this is a new affiliate.
+     */
+    public static void saveSubscription(Node node, NodeSubscription subscription, boolean create) {
+<span class="nc" id="L1056">        Connection con = null;</span>
+<span class="nc" id="L1057">        PreparedStatement pstmt = null;</span>
+        try {
+<span class="nc" id="L1059">            con = DbConnectionManager.getConnection();</span>
+<span class="nc bnc" id="L1060" title="All 2 branches missed.">            if (create) {</span>
+                // Add the subscription of the user to the database
+<span class="nc" id="L1062">                pstmt = con.prepareStatement(ADD_SUBSCRIPTION);</span>
+<span class="nc" id="L1063">                pstmt.setString(1, node.getService().getServiceID());</span>
+<span class="nc" id="L1064">                pstmt.setString(2, encodeNodeID(node.getNodeID()));</span>
+<span class="nc" id="L1065">                pstmt.setString(3, subscription.getID());</span>
+<span class="nc" id="L1066">                pstmt.setString(4, subscription.getJID().toString());</span>
+<span class="nc" id="L1067">                pstmt.setString(5, subscription.getOwner().toString());</span>
+<span class="nc" id="L1068">                pstmt.setString(6, subscription.getState().name());</span>
+<span class="nc bnc" id="L1069" title="All 2 branches missed.">                pstmt.setInt(7, (subscription.shouldDeliverNotifications() ? 1 : 0));</span>
+<span class="nc bnc" id="L1070" title="All 2 branches missed.">                pstmt.setInt(8, (subscription.isUsingDigest() ? 1 : 0));</span>
+<span class="nc" id="L1071">                pstmt.setInt(9, subscription.getDigestFrequency());</span>
+<span class="nc" id="L1072">                Date expireDate = subscription.getExpire();</span>
+<span class="nc bnc" id="L1073" title="All 2 branches missed.">                if (expireDate == null) {</span>
+<span class="nc" id="L1074">                    pstmt.setString(10, null);</span>
+                }
+                else {
+<span class="nc" id="L1077">                    pstmt.setString(10, StringUtils.dateToMillis(expireDate));</span>
+                }
+<span class="nc bnc" id="L1079" title="All 2 branches missed.">                pstmt.setInt(11, (subscription.isIncludingBody() ? 1 : 0));</span>
+<span class="nc" id="L1080">                pstmt.setString(12, encodeWithComma(subscription.getPresenceStates()));</span>
+<span class="nc" id="L1081">                pstmt.setString(13, subscription.getType().name());</span>
+<span class="nc" id="L1082">                pstmt.setInt(14, subscription.getDepth());</span>
+<span class="nc" id="L1083">                pstmt.setString(15, subscription.getKeyword());</span>
+<span class="nc" id="L1084">                pstmt.executeUpdate();</span>
+                // Indicate the subscription that is has been saved to the database
+<span class="nc" id="L1086">                subscription.setSavedToDB(true);</span>
+<span class="nc" id="L1087">            }</span>
+            else {
+<span class="nc bnc" id="L1089" title="All 2 branches missed.">                if (NodeSubscription.State.none == subscription.getState()) {</span>
+                    // Remove the subscription of the user from the table
+<span class="nc" id="L1091">                    pstmt = con.prepareStatement(DELETE_SUBSCRIPTION);</span>
+<span class="nc" id="L1092">                    pstmt.setString(1, node.getService().getServiceID());</span>
+<span class="nc" id="L1093">                    pstmt.setString(2, encodeNodeID(node.getNodeID()));</span>
+<span class="nc" id="L1094">                    pstmt.setString(2, subscription.getID());</span>
+<span class="nc" id="L1095">                    pstmt.executeUpdate();</span>
+                }
+                else {
+                    // Update the subscription of the user in the backend store
+<span class="nc" id="L1099">                    pstmt = con.prepareStatement(UPDATE_SUBSCRIPTION);</span>
+<span class="nc" id="L1100">                    pstmt.setString(1, subscription.getOwner().toString());</span>
+<span class="nc" id="L1101">                    pstmt.setString(2, subscription.getState().name());</span>
+<span class="nc bnc" id="L1102" title="All 2 branches missed.">                    pstmt.setInt(3, (subscription.shouldDeliverNotifications() ? 1 : 0));</span>
+<span class="nc bnc" id="L1103" title="All 2 branches missed.">                    pstmt.setInt(4, (subscription.isUsingDigest() ? 1 : 0));</span>
+<span class="nc" id="L1104">                    pstmt.setInt(5, subscription.getDigestFrequency());</span>
+<span class="nc" id="L1105">                    Date expireDate = subscription.getExpire();</span>
+<span class="nc bnc" id="L1106" title="All 2 branches missed.">                    if (expireDate == null) {</span>
+<span class="nc" id="L1107">                        pstmt.setString(6, null);</span>
+                    }
+                    else {
+<span class="nc" id="L1110">                        pstmt.setString(6, StringUtils.dateToMillis(expireDate));</span>
+                    }
+<span class="nc bnc" id="L1112" title="All 2 branches missed.">                    pstmt.setInt(7, (subscription.isIncludingBody() ? 1 : 0));</span>
+<span class="nc" id="L1113">                    pstmt.setString(8, encodeWithComma(subscription.getPresenceStates()));</span>
+<span class="nc" id="L1114">                    pstmt.setString(9, subscription.getType().name());</span>
+<span class="nc" id="L1115">                    pstmt.setInt(10, subscription.getDepth());</span>
+<span class="nc" id="L1116">                    pstmt.setString(11, subscription.getKeyword());</span>
+<span class="nc" id="L1117">                    pstmt.setString(12, node.getService().getServiceID());</span>
+<span class="nc" id="L1118">                    pstmt.setString(13, encodeNodeID(node.getNodeID()));</span>
+<span class="nc" id="L1119">                    pstmt.setString(14, subscription.getID());</span>
+<span class="nc" id="L1120">                    pstmt.executeUpdate();</span>
+                }
+            }
+        }
+<span class="nc" id="L1124">        catch (SQLException sqle) {</span>
+<span class="nc" id="L1125">            log.error(sqle.getMessage(), sqle);</span>
+        }
+        finally {
+<span class="nc" id="L1128">            DbConnectionManager.closeConnection(pstmt, con);</span>
+<span class="nc" id="L1129">        }</span>
+<span class="nc" id="L1130">    }</span>
+
+    /**
+     * Removes the subscription of the user from the DB.
+     *
+     * @param subscription The existing subsription of the user to the node.
+     */
+    public static void removeSubscription(NodeSubscription subscription) {
+<span class="nc" id="L1138">        Connection con = null;</span>
+<span class="nc" id="L1139">        PreparedStatement pstmt = null;</span>
+        try {
+<span class="nc" id="L1141">            con = DbConnectionManager.getConnection();</span>
+            // Remove the affiliate from the table of node affiliates
+<span class="nc" id="L1143">            pstmt = con.prepareStatement(DELETE_SUBSCRIPTION);</span>
+<span class="nc" id="L1144">            pstmt.setString(1, subscription.getNode().getService().getServiceID());</span>
+<span class="nc" id="L1145">            pstmt.setString(2, encodeNodeID(subscription.getNode().getNodeID()));</span>
+<span class="nc" id="L1146">            pstmt.setString(3, subscription.getID());</span>
+<span class="nc" id="L1147">            pstmt.executeUpdate();</span>
+        }
+<span class="nc" id="L1149">        catch (SQLException sqle) {</span>
+<span class="nc" id="L1150">            log.error(sqle.getMessage(), sqle);</span>
+        }
+        finally {
+<span class="nc" id="L1153">            DbConnectionManager.closeConnection(pstmt, con);</span>
+<span class="nc" id="L1154">        }</span>
+<span class="nc" id="L1155">    }</span>
+
+    /**
+     * Creates and stores the published item in the database. Note that the
+     * item will be cached temporarily before being flushed asynchronously 
+     * to the database. The write cache can be tuned using the following
+     * two properties:
+     * &lt;pre&gt;
+     *   &quot;xmpp.pubsub.flush.max&quot; - maximum items in the cache (-1 to disable cache)
+     *   &quot;xmpp.pubsub.flush.timer&quot; - number of seconds between cache flushes
+     * &lt;/pre&gt;
+     * @param item The published item to save.
+     */
+    public static void savePublishedItem(PublishedItem item) {
+<span class="nc" id="L1169">        savePublishedItem(new RetryWrapper(item));</span>
+<span class="nc" id="L1170">    }</span>
+
+    /**
+     * Creates and stores the published item in the database. 
+     * @param wrapper The published item, wrapped for retry
+     */
+    private static void savePublishedItem(RetryWrapper wrapper) {
+<span class="nc bnc" id="L1177" title="All 2 branches missed.">        boolean firstPass = (wrapper.getRetryCount() == 0);</span>
+<span class="nc" id="L1178">        PublishedItem item = wrapper.get();</span>
+<span class="nc" id="L1179">        String itemKey = item.getItemKey();</span>
+<span class="nc" id="L1180">        itemCache.put(itemKey, item);</span>
+<span class="nc" id="L1181">        log.debug(&quot;Added new (inbound) item to cache&quot;);</span>
+<span class="nc" id="L1182">        synchronized (itemsPending) {</span>
+<span class="nc" id="L1183">            LinkedListNode&lt;RetryWrapper&gt; itemToReplace = itemsPending.remove(itemKey);</span>
+<span class="nc bnc" id="L1184" title="All 2 branches missed.">            if (itemToReplace != null) {</span>
+<span class="nc" id="L1185">                itemToReplace.remove(); // remove duplicate from itemsToAdd linked list</span>
+            }
+<span class="nc bnc" id="L1187" title="All 2 branches missed.">            LinkedListNode&lt;RetryWrapper&gt; listNode = firstPass ? </span>
+<span class="nc" id="L1188">                                itemsToAdd.addLast(wrapper) : </span>
+<span class="nc" id="L1189">                                itemsToAdd.addFirst(wrapper);</span>
+<span class="nc" id="L1190">            itemsPending.put(itemKey, listNode);</span>
+<span class="nc" id="L1191">        }</span>
+        // skip the flush step if this is a retry attempt
+<span class="nc bnc" id="L1193" title="All 4 branches missed.">        if (firstPass &amp;&amp; itemsPending.size() &gt; MAX_ITEMS_FLUSH) {</span>
+<span class="nc" id="L1194">            TaskEngine.getInstance().submit(new Runnable() {</span>
+                @Override
+<span class="nc" id="L1196">                public void run() { flushPendingItems(false); }</span>
+            });
+        }
+<span class="nc" id="L1199">    }</span>
+    
+    /**
+     * This class is used internally to wrap PublishedItems. It adds
+     * a retry counter for the persistence exception handling logic.
+     */
+    private static class RetryWrapper {
+        private PublishedItem item;
+<span class="nc" id="L1207">        private volatile transient int retryCount = 0;</span>
+<span class="nc" id="L1208">        public RetryWrapper(PublishedItem item) { this.item = item; }</span>
+<span class="nc" id="L1209">        public PublishedItem get() { return item; }</span>
+<span class="nc" id="L1210">        public int getRetryCount() { return retryCount; }</span>
+<span class="nc" id="L1211">        public int nextRetry() { return ++retryCount; }</span>
+    }
+
+    /**
+     * Flush the cache(s) of items to be persisted (itemsToAdd) and deleted (itemsToDelete).
+     */
+    public static void flushPendingItems()
+    {
+<span class="nc" id="L1219">        flushPendingItems(ClusterManager.isClusteringEnabled());</span>
+<span class="nc" id="L1220">    }</span>
+
+    /**
+     * Flush the cache(s) of items to be persisted (itemsToAdd) and deleted (itemsToDelete).
+     * @param sendToCluster If true, delegate to cluster members, otherwise local only
+     */
+    public static void flushPendingItems(boolean sendToCluster)
+    {
+        // forward to other cluster members and wait for response
+<span class="nc bnc" id="L1229" title="All 2 branches missed.">        if (sendToCluster) {</span>
+<span class="nc" id="L1230">            CacheFactory.doSynchronousClusterTask(new FlushTask(), false);</span>
+        }
+
+<span class="nc bnc" id="L1233" title="All 4 branches missed.">        if (itemsToAdd.getFirst() == null &amp;&amp; itemsToDelete.getFirst() == null) {</span>
+<span class="nc" id="L1234">            return;	 // nothing to do for this cluster member</span>
+        }
+        
+<span class="nc" id="L1237">        Connection con = null;</span>
+<span class="nc" id="L1238">        boolean rollback = false;</span>
+<span class="nc" id="L1239">        LinkedList&lt;RetryWrapper&gt; addList = null;</span>
+<span class="nc" id="L1240">        LinkedList&lt;PublishedItem&gt; delList = null;</span>
+
+        // Swap pending items so we can parse and save the contents from this point in time
+        // while not blocking new entries from being cached.
+<span class="nc" id="L1244">        synchronized(itemsPending) </span>
+        {
+<span class="nc" id="L1246">            addList = itemsToAdd;</span>
+<span class="nc" id="L1247">            delList = itemsToDelete;</span>
+
+<span class="nc" id="L1249">            itemsToAdd = new LinkedList&lt;&gt;();</span>
+<span class="nc" id="L1250">            itemsToDelete = new LinkedList&lt;&gt;();</span>
+            
+            // Ensure pending items are available via the item read cache;
+            // this allows the item(s) to be fetched by other request threads
+            // while being written to the DB from this thread
+<span class="nc" id="L1255">            int copied = 0;</span>
+<span class="nc bnc" id="L1256" title="All 2 branches missed.">            for (String key : itemsPending.keySet()) {</span>
+<span class="nc bnc" id="L1257" title="All 2 branches missed.">                if (!itemCache.containsKey(key)) {</span>
+<span class="nc" id="L1258">                    itemCache.put(key, (((RetryWrapper)itemsPending.get(key).object)).get());</span>
+<span class="nc" id="L1259">                    copied++;</span>
+                }
+<span class="nc" id="L1261">            }</span>
+<span class="nc bnc" id="L1262" title="All 4 branches missed.">            if (log.isDebugEnabled() &amp;&amp; copied &gt; 0) {</span>
+<span class="nc" id="L1263">                log.debug(&quot;Added &quot; + copied + &quot; pending items to published item cache&quot;);</span>
+            }
+<span class="nc" id="L1265">            itemsPending.clear();</span>
+<span class="nc" id="L1266">        }</span>
+
+        // Note that we now make multiple attempts to write cached items to the DB:
+        //   1) insert all pending items in a single batch
+        //   2) if the batch insert fails, retry by inserting each item separately
+        //   3) if a given item cannot be written, return it to the pending write cache
+        // By default step 3 will be tried once per item, but this can be configured
+        // (or disabled) using the &quot;xmpp.pubsub.item.retry&quot; property. In the event of
+        // a transaction rollback, items that could not be written to the database
+        // will be returned to the pending item write cache.
+        try {
+<span class="nc" id="L1277">            con = DbConnectionManager.getTransactionConnection();</span>
+<span class="nc" id="L1278">            writePendingItems(con, addList, delList);</span>
+<span class="nc" id="L1279">        } catch (SQLException se) {</span>
+<span class="nc" id="L1280">            log.error(&quot;Failed to flush pending items; initiating rollback&quot;, se);</span>
+            // return new items to the write cache
+<span class="nc" id="L1282">            LinkedListNode&lt;RetryWrapper&gt; node = addList.getLast();</span>
+<span class="nc bnc" id="L1283" title="All 2 branches missed.">            while (node != null) {</span>
+<span class="nc" id="L1284">                savePublishedItem(node.object);</span>
+<span class="nc" id="L1285">                node.remove();</span>
+<span class="nc" id="L1286">                node = addList.getLast();</span>
+            }
+<span class="nc" id="L1288">            rollback = true;</span>
+        } finally {
+<span class="nc" id="L1290">            DbConnectionManager.closeTransactionConnection(con, rollback);</span>
+<span class="nc" id="L1291">        }</span>
+<span class="nc" id="L1292">    }</span>
+
+    /**
+     * Loop through the lists of added and deleted items and write to the database
+     * @param con
+     * @param addList
+     * @param delList
+     * @throws SQLException
+     */
+    private static void writePendingItems(Connection con, LinkedList&lt;RetryWrapper&gt; addList, LinkedList&lt;PublishedItem&gt; delList) throws SQLException
+    {
+<span class="nc" id="L1303">        LinkedListNode&lt;RetryWrapper&gt; addItem = addList.getFirst();</span>
+<span class="nc" id="L1304">        LinkedListNode&lt;PublishedItem&gt; delItem = delList.getFirst();</span>
+        
+        // is there anything to do?
+<span class="nc bnc" id="L1307" title="All 4 branches missed.">        if ((addItem == null) &amp;&amp; (delItem == null)) { return; }</span>
+        
+<span class="nc bnc" id="L1309" title="All 2 branches missed.">        if (log.isDebugEnabled()) {</span>
+<span class="nc" id="L1310">            log.debug(&quot;Flush &quot; + itemsPending.size() + &quot; pending items to database&quot;);</span>
+        }
+
+        // ensure there are no duplicates by deleting before adding
+<span class="nc bnc" id="L1314" title="All 2 branches missed.">        if (addItem != null) {</span>
+<span class="nc" id="L1315">            LinkedListNode&lt;RetryWrapper&gt; addHead = addItem.previous;</span>
+<span class="nc bnc" id="L1316" title="All 2 branches missed.">            while (addItem != addHead) {</span>
+<span class="nc" id="L1317">                delList.addLast(addItem.object.get());</span>
+<span class="nc" id="L1318">                addItem = addItem.next;</span>
+            }
+        }
+
+        // delete first (to remove possible duplicates), then add new items
+<span class="nc" id="L1323">        delItem = delList.getFirst();</span>
+<span class="nc bnc" id="L1324" title="All 2 branches missed.">        if (delItem != null) {</span>
+<span class="nc" id="L1325">            PreparedStatement pstmt = null;</span>
+            try {
+<span class="nc" id="L1327">                LinkedListNode&lt;PublishedItem&gt; delHead = delItem.previous;</span>
+<span class="nc" id="L1328">                pstmt = con.prepareStatement(DELETE_ITEM);</span>
+<span class="nc" id="L1329">                Boolean hasBatchItems = false;</span>
+<span class="nc bnc" id="L1330" title="All 2 branches missed.">                while (delItem != delHead)</span>
+                {
+<span class="nc" id="L1332">                    hasBatchItems = true;</span>
+<span class="nc" id="L1333">                    PublishedItem item = delItem.object;</span>
+<span class="nc" id="L1334">                    pstmt.setString(1, item.getNode().getService().getServiceID());</span>
+<span class="nc" id="L1335">                    pstmt.setString(2, encodeNodeID(item.getNode().getNodeID()));</span>
+<span class="nc" id="L1336">                    pstmt.setString(3, item.getID());</span>
+<span class="nc" id="L1337">                    pstmt.addBatch();</span>
+
+<span class="nc" id="L1339">                    delItem = delItem.next;</span>
+<span class="nc" id="L1340">                }</span>
+<span class="nc bnc" id="L1341" title="All 2 branches missed.">                if (hasBatchItems) pstmt.executeBatch();</span>
+<span class="nc" id="L1342">            } catch (SQLException ex) {</span>
+<span class="nc" id="L1343">                log.error(&quot;Failed to delete published item(s) from DB&quot;, ex);</span>
+                // do not re-throw here; continue with insert operation if possible
+            } finally {
+<span class="nc" id="L1346">                DbConnectionManager.closeStatement(pstmt);</span>
+<span class="nc" id="L1347">            }</span>
+        }
+        
+        try { 
+            // first try to add the pending items as a batch
+<span class="nc" id="L1352">            writePendingItems(con, addList.getFirst(), true);</span>
+<span class="nc" id="L1353">        } catch (SQLException ex) {</span>
+            // retry each item individually rather than rolling back
+<span class="nc" id="L1355">            writePendingItems(con, addList.getFirst(), false);       	</span>
+<span class="nc" id="L1356">        }</span>
+<span class="nc" id="L1357">    }</span>
+    
+    /**
+     * Execute JDBC calls (optionally via batch) to persist the given published items
+     * @param con
+     * @param addItem
+     * @param batch
+     * @throws SQLException
+     */
+    private static void writePendingItems(Connection con, LinkedListNode&lt;RetryWrapper&gt; addItem, boolean batch)  throws SQLException 
+    {	
+<span class="nc bnc" id="L1368" title="All 2 branches missed.">        if (addItem == null) { return; }</span>
+<span class="nc" id="L1369">        LinkedListNode&lt;RetryWrapper&gt; addHead = addItem.previous;</span>
+<span class="nc" id="L1370">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L1371">        RetryWrapper wrappedItem = null;</span>
+<span class="nc" id="L1372">        PublishedItem item = null;       </span>
+        try {
+<span class="nc" id="L1374">            pstmt = con.prepareStatement(ADD_ITEM);</span>
+<span class="nc" id="L1375">            Boolean hasBatchItems = false;</span>
+<span class="nc bnc" id="L1376" title="All 2 branches missed.">            while (addItem != addHead)</span>
+            {
+<span class="nc" id="L1378">                hasBatchItems = true;</span>
+<span class="nc" id="L1379">                wrappedItem = addItem.object;</span>
+<span class="nc" id="L1380">                item = wrappedItem.get();</span>
+<span class="nc" id="L1381">                pstmt.setString(1, item.getNode().getService().getServiceID());</span>
+<span class="nc" id="L1382">                pstmt.setString(2, encodeNodeID(item.getNodeID()));</span>
+<span class="nc" id="L1383">                pstmt.setString(3, item.getID());</span>
+<span class="nc" id="L1384">                pstmt.setString(4, item.getPublisher().toString());</span>
+<span class="nc" id="L1385">                pstmt.setString(5, StringUtils.dateToMillis(item.getCreationDate()));</span>
+<span class="nc" id="L1386">                pstmt.setString(6, item.getPayloadXML());</span>
+<span class="nc bnc" id="L1387" title="All 2 branches missed.">                if (batch) { pstmt.addBatch(); }</span>
+                else { 
+<span class="nc" id="L1389">                    try { pstmt.execute(); }</span>
+<span class="nc" id="L1390">                    catch (SQLException se) {</span>
+                        // individual item could not be persisted; retry (up to MAX_ITEM_RETRY attempts)
+<span class="nc" id="L1392">                        String itemKey = item.getItemKey();</span>
+<span class="nc bnc" id="L1393" title="All 2 branches missed.">                        if (wrappedItem.nextRetry() &lt; MAX_ITEM_RETRY) {</span>
+<span class="nc" id="L1394">                            log.warn(&quot;Failed to persist published item (will retry): &quot; + itemKey);</span>
+<span class="nc" id="L1395">                            savePublishedItem(wrappedItem);</span>
+                        } else {
+                            // all hope is lost ... item will be dropped
+<span class="nc" id="L1398">                            log.error(&quot;Published item could not be written to database: &quot; + itemKey + &quot;\n&quot; + item.getPayloadXML(), se);</span>
+                        }
+<span class="nc" id="L1400">                    }</span>
+                }
+<span class="nc" id="L1402">                addItem = addItem.next;</span>
+            }
+<span class="nc bnc" id="L1404" title="All 4 branches missed.">            if (batch &amp;&amp; hasBatchItems) { pstmt.executeBatch(); }			</span>
+<span class="nc" id="L1405">        } catch (SQLException se) {</span>
+<span class="nc" id="L1406">            log.error(&quot;Failed to persist published items as batch; will retry individually&quot;, se);</span>
+            // caught by caller; should not cause a transaction rollback
+<span class="nc" id="L1408">            throw se;</span>
+        } finally {
+<span class="nc" id="L1410">            DbConnectionManager.closeStatement(pstmt);</span>
+<span class="nc" id="L1411">        }</span>
+<span class="nc" id="L1412">    }</span>
+
+    /**
+     * Removes the specified published item from the DB.
+     *
+     * @param item The published item to delete.
+     */
+    public static void removePublishedItem(PublishedItem item) {
+<span class="nc" id="L1420">        String itemKey = item.getItemKey();</span>
+<span class="nc" id="L1421">        itemCache.remove(itemKey);</span>
+<span class="nc" id="L1422">        synchronized (itemsPending)</span>
+        {
+<span class="nc" id="L1424">            itemsToDelete.addLast(item);</span>
+<span class="nc" id="L1425">            LinkedListNode&lt;RetryWrapper&gt; itemToAdd = itemsPending.remove(itemKey);</span>
+<span class="nc bnc" id="L1426" title="All 2 branches missed.">            if (itemToAdd != null)</span>
+<span class="nc" id="L1427">                itemToAdd.remove();  // drop from itemsToAdd linked list</span>
+<span class="nc" id="L1428">        }</span>
+<span class="nc" id="L1429">    }</span>
+
+    /**
+     * Loads from the database the default node configuration for the specified node type
+     * and pubsub service.
+     *
+     * @param service the default node configuration used by this pubsub service.
+     * @param isLeafType true if loading default configuration for leaf nodes.
+     * @return the loaded default node configuration for the specified node type and service
+     *         or {@code null} if none was found.
+     */
+    public static DefaultNodeConfiguration loadDefaultConfiguration(PubSubService service,
+            boolean isLeafType) {
+<span class="nc" id="L1442">        Connection con = null;</span>
+<span class="nc" id="L1443">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L1444">        ResultSet rs = null;</span>
+<span class="nc" id="L1445">        DefaultNodeConfiguration config = null;</span>
+        try {
+<span class="nc" id="L1447">            con = DbConnectionManager.getConnection();</span>
+            // Get default node configuration for the specified service
+<span class="nc" id="L1449">            pstmt = con.prepareStatement(LOAD_DEFAULT_CONF);</span>
+<span class="nc" id="L1450">            pstmt.setString(1, service.getServiceID());</span>
+<span class="nc bnc" id="L1451" title="All 2 branches missed.">            pstmt.setInt(2, (isLeafType ? 1 : 0));</span>
+<span class="nc" id="L1452">            rs = pstmt.executeQuery();</span>
+<span class="nc bnc" id="L1453" title="All 2 branches missed.">            if (rs.next()) {</span>
+<span class="nc" id="L1454">                config = new DefaultNodeConfiguration(isLeafType);</span>
+                // Rebuild loaded default node configuration
+<span class="nc bnc" id="L1456" title="All 2 branches missed.">                config.setDeliverPayloads(rs.getInt(1) == 1);</span>
+<span class="nc" id="L1457">                config.setMaxPayloadSize(rs.getInt(2));</span>
+<span class="nc bnc" id="L1458" title="All 2 branches missed.">                config.setPersistPublishedItems(rs.getInt(3) == 1);</span>
+<span class="nc" id="L1459">                config.setMaxPublishedItems(rs.getInt(4));</span>
+<span class="nc bnc" id="L1460" title="All 2 branches missed.">                config.setNotifyConfigChanges(rs.getInt(5) == 1);</span>
+<span class="nc bnc" id="L1461" title="All 2 branches missed.">                config.setNotifyDelete(rs.getInt(6) == 1);</span>
+<span class="nc bnc" id="L1462" title="All 2 branches missed.">                config.setNotifyRetract(rs.getInt(7) == 1);</span>
+<span class="nc bnc" id="L1463" title="All 2 branches missed.">                config.setPresenceBasedDelivery(rs.getInt(8) == 1);</span>
+<span class="nc bnc" id="L1464" title="All 2 branches missed.">                config.setSendItemSubscribe(rs.getInt(9) == 1);</span>
+<span class="nc" id="L1465">                config.setPublisherModel(PublisherModel.valueOf(rs.getString(10)));</span>
+<span class="nc bnc" id="L1466" title="All 2 branches missed.">                config.setSubscriptionEnabled(rs.getInt(11) == 1);</span>
+<span class="nc" id="L1467">                config.setAccessModel(AccessModel.valueOf(rs.getString(12)));</span>
+<span class="nc" id="L1468">                config.setLanguage(rs.getString(13));</span>
+<span class="nc bnc" id="L1469" title="All 2 branches missed.">                if (rs.getString(14) != null) {</span>
+<span class="nc" id="L1470">                    config.setReplyPolicy(Node.ItemReplyPolicy.valueOf(rs.getString(14)));</span>
+                }
+<span class="nc" id="L1472">                config.setAssociationPolicy(</span>
+<span class="nc" id="L1473">                        CollectionNode.LeafNodeAssociationPolicy.valueOf(rs.getString(15)));</span>
+<span class="nc" id="L1474">                config.setMaxLeafNodes(rs.getInt(16));</span>
+            }
+        }
+<span class="nc" id="L1477">        catch (Exception sqle) {</span>
+<span class="nc" id="L1478">            log.error(sqle.getMessage(), sqle);</span>
+        }
+        finally {
+<span class="nc" id="L1481">            DbConnectionManager.closeConnection(rs, pstmt, con);</span>
+<span class="nc" id="L1482">        }</span>
+<span class="nc" id="L1483">        return config;</span>
+    }
+
+    /**
+     * Creates a new default node configuration for the specified service.
+     *
+     * @param service the default node configuration used by this pubsub service.
+     * @param config the default node configuration to create in the database.
+     */
+    public static void createDefaultConfiguration(PubSubService service,
+            DefaultNodeConfiguration config) {
+<span class="nc" id="L1494">        Connection con = null;</span>
+<span class="nc" id="L1495">        PreparedStatement pstmt = null;</span>
+        try {
+<span class="nc" id="L1497">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L1498">            pstmt = con.prepareStatement(ADD_DEFAULT_CONF);</span>
+<span class="nc" id="L1499">            pstmt.setString(1, service.getServiceID());</span>
+<span class="nc bnc" id="L1500" title="All 2 branches missed.">            pstmt.setInt(2, (config.isLeaf() ? 1 : 0));</span>
+<span class="nc bnc" id="L1501" title="All 2 branches missed.">            pstmt.setInt(3, (config.isDeliverPayloads() ? 1 : 0));</span>
+<span class="nc" id="L1502">            pstmt.setInt(4, config.getMaxPayloadSize());</span>
+<span class="nc bnc" id="L1503" title="All 2 branches missed.">            pstmt.setInt(5, (config.isPersistPublishedItems() ? 1 : 0));</span>
+<span class="nc" id="L1504">            pstmt.setInt(6, config.getMaxPublishedItems());</span>
+<span class="nc bnc" id="L1505" title="All 2 branches missed.">            pstmt.setInt(7, (config.isNotifyConfigChanges() ? 1 : 0));</span>
+<span class="nc bnc" id="L1506" title="All 2 branches missed.">            pstmt.setInt(8, (config.isNotifyDelete() ? 1 : 0));</span>
+<span class="nc bnc" id="L1507" title="All 2 branches missed.">            pstmt.setInt(9, (config.isNotifyRetract() ? 1 : 0));</span>
+<span class="nc bnc" id="L1508" title="All 2 branches missed.">            pstmt.setInt(10, (config.isPresenceBasedDelivery() ? 1 : 0));</span>
+<span class="nc bnc" id="L1509" title="All 2 branches missed.">            pstmt.setInt(11, (config.isSendItemSubscribe() ? 1 : 0));</span>
+<span class="nc" id="L1510">            pstmt.setString(12, config.getPublisherModel().getName());</span>
+<span class="nc bnc" id="L1511" title="All 2 branches missed.">            pstmt.setInt(13, (config.isSubscriptionEnabled() ? 1 : 0));</span>
+<span class="nc" id="L1512">            pstmt.setString(14, config.getAccessModel().getName());</span>
+<span class="nc" id="L1513">            pstmt.setString(15, config.getLanguage());</span>
+<span class="nc bnc" id="L1514" title="All 2 branches missed.">            if (config.getReplyPolicy() != null) {</span>
+<span class="nc" id="L1515">                pstmt.setString(16, config.getReplyPolicy().name());</span>
+            }
+            else {
+<span class="nc" id="L1518">                pstmt.setString(16, null);</span>
+            }
+<span class="nc" id="L1520">            pstmt.setString(17, config.getAssociationPolicy().name());</span>
+<span class="nc" id="L1521">            pstmt.setInt(18, config.getMaxLeafNodes());</span>
+<span class="nc" id="L1522">            pstmt.executeUpdate();</span>
+        }
+<span class="nc" id="L1524">        catch (SQLException sqle) {</span>
+<span class="nc" id="L1525">            log.error(sqle.getMessage(), sqle);</span>
+        }
+        finally {
+<span class="nc" id="L1528">            DbConnectionManager.closeConnection(pstmt, con);</span>
+<span class="nc" id="L1529">        }</span>
+<span class="nc" id="L1530">    }</span>
+
+    /**
+     * Updates the default node configuration for the specified service.
+     *
+     * @param service the default node configuration used by this pubsub service.
+     * @param config the default node configuration to update in the database.
+     */
+    public static void updateDefaultConfiguration(PubSubService service,
+            DefaultNodeConfiguration config) {
+<span class="nc" id="L1540">        Connection con = null;</span>
+<span class="nc" id="L1541">        PreparedStatement pstmt = null;</span>
+        try {
+<span class="nc" id="L1543">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L1544">            pstmt = con.prepareStatement(UPDATE_DEFAULT_CONF);</span>
+<span class="nc bnc" id="L1545" title="All 2 branches missed.">            pstmt.setInt(1, (config.isDeliverPayloads() ? 1 : 0));</span>
+<span class="nc" id="L1546">            pstmt.setInt(2, config.getMaxPayloadSize());</span>
+<span class="nc bnc" id="L1547" title="All 2 branches missed.">            pstmt.setInt(3, (config.isPersistPublishedItems() ? 1 : 0));</span>
+<span class="nc" id="L1548">            pstmt.setInt(4, config.getMaxPublishedItems());</span>
+<span class="nc bnc" id="L1549" title="All 2 branches missed.">            pstmt.setInt(5, (config.isNotifyConfigChanges() ? 1 : 0));</span>
+<span class="nc bnc" id="L1550" title="All 2 branches missed.">            pstmt.setInt(6, (config.isNotifyDelete() ? 1 : 0));</span>
+<span class="nc bnc" id="L1551" title="All 2 branches missed.">            pstmt.setInt(7, (config.isNotifyRetract() ? 1 : 0));</span>
+<span class="nc bnc" id="L1552" title="All 2 branches missed.">            pstmt.setInt(8, (config.isPresenceBasedDelivery() ? 1 : 0));</span>
+<span class="nc bnc" id="L1553" title="All 2 branches missed.">            pstmt.setInt(9, (config.isSendItemSubscribe() ? 1 : 0));</span>
+<span class="nc" id="L1554">            pstmt.setString(10, config.getPublisherModel().getName());</span>
+<span class="nc bnc" id="L1555" title="All 2 branches missed.">            pstmt.setInt(11, (config.isSubscriptionEnabled() ? 1 : 0));</span>
+<span class="nc" id="L1556">            pstmt.setString(12, config.getAccessModel().getName());</span>
+<span class="nc" id="L1557">            pstmt.setString(13, config.getLanguage());</span>
+<span class="nc bnc" id="L1558" title="All 2 branches missed.">            if (config.getReplyPolicy() != null) {</span>
+<span class="nc" id="L1559">                pstmt.setString(14, config.getReplyPolicy().name());</span>
+            }
+            else {
+<span class="nc" id="L1562">                pstmt.setString(14, null);</span>
+            }
+<span class="nc" id="L1564">            pstmt.setString(15, config.getAssociationPolicy().name());</span>
+<span class="nc" id="L1565">            pstmt.setInt(16, config.getMaxLeafNodes());</span>
+<span class="nc" id="L1566">            pstmt.setString(17, service.getServiceID());</span>
+<span class="nc bnc" id="L1567" title="All 2 branches missed.">            pstmt.setInt(18, (config.isLeaf() ? 1 : 0));</span>
+<span class="nc" id="L1568">            pstmt.executeUpdate();</span>
+        }
+<span class="nc" id="L1570">        catch (SQLException sqle) {</span>
+<span class="nc" id="L1571">            log.error(sqle.getMessage(), sqle);</span>
+        }
+        finally {
+<span class="nc" id="L1574">            DbConnectionManager.closeConnection(pstmt, con);</span>
+<span class="nc" id="L1575">        }</span>
+<span class="nc" id="L1576">    }</span>
+
+
+    /**
+     * Fetches all the results for the specified node, limited by {@link LeafNode#getMaxPublishedItems()}.
+     *
+     * @param node the leaf node to load its published items.
+     * @return the list of published items
+     */
+    public static List&lt;PublishedItem&gt; getPublishedItems(LeafNode node) {
+<span class="nc" id="L1586">        return getPublishedItems(node, node.getMaxPublishedItems());</span>
+    }
+
+    /**
+     * Fetches all the results for the specified node, limited by {@link LeafNode#getMaxPublishedItems()}.
+     *
+     * @param node the leaf node to load its published items.
+     * @param maxRows the maximum number of items to return
+     * @return the list of published items
+     */
+    public static List&lt;PublishedItem&gt; getPublishedItems(LeafNode node, int maxRows) {
+<span class="nc" id="L1597">        Lock itemLock = CacheFactory.getLock(ITEM_CACHE, itemCache);</span>
+        try {
+            // NOTE: force other requests to wait for DB I/O to complete
+<span class="nc" id="L1600">            itemLock.lock();</span>
+<span class="nc" id="L1601">            flushPendingItems();</span>
+        } finally {
+<span class="nc" id="L1603">            itemLock.unlock();</span>
+<span class="nc" id="L1604">        }</span>
+<span class="nc" id="L1605">        Connection con = null;</span>
+<span class="nc" id="L1606">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L1607">        ResultSet rs = null;</span>
+<span class="nc" id="L1608">        int max = MAX_ROWS_FETCH;</span>
+<span class="nc" id="L1609">        int maxPublished = node.getMaxPublishedItems();</span>
+
+        // Limit the max rows until a solution is in place with Result Set Management
+<span class="nc bnc" id="L1612" title="All 2 branches missed.">        if (maxRows != -1)</span>
+<span class="nc bnc" id="L1613" title="All 2 branches missed.">            max = maxPublished == -1 ? Math.min(maxRows, MAX_ROWS_FETCH) :  Math.min(maxRows, maxPublished);</span>
+<span class="nc bnc" id="L1614" title="All 2 branches missed.">        else if (maxPublished != -1)</span>
+<span class="nc" id="L1615">            max = Math.min(MAX_ROWS_FETCH, maxPublished);</span>
+
+        // We don't know how many items are in the db, so we will start with an allocation of 500
+<span class="nc" id="L1618">        java.util.LinkedList&lt;PublishedItem&gt; results = new java.util.LinkedList&lt;&gt;();</span>
+<span class="nc" id="L1619">        boolean descending = JiveGlobals.getBooleanProperty(&quot;xmpp.pubsub.order.descending&quot;, false);</span>
+
+        try
+        {
+<span class="nc" id="L1623">            con = DbConnectionManager.getConnection();</span>
+            // Get published items of the specified node
+<span class="nc" id="L1625">            pstmt = con.prepareStatement(LOAD_ITEMS);</span>
+<span class="nc" id="L1626">            pstmt.setMaxRows(max);</span>
+<span class="nc" id="L1627">            pstmt.setString(1, node.getService().getServiceID());</span>
+<span class="nc" id="L1628">            pstmt.setString(2, encodeNodeID(node.getNodeID()));</span>
+<span class="nc" id="L1629">            rs = pstmt.executeQuery();</span>
+<span class="nc" id="L1630">            int counter = 0;</span>
+
+            // Rebuild loaded published items
+<span class="nc bnc" id="L1633" title="All 4 branches missed.">            while(rs.next() &amp;&amp; (counter &lt; max)) {</span>
+<span class="nc" id="L1634">                String itemID = rs.getString(1);</span>
+<span class="nc" id="L1635">                JID publisher = new JID(rs.getString(2));</span>
+<span class="nc" id="L1636">                Date creationDate = new Date(Long.parseLong(rs.getString(3).trim()));</span>
+                // Create the item
+<span class="nc" id="L1638">                PublishedItem item = new PublishedItem(node, publisher, itemID, creationDate);</span>
+                // Add the extra fields to the published item
+<span class="nc bnc" id="L1640" title="All 2 branches missed.">                if (rs.getString(4) != null) {</span>
+<span class="nc" id="L1641">                    item.setPayloadXML(rs.getString(4));</span>
+                }
+                // Add the published item to the node
+<span class="nc bnc" id="L1644" title="All 2 branches missed.">                if (descending)</span>
+<span class="nc" id="L1645">                    results.add(item);</span>
+                else
+<span class="nc" id="L1647">                    results.addFirst(item);</span>
+<span class="nc" id="L1648">                counter++;</span>
+<span class="nc" id="L1649">            }</span>
+        }
+<span class="nc" id="L1651">        catch (Exception sqle) {</span>
+<span class="nc" id="L1652">            log.error(sqle.getMessage(), sqle);</span>
+        }
+        finally {
+<span class="nc" id="L1655">            DbConnectionManager.closeConnection(rs, pstmt, con);</span>
+<span class="nc" id="L1656">        }</span>
+
+<span class="nc" id="L1658">        return results;</span>
+    }
+
+    /**
+     * Fetches the last published item for the specified node.
+     *
+     * @param node the leaf node to load its last published items.
+     * @return the published item
+     */
+    public static PublishedItem getLastPublishedItem(LeafNode node) {
+<span class="nc" id="L1668">        Lock itemLock = CacheFactory.getLock(ITEM_CACHE, itemCache);</span>
+        try {
+            // NOTE: force other requests to wait for DB I/O to complete
+<span class="nc" id="L1671">            itemLock.lock();</span>
+<span class="nc" id="L1672">            flushPendingItems();</span>
+        } finally {
+<span class="nc" id="L1674">            itemLock.unlock();</span>
+<span class="nc" id="L1675">        }</span>
+<span class="nc" id="L1676">        Connection con = null;</span>
+<span class="nc" id="L1677">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L1678">        ResultSet rs = null;</span>
+<span class="nc" id="L1679">        PublishedItem item = null;</span>
+
+        try {
+<span class="nc" id="L1682">            con = DbConnectionManager.getConnection();</span>
+            // Get published items of the specified node
+<span class="nc" id="L1684">            pstmt = con.prepareStatement(LOAD_LAST_ITEM);</span>
+<span class="nc" id="L1685">            pstmt.setFetchSize(1);</span>
+<span class="nc" id="L1686">            pstmt.setMaxRows(1);</span>
+<span class="nc" id="L1687">            pstmt.setString(1, node.getService().getServiceID());</span>
+<span class="nc" id="L1688">            pstmt.setString(2, encodeNodeID(node.getNodeID()));</span>
+<span class="nc" id="L1689">            rs = pstmt.executeQuery();</span>
+            // Rebuild loaded published items
+<span class="nc bnc" id="L1691" title="All 2 branches missed.">            if (rs.next()) {</span>
+<span class="nc" id="L1692">                String itemID = rs.getString(1);</span>
+<span class="nc" id="L1693">                JID publisher = new JID(rs.getString(2));</span>
+<span class="nc" id="L1694">                Date creationDate = new Date(Long.parseLong(rs.getString(3).trim()));</span>
+                // Create the item
+<span class="nc" id="L1696">                item = new PublishedItem(node, publisher, itemID, creationDate);</span>
+                // Add the extra fields to the published item
+<span class="nc bnc" id="L1698" title="All 2 branches missed.">                if (rs.getString(4) != null) {</span>
+<span class="nc" id="L1699">                    item.setPayloadXML(rs.getString(4));</span>
+                }
+            }
+        }
+<span class="nc" id="L1703">        catch (Exception sqle) {</span>
+<span class="nc" id="L1704">            log.error(sqle.getMessage(), sqle);</span>
+        }
+        finally {
+<span class="nc" id="L1707">            DbConnectionManager.closeConnection(rs, pstmt, con);</span>
+<span class="nc" id="L1708">        }</span>
+<span class="nc" id="L1709">        return item;</span>
+    }
+
+    public static PublishedItem getPublishedItem(LeafNode node, String itemID) {
+<span class="nc" id="L1713">        String itemKey = PublishedItem.getItemKey(node, itemID);</span>
+
+        // try to fetch from cache first without locking
+<span class="nc" id="L1716">        PublishedItem result = itemCache.get(itemKey);</span>
+<span class="nc bnc" id="L1717" title="All 2 branches missed.">        if (result == null) {</span>
+<span class="nc" id="L1718">            Lock itemLock = CacheFactory.getLock(ITEM_CACHE, itemCache);</span>
+            try {
+                // Acquire lock, then re-check cache before reading from DB;
+                // allows clustered item cache to be primed by first request
+<span class="nc" id="L1722">                itemLock.lock();</span>
+<span class="nc" id="L1723">                result = itemCache.get(itemKey);</span>
+<span class="nc bnc" id="L1724" title="All 2 branches missed.">                if (result == null) {</span>
+<span class="nc" id="L1725">                    flushPendingItems(); </span>
+    
+                    // fetch item from DB
+<span class="nc" id="L1728">                    Connection con = null;</span>
+<span class="nc" id="L1729">                    PreparedStatement pstmt = null;</span>
+<span class="nc" id="L1730">                    ResultSet rs = null;</span>
+                    try {
+<span class="nc" id="L1732">                        con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L1733">                        pstmt = con.prepareStatement(LOAD_ITEM);</span>
+<span class="nc" id="L1734">                        pstmt.setString(1, node.getService().getServiceID());</span>
+<span class="nc" id="L1735">                        pstmt.setString(2, node.getNodeID());</span>
+<span class="nc" id="L1736">                        pstmt.setString(3, itemID);</span>
+<span class="nc" id="L1737">                        rs = pstmt.executeQuery();</span>
+    
+                        // Add to each node the corresponding subscriptions
+<span class="nc bnc" id="L1740" title="All 2 branches missed.">                        if (rs.next()) {</span>
+<span class="nc" id="L1741">                            JID publisher = new JID(rs.getString(1));</span>
+<span class="nc" id="L1742">                            Date creationDate = new Date(Long.parseLong(rs.getString(2).trim()));</span>
+                            // Create the item
+<span class="nc" id="L1744">                            result = new PublishedItem(node, publisher, itemID, creationDate);</span>
+                            // Add the extra fields to the published item
+<span class="nc bnc" id="L1746" title="All 2 branches missed.">                            if (rs.getString(3) != null) {</span>
+<span class="nc" id="L1747">                                result.setPayloadXML(rs.getString(3));</span>
+                            }
+<span class="nc" id="L1749">                            itemCache.put(itemKey, result);</span>
+<span class="nc" id="L1750">                            log.debug(&quot;Loaded item into cache from DB&quot;);</span>
+                        }
+<span class="nc" id="L1752">                    } catch (Exception exc) {</span>
+<span class="nc" id="L1753">                        log.error(exc.getMessage(), exc);</span>
+                    } finally {
+<span class="nc" id="L1755">                        DbConnectionManager.closeConnection(pstmt, con);</span>
+<span class="nc" id="L1756">                    }</span>
+<span class="nc" id="L1757">                } else {</span>
+<span class="nc" id="L1758">                    log.debug(&quot;Found cached item on second attempt (after acquiring lock)&quot;);</span>
+                }
+            } finally {
+<span class="nc" id="L1761">                itemLock.unlock();</span>
+<span class="nc" id="L1762">            }</span>
+<span class="nc" id="L1763">        } else {</span>
+<span class="nc" id="L1764">            log.debug(&quot;Found cached item on first attempt (no lock)&quot;);</span>
+        }
+<span class="nc" id="L1766">        return result;</span>
+    }
+
+    public static void purgeNode(LeafNode leafNode)
+    {
+<span class="nc" id="L1771">        Connection con = null;</span>
+<span class="nc" id="L1772">        boolean rollback = false;</span>
+
+        try
+        {
+<span class="nc" id="L1776">            con = DbConnectionManager.getTransactionConnection();</span>
+
+<span class="nc" id="L1778">            purgeNode(leafNode, con);</span>
+
+            // Delete all the entries from the itemsToAdd list and pending map
+            // that match this node.
+<span class="nc" id="L1782">            synchronized (itemsPending)</span>
+            {
+<span class="nc" id="L1784">                Iterator&lt;Map.Entry&lt;String, LinkedListNode&lt;RetryWrapper&gt;&gt;&gt; pendingIt = itemsPending.entrySet().iterator();</span>
+
+<span class="nc bnc" id="L1786" title="All 2 branches missed.">                while (pendingIt.hasNext())</span>
+                {
+<span class="nc" id="L1788">                    LinkedListNode&lt;RetryWrapper&gt; itemNode = pendingIt.next().getValue();</span>
+
+<span class="nc bnc" id="L1790" title="All 2 branches missed.">                    if (itemNode.object.get().getNodeID().equals(leafNode.getNodeID()))</span>
+                    {
+<span class="nc" id="L1792">                        itemNode.remove();</span>
+<span class="nc" id="L1793">                        pendingIt.remove();</span>
+                    }
+<span class="nc" id="L1795">                }</span>
+<span class="nc" id="L1796">            }</span>
+        }
+<span class="nc" id="L1798">        catch (SQLException exc)</span>
+        {
+<span class="nc" id="L1800">            log.error(exc.getMessage(), exc);</span>
+<span class="nc" id="L1801">            rollback = true;</span>
+        }
+        finally
+        {
+<span class="nc" id="L1805">            DbConnectionManager.closeTransactionConnection(con, rollback);</span>
+<span class="nc" id="L1806">        }</span>
+<span class="nc" id="L1807">    }</span>
+
+    private static void purgeNode(LeafNode leafNode, Connection con) throws SQLException
+    {
+<span class="nc" id="L1811">        flushPendingItems();</span>
+        // Remove published items of the node being deleted
+<span class="nc" id="L1813">        PreparedStatement pstmt = null;</span>
+
+        try
+        {
+<span class="nc" id="L1817">            pstmt = con.prepareStatement(DELETE_ITEMS);</span>
+<span class="nc" id="L1818">            pstmt.setString(1, leafNode.getService().getServiceID());</span>
+<span class="nc" id="L1819">            pstmt.setString(2, encodeNodeID(leafNode.getNodeID()));</span>
+<span class="nc" id="L1820">            pstmt.executeUpdate();</span>
+        }
+        finally
+        {
+<span class="nc" id="L1824">            DbConnectionManager.closeStatement(pstmt);</span>
+<span class="nc" id="L1825">        }</span>
+
+        // drop cached items for purged node
+<span class="nc" id="L1828">        synchronized (itemCache)</span>
+        {
+<span class="nc bnc" id="L1830" title="All 2 branches missed.">            for (PublishedItem item : itemCache.values())</span>
+            {
+<span class="nc bnc" id="L1832" title="All 2 branches missed.">                if (leafNode.getNodeID().equals(item.getNodeID()))</span>
+                {
+<span class="nc" id="L1834">                    itemCache.remove(item.getItemKey());</span>
+                }
+<span class="nc" id="L1836">            }</span>
+<span class="nc" id="L1837">        }</span>
+<span class="nc" id="L1838">    }</span>
+
+    private static String encodeWithComma(Collection&lt;String&gt; strings) {
+<span class="nc" id="L1841">        StringBuilder sb = new StringBuilder(90);</span>
+<span class="nc bnc" id="L1842" title="All 2 branches missed.">        for (String group : strings) {</span>
+<span class="nc" id="L1843">            sb.append(group).append(',');</span>
+<span class="nc" id="L1844">        }</span>
+<span class="nc bnc" id="L1845" title="All 2 branches missed.">        if (!strings.isEmpty()) {</span>
+<span class="nc" id="L1846">            sb.setLength(sb.length()-1);</span>
+        }
+        else {
+            // Add a blank so an empty string is never replaced with NULL (oracle...arggg!!!)
+<span class="nc" id="L1850">            sb.append(' ');</span>
+        }
+<span class="nc" id="L1852">        return sb.toString();</span>
+    }
+
+    private static Collection&lt;String&gt; decodeWithComma(String strings) {
+<span class="nc" id="L1856">        Collection&lt;String&gt; decodedStrings = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L1857">        StringTokenizer tokenizer = new StringTokenizer(strings.trim(), &quot;,&quot;);</span>
+<span class="nc bnc" id="L1858" title="All 2 branches missed.">        while (tokenizer.hasMoreTokens()) {</span>
+<span class="nc" id="L1859">            decodedStrings.add(tokenizer.nextToken());</span>
+        }
+<span class="nc" id="L1861">        return decodedStrings;</span>
+    }
+
+    private static String encodeNodeID(String nodeID) {
+<span class="nc bnc" id="L1865" title="All 2 branches missed.">        if (DbConnectionManager.getDatabaseType() == DbConnectionManager.DatabaseType.oracle &amp;&amp;</span>
+<span class="nc bnc" id="L1866" title="All 2 branches missed.">                &quot;&quot;.equals(nodeID)) {</span>
+            // Oracle stores empty strings as null so return a string with a space
+<span class="nc" id="L1868">            return &quot; &quot;;</span>
+        }
+<span class="nc" id="L1870">        return nodeID;</span>
+    }
+
+    private static String decodeNodeID(String nodeID) {
+<span class="nc bnc" id="L1874" title="All 2 branches missed.">        if (DbConnectionManager.getDatabaseType() == DbConnectionManager.DatabaseType.oracle &amp;&amp;</span>
+<span class="nc bnc" id="L1875" title="All 2 branches missed.">                &quot; &quot;.equals(nodeID)) {</span>
+            // Oracle stores empty strings as null so convert them back to empty strings
+<span class="nc" id="L1877">            return &quot;&quot;;</span>
+        }
+<span class="nc" id="L1879">        return nodeID;</span>
+    }
+
+    /**
+     * Purges all items from the database that exceed the defined item count on
+     * all nodes.
+     */
+    private static void purgeItems()
+    {
+<span class="nc" id="L1888">        boolean abortTransaction = false;</span>
+<span class="nc" id="L1889">        Connection con = null;</span>
+<span class="nc" id="L1890">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L1891">        PreparedStatement nodeConfig = null;</span>
+<span class="nc" id="L1892">        ResultSet rs = null;</span>
+
+        try
+        {
+<span class="nc" id="L1896">            con = DbConnectionManager.getTransactionConnection();</span>
+<span class="nc" id="L1897">            nodeConfig = con.prepareStatement(PERSISTENT_NODES);</span>
+<span class="nc" id="L1898">            rs = nodeConfig.executeQuery();</span>
+<span class="nc" id="L1899">            PreparedStatement purgeNode = con</span>
+<span class="nc" id="L1900">                    .prepareStatement(getPurgeStatement(DbConnectionManager.getDatabaseType()));</span>
+
+<span class="nc" id="L1902">            Boolean hasBatchItems = false;</span>
+<span class="nc bnc" id="L1903" title="All 2 branches missed.">            while (rs.next())</span>
+            {
+<span class="nc" id="L1905">                hasBatchItems = true;</span>
+<span class="nc" id="L1906">                String svcId = rs.getString(1);</span>
+<span class="nc" id="L1907">                String nodeId = rs.getString(2);</span>
+<span class="nc" id="L1908">                int maxItems = rs.getInt(3);</span>
+
+<span class="nc" id="L1910">                setPurgeParams(DbConnectionManager.getDatabaseType(), purgeNode, svcId, nodeId, maxItems);</span>
+
+<span class="nc" id="L1912">                purgeNode.addBatch();</span>
+<span class="nc" id="L1913">            }</span>
+<span class="nc bnc" id="L1914" title="All 2 branches missed.">            if (hasBatchItems) purgeNode.executeBatch();</span>
+        }
+<span class="nc" id="L1916">        catch (Exception sqle)</span>
+        {
+<span class="nc" id="L1918">            log.error(sqle.getMessage(), sqle);</span>
+<span class="nc" id="L1919">            abortTransaction = true;</span>
+        }
+        finally
+        {
+<span class="nc" id="L1923">            DbConnectionManager.closeResultSet(rs);</span>
+<span class="nc" id="L1924">            DbConnectionManager.closeStatement(rs, nodeConfig);</span>
+<span class="nc" id="L1925">            DbConnectionManager.closeTransactionConnection(pstmt, con, abortTransaction);</span>
+<span class="nc" id="L1926">        }</span>
+<span class="nc" id="L1927">    }</span>
+
+    private static void setPurgeParams(DatabaseType dbType, PreparedStatement purgeStmt, String serviceId,
+            String nodeId, int maxItems) throws SQLException
+    {
+<span class="nc bnc" id="L1932" title="All 3 branches missed.">        switch (dbType)</span>
+        {
+        case hsqldb:
+<span class="nc" id="L1935">            purgeStmt.setString(1, serviceId);</span>
+<span class="nc" id="L1936">            purgeStmt.setString(2, nodeId);</span>
+<span class="nc" id="L1937">            purgeStmt.setString(3, serviceId);</span>
+<span class="nc" id="L1938">            purgeStmt.setString(4, nodeId);</span>
+<span class="nc" id="L1939">            purgeStmt.setInt(5, maxItems);</span>
+<span class="nc" id="L1940">            break;</span>
+        case sqlserver:
+<span class="nc" id="L1942">            purgeStmt.setInt(1, maxItems);</span>
+<span class="nc" id="L1943">            purgeStmt.setString(2, serviceId);</span>
+<span class="nc" id="L1944">            purgeStmt.setString(3, nodeId);</span>
+<span class="nc" id="L1945">            purgeStmt.setString(4, serviceId);</span>
+<span class="nc" id="L1946">            purgeStmt.setString(5, nodeId);</span>
+<span class="nc" id="L1947">            break;</span>
+
+        default:
+<span class="nc" id="L1950">            purgeStmt.setString(1, serviceId);</span>
+<span class="nc" id="L1951">            purgeStmt.setString(2, nodeId);</span>
+<span class="nc" id="L1952">            purgeStmt.setInt(3, maxItems);</span>
+<span class="nc" id="L1953">            purgeStmt.setString(4, serviceId);</span>
+<span class="nc" id="L1954">            purgeStmt.setString(5, nodeId);</span>
+            break;
+        }
+<span class="nc" id="L1957">    }</span>
+
+    private static String getPurgeStatement(DatabaseType type)
+    {
+<span class="nc bnc" id="L1961" title="All 6 branches missed.">        switch (type)</span>
+        {
+        case postgresql:
+<span class="nc" id="L1964">            return PURGE_FOR_SIZE_POSTGRESQL;</span>
+        case mysql:
+<span class="nc" id="L1966">            return PURGE_FOR_SIZE_MYSQL;</span>
+        case hsqldb:
+<span class="nc" id="L1968">            return PURGE_FOR_SIZE_HSQLDB;</span>
+        case oracle:
+<span class="nc" id="L1970">            return PURGE_FOR_SIZE_ORACLE;</span>
+        case sqlserver:
+<span class="nc" id="L1972">            return PURGE_FOR_SIZE_SQLSERVER;</span>
+
+        default:
+<span class="nc" id="L1975">            return PURGE_FOR_SIZE;</span>
+        }
+    }
+
+    public static void shutdown()
+    {
+<span class="nc" id="L1981">        log.info(&quot;Flushing write cache to database&quot;);</span>
+<span class="nc" id="L1982">        flushPendingItems(false); // local member only</span>
+        
+        // node cleanup (skip when running as a cluster)
+<span class="nc bnc" id="L1985" title="All 2 branches missed.">        if (!ClusterManager.isClusteringEnabled()) {</span>
+<span class="nc" id="L1986">            purgeItems();</span>
+        }
+<span class="nc" id="L1988">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

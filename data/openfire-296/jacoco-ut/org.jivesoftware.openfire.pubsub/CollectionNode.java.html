@@ -1,0 +1,497 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>CollectionNode.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.pubsub</a> &gt; <span class="el_source">CollectionNode.java</span></div><h1>CollectionNode.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.pubsub;
+
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+
+import org.dom4j.Element;
+import org.jivesoftware.util.LocaleUtils;
+import org.xmpp.forms.DataForm;
+import org.xmpp.forms.FormField;
+import org.xmpp.packet.JID;
+import org.xmpp.packet.Message;
+
+/**
+ * A type of node that contains nodes and/or other collections but no published
+ * items. Collections provide the foundation entity to provide a means of representing
+ * hierarchical node structures.
+ *
+ * @author Matt Tucker
+ */
+public class CollectionNode extends Node {
+
+    /**
+     * Map that contains the child nodes of this node. The key is the child node ID and the
+     * value is the child node. A map is used to ensure uniqueness and in particular
+     * a ConcurrentHashMap for concurrency reasons.
+     */
+<span class="nc" id="L47">    private Map&lt;String, Node&gt; nodes = new ConcurrentHashMap&lt;&gt;();</span>
+    /**
+     * Policy that defines who may associate leaf nodes with a collection.
+     */
+<span class="nc" id="L51">    private LeafNodeAssociationPolicy associationPolicy = LeafNodeAssociationPolicy.all;</span>
+    /**
+     * Users that are allowed to associate leaf nodes with this collection node. This collection
+     * is going to be used only when the associationPolicy is {@code whitelist}.
+     */
+<span class="nc" id="L56">    private Collection&lt;JID&gt; associationTrusted = new ArrayList&lt;&gt;();</span>
+    /**
+     * Max number of leaf nodes that this collection node might have. A value of -1 means
+     * that there is no limit.
+     */
+<span class="nc" id="L61">    private int maxLeafNodes = -1;</span>
+
+    public CollectionNode(PubSubService service, CollectionNode parentNode, String nodeID, JID creator) {
+<span class="nc" id="L64">        super(service, parentNode, nodeID, creator);</span>
+        // Configure node with default values (get them from the pubsub service)
+<span class="nc" id="L66">        DefaultNodeConfiguration defaultConfiguration = service.getDefaultNodeConfiguration(false);</span>
+<span class="nc" id="L67">        this.associationPolicy = defaultConfiguration.getAssociationPolicy();</span>
+<span class="nc" id="L68">        this.maxLeafNodes = defaultConfiguration.getMaxLeafNodes();</span>
+<span class="nc" id="L69">    }</span>
+
+
+    @Override
+    protected void configure(FormField field) throws NotAcceptableException {
+        List&lt;String&gt; values;
+<span class="nc bnc" id="L75" title="All 2 branches missed.">        if (&quot;pubsub#leaf_node_association_policy&quot;.equals(field.getVariable()) ||</span>
+<span class="nc bnc" id="L76" title="All 2 branches missed.">            &quot;pubsub#children_association_policy&quot;.equals(field.getVariable())) {</span>
+<span class="nc" id="L77">            values = field.getValues();</span>
+<span class="nc bnc" id="L78" title="All 2 branches missed.">            if (values.size() &gt; 0)  {</span>
+<span class="nc" id="L79">                associationPolicy = LeafNodeAssociationPolicy.valueOf(values.get(0));</span>
+            }
+        }
+<span class="nc bnc" id="L82" title="All 2 branches missed.">        else if (&quot;pubsub#leaf_node_association_whitelist&quot;.equals(field.getVariable()) ||</span>
+<span class="nc bnc" id="L83" title="All 2 branches missed.">                &quot;pubsub#children_association_whitelist&quot;.equals(field.getVariable())) {</span>
+            // Get the new list of users that may add leaf nodes to this collection node
+<span class="nc" id="L85">            associationTrusted = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L86" title="All 2 branches missed.">            for (String value : field.getValues()) {</span>
+                try {
+<span class="nc" id="L88">                    addAssociationTrusted(new JID(value));</span>
+                }
+<span class="nc" id="L90">                catch (Exception e) {</span>
+                    // Do nothing
+<span class="nc" id="L92">                }</span>
+<span class="nc" id="L93">            }</span>
+        }
+<span class="nc bnc" id="L95" title="All 2 branches missed.">        else if (&quot;pubsub#leaf_nodes_max&quot;.equals(field.getVariable()) ||</span>
+<span class="nc bnc" id="L96" title="All 2 branches missed.">                &quot;pubsub#children_max&quot;.equals(field.getVariable())) {</span>
+<span class="nc" id="L97">            values = field.getValues();</span>
+<span class="nc bnc" id="L98" title="All 2 branches missed.">            maxLeafNodes = values.size() &gt; 0 ? Integer.parseInt(values.get(0)) : -1;</span>
+        }
+<span class="nc bnc" id="L100" title="All 2 branches missed.">        else if (&quot;pubsub#children&quot;.endsWith(field.getVariable())) {</span>
+<span class="nc" id="L101">            values = field.getValues();</span>
+<span class="nc" id="L102">            ArrayList&lt;Node&gt; childrenNodes = new ArrayList&lt;&gt;(values.size());</span>
+            
+            // Check all nodes for their existence 
+<span class="nc bnc" id="L105" title="All 2 branches missed.">            for (String nodeId : values)</span>
+            {
+<span class="nc" id="L107">                Node childNode = service.getNode(nodeId);</span>
+                
+<span class="nc bnc" id="L109" title="All 2 branches missed.">                if (childNode == null)</span>
+                {
+<span class="nc" id="L111">                    throw new NotAcceptableException(&quot;Child node does not exist&quot;);</span>
+                }
+<span class="nc" id="L113">                childrenNodes.add(childNode);</span>
+<span class="nc" id="L114">            }</span>
+            // Remove any children not in the new list.
+<span class="nc" id="L116">            ArrayList&lt;Node&gt; toRemove = new ArrayList&lt;&gt;(nodes.values());</span>
+<span class="nc" id="L117">            toRemove.removeAll(childrenNodes);</span>
+            
+<span class="nc bnc" id="L119" title="All 2 branches missed.">            for (Node node : toRemove)</span>
+            {
+<span class="nc" id="L121">                removeChildNode(node);</span>
+<span class="nc" id="L122">            }</span>
+            
+            // Set the parent on the children.
+<span class="nc bnc" id="L125" title="All 2 branches missed.">            for (Node node : childrenNodes)</span>
+            {
+<span class="nc" id="L127">                node.changeParent(this);</span>
+<span class="nc" id="L128">            }</span>
+        }
+<span class="nc" id="L130">    }</span>
+
+    @Override
+    void postConfigure(DataForm completedForm) {
+        //Do nothing.
+<span class="nc" id="L135">    }</span>
+
+    @Override
+    protected void addFormFields(DataForm form, boolean isEditing) {
+<span class="nc" id="L139">        super.addFormFields(form, isEditing);</span>
+
+<span class="nc" id="L141">        FormField typeField = form.getField(&quot;pubsub#node_type&quot;);</span>
+<span class="nc" id="L142">        typeField.addValue(&quot;collection&quot;);</span>
+        
+        // TODO: remove this field during an upgrade to pubsub version since it is replaced by children_association_policy
+<span class="nc" id="L145">        FormField formField = form.addField();</span>
+<span class="nc" id="L146">        formField.setVariable(&quot;pubsub#leaf_node_association_policy&quot;);</span>
+<span class="nc bnc" id="L147" title="All 2 branches missed.">        if (isEditing) {</span>
+<span class="nc" id="L148">            formField.setType(FormField.Type.list_single);</span>
+<span class="nc" id="L149">            formField.setLabel(LocaleUtils.getLocalizedString(&quot;pubsub.form.conf.children_association_policy&quot;));</span>
+<span class="nc" id="L150">            formField.addOption(LocaleUtils.getLocalizedString(&quot;pubsub.form.conf.children_association_policy.all&quot;), LeafNodeAssociationPolicy.all.name());</span>
+<span class="nc" id="L151">            formField.addOption(LocaleUtils.getLocalizedString(&quot;pubsub.form.conf.children_association_policy.owners&quot;), LeafNodeAssociationPolicy.owners.name());</span>
+<span class="nc" id="L152">            formField.addOption(LocaleUtils.getLocalizedString(&quot;pubsub.form.conf.children_association_policy.whitelist&quot;), LeafNodeAssociationPolicy.whitelist.name());</span>
+        }
+<span class="nc" id="L154">        formField.addValue(associationPolicy.name());</span>
+
+<span class="nc" id="L156">        formField = form.addField();</span>
+<span class="nc" id="L157">        formField.setVariable(&quot;pubsub#children_association_policy&quot;);</span>
+<span class="nc bnc" id="L158" title="All 2 branches missed.">        if (isEditing) {</span>
+<span class="nc" id="L159">            formField.setType(FormField.Type.list_single);</span>
+<span class="nc" id="L160">            formField.setLabel(LocaleUtils.getLocalizedString(&quot;pubsub.form.conf.children_association_policy&quot;));</span>
+<span class="nc" id="L161">            formField.addOption(LocaleUtils.getLocalizedString(&quot;pubsub.form.conf.children_association_policy.all&quot;), LeafNodeAssociationPolicy.all.name());</span>
+<span class="nc" id="L162">            formField.addOption(LocaleUtils.getLocalizedString(&quot;pubsub.form.conf.children_association_policy.owners&quot;), LeafNodeAssociationPolicy.owners.name());</span>
+<span class="nc" id="L163">            formField.addOption(LocaleUtils.getLocalizedString(&quot;pubsub.form.conf.children_association_policy.whitelist&quot;), LeafNodeAssociationPolicy.whitelist.name());</span>
+        }
+<span class="nc" id="L165">        formField.addValue(associationPolicy.name());</span>
+
+        // TODO: remove this field during an upgrade to pubsub version since it is replaced by children_association_whitelist
+<span class="nc" id="L168">        formField = form.addField();</span>
+<span class="nc" id="L169">        formField.setVariable(&quot;pubsub#leaf_node_association_whitelist&quot;);</span>
+<span class="nc bnc" id="L170" title="All 2 branches missed.">        if (isEditing) {</span>
+<span class="nc" id="L171">            formField.setType(FormField.Type.jid_multi);</span>
+<span class="nc" id="L172">            formField.setLabel(LocaleUtils.getLocalizedString(&quot;pubsub.form.conf.children_association_whitelist&quot;));</span>
+        }
+<span class="nc bnc" id="L174" title="All 2 branches missed.">        for (JID contact : associationTrusted) {</span>
+<span class="nc" id="L175">            formField.addValue(contact.toString());</span>
+<span class="nc" id="L176">        }</span>
+
+<span class="nc" id="L178">        formField = form.addField();</span>
+<span class="nc" id="L179">        formField.setVariable(&quot;pubsub#children_association_whitelist&quot;);</span>
+<span class="nc bnc" id="L180" title="All 2 branches missed.">        if (isEditing) {</span>
+<span class="nc" id="L181">            formField.setType(FormField.Type.jid_multi);</span>
+<span class="nc" id="L182">            formField.setLabel(LocaleUtils.getLocalizedString(&quot;pubsub.form.conf.children_association_whitelist&quot;));</span>
+        }
+<span class="nc bnc" id="L184" title="All 2 branches missed.">        for (JID contact : associationTrusted) {</span>
+<span class="nc" id="L185">            formField.addValue(contact.toString());</span>
+<span class="nc" id="L186">        }</span>
+
+<span class="nc" id="L188">        formField = form.addField();</span>
+<span class="nc" id="L189">        formField.setVariable(&quot;pubsub#leaf_nodes_max&quot;);</span>
+<span class="nc bnc" id="L190" title="All 2 branches missed.">        if (isEditing) {</span>
+<span class="nc" id="L191">            formField.setType(FormField.Type.text_single);</span>
+<span class="nc" id="L192">            formField.setLabel(LocaleUtils.getLocalizedString(&quot;pubsub.form.conf.children_max&quot;));</span>
+        }
+<span class="nc" id="L194">        formField.addValue(maxLeafNodes);</span>
+
+<span class="nc" id="L196">        formField = form.addField();</span>
+<span class="nc" id="L197">        formField.setVariable(&quot;pubsub#children_max&quot;);</span>
+<span class="nc bnc" id="L198" title="All 2 branches missed.">        if (isEditing) {</span>
+<span class="nc" id="L199">            formField.setType(FormField.Type.text_single);</span>
+<span class="nc" id="L200">            formField.setLabel(LocaleUtils.getLocalizedString(&quot;pubsub.form.conf.children_max&quot;));</span>
+        }
+<span class="nc" id="L202">        formField.addValue(maxLeafNodes);</span>
+
+<span class="nc" id="L204">        formField = form.addField();</span>
+<span class="nc" id="L205">        formField.setVariable(&quot;pubsub#children&quot;);</span>
+<span class="nc bnc" id="L206" title="All 2 branches missed.">        if (isEditing) {</span>
+<span class="nc" id="L207">            formField.setType(FormField.Type.text_multi);</span>
+<span class="nc" id="L208">            formField.setLabel(LocaleUtils.getLocalizedString(&quot;pubsub.form.conf.children&quot;));</span>
+        }
+<span class="nc bnc" id="L210" title="All 2 branches missed.">        for (String nodeId : nodes.keySet()) {</span>
+<span class="nc" id="L211">            formField.addValue(nodeId);</span>
+<span class="nc" id="L212">        }</span>
+<span class="nc" id="L213">    }</span>
+
+    /**
+     * Adds a child node to the list of child nodes. The new child node may just have been
+     * created or just restored from the database. This method will not trigger notifications
+     * to node subscribers since the node could be a node that has just been loaded from the
+     * database.
+     *
+     * @param child the node to add to the list of child nodes.
+     */
+    void addChildNode(Node child) {
+<span class="nc" id="L224">        nodes.put(child.getNodeID(), child);</span>
+<span class="nc" id="L225">    }</span>
+
+
+    /**
+     * Removes a child node from the list of child nodes. This method will not trigger
+     * notifications to node subscribers.
+     *
+     * @param child the node to remove from the list of child nodes.
+     */
+    void removeChildNode(Node child) {
+<span class="nc" id="L235">        nodes.remove(child.getNodeID());</span>
+<span class="nc" id="L236">    }</span>
+
+    /**
+     * Notification that a new node was created and added to this node. Trigger notifications
+     * to node subscribers whose subscription type is {@link NodeSubscription.Type#nodes} and
+     * have the proper depth.
+     *
+     * @param child the newly created node that was added to this node.
+     */
+    void childNodeAdded(Node child) {
+        // Build packet to broadcast to subscribers
+<span class="nc" id="L247">        Message message = new Message();</span>
+<span class="nc" id="L248">        Element event = message.addChildElement(&quot;event&quot;, &quot;http://jabber.org/protocol/pubsub#event&quot;);</span>
+<span class="nc" id="L249">        Element items = event.addElement(&quot;items&quot;);</span>
+<span class="nc" id="L250">        items.addAttribute(&quot;node&quot;, getNodeID()); </span>
+<span class="nc" id="L251">        Element item = items.addElement(&quot;item&quot;);</span>
+<span class="nc" id="L252">        item.addAttribute(&quot;id&quot;, child.getNodeID());</span>
+<span class="nc bnc" id="L253" title="All 2 branches missed.">        if (deliverPayloads) {</span>
+<span class="nc" id="L254">            item.add(child.getMetadataForm().getElement());</span>
+        }
+        // Broadcast event notification to subscribers
+<span class="nc" id="L257">        broadcastCollectionNodeEvent(child, message);</span>
+<span class="nc" id="L258">    }</span>
+
+    /**
+     * Notification that a child node was deleted from this node. Trigger notifications
+     * to node subscribers whose subscription type is {@link NodeSubscription.Type#nodes} and
+     * have the proper depth.
+     *
+     * @param child the deleted node that was removed from this node.
+     */
+    void childNodeDeleted(Node child) {
+        // Build packet to broadcast to subscribers
+<span class="nc" id="L269">        Message message = new Message();</span>
+<span class="nc" id="L270">        Element event = message.addChildElement(&quot;event&quot;, &quot;http://jabber.org/protocol/pubsub#event&quot;);</span>
+<span class="nc" id="L271">        event.addElement(&quot;delete&quot;).addAttribute(&quot;node&quot;, child.getNodeID());</span>
+        // Broadcast event notification to subscribers
+<span class="nc" id="L273">        broadcastCollectionNodeEvent(child, message);</span>
+<span class="nc" id="L274">    }</span>
+
+    @Override
+    protected void deletingNode() {
+        // Update child nodes to use the parent node of this node as the new parent node
+<span class="nc bnc" id="L279" title="All 2 branches missed.">        for (Node node : getNodes()) {</span>
+<span class="nc" id="L280">            node.changeParent(parent);</span>
+<span class="nc" id="L281">        }</span>
+<span class="nc" id="L282">    }</span>
+
+    private void broadcastCollectionNodeEvent(Node child, Message notification) {
+        // Get affected subscriptions (of this node and all parent nodes)
+<span class="nc" id="L286">        Collection&lt;NodeSubscription&gt; subscriptions = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L287">        subscriptions.addAll(getSubscriptions(child));</span>
+<span class="nc bnc" id="L288" title="All 2 branches missed.">        for (CollectionNode parentNode : getParents()) {</span>
+<span class="nc" id="L289">            subscriptions.addAll(parentNode.getSubscriptions(child));</span>
+<span class="nc" id="L290">        }</span>
+        // TODO Possibly use a thread pool for sending packets (based on the jids size)
+<span class="nc bnc" id="L292" title="All 2 branches missed.">        for (NodeSubscription subscription : subscriptions) {</span>
+<span class="nc" id="L293">            service.sendNotification(subscription.getNode(), notification, subscription.getJID());</span>
+<span class="nc" id="L294">        }</span>
+<span class="nc" id="L295">    }</span>
+
+    /**
+     * Returns a collection with the subscriptions to this node that should be notified
+     * that a new child was added or deleted.
+     *
+     * @param child the added or deleted child.
+     * @return a collection with the subscriptions to this node that should be notified
+     *         that a new child was added or deleted.
+     */
+    private Collection&lt;NodeSubscription&gt; getSubscriptions(Node child) {
+<span class="nc" id="L306">        Collection&lt;NodeSubscription&gt; subscriptions = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L307" title="All 2 branches missed.">        for (NodeSubscription subscription : getSubscriptions()) {</span>
+<span class="nc bnc" id="L308" title="All 2 branches missed.">            if (subscription.canSendChildNodeEvent(child)) {</span>
+<span class="nc" id="L309">                subscriptions.add(subscription);</span>
+            }
+<span class="nc" id="L311">        }</span>
+<span class="nc" id="L312">        return subscriptions;</span>
+    }
+
+    @Override
+    public boolean isCollectionNode() {
+<span class="nc" id="L317">        return true;</span>
+    }
+
+    /**
+     * Returns true if the specified node is a first-level children of this collection
+     * node.
+     *
+     * @param child the node to check if it is a direct child of this node.
+     * @return true if the specified node is a first-level children of this collection
+     *         node.
+     */
+    @Override
+    public boolean isChildNode(Node child) {
+<span class="nc" id="L330">        return nodes.containsKey(child.getNodeID());</span>
+    }
+
+    /**
+     * Returns true if the specified node is a direct child node of this collection node or
+     * a descendant of the children nodes.
+     *
+     * @param child the node to check if it is a descendant of this node.
+     * @return true if the specified node is a direct child node of this collection node or
+     *         a descendant of the children nodes.
+     */
+    @Override
+    public boolean isDescendantNode(Node child) {
+<span class="nc bnc" id="L343" title="All 2 branches missed.">        if (isChildNode(child)) {</span>
+<span class="nc" id="L344">            return true;</span>
+        }
+<span class="nc bnc" id="L346" title="All 2 branches missed.">        for (Node node : getNodes()) {</span>
+<span class="nc bnc" id="L347" title="All 2 branches missed.">            if (node.isDescendantNode(child)) {</span>
+<span class="nc" id="L348">                return true;</span>
+            }
+<span class="nc" id="L350">        }</span>
+<span class="nc" id="L351">        return false;</span>
+    }
+
+    @Override
+    public Collection&lt;Node&gt; getNodes() {
+<span class="nc" id="L356">        return nodes.values();</span>
+    }
+
+    /**
+     * Returns the policy that defines who may associate leaf nodes with a collection.
+     *
+     * @return the policy that defines who may associate leaf nodes with a collection.
+     */
+    public LeafNodeAssociationPolicy getAssociationPolicy() {
+<span class="nc" id="L365">        return associationPolicy;</span>
+    }
+
+    /**
+     * Returns the users that are allowed to associate leaf nodes with this collection node.
+     * This collection is going to be used only when the associationPolicy is {@code whitelist}.
+     *
+     * @return the users that are allowed to associate leaf nodes with this collection node.
+     */
+    public Collection&lt;JID&gt; getAssociationTrusted() {
+<span class="nc" id="L375">        return Collections.unmodifiableCollection(associationTrusted);</span>
+    }
+
+    /**
+     * Adds a new trusted user that is allowed to associate leaf nodes with this collection node.
+     * The new user is not going to be added to the database. Instead it is just kept in memory.
+     *
+     * @param user the new trusted user that is allowed to associate leaf nodes with this
+     *        collection node.
+     */
+    void addAssociationTrusted(JID user) {
+<span class="nc" id="L386">        associationTrusted.add(user);</span>
+<span class="nc" id="L387">    }</span>
+
+    /**
+     * Returns the max number of leaf nodes that this collection node might have. A value of
+     * -1 means that there is no limit.
+     *
+     * @return the max number of leaf nodes that this collection node might have.
+     */
+    public int getMaxLeafNodes() {
+<span class="nc" id="L396">        return maxLeafNodes;</span>
+    }
+
+    /**
+     * Sets the policy that defines who may associate leaf nodes with a collection.
+     *
+     * @param associationPolicy the policy that defines who may associate leaf nodes
+     *        with a collection.
+     */
+    void setAssociationPolicy(LeafNodeAssociationPolicy associationPolicy) {
+<span class="nc" id="L406">        this.associationPolicy = associationPolicy;</span>
+<span class="nc" id="L407">    }</span>
+
+    /**
+     * Sets the users that are allowed to associate leaf nodes with this collection node.
+     * This collection is going to be used only when the associationPolicy is {@code whitelist}.
+     *
+     * @param associationTrusted the users that are allowed to associate leaf nodes with this
+     *        collection node.
+     */
+    void setAssociationTrusted(Collection&lt;JID&gt; associationTrusted) {
+<span class="nc" id="L417">        this.associationTrusted = associationTrusted;</span>
+<span class="nc" id="L418">    }</span>
+
+    /**
+     * Sets the max number of leaf nodes that this collection node might have. A value of
+     * -1 means that there is no limit.
+     *
+     * @param maxLeafNodes the max number of leaf nodes that this collection node might have.
+     */
+    void setMaxLeafNodes(int maxLeafNodes) {
+<span class="nc" id="L427">        this.maxLeafNodes = maxLeafNodes;</span>
+<span class="nc" id="L428">    }</span>
+
+    /**
+     * Returns true if the specified user is allowed to associate a leaf node with this
+     * node. The decision is taken based on the association policy that the node is
+     * using.
+     *
+     * @param user the user trying to associate a leaf node with this node.
+     * @return true if the specified user is allowed to associate a leaf node with this
+     *         node.
+     */
+    public boolean isAssociationAllowed(JID user) {
+<span class="nc bnc" id="L440" title="All 2 branches missed.">        if (associationPolicy == LeafNodeAssociationPolicy.all) {</span>
+            // Anyone is allowed to associate leaf nodes with this node
+<span class="nc" id="L442">            return true;</span>
+        }
+<span class="nc bnc" id="L444" title="All 2 branches missed.">        else if (associationPolicy == LeafNodeAssociationPolicy.owners) {</span>
+            // Only owners or sysadmins are allowed to associate leaf nodes with this node
+<span class="nc" id="L446">            return isAdmin(user);</span>
+        }
+        else {
+            // Owners, sysadmins and a whitelist of usres are allowed to
+            // associate leaf nodes with this node
+<span class="nc bnc" id="L451" title="All 4 branches missed.">            return isAdmin(user) || associationTrusted.contains(user);</span>
+        }
+    }
+
+    /**
+     * Returns true if the max number of leaf nodes associated with this node has
+     * reached to the maximum allowed.
+     *
+     * @return true if the max number of leaf nodes associated with this node has
+     *         reached to the maximum allowed.
+     */
+    public boolean isMaxLeafNodeReached() {
+<span class="nc bnc" id="L463" title="All 2 branches missed.">        if (maxLeafNodes &lt; 0) {</span>
+            // There is no maximum limit
+<span class="nc" id="L465">            return false;</span>
+        }
+        // Count number of child leaf nodes
+<span class="nc" id="L468">        int counter = 0;</span>
+<span class="nc bnc" id="L469" title="All 2 branches missed.">        for (Node node : getNodes()) {</span>
+<span class="nc bnc" id="L470" title="All 2 branches missed.">            if (!node.isCollectionNode()) {</span>
+<span class="nc" id="L471">                counter = counter + 1;</span>
+            }
+<span class="nc" id="L473">        }</span>
+        // Compare count with maximum allowed
+<span class="nc bnc" id="L475" title="All 2 branches missed.">        return counter &gt;= maxLeafNodes;</span>
+    }
+
+    /**
+     * Policy that defines who may associate leaf nodes with a collection.
+     */
+<span class="nc" id="L481">    public static enum LeafNodeAssociationPolicy {</span>
+
+        /**
+         * Anyone may associate leaf nodes with the collection.
+         */
+<span class="nc" id="L486">        all,</span>
+        /**
+         * Only collection node owners may associate leaf nodes with the collection.
+         */
+<span class="nc" id="L490">        owners,</span>
+        /**
+         * Only those on a whitelist may associate leaf nodes with the collection.
+         */
+<span class="nc" id="L494">        whitelist</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

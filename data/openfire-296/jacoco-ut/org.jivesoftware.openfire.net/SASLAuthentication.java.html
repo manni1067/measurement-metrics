@@ -1,0 +1,701 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>SASLAuthentication.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.net</a> &gt; <span class="el_source">SASLAuthentication.java</span></div><h1>SASLAuthentication.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.net;
+
+import java.security.Security;
+import java.security.cert.Certificate;
+import java.security.cert.X509Certificate;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.Enumeration;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.regex.Pattern;
+
+import javax.security.sasl.Sasl;
+import javax.security.sasl.SaslException;
+import javax.security.sasl.SaslServer;
+import javax.security.sasl.SaslServerFactory;
+
+import org.dom4j.DocumentHelper;
+import org.dom4j.Element;
+import org.dom4j.Namespace;
+import org.dom4j.QName;
+import org.jivesoftware.openfire.Connection;
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.XMPPServerInfo;
+import org.jivesoftware.openfire.auth.AuthFactory;
+import org.jivesoftware.openfire.auth.AuthToken;
+import org.jivesoftware.openfire.keystore.CertificateStoreManager;
+import org.jivesoftware.openfire.keystore.TrustStore;
+import org.jivesoftware.openfire.lockout.LockOutManager;
+import org.jivesoftware.openfire.sasl.AnonymousSaslServer;
+import org.jivesoftware.openfire.sasl.Failure;
+import org.jivesoftware.openfire.sasl.JiveSharedSecretSaslServer;
+import org.jivesoftware.openfire.sasl.SaslFailureException;
+import org.jivesoftware.openfire.session.ClientSession;
+import org.jivesoftware.openfire.session.ConnectionSettings;
+import org.jivesoftware.openfire.session.IncomingServerSession;
+import org.jivesoftware.openfire.session.LocalClientSession;
+import org.jivesoftware.openfire.session.LocalIncomingServerSession;
+import org.jivesoftware.openfire.session.LocalSession;
+import org.jivesoftware.openfire.session.Session;
+import org.jivesoftware.openfire.spi.ConnectionType;
+import org.jivesoftware.util.*;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * SASLAuthentication is responsible for returning the available SASL mechanisms to use and for
+ * actually performing the SASL authentication.&lt;p&gt;
+ *
+ * The list of available SASL mechanisms is determined by:
+ * &lt;ol&gt;
+ *      &lt;li&gt;The type of {@link org.jivesoftware.openfire.user.UserProvider} being used since
+ *      some SASL mechanisms require the server to be able to retrieve user passwords&lt;/li&gt;
+ *      &lt;li&gt;Whether anonymous logins are enabled or not.&lt;/li&gt;
+ *      &lt;li&gt;Whether shared secret authentication is enabled or not.&lt;/li&gt;
+ *      &lt;li&gt;Whether the underlying connection has been secured or not.&lt;/li&gt;
+ * &lt;/ol&gt;
+ *
+ * @author Hao Chen
+ * @author Gaston Dombiak
+ */
+<span class="nc" id="L82">public class SASLAuthentication {</span>
+
+<span class="nc" id="L84">    private static final Logger Log = LoggerFactory.getLogger(SASLAuthentication.class);</span>
+
+<span class="nc" id="L86">    public static final SystemProperty&lt;Boolean&gt; SKIP_PEER_CERT_REVALIDATION_CLIENT = SystemProperty.Builder.ofType(Boolean.class)</span>
+<span class="nc" id="L87">        .setKey(&quot;xmpp.auth.external.client.skip-cert-revalidation&quot;)</span>
+<span class="nc" id="L88">        .setDynamic(true)</span>
+<span class="nc" id="L89">        .setDefaultValue(false)</span>
+<span class="nc" id="L90">        .build();</span>
+
+    // http://stackoverflow.com/questions/8571501/how-to-check-whether-the-string-is-base64-encoded-or-not
+    // plus an extra regex alternative to catch a single equals sign ('=', see RFC 6120 6.4.2)
+<span class="nc" id="L94">    private static final Pattern BASE64_ENCODED = Pattern.compile(&quot;^(=|([A-Za-z0-9+/]{4})*([A-Za-z0-9+/]{4}|[A-Za-z0-9+/]{3}=|[A-Za-z0-9+/]{2}==))$&quot;);</span>
+
+    private static final String SASL_NAMESPACE = &quot;urn:ietf:params:xml:ns:xmpp-sasl&quot;;
+
+<span class="nc" id="L98">    private static Set&lt;String&gt; mechanisms = new HashSet&lt;&gt;();</span>
+
+    static
+    {
+        // Add (proprietary) Providers of SASL implementation to the Java security context.
+<span class="nc" id="L103">        Security.addProvider( new org.jivesoftware.openfire.sasl.SaslProvider() );</span>
+
+        // Convert XML based provider setup to Database based
+<span class="nc" id="L106">        JiveGlobals.migrateProperty(&quot;sasl.mechs&quot;);</span>
+<span class="nc" id="L107">        JiveGlobals.migrateProperty(&quot;sasl.gssapi.debug&quot;);</span>
+<span class="nc" id="L108">        JiveGlobals.migrateProperty(&quot;sasl.gssapi.config&quot;);</span>
+<span class="nc" id="L109">        JiveGlobals.migrateProperty(&quot;sasl.gssapi.useSubjectCredsOnly&quot;);</span>
+
+<span class="nc" id="L111">        initMechanisms();</span>
+
+<span class="nc" id="L113">        org.jivesoftware.util.PropertyEventDispatcher.addListener( new PropertyEventListener()</span>
+<span class="nc" id="L114">        {</span>
+            @Override
+            public void propertySet( String property, Map&lt;String, Object&gt; params )
+            {
+<span class="nc bnc" id="L118" title="All 2 branches missed.">                if (&quot;sasl.mechs&quot;.equals( property ) )</span>
+                {
+<span class="nc" id="L120">                    initMechanisms();</span>
+                }
+<span class="nc" id="L122">            }</span>
+
+            @Override
+            public void propertyDeleted( String property, Map&lt;String, Object&gt; params )
+            {
+<span class="nc bnc" id="L127" title="All 2 branches missed.">                if (&quot;sasl.mechs&quot;.equals( property ) )</span>
+                {
+<span class="nc" id="L129">                    initMechanisms();</span>
+                }
+<span class="nc" id="L131">            }</span>
+
+            @Override
+            public void xmlPropertySet( String property, Map&lt;String, Object&gt; params )
+<span class="nc" id="L135">            {}</span>
+
+            @Override
+            public void xmlPropertyDeleted( String property, Map&lt;String, Object&gt; params )
+<span class="nc" id="L139">            {}</span>
+        } );
+<span class="nc" id="L141">    }</span>
+
+<span class="nc" id="L143">    public enum ElementType</span>
+    {
+<span class="nc" id="L145">        ABORT,</span>
+<span class="nc" id="L146">        AUTH,</span>
+<span class="nc" id="L147">        RESPONSE,</span>
+<span class="nc" id="L148">        CHALLENGE,</span>
+<span class="nc" id="L149">        FAILURE,</span>
+<span class="nc" id="L150">        UNDEF;</span>
+
+        public static ElementType valueOfCaseInsensitive( String name )
+        {
+<span class="nc bnc" id="L154" title="All 4 branches missed.">            if ( name == null || name.isEmpty() ) {</span>
+<span class="nc" id="L155">                return UNDEF;</span>
+            }
+            try
+            {
+<span class="nc" id="L159">                return ElementType.valueOf( name.toUpperCase() );</span>
+            }
+<span class="nc" id="L161">            catch ( Throwable t )</span>
+            {
+<span class="nc" id="L163">                return UNDEF;</span>
+            }
+        }
+    }
+
+<span class="nc" id="L168">    public enum Status</span>
+    {
+        /**
+         * Entity needs to respond last challenge. Session is still negotiatingSASL authentication.
+         */
+<span class="nc" id="L173">        needResponse,</span>
+
+        /**
+         * SASL negotiation has failed. The entity may retry a few times before the connection is closed.
+         */
+<span class="nc" id="L178">        failed,</span>
+
+        /**
+         * SASL negotiation has been successful.
+         */
+<span class="nc" id="L183">        authenticated</span>
+    }
+
+    /**
+     * Returns a string with the valid SASL mechanisms available for the specified session. If
+     * the session's connection is not secured then only include the SASL mechanisms that don't
+     * require TLS.
+     *
+     * @param session The current session
+     *
+     * @return a string with the valid SASL mechanisms available for the specified session.
+     */
+    public static String getSASLMechanisms( LocalSession session )
+    {
+<span class="nc bnc" id="L197" title="All 2 branches missed.">        if ( session instanceof ClientSession )</span>
+        {
+<span class="nc" id="L199">            return getSASLMechanismsElement( (ClientSession) session ).asXML();</span>
+        }
+<span class="nc bnc" id="L201" title="All 2 branches missed.">        else if ( session instanceof LocalIncomingServerSession )</span>
+        {
+<span class="nc" id="L203">            return getSASLMechanismsElement( (LocalIncomingServerSession) session ).asXML();</span>
+        }
+        else
+        {
+<span class="nc" id="L207">            Log.debug( &quot;Unable to determine SASL mechanisms that are applicable to session '{}'. Unrecognized session type.&quot;, session );</span>
+<span class="nc" id="L208">            return &quot;&quot;;</span>
+        }
+    }
+
+    public static Element getSASLMechanismsElement( ClientSession session )
+    {
+<span class="nc" id="L214">        final Element result = DocumentHelper.createElement( new QName( &quot;mechanisms&quot;, new Namespace( &quot;&quot;, SASL_NAMESPACE ) ) );</span>
+<span class="nc bnc" id="L215" title="All 2 branches missed.">        for (String mech : getSupportedMechanisms()) {</span>
+<span class="nc bnc" id="L216" title="All 2 branches missed.">            if (mech.equals(&quot;EXTERNAL&quot;)) {</span>
+<span class="nc" id="L217">                boolean trustedCert = false;</span>
+<span class="nc bnc" id="L218" title="All 2 branches missed.">                if (session.isSecure()) {</span>
+<span class="nc" id="L219">                    final Connection connection = ( (LocalClientSession) session ).getConnection();</span>
+<span class="nc bnc" id="L220" title="All 2 branches missed.">                    if ( SKIP_PEER_CERT_REVALIDATION_CLIENT.getValue() ) {</span>
+                        // Trust that the peer certificate has been validated when TLS got established.
+<span class="nc bnc" id="L222" title="All 4 branches missed.">                        trustedCert = connection.getPeerCertificates() != null &amp;&amp; connection.getPeerCertificates().length &gt; 0;</span>
+                    } else {
+                        // Re-evaluate the validity of the peer certificate.
+<span class="nc" id="L225">                        final TrustStore trustStore = connection.getConfiguration().getTrustStore();</span>
+<span class="nc" id="L226">                        trustedCert = trustStore.isTrusted( connection.getPeerCertificates() );</span>
+                    }
+                }
+<span class="nc bnc" id="L229" title="All 2 branches missed.">                if ( !trustedCert ) {</span>
+<span class="nc" id="L230">                    continue; // Do not offer EXTERNAL.</span>
+                }
+            }
+<span class="nc" id="L233">            final Element mechanism = result.addElement(&quot;mechanism&quot;);</span>
+<span class="nc" id="L234">            mechanism.setText(mech);</span>
+<span class="nc" id="L235">        }</span>
+<span class="nc" id="L236">        return result;</span>
+    }
+
+    public static Element getSASLMechanismsElement( LocalIncomingServerSession session )
+    {
+<span class="nc" id="L241">        final Element result = DocumentHelper.createElement( new QName( &quot;mechanisms&quot;, new Namespace( &quot;&quot;, SASL_NAMESPACE ) ) );</span>
+<span class="nc bnc" id="L242" title="All 2 branches missed.">        if (session.isSecure()) {</span>
+<span class="nc" id="L243">            final Connection connection   = session.getConnection();</span>
+<span class="nc" id="L244">            final TrustStore trustStore   = connection.getConfiguration().getTrustStore();</span>
+<span class="nc" id="L245">            final X509Certificate trusted = trustStore.getEndEntityCertificate( session.getConnection().getPeerCertificates() );</span>
+
+<span class="nc bnc" id="L247" title="All 2 branches missed.">            boolean haveTrustedCertificate = trusted != null;</span>
+<span class="nc bnc" id="L248" title="All 4 branches missed.">            if (trusted != null &amp;&amp; session.getDefaultIdentity() != null) {</span>
+<span class="nc" id="L249">                haveTrustedCertificate = verifyCertificate(trusted, session.getDefaultIdentity());</span>
+            }
+<span class="nc bnc" id="L251" title="All 2 branches missed.">            if (haveTrustedCertificate) {</span>
+                // Offer SASL EXTERNAL only if TLS has already been negotiated and the peer has a trusted cert.
+<span class="nc" id="L253">                final Element mechanism = result.addElement(&quot;mechanism&quot;);</span>
+<span class="nc" id="L254">                mechanism.setText(&quot;EXTERNAL&quot;);</span>
+            }
+        }
+<span class="nc" id="L257">        return result;</span>
+    }
+
+    /**
+     * Handles the SASL authentication packet. The entity may be sending an initial
+     * authentication request or a response to a challenge made by the server. The returned
+     * value indicates whether the authentication has finished either successfully or not or
+     * if the entity is expected to send a response to a challenge.
+     *
+     * @param session the session that is authenticating with the server.
+     * @param doc the stanza sent by the authenticating entity.
+     * @return value that indicates whether the authentication has finished either successfully
+     *         or not or if the entity is expected to send a response to a challenge.
+     */
+    public static Status handle(LocalSession session, Element doc)
+    {
+        try
+        {
+<span class="nc bnc" id="L275" title="All 2 branches missed.">            if ( !doc.getNamespaceURI().equals( SASL_NAMESPACE ) )</span>
+            {
+<span class="nc" id="L277">                throw new IllegalStateException( &quot;Unexpected data received while negotiating SASL authentication. Name of the offending root element: &quot; + doc.getName() + &quot; Namespace: &quot; + doc.getNamespaceURI() );</span>
+            }
+
+<span class="nc bnc" id="L280" title="All 4 branches missed.">            switch ( ElementType.valueOfCaseInsensitive( doc.getName() ) )</span>
+            {
+                case ABORT:
+<span class="nc" id="L283">                    throw new SaslFailureException( Failure.ABORTED );</span>
+
+                case AUTH:
+<span class="nc bnc" id="L286" title="All 2 branches missed.">                    if ( doc.attributeValue( &quot;mechanism&quot; ) == null )</span>
+                    {
+<span class="nc" id="L288">                        throw new SaslFailureException( Failure.INVALID_MECHANISM, &quot;Peer did not specify a mechanism.&quot; );</span>
+                    }
+
+<span class="nc" id="L291">                    final String mechanismName = doc.attributeValue( &quot;mechanism&quot; ).toUpperCase();</span>
+
+                    // See if the mechanism is supported by configuration as well as by implementation.
+<span class="nc bnc" id="L294" title="All 2 branches missed.">                    if ( !mechanisms.contains( mechanismName ) )</span>
+                    {
+<span class="nc" id="L296">                        throw new SaslFailureException( Failure.INVALID_MECHANISM, &quot;The configuration of Openfire does not contain or allow the mechanism.&quot; );</span>
+                    }
+
+                    // OF-477: The SASL implementation requires the fully qualified host name (not the domain name!) of this server,
+                    // yet, most of the XMPP implemenations of DIGEST-MD5 will actually use the domain name. To account for that,
+                    // here, we'll use the host name, unless DIGEST-MD5 is being negotiated!
+<span class="nc" id="L302">                    final XMPPServerInfo serverInfo = XMPPServer.getInstance().getServerInfo();</span>
+<span class="nc bnc" id="L303" title="All 2 branches missed.">                    final String serverName = ( mechanismName.equals( &quot;DIGEST-MD5&quot; ) ? serverInfo.getXMPPDomain() : serverInfo.getHostname() );</span>
+
+                    // Construct the configuration properties
+<span class="nc" id="L306">                    final Map&lt;String, Object&gt; props = new HashMap&lt;&gt;();</span>
+<span class="nc" id="L307">                    props.put( LocalSession.class.getCanonicalName(), session );</span>
+<span class="nc bnc" id="L308" title="All 2 branches missed.">                    props.put(Sasl.POLICY_NOANONYMOUS, Boolean.toString(!AnonymousSaslServer.ENABLED.getValue()));</span>
+<span class="nc" id="L309">                    props.put( &quot;com.sun.security.sasl.digest.realm&quot;, serverInfo.getXMPPDomain() );</span>
+
+<span class="nc" id="L311">                    SaslServer saslServer = Sasl.createSaslServer( mechanismName, &quot;xmpp&quot;, serverName, props, new XMPPCallbackHandler() );</span>
+<span class="nc bnc" id="L312" title="All 2 branches missed.">                    if ( saslServer == null )</span>
+                    {
+<span class="nc" id="L314">                        throw new SaslFailureException( Failure.INVALID_MECHANISM, &quot;There is no provider that can provide a SASL server for the desired mechanism and properties.&quot; );</span>
+                    }
+
+<span class="nc" id="L317">                    session.setSessionData( &quot;SaslServer&quot;, saslServer );</span>
+
+<span class="nc bnc" id="L319" title="All 2 branches missed.">                    if ( mechanismName.equals( &quot;DIGEST-MD5&quot; ) )</span>
+                    {
+                        // RFC2831 (DIGEST-MD5) says the client MAY provide data in the initial response. Java SASL does
+                        // not (currently) support this and throws an exception. For XMPP, such data violates
+                        // the RFC, so we just strip any initial token.
+<span class="nc" id="L324">                        doc.setText( &quot;&quot; );</span>
+                    }
+
+                    // intended fall-through
+                case RESPONSE:
+
+<span class="nc" id="L330">                    saslServer = (SaslServer) session.getSessionData( &quot;SaslServer&quot; );</span>
+
+<span class="nc bnc" id="L332" title="All 2 branches missed.">                    if ( saslServer == null )</span>
+                    {
+                        // Client sends response without a preceding auth?
+<span class="nc" id="L335">                        throw new IllegalStateException( &quot;A SaslServer instance was not initialized and/or stored on the session.&quot; );</span>
+                    }
+
+                    // Decode any data that is provided in the client response.
+<span class="nc" id="L339">                    final String encoded = doc.getTextTrim();</span>
+                    final byte[] decoded;
+<span class="nc bnc" id="L341" title="All 6 branches missed.">                    if ( encoded == null || encoded.isEmpty() || encoded.equals(&quot;=&quot;) ) // java SaslServer cannot handle a null.</span>
+                    {
+<span class="nc" id="L343">                        decoded = new byte[ 0 ];</span>
+                    }
+                    else
+                    {
+                        // TODO: We shouldn't depend on regex-based validation. Instead, use a proper decoder implementation and handle any exceptions that it throws.
+<span class="nc bnc" id="L348" title="All 2 branches missed.">                        if ( !BASE64_ENCODED.matcher( encoded ).matches() )</span>
+                        {
+<span class="nc" id="L350">                            throw new SaslFailureException( Failure.INCORRECT_ENCODING );</span>
+                        }
+
+<span class="nc" id="L353">                        decoded = StringUtils.decodeBase64( encoded );</span>
+                    }
+
+                    // Process client response.
+<span class="nc" id="L357">                    final byte[] challenge = saslServer.evaluateResponse( decoded ); // Either a challenge or success data.</span>
+
+<span class="nc bnc" id="L359" title="All 2 branches missed.">                    if ( !saslServer.isComplete() )</span>
+                    {
+                        // Not complete: client is challenged for additional steps.
+<span class="nc" id="L362">                        sendChallenge( session, challenge );</span>
+<span class="nc" id="L363">                        return Status.needResponse;</span>
+                    }
+
+                    // Success!
+<span class="nc bnc" id="L367" title="All 2 branches missed.">                    if ( session instanceof IncomingServerSession )</span>
+                    {
+                        // Flag that indicates if certificates of the remote server should be validated.
+<span class="nc" id="L370">                        final boolean verify = JiveGlobals.getBooleanProperty( ConnectionSettings.Server.TLS_CERTIFICATE_VERIFY, true );</span>
+<span class="nc bnc" id="L371" title="All 2 branches missed.">                        if ( verify )</span>
+                        {
+<span class="nc bnc" id="L373" title="All 2 branches missed.">                            if ( verifyCertificates( session.getConnection().getPeerCertificates(), saslServer.getAuthorizationID(), true ) )</span>
+                            {
+<span class="nc" id="L375">                                ( (LocalIncomingServerSession) session ).tlsAuth();</span>
+                            }
+                            else
+                            {
+<span class="nc" id="L379">                                throw new SaslFailureException( Failure.NOT_AUTHORIZED, &quot;Server-to-Server certificate verification failed.&quot; );</span>
+                            }
+                        }
+                    }
+
+<span class="nc" id="L384">                    authenticationSuccessful( session, saslServer.getAuthorizationID(), challenge );</span>
+<span class="nc" id="L385">                    session.removeSessionData( &quot;SaslServer&quot; );</span>
+<span class="nc" id="L386">                    return Status.authenticated;</span>
+
+                default:
+<span class="nc" id="L389">                    throw new IllegalStateException( &quot;Unexpected data received while negotiating SASL authentication. Name of the offending root element: &quot; + doc.getName() + &quot; Namespace: &quot; + doc.getNamespaceURI() );</span>
+            }
+        }
+<span class="nc" id="L392">        catch ( SaslException ex )</span>
+        {
+<span class="nc" id="L394">            Log.debug( &quot;SASL negotiation failed for session: {}&quot;, session, ex );</span>
+            final Failure failure;
+<span class="nc bnc" id="L396" title="All 4 branches missed.">            if ( ex instanceof SaslFailureException &amp;&amp; ((SaslFailureException) ex).getFailure() != null )</span>
+            {
+<span class="nc" id="L398">                failure = ((SaslFailureException) ex).getFailure();</span>
+            }
+            else
+            {
+<span class="nc" id="L402">                failure = Failure.NOT_AUTHORIZED;</span>
+            }
+<span class="nc" id="L404">            authenticationFailed( session, failure );</span>
+<span class="nc" id="L405">            session.removeSessionData( &quot;SaslServer&quot; );</span>
+<span class="nc" id="L406">            return Status.failed;</span>
+        }
+<span class="nc" id="L408">        catch( Exception ex )</span>
+        {
+<span class="nc" id="L410">            Log.warn( &quot;An unexpected exception occurred during SASL negotiation. Affected session: {}&quot;, session, ex );</span>
+<span class="nc" id="L411">            authenticationFailed( session, Failure.NOT_AUTHORIZED );</span>
+<span class="nc" id="L412">            session.removeSessionData( &quot;SaslServer&quot; );</span>
+<span class="nc" id="L413">            return Status.failed;</span>
+        }
+    }
+
+    public static boolean verifyCertificate(X509Certificate trustedCert, String hostname) {
+<span class="nc bnc" id="L418" title="All 2 branches missed.">        for (String identity : CertificateManager.getServerIdentities(trustedCert)) {</span>
+            // Verify that either the identity is the same as the hostname, or for wildcarded
+            // identities that the hostname ends with .domainspecified or -is- domainspecified.
+<span class="nc bnc" id="L421" title="All 2 branches missed.">            if ((identity.startsWith(&quot;*.&quot;)</span>
+<span class="nc bnc" id="L422" title="All 2 branches missed.">                 &amp;&amp; (hostname.endsWith(identity.replace(&quot;*.&quot;, &quot;.&quot;))</span>
+<span class="nc bnc" id="L423" title="All 2 branches missed.">                     || hostname.equals(identity.replace(&quot;*.&quot;, &quot;&quot;))))</span>
+<span class="nc bnc" id="L424" title="All 2 branches missed.">                    || hostname.equals(identity)) {</span>
+<span class="nc" id="L425">                return true;</span>
+            }
+<span class="nc" id="L427">        }</span>
+<span class="nc" id="L428">        return false;</span>
+    }
+
+    public static boolean verifyCertificates(Certificate[] chain, String hostname, boolean isS2S) {
+<span class="nc" id="L432">        final CertificateStoreManager certificateStoreManager = XMPPServer.getInstance().getCertificateStoreManager();</span>
+<span class="nc bnc" id="L433" title="All 2 branches missed.">        final ConnectionType connectionType = isS2S ? ConnectionType.SOCKET_S2S : ConnectionType.SOCKET_C2S;</span>
+<span class="nc" id="L434">        final TrustStore trustStore = certificateStoreManager.getTrustStore( connectionType );</span>
+<span class="nc" id="L435">        final X509Certificate trusted = trustStore.getEndEntityCertificate( chain );</span>
+<span class="nc bnc" id="L436" title="All 2 branches missed.">        if (trusted != null) {</span>
+<span class="nc" id="L437">            return verifyCertificate(trusted, hostname);</span>
+        }
+<span class="nc" id="L439">        return false;</span>
+    }
+
+    private static void sendElement(Session session, String element, byte[] data) {
+<span class="nc" id="L443">        StringBuilder reply = new StringBuilder(250);</span>
+<span class="nc" id="L444">        reply.append(&quot;&lt;&quot;);</span>
+<span class="nc" id="L445">        reply.append(element);</span>
+<span class="nc" id="L446">        reply.append(&quot; xmlns=\&quot;urn:ietf:params:xml:ns:xmpp-sasl\&quot;&quot;);</span>
+<span class="nc bnc" id="L447" title="All 2 branches missed.">        if (data != null) {</span>
+<span class="nc" id="L448">            reply.append(&quot;&gt;&quot;);</span>
+<span class="nc" id="L449">            String data_b64 = StringUtils.encodeBase64(data).trim();</span>
+<span class="nc bnc" id="L450" title="All 2 branches missed.">            if (&quot;&quot;.equals(data_b64)) {</span>
+<span class="nc" id="L451">                data_b64 = &quot;=&quot;;</span>
+            }
+<span class="nc" id="L453">            reply.append(data_b64);</span>
+<span class="nc" id="L454">            reply.append(&quot;&lt;/&quot;);</span>
+<span class="nc" id="L455">            reply.append(element);</span>
+<span class="nc" id="L456">            reply.append(&quot;&gt;&quot;);</span>
+<span class="nc" id="L457">        } else {</span>
+<span class="nc" id="L458">            reply.append(&quot;/&gt;&quot;);</span>
+        }
+<span class="nc" id="L460">        session.deliverRawText(reply.toString());</span>
+<span class="nc" id="L461">    }</span>
+
+    private static void sendChallenge(Session session, byte[] challenge) {
+<span class="nc" id="L464">        sendElement(session, &quot;challenge&quot;, challenge);</span>
+<span class="nc" id="L465">    }</span>
+
+    private static void authenticationSuccessful(LocalSession session, String username,
+            byte[] successData) {
+<span class="nc bnc" id="L469" title="All 4 branches missed.">        if (username != null &amp;&amp; LockOutManager.getInstance().isAccountDisabled(username)) {</span>
+            // Interception!  This person is locked out, fail instead!
+<span class="nc" id="L471">            LockOutManager.getInstance().recordFailedLogin(username);</span>
+<span class="nc" id="L472">            authenticationFailed(session, Failure.ACCOUNT_DISABLED);</span>
+<span class="nc" id="L473">            return;</span>
+        }
+<span class="nc" id="L475">        sendElement(session, &quot;success&quot;, successData);</span>
+        // We only support SASL for c2s
+<span class="nc bnc" id="L477" title="All 2 branches missed.">        if (session instanceof ClientSession) {</span>
+            final AuthToken authToken;
+<span class="nc bnc" id="L479" title="All 2 branches missed.">            if (username == null) {</span>
+                // AuthzId is null, which indicates that authentication was anonymous.
+<span class="nc" id="L481">                authToken = AuthToken.generateAnonymousToken();</span>
+            } else {
+<span class="nc" id="L483">                authToken = AuthToken.generateUserToken(username);</span>
+            }
+<span class="nc" id="L485">            ((LocalClientSession) session).setAuthToken(authToken);</span>
+<span class="nc" id="L486">        }</span>
+<span class="nc bnc" id="L487" title="All 2 branches missed.">        else if (session instanceof IncomingServerSession) {</span>
+<span class="nc" id="L488">            String hostname = username;</span>
+            // Add the validated domain as a valid domain. The remote server can
+            // now send packets from this address
+<span class="nc" id="L491">            ((LocalIncomingServerSession) session).addValidatedDomain(hostname);</span>
+<span class="nc" id="L492">            Log.info(&quot;Inbound Server {} authenticated (via TLS)&quot;, username);</span>
+        }
+<span class="nc" id="L494">    }</span>
+
+    private static void authenticationFailed(LocalSession session, Failure failure) {
+<span class="nc" id="L497">        StringBuilder reply = new StringBuilder(80);</span>
+<span class="nc" id="L498">        reply.append(&quot;&lt;failure xmlns=\&quot;urn:ietf:params:xml:ns:xmpp-sasl\&quot;&gt;&lt;&quot;);</span>
+<span class="nc" id="L499">        reply.append(failure.toString());</span>
+<span class="nc" id="L500">        reply.append(&quot;/&gt;&lt;/failure&gt;&quot;);</span>
+<span class="nc" id="L501">        session.deliverRawText(reply.toString());</span>
+        // Give a number of retries before closing the connection
+<span class="nc" id="L503">        Integer retries = (Integer) session.getSessionData(&quot;authRetries&quot;);</span>
+<span class="nc bnc" id="L504" title="All 2 branches missed.">        if (retries == null) {</span>
+<span class="nc" id="L505">            retries = 1;</span>
+        }
+        else {
+<span class="nc" id="L508">            retries = retries + 1;</span>
+        }
+<span class="nc" id="L510">        session.setSessionData(&quot;authRetries&quot;, retries);</span>
+<span class="nc bnc" id="L511" title="All 2 branches missed.">        if (retries &gt;= JiveGlobals.getIntProperty(&quot;xmpp.auth.retries&quot;, 3) ) {</span>
+            // Close the connection
+<span class="nc" id="L513">            Log.debug( &quot;Closing session that failed to authenticate {} times: {}&quot;, retries, session );</span>
+<span class="nc" id="L514">            session.close();</span>
+        }
+<span class="nc" id="L516">    }</span>
+
+    /**
+     * Adds a new SASL mechanism to the list of supported SASL mechanisms by the server. The
+     * new mechanism will be offered to clients and connection managers as stream features.&lt;p&gt;
+     *
+     * Note: this method simply registers the SASL mechanism to be advertised as a supported
+     * mechanism by Openfire. Actual SASL handling is done by Java itself, so you must add
+     * the provider to Java.
+     *
+     * @param mechanismName the name of the new SASL mechanism (cannot be null or an empty String).
+     */
+    public static void addSupportedMechanism(String mechanismName) {
+<span class="nc bnc" id="L529" title="All 4 branches missed.">        if ( mechanismName == null || mechanismName.isEmpty() ) {</span>
+<span class="nc" id="L530">            throw new IllegalArgumentException( &quot;Argument 'mechanism' must cannot be null or an empty string.&quot; );</span>
+        }
+<span class="nc" id="L532">        mechanisms.add( mechanismName.toUpperCase() );</span>
+<span class="nc" id="L533">        Log.info( &quot;Support added for the '{}' SASL mechanism.&quot;, mechanismName.toUpperCase() );</span>
+<span class="nc" id="L534">    }</span>
+
+    /**
+     * Removes a SASL mechanism from the list of supported SASL mechanisms by the server.
+     *
+     * @param mechanismName the name of the SASL mechanism to remove (cannot be null or empty, not case sensitive).
+     */
+    public static void removeSupportedMechanism(String mechanismName) {
+<span class="nc bnc" id="L542" title="All 4 branches missed.">        if ( mechanismName == null || mechanismName.isEmpty() ) {</span>
+<span class="nc" id="L543">            throw new IllegalArgumentException( &quot;Argument 'mechanism' must cannot be null or an empty string.&quot; );</span>
+        }
+
+<span class="nc bnc" id="L546" title="All 2 branches missed.">        if ( mechanisms.remove( mechanismName.toUpperCase() ) )</span>
+        {
+<span class="nc" id="L548">            Log.info( &quot;Support removed for the '{}' SASL mechanism.&quot;, mechanismName.toUpperCase() );</span>
+        }
+<span class="nc" id="L550">    }</span>
+
+    /**
+     * Returns the list of supported SASL mechanisms by the server. Note that Java may have
+     * support for more mechanisms but some of them may not be returned since a special setup
+     * is required that might be missing. Use {@link #addSupportedMechanism(String)} to add
+     * new SASL mechanisms.
+     *
+     * @return the list of supported SASL mechanisms by the server.
+     */
+    public static Set&lt;String&gt; getSupportedMechanisms()
+    {
+        // List all mechanism names for which there's an implementation.
+<span class="nc" id="L563">        final Set&lt;String&gt; implementedMechanisms = getImplementedMechanisms();</span>
+
+        // Start off with all mechanisms that we intend to support.
+<span class="nc" id="L566">        final Set&lt;String&gt; answer = new HashSet&lt;&gt;( mechanisms );</span>
+
+        // Clean up not-available mechanisms.
+<span class="nc bnc" id="L569" title="All 2 branches missed.">        for ( final Iterator&lt;String&gt; it = answer.iterator(); it.hasNext(); )</span>
+        {
+<span class="nc" id="L571">            final String mechanism = it.next();</span>
+
+<span class="nc bnc" id="L573" title="All 2 branches missed.">            if ( !implementedMechanisms.contains( mechanism ) )</span>
+            {
+<span class="nc" id="L575">                Log.trace( &quot;Cannot support '{}' as there's no implementation available.&quot;, mechanism );</span>
+<span class="nc" id="L576">                it.remove();</span>
+<span class="nc" id="L577">                continue;</span>
+            }
+
+<span class="nc bnc" id="L580" title="All 25 branches missed.">            switch ( mechanism )</span>
+            {
+                case &quot;CRAM-MD5&quot;: // intended fall-through
+                case &quot;DIGEST-MD5&quot;:
+                    // Check if the user provider in use supports passwords retrieval. Access to the users passwords will be required by the CallbackHandler.
+<span class="nc bnc" id="L585" title="All 2 branches missed.">                    if ( !AuthFactory.supportsPasswordRetrieval() )</span>
+                    {
+<span class="nc" id="L587">                        Log.trace( &quot;Cannot support '{}' as the AuthFactory that's in use does not support password retrieval.&quot;, mechanism );</span>
+<span class="nc" id="L588">                        it.remove();</span>
+                    }
+                    break;
+
+                case &quot;SCRAM-SHA-1&quot;:
+<span class="nc bnc" id="L593" title="All 2 branches missed.">                    if ( !AuthFactory.supportsScram() )</span>
+                    {
+<span class="nc" id="L595">                        Log.trace( &quot;Cannot support '{}' as the AuthFactory that's in use does not support SCRAM.&quot;, mechanism );</span>
+<span class="nc" id="L596">                        it.remove();</span>
+                    }
+                    break;
+
+                case &quot;ANONYMOUS&quot;:
+<span class="nc bnc" id="L601" title="All 2 branches missed.">                    if (!AnonymousSaslServer.ENABLED.getValue()) {</span>
+<span class="nc" id="L602">                        Log.trace( &quot;Cannot support '{}' as it has been disabled by configuration.&quot;, mechanism );</span>
+<span class="nc" id="L603">                        it.remove();</span>
+                    }
+                    break;
+
+                case &quot;JIVE-SHAREDSECRET&quot;:
+<span class="nc bnc" id="L608" title="All 2 branches missed.">                    if ( !JiveSharedSecretSaslServer.isSharedSecretAllowed() )</span>
+                    {
+<span class="nc" id="L610">                        Log.trace( &quot;Cannot support '{}' as it has been disabled by configuration.&quot;, mechanism );</span>
+<span class="nc" id="L611">                        it.remove();</span>
+                    }
+                    break;
+
+                case &quot;GSSAPI&quot;:
+<span class="nc" id="L616">                    final String gssapiConfig = JiveGlobals.getProperty( &quot;sasl.gssapi.config&quot; );</span>
+<span class="nc bnc" id="L617" title="All 2 branches missed.">                    if ( gssapiConfig != null )</span>
+                    {
+<span class="nc" id="L619">                        System.setProperty( &quot;java.security.krb5.debug&quot;, JiveGlobals.getProperty( &quot;sasl.gssapi.debug&quot;, &quot;false&quot; ) );</span>
+<span class="nc" id="L620">                        System.setProperty( &quot;java.security.auth.login.config&quot;, gssapiConfig );</span>
+<span class="nc" id="L621">                        System.setProperty( &quot;javax.security.auth.useSubjectCredsOnly&quot;, JiveGlobals.getProperty( &quot;sasl.gssapi.useSubjectCredsOnly&quot;, &quot;false&quot; ) );</span>
+                    }
+                    else
+                    {
+<span class="nc" id="L625">                        Log.trace( &quot;Cannot support '{}' as the 'sasl.gssapi.config' property has not been defined.&quot;, mechanism );</span>
+<span class="nc" id="L626">                        it.remove();</span>
+                    }
+                    break;
+            }
+<span class="nc" id="L630">        }</span>
+<span class="nc" id="L631">        return answer;</span>
+    }
+
+    /**
+     * Returns a collection of mechanism names for which the JVM has an implementation available.
+     * &lt;p&gt;
+     * Note that this need not (and likely will not) correspond with the list of mechanisms that is offered to XMPP
+     * peer entities, which is provided by #getSupportedMechanisms.
+     *
+     * @return a collection of SASL mechanism names (never null, possibly empty)
+     */
+    public static Set&lt;String&gt; getImplementedMechanisms()
+    {
+<span class="nc" id="L644">        final Set&lt;String&gt; result = new HashSet&lt;&gt;();</span>
+<span class="nc" id="L645">        final Enumeration&lt;SaslServerFactory&gt; saslServerFactories = Sasl.getSaslServerFactories();</span>
+<span class="nc bnc" id="L646" title="All 2 branches missed.">        while ( saslServerFactories.hasMoreElements() )</span>
+        {
+<span class="nc" id="L648">            final SaslServerFactory saslServerFactory = saslServerFactories.nextElement();</span>
+<span class="nc" id="L649">            Collections.addAll( result, saslServerFactory.getMechanismNames( null ) );</span>
+<span class="nc" id="L650">        }</span>
+<span class="nc" id="L651">        return result;</span>
+    }
+
+    /**
+     * Returns a collection of SASL mechanism names that forms the source pool from which the mechanisms that are
+     * eventually being offered to peers are obtained.
+     **
+     * When a mechanism is not returned by this method, it will never be offered, but when a mechanism is returned
+     * by this method, there is no guarantee that it will be offered.
+     *
+     * Apart from being returned in this method, an implementation must be available (see {@link #getImplementedMechanisms()}
+     * and configuration or other characteristics of this server must not prevent a particular mechanism from being
+     * used (see @{link {@link #getSupportedMechanisms()}}.
+     *
+     * @return A collection of mechanisms that are considered for use in this instance of Openfire.
+     */
+    public static List&lt;String&gt; getEnabledMechanisms()
+    {
+<span class="nc" id="L669">        return JiveGlobals.getListProperty(&quot;sasl.mechs&quot;, Arrays.asList( &quot;ANONYMOUS&quot;,&quot;PLAIN&quot;,&quot;DIGEST-MD5&quot;,&quot;CRAM-MD5&quot;,&quot;SCRAM-SHA-1&quot;,&quot;JIVE-SHAREDSECRET&quot;,&quot;GSSAPI&quot;,&quot;EXTERNAL&quot; ) );</span>
+    }
+
+    /**
+     * Sets the collection of mechanism names that the system administrator allows to be used.
+     *
+     * @param mechanisms A collection of mechanisms that are considered for use in this instance of Openfire. Null to reset the default setting.
+     * @see #getEnabledMechanisms()
+     */
+    public static void setEnabledMechanisms( List&lt;String&gt; mechanisms )
+    {
+<span class="nc" id="L680">        JiveGlobals.setProperty( &quot;sasl.mechs&quot;, mechanisms );</span>
+<span class="nc" id="L681">        initMechanisms();</span>
+<span class="nc" id="L682">    }</span>
+
+    private static void initMechanisms()
+    {
+<span class="nc" id="L686">        final List&lt;String&gt; propertyValues = getEnabledMechanisms();</span>
+<span class="nc" id="L687">        mechanisms = new HashSet&lt;&gt;();</span>
+<span class="nc bnc" id="L688" title="All 2 branches missed.">        for ( final String propertyValue : propertyValues )</span>
+        {
+            try
+            {
+<span class="nc" id="L692">                addSupportedMechanism( propertyValue );</span>
+            }
+<span class="nc" id="L694">            catch ( Exception ex )</span>
+            {
+<span class="nc" id="L696">                Log.warn( &quot;An exception occurred while trying to add support for SASL Mechanism '{}':&quot;, propertyValue, ex );</span>
+<span class="nc" id="L697">            }</span>
+<span class="nc" id="L698">        }</span>
+<span class="nc" id="L699">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

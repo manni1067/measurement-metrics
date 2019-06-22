@@ -1,0 +1,237 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>CertificateStoreWatcher.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.keystore</a> &gt; <span class="el_source">CertificateStoreWatcher.java</span></div><h1>CertificateStoreWatcher.java</h1><pre class="source lang-java linenums">package org.jivesoftware.openfire.keystore;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.io.EOFException;
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.nio.file.*;
+import java.security.KeyStore;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+
+/**
+ * Detects file-system based changes to (Java) keystores that back Openfire Certificate Stores, reloading them when
+ * needed.
+ *
+ * @author Guus der Kinderen, guus.der.kinderen@gmail.com
+ */
+public class CertificateStoreWatcher
+{
+<span class="nc" id="L25">    private static final Logger Log = LoggerFactory.getLogger( CertificateStoreWatcher.class );</span>
+
+<span class="nc" id="L27">    private final Map&lt;CertificateStore, Path&gt; watchedStores = new HashMap&lt;&gt;();</span>
+
+<span class="nc" id="L29">    private final Map&lt;Path, WatchKey&gt; watchedPaths = new HashMap&lt;&gt;();</span>
+
+    private WatchService storeWatcher;
+
+<span class="nc" id="L33">    private ExecutorService executorService = Executors.newSingleThreadScheduledExecutor();</span>
+
+    public CertificateStoreWatcher()
+<span class="nc" id="L36">    {</span>
+        try
+        {
+<span class="nc" id="L39">            storeWatcher = FileSystems.getDefault().newWatchService();</span>
+
+<span class="nc" id="L41">            executorService.submit( new Runnable()</span>
+<span class="nc" id="L42">            {</span>
+                @Override
+                public void run()
+                {
+<span class="nc bnc" id="L46" title="All 2 branches missed.">                    while ( !executorService.isShutdown() )</span>
+                    {
+                        final WatchKey key;
+                        try
+                        {
+<span class="nc" id="L51">                            key = storeWatcher.poll( 5, TimeUnit.SECONDS );</span>
+                        }
+<span class="nc" id="L53">                        catch ( InterruptedException e )</span>
+                        {
+                            // Interrupted. Stop waiting
+<span class="nc" id="L56">                            continue;</span>
+<span class="nc" id="L57">                        }</span>
+
+<span class="nc bnc" id="L59" title="All 2 branches missed.">                        if ( key == null )</span>
+                        {
+<span class="nc" id="L61">                            continue;</span>
+                        }
+
+<span class="nc bnc" id="L64" title="All 2 branches missed.">                        for ( final WatchEvent&lt;?&gt; event : key.pollEvents() )</span>
+                        {
+<span class="nc" id="L66">                            final WatchEvent.Kind&lt;?&gt; kind = event.kind();</span>
+
+                            // An OVERFLOW event can occur regardless of what kind of events the watcher was configured for.
+<span class="nc bnc" id="L69" title="All 2 branches missed.">                            if ( kind == StandardWatchEventKinds.OVERFLOW )</span>
+                            {
+<span class="nc" id="L71">                                continue;</span>
+                            }
+
+<span class="nc" id="L74">                            synchronized ( watchedStores )</span>
+                            {
+                                // The filename is the context of the event.
+<span class="nc" id="L77">                                final WatchEvent&lt;Path&gt; ev = (WatchEvent&lt;Path&gt;) event;</span>
+<span class="nc" id="L78">                                final Path changedFile = ((Path) key.watchable()).resolve( ev.context() );</span>
+
+                                // Can't use the value from the 'watchedStores' map, as that's the parent dir, not the keystore file!
+<span class="nc bnc" id="L81" title="All 2 branches missed.">                                for ( final CertificateStore store : watchedStores.keySet() )</span>
+                                {
+<span class="nc" id="L83">                                    final Path storeFile = store.getConfiguration().getFile().toPath().normalize();</span>
+<span class="nc bnc" id="L84" title="All 2 branches missed.">                                    if ( storeFile.equals( changedFile ) )</span>
+                                    {
+                                        // Check if the modified file is usable.
+<span class="nc" id="L87">                                        try ( final FileInputStream is = new FileInputStream( changedFile.toFile() ) )</span>
+                                        {
+<span class="nc" id="L89">                                            final KeyStore tmpStore = KeyStore.getInstance( store.getConfiguration().getType() );</span>
+<span class="nc" id="L90">                                            tmpStore.load( is, store.getConfiguration().getPassword() );</span>
+<span class="nc bnc" id="L91" title="All 8 branches missed.">                                        }</span>
+<span class="nc" id="L92">                                        catch ( EOFException e )</span>
+                                        {
+<span class="nc" id="L94">                                            Log.debug( &quot;The keystore is still being modified. Ignore for now. A new event should be thrown later.&quot;, e );</span>
+<span class="nc" id="L95">                                            break;</span>
+                                        }
+<span class="nc" id="L97">                                        catch ( Exception e )</span>
+                                        {
+<span class="nc" id="L99">                                            Log.debug( &quot;Can't read the modified keystore with this config. Continue iterating over configs.&quot;, e );</span>
+<span class="nc" id="L100">                                            continue;</span>
+<span class="nc" id="L101">                                        }</span>
+
+<span class="nc" id="L103">                                        Log.info( &quot;A file system change was detected. A(nother) certificate store that is backed by file '{}' will be reloaded.&quot;, storeFile );</span>
+                                        try
+                                        {
+<span class="nc" id="L106">                                            store.reload();</span>
+                                        }
+<span class="nc" id="L108">                                        catch ( CertificateStoreConfigException e )</span>
+                                        {
+<span class="nc" id="L110">                                            Log.warn( &quot;An unexpected exception occurred while trying to reload a certificate store that is backed by file '{}'!&quot;, storeFile, e );</span>
+<span class="nc" id="L111">                                        }</span>
+                                    }
+<span class="nc" id="L113">                                }</span>
+<span class="nc" id="L114">                            }</span>
+<span class="nc" id="L115">                        }</span>
+
+                        // Reset the key to receive further events.
+<span class="nc" id="L118">                        key.reset();</span>
+<span class="nc" id="L119">                    }</span>
+<span class="nc" id="L120">                }</span>
+            });
+        }
+
+<span class="nc" id="L124">        catch ( UnsupportedOperationException e )</span>
+        {
+<span class="nc" id="L126">            storeWatcher = null;</span>
+<span class="nc" id="L127">            Log.info( &quot;This file system does not support watching file system objects for changes and events. Changes to Openfire certificate stores made outside of Openfire might not be detected. A restart of Openfire might be required for these to be applied.&quot; );</span>
+        }
+<span class="nc" id="L129">        catch ( IOException e )</span>
+        {
+<span class="nc" id="L131">            storeWatcher = null;</span>
+<span class="nc" id="L132">            Log.warn( &quot;An exception occured while trying to create a service that monitors the Openfire certificate stores for changes. Changes to Openfire certificate stores made outside of Openfire might not be detected. A restart of Openfire might be required for these to be applied.&quot;, e );</span>
+<span class="nc" id="L133">        }</span>
+<span class="nc" id="L134">    }</span>
+
+    /**
+     * Shuts down this watcher, releasing all resources.
+     */
+    public void destroy()
+    {
+<span class="nc bnc" id="L141" title="All 2 branches missed.">        if ( executorService != null )</span>
+        {
+<span class="nc" id="L143">            executorService.shutdown();</span>
+        }
+
+<span class="nc" id="L146">        synchronized ( watchedStores )</span>
+        {
+<span class="nc bnc" id="L148" title="All 2 branches missed.">            if ( storeWatcher != null )</span>
+            {
+                try
+                {
+<span class="nc" id="L152">                    storeWatcher.close();</span>
+                }
+<span class="nc" id="L154">                catch ( IOException e )</span>
+                {
+<span class="nc" id="L156">                    Log.warn( &quot;Unable to close the watcherservice that is watching for file system changes to certificate stores.&quot;, e );</span>
+<span class="nc" id="L157">                }</span>
+            }
+<span class="nc" id="L159">        }</span>
+<span class="nc" id="L160">    }</span>
+
+    /**
+     * Start watching the file that backs a Certificate Store for changes, reloading the Certificate Store when
+     * appropriate.
+     *
+     * This method does nothing when the file watching functionality is not supported by the file system.
+     *
+     * @param store The certificate store (cannot be null).
+     */
+    public void watch( CertificateStore store )
+    {
+<span class="nc bnc" id="L172" title="All 2 branches missed.">        if ( store == null )</span>
+        {
+<span class="nc" id="L174">            throw new IllegalArgumentException( &quot;Argument 'store' cannot be null.&quot; );</span>
+        }
+
+<span class="nc bnc" id="L177" title="All 2 branches missed.">        if ( storeWatcher == null )</span>
+        {
+<span class="nc" id="L179">            return;</span>
+        }
+
+<span class="nc" id="L182">        final Path dir = store.getConfiguration().getFile().toPath().normalize().getParent();</span>
+
+<span class="nc" id="L184">        synchronized ( watchedStores )</span>
+        {
+<span class="nc" id="L186">            watchedStores.put( store, dir );</span>
+
+            // Watch the directory that contains the keystore, if we're not already watching it.
+<span class="nc bnc" id="L189" title="All 2 branches missed.">            if ( !watchedPaths.containsKey( dir ) )</span>
+            {
+                try
+                {
+                    // Ignoring deletion events, as those changes should be applied via property value changes.
+<span class="nc" id="L194">                    final WatchKey watchKey = dir.register( storeWatcher, StandardWatchEventKinds.ENTRY_MODIFY, StandardWatchEventKinds.ENTRY_CREATE );</span>
+<span class="nc" id="L195">                    watchedPaths.put( dir, watchKey );</span>
+                }
+<span class="nc" id="L197">                catch ( Throwable t )</span>
+                {
+<span class="nc" id="L199">                    Log.warn( &quot;Unable to add a watcher for a path that contains files that provides the backend storage for certificate stores. Changes to those files are unlikely to be picked up automatically. Path: {}&quot;, dir, t );</span>
+<span class="nc" id="L200">                    watchedStores.remove( store );</span>
+<span class="nc" id="L201">                }</span>
+            }
+<span class="nc" id="L203">        }</span>
+<span class="nc" id="L204">    }</span>
+
+    /**
+     * Stop watching the file that backs a Certificate Store for changes
+     *
+     * @param store The certificate store (cannot be null).
+     */
+    public synchronized void unwatch( CertificateStore store )
+    {
+<span class="nc bnc" id="L213" title="All 2 branches missed.">        if ( store == null )</span>
+        {
+<span class="nc" id="L215">            throw new IllegalArgumentException( &quot;Argument 'store' cannot be null.&quot; );</span>
+        }
+
+<span class="nc" id="L218">        synchronized ( watchedStores )</span>
+        {
+<span class="nc" id="L220">            watchedStores.remove( store );</span>
+<span class="nc" id="L221">            final Path dir = store.getConfiguration().getFile().toPath().normalize().getParent();</span>
+
+            // Check if there are any other stores being watched in the same directory.
+<span class="nc bnc" id="L224" title="All 2 branches missed.">            if ( watchedStores.containsValue( dir ) )</span>
+            {
+<span class="nc" id="L226">                return;</span>
+            }
+
+<span class="nc" id="L229">            final WatchKey key = watchedPaths.remove( dir );</span>
+<span class="nc bnc" id="L230" title="All 2 branches missed.">            if ( key != null )</span>
+            {
+<span class="nc" id="L232">                key.cancel();</span>
+            }
+<span class="nc" id="L234">        }</span>
+<span class="nc" id="L235">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

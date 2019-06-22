@@ -1,0 +1,207 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>FaviconServlet.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.util</a> &gt; <span class="el_source">FaviconServlet.java</span></div><h1>FaviconServlet.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.util;
+
+import java.io.IOException;
+import java.net.MalformedURLException;
+import java.net.URL;
+
+import javax.servlet.ServletConfig;
+import javax.servlet.ServletException;
+import javax.servlet.ServletOutputStream;
+import javax.servlet.http.HttpServlet;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
+
+import org.apache.http.HttpStatus;
+import org.apache.http.client.config.RequestConfig;
+import org.apache.http.client.methods.CloseableHttpResponse;
+import org.apache.http.client.methods.HttpUriRequest;
+import org.apache.http.client.methods.RequestBuilder;
+import org.apache.http.impl.client.CloseableHttpClient;
+import org.apache.http.impl.client.HttpClientBuilder;
+import org.apache.http.impl.client.LaxRedirectStrategy;
+import org.apache.http.impl.conn.PoolingHttpClientConnectionManager;
+import org.apache.http.util.EntityUtils;
+import org.jivesoftware.util.cache.Cache;
+import org.jivesoftware.util.cache.CacheFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Servlet that gets favicons of webservers and includes them in HTTP responses. This
+ * servlet can be used when getting a favicon can take some time so pages can use this
+ * servlet as the image source to let the page load quickly and get the favicon images
+ * as they are available.&lt;p&gt;
+ *
+ * This servlet expects the web application to have the {@code images/server_16x16.gif}
+ * file that is used when no favicon is found.
+ *
+ * @author Gaston Dombiak
+ */
+<span class="nc" id="L56">public class FaviconServlet extends HttpServlet {</span>
+
+<span class="nc" id="L58">    private static final Logger LOGGER = LoggerFactory.getLogger(FaviconServlet.class);</span>
+
+    /**
+     * The content-type of the images to return.
+     */
+    private static final String CONTENT_TYPE = &quot;image/x-icon&quot;;
+    /**
+     * Bytes of the default favicon to return when one was not found on a host.
+     */
+    private byte[] defaultBytes;
+    /**
+     * Pool of HTTP connections to use to get the favicons
+     */
+    private CloseableHttpClient client;
+    /**
+     * Cache the domains that a favicon was not found.
+     */
+    private Cache&lt;String, Integer&gt; missesCache;
+    /**
+     * Cache the favicons that we've found.
+     */
+    private Cache&lt;String, byte[]&gt; hitsCache;
+
+    @Override
+    public void init(ServletConfig config) throws ServletException {
+<span class="nc" id="L83">        super.init(config);</span>
+        // Create a pool of HTTP connections to use to get the favicons
+<span class="nc" id="L85">        client = HttpClientBuilder.create()</span>
+<span class="nc" id="L86">            .setConnectionManager(new PoolingHttpClientConnectionManager())</span>
+<span class="nc" id="L87">            .setRedirectStrategy(new LaxRedirectStrategy())</span>
+<span class="nc" id="L88">            .build();</span>
+        // Load the default favicon to use when no favicon was found of a remote host
+        try {
+<span class="nc" id="L91">            URL resource = config.getServletContext().getResource(&quot;/images/server_16x16.gif&quot;);</span>
+<span class="nc" id="L92">            defaultBytes = getImage(resource.toString());</span>
+        }
+<span class="nc" id="L94">        catch (MalformedURLException e) {</span>
+<span class="nc" id="L95">            LOGGER.warn(&quot;Unable to retrieve default favicon&quot;, e);</span>
+<span class="nc" id="L96">        }</span>
+        // Initialize caches.
+<span class="nc" id="L98">        missesCache = CacheFactory.createCache(&quot;Favicon Misses&quot;);</span>
+<span class="nc" id="L99">        hitsCache = CacheFactory.createCache(&quot;Favicon Hits&quot;);</span>
+<span class="nc" id="L100">    }</span>
+
+    @Override
+    public void destroy() {
+        try {
+<span class="nc" id="L105">            client.close();</span>
+<span class="nc" id="L106">        } catch (IOException e) {</span>
+<span class="nc" id="L107">            LOGGER.warn(&quot;Unable to close HTTP client&quot;, e);</span>
+<span class="nc" id="L108">        }</span>
+<span class="nc" id="L109">    }</span>
+
+    /**
+     * Retrieve the image based on it's name.
+     *
+     * @param request the httpservletrequest.
+     * @param response the httpservletresponse.
+     */
+    @Override
+    public void doGet(HttpServletRequest request, HttpServletResponse response) {
+<span class="nc" id="L119">        String host = request.getParameter(&quot;host&quot;);</span>
+        // Check special cases where we need to change host to get a favicon
+<span class="nc bnc" id="L121" title="All 2 branches missed.">        host = &quot;gmail.com&quot;.equals(host) ? &quot;google.com&quot; : host;</span>
+
+<span class="nc" id="L123">        byte[] bytes = getImage(host, defaultBytes);</span>
+<span class="nc bnc" id="L124" title="All 2 branches missed.">        if (bytes != null) {</span>
+<span class="nc" id="L125">            writeBytesToStream(bytes, response);</span>
+        }
+<span class="nc" id="L127">    }</span>
+
+    /**
+     * Writes out a &lt;code&gt;byte&lt;/code&gt; to the ServletOuputStream.
+     *
+     * @param bytes the bytes to write to the &lt;code&gt;ServletOutputStream&lt;/code&gt;.
+     */
+    private void writeBytesToStream(byte[] bytes, HttpServletResponse response) {
+<span class="nc" id="L135">        response.setContentType(CONTENT_TYPE);</span>
+
+        // Send image
+<span class="nc" id="L138">        try (ServletOutputStream sos = response.getOutputStream()) {</span>
+<span class="nc" id="L139">            sos.write(bytes);</span>
+<span class="nc" id="L140">            sos.flush();</span>
+<span class="nc bnc" id="L141" title="All 8 branches missed.">        }</span>
+<span class="nc" id="L142">        catch (IOException e) {</span>
+            // Do nothing
+<span class="nc" id="L144">        }</span>
+<span class="nc" id="L145">    }</span>
+
+    /**
+     * Returns the favicon image bytes of the specified host.
+     *
+     * @param host the name of the host to get its favicon.
+     * @return the image bytes found, otherwise null.
+     */
+    private byte[] getImage(String host, byte[] defaultImage) {
+        // If we've already attempted to get the favicon twice and failed,
+        // return the default image.
+<span class="nc bnc" id="L156" title="All 4 branches missed.">        if (missesCache.get(host) != null &amp;&amp; missesCache.get(host) &gt; 1) {</span>
+            // Domain does not have a favicon so return default icon
+<span class="nc" id="L158">            return defaultImage;</span>
+        }
+        // See if we've cached the favicon.
+<span class="nc bnc" id="L161" title="All 2 branches missed.">        if (hitsCache.containsKey(host)) {</span>
+<span class="nc" id="L162">            return hitsCache.get(host);</span>
+        }
+<span class="nc" id="L164">        byte[] bytes = getImage(&quot;http://&quot; + host + &quot;/favicon.ico&quot;);</span>
+<span class="nc bnc" id="L165" title="All 2 branches missed.">        if (bytes == null) {</span>
+            // Cache that the requested domain does not have a favicon. Check if this
+            // is the first cache miss or the second.
+<span class="nc bnc" id="L168" title="All 2 branches missed.">            if (missesCache.get(host) != null) {</span>
+<span class="nc" id="L169">                missesCache.put(host, 2);</span>
+            }
+            else {
+<span class="nc" id="L172">                missesCache.put(host, 1);</span>
+            }
+            // Return byte of default icon
+<span class="nc" id="L175">            bytes = defaultImage;</span>
+        }
+        // Cache the favicon.
+        else {
+<span class="nc" id="L179">            hitsCache.put(host, bytes);</span>
+        }
+<span class="nc" id="L181">        return bytes;</span>
+    }
+
+    private byte[] getImage(String url) {
+        // Try to get the fiveicon from the url using an HTTP connection from the pool
+        // that also allows to configure timeout values (e.g. connect and get data)
+<span class="nc" id="L187">        final RequestConfig requestConfig = RequestConfig.custom()</span>
+<span class="nc" id="L188">            .setConnectTimeout(2000)</span>
+<span class="nc" id="L189">            .setSocketTimeout(2000)</span>
+<span class="nc" id="L190">            .build();</span>
+<span class="nc" id="L191">        final HttpUriRequest getRequest = RequestBuilder.get(url)</span>
+<span class="nc" id="L192">            .setConfig(requestConfig)</span>
+<span class="nc" id="L193">            .build();</span>
+
+<span class="nc" id="L195">        try(final CloseableHttpResponse response = client.execute(getRequest)) {</span>
+<span class="nc bnc" id="L196" title="All 2 branches missed.">            if(response.getStatusLine().getStatusCode() == HttpStatus.SC_OK) {</span>
+<span class="nc" id="L197">                return EntityUtils.toByteArray(response.getEntity());</span>
+            }
+<span class="nc bnc" id="L199" title="All 12 branches missed.">        } catch (final IOException ignored) {</span>
+            // Do nothing
+<span class="nc" id="L201">        }</span>
+
+<span class="nc" id="L203">        return null;</span>
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

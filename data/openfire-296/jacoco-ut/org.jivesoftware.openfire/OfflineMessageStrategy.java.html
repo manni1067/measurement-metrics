@@ -1,0 +1,297 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>OfflineMessageStrategy.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire</a> &gt; <span class="el_source">OfflineMessageStrategy.java</span></div><h1>OfflineMessageStrategy.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire;
+
+import java.util.Collections;
+import java.util.Iterator;
+import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
+
+import org.jivesoftware.openfire.container.BasicModule;
+import org.jivesoftware.openfire.disco.ServerFeaturesProvider;
+import org.jivesoftware.openfire.privacy.PrivacyList;
+import org.jivesoftware.openfire.privacy.PrivacyListManager;
+import org.jivesoftware.openfire.user.UserManager;
+import org.jivesoftware.util.JiveGlobals;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmpp.packet.JID;
+import org.xmpp.packet.Message;
+import org.xmpp.packet.PacketError;
+
+/**
+ * Controls what is done with offline messages.
+ *
+ * @author Iain Shigeoka
+ */
+public class OfflineMessageStrategy extends BasicModule implements ServerFeaturesProvider {
+
+<span class="nc" id="L43">    private static final Logger Log = LoggerFactory.getLogger(OfflineMessageStrategy.class);</span>
+
+<span class="nc" id="L45">    private static int quota = 100*1024; // Default to 100 K.</span>
+<span class="nc" id="L46">    private static Type type = Type.store_and_bounce;</span>
+
+<span class="nc" id="L48">    private static List&lt;OfflineMessageListener&gt; listeners = new CopyOnWriteArrayList&lt;&gt;();</span>
+
+    private OfflineMessageStore messageStore;
+    private JID serverAddress;
+    private PacketRouter router;
+
+    public OfflineMessageStrategy() {
+<span class="nc" id="L55">        super(&quot;Offline Message Strategy&quot;);</span>
+<span class="nc" id="L56">    }</span>
+
+    public int getQuota() {
+<span class="nc" id="L59">        return quota;</span>
+    }
+
+    public void setQuota(int quota) {
+<span class="nc" id="L63">        OfflineMessageStrategy.quota = quota;</span>
+<span class="nc" id="L64">        JiveGlobals.setProperty(&quot;xmpp.offline.quota&quot;, Integer.toString(quota));</span>
+<span class="nc" id="L65">    }</span>
+
+    public OfflineMessageStrategy.Type getType() {
+<span class="nc" id="L68">        return type;</span>
+    }
+
+    public void setType(OfflineMessageStrategy.Type type) {
+<span class="nc bnc" id="L72" title="All 2 branches missed.">        if (type == null) {</span>
+<span class="nc" id="L73">            throw new IllegalArgumentException();</span>
+        }
+<span class="nc" id="L75">        OfflineMessageStrategy.type = type;</span>
+<span class="nc" id="L76">        JiveGlobals.setProperty(&quot;xmpp.offline.type&quot;, type.toString());</span>
+<span class="nc" id="L77">    }</span>
+
+    public void storeOffline(Message message) {
+<span class="nc bnc" id="L80" title="All 2 branches missed.">        if (message != null) {</span>
+            // Do nothing if the message was sent to the server itself, an anonymous user or a non-existent user
+            // Also ignore message carbons
+<span class="nc" id="L83">            JID recipientJID = message.getTo();</span>
+<span class="nc bnc" id="L84" title="All 4 branches missed.">            if (recipientJID == null || serverAddress.equals(recipientJID) ||</span>
+<span class="nc bnc" id="L85" title="All 2 branches missed.">                    recipientJID.getNode() == null ||</span>
+<span class="nc bnc" id="L86" title="All 2 branches missed.">                    message.getExtension(&quot;received&quot;, &quot;urn:xmpp:carbons:2&quot;) != null ||</span>
+<span class="nc bnc" id="L87" title="All 2 branches missed.">                    !UserManager.getInstance().isRegisteredUser(recipientJID.getNode())) {</span>
+<span class="nc" id="L88">                return;</span>
+            }
+
+            // Do not store messages if communication is blocked
+            PrivacyList list =
+<span class="nc" id="L93">                    PrivacyListManager.getInstance().getDefaultPrivacyList(recipientJID.getNode());</span>
+<span class="nc bnc" id="L94" title="All 4 branches missed.">            if (list != null &amp;&amp; list.shouldBlockPacket(message)) {</span>
+<span class="nc" id="L95">                Message result = message.createCopy();</span>
+<span class="nc" id="L96">                result.setTo(message.getFrom());</span>
+<span class="nc" id="L97">                result.setFrom(message.getTo());</span>
+<span class="nc" id="L98">                result.setError(PacketError.Condition.service_unavailable);</span>
+<span class="nc" id="L99">                XMPPServer.getInstance().getRoutingTable().routePacket(message.getFrom(), result, true);</span>
+<span class="nc" id="L100">                return;</span>
+            }
+
+            // 8.5.2.  localpart@domainpart
+            // 8.5.2.2.  No Available or Connected Resources
+<span class="nc bnc" id="L105" title="All 2 branches missed.">            if (recipientJID.getResource() == null) {</span>
+<span class="nc bnc" id="L106" title="All 4 branches missed.">                if (message.getType() == Message.Type.headline || message.getType() == Message.Type.error) {</span>
+                    // For a message stanza of type &quot;headline&quot; or &quot;error&quot;, the server MUST silently ignore the message.
+<span class="nc" id="L108">                    return;</span>
+                }
+                // // For a message stanza of type &quot;groupchat&quot;, the server MUST return an error to the sender, which SHOULD be &lt;service-unavailable/&gt;.
+<span class="nc bnc" id="L111" title="All 2 branches missed.">                else if (message.getType() == Message.Type.groupchat) {</span>
+<span class="nc" id="L112">                    bounce(message);</span>
+<span class="nc" id="L113">                    return;</span>
+                }
+            } else {
+                // 8.5.3.  localpart@domainpart/resourcepart
+                // 8.5.3.2.1.  Message
+
+                // For a message stanza of type &quot;normal&quot;, &quot;groupchat&quot;, or &quot;headline&quot;, the server MUST either (a) silently ignore the stanza
+                // or (b) return an error stanza to the sender, which SHOULD be &lt;service-unavailable/&gt;.
+<span class="nc bnc" id="L121" title="All 6 branches missed.">                if (message.getType() == Message.Type.normal || message.getType() == Message.Type.groupchat || message.getType() == Message.Type.headline) {</span>
+                    // Depending on the OfflineMessageStragey, we may silently ignore or bounce
+<span class="nc bnc" id="L123" title="All 2 branches missed.">                    if (type == Type.bounce) {</span>
+<span class="nc" id="L124">                        bounce(message);</span>
+                    }
+                    // Either bounce or silently ignore, never store such messages
+<span class="nc" id="L127">                    return;</span>
+                }
+                // For a message stanza of type &quot;error&quot;, the server MUST silently ignore the stanza.
+<span class="nc bnc" id="L130" title="All 2 branches missed.">                else if (message.getType() == Message.Type.error) {</span>
+<span class="nc" id="L131">                    return;</span>
+                }
+            }
+
+<span class="nc bnc" id="L135" title="All 5 branches missed.">            switch (type) {</span>
+            case bounce:
+<span class="nc" id="L137">                bounce(message);</span>
+<span class="nc" id="L138">                break;</span>
+            case store:
+<span class="nc" id="L140">                store(message);</span>
+<span class="nc" id="L141">                break;</span>
+            case store_and_bounce:
+<span class="nc bnc" id="L143" title="All 2 branches missed.">                if (underQuota(message)) {</span>
+<span class="nc" id="L144">                    store(message);</span>
+                }
+                else {
+<span class="nc" id="L147">                    Log.debug( &quot;Unable to store, as user is over storage quota. Bouncing message instead: &quot; + message.toXML() );</span>
+<span class="nc" id="L148">                    bounce(message);</span>
+                }
+<span class="nc" id="L150">                break;</span>
+            case store_and_drop:
+<span class="nc bnc" id="L152" title="All 2 branches missed.">                if (underQuota(message)) {</span>
+<span class="nc" id="L153">                    store(message);</span>
+                } else {
+<span class="nc" id="L155">                    Log.debug( &quot;Unable to store, as user is over storage quota. Silently dropping message: &quot; + message.toXML() );</span>
+                }
+<span class="nc" id="L157">                break;</span>
+            case drop:
+                // Drop essentially means silently ignore/do nothing
+                break;
+            }
+        }
+<span class="nc" id="L163">    }</span>
+
+    /**
+     * Registers a listener to receive events.
+     *
+     * @param listener the listener.
+     */
+    public static void addListener(OfflineMessageListener listener) {
+<span class="nc bnc" id="L171" title="All 2 branches missed.">        if (listener == null) {</span>
+<span class="nc" id="L172">            throw new NullPointerException();</span>
+        }
+<span class="nc" id="L174">        listeners.add(listener);</span>
+<span class="nc" id="L175">    }</span>
+
+    /**
+     * Unregisters a listener to receive events.
+     *
+     * @param listener the listener.
+     */
+    public static void removeListener(OfflineMessageListener listener) {
+<span class="nc" id="L183">        listeners.remove(listener);</span>
+<span class="nc" id="L184">    }</span>
+
+    private boolean underQuota(Message message) {
+<span class="nc bnc" id="L187" title="All 2 branches missed.">        return quota &gt; messageStore.getSize(message.getTo().getNode()) + message.toXML().length();</span>
+    }
+
+    private void store(Message message) {
+<span class="nc" id="L191">        messageStore.addMessage(message);</span>
+        // Inform listeners that an offline message was stored
+<span class="nc bnc" id="L193" title="All 2 branches missed.">        if (!listeners.isEmpty()) {</span>
+<span class="nc bnc" id="L194" title="All 2 branches missed.">            for (OfflineMessageListener listener : listeners) {</span>
+                try {
+<span class="nc" id="L196">                    listener.messageStored(message);    </span>
+<span class="nc" id="L197">                } catch (Exception e) {</span>
+<span class="nc" id="L198">                    Log.warn(&quot;An exception occurred while dispatching a 'messageStored' event!&quot;, e);</span>
+<span class="nc" id="L199">                }</span>
+<span class="nc" id="L200">            }</span>
+        }
+<span class="nc" id="L202">    }</span>
+
+    private void bounce(Message message) {
+        // Do nothing if the sender was the server itself
+<span class="nc bnc" id="L206" title="All 4 branches missed.">        if (message.getFrom() == null || message.getFrom().equals( serverAddress )) {</span>
+<span class="nc" id="L207">            return;</span>
+        }
+        try {
+            // Generate a rejection response to the sender
+<span class="nc" id="L211">            Message errorResponse = message.createCopy();</span>
+            // return an error stanza to the sender, which SHOULD be &lt;service-unavailable/&gt;
+<span class="nc" id="L213">            errorResponse.setError(PacketError.Condition.service_unavailable);</span>
+<span class="nc" id="L214">            errorResponse.setFrom(message.getTo());</span>
+<span class="nc" id="L215">            errorResponse.setTo(message.getFrom());</span>
+            // Send the response
+<span class="nc" id="L217">            router.route(errorResponse);</span>
+            // Inform listeners that an offline message was bounced
+<span class="nc bnc" id="L219" title="All 2 branches missed.">            if (!listeners.isEmpty()) {</span>
+<span class="nc bnc" id="L220" title="All 2 branches missed.">                for (OfflineMessageListener listener : listeners) {</span>
+                    try {
+<span class="nc" id="L222">                        listener.messageBounced(message);</span>
+<span class="nc" id="L223">                    } catch (Exception e) {</span>
+<span class="nc" id="L224">                        Log.warn(&quot;An exception occurred while dispatching a 'messageBounced' event!&quot;, e);</span>
+<span class="nc" id="L225">                    }</span>
+<span class="nc" id="L226">                }</span>
+            }
+        }
+<span class="nc" id="L229">        catch (Exception e) {</span>
+<span class="nc" id="L230">            Log.error(e.getMessage(), e);</span>
+<span class="nc" id="L231">        }</span>
+<span class="nc" id="L232">    }</span>
+
+    @Override
+    public void initialize(XMPPServer server) {
+<span class="nc" id="L236">        super.initialize(server);</span>
+<span class="nc" id="L237">        messageStore = server.getOfflineMessageStore();</span>
+<span class="nc" id="L238">        router = server.getPacketRouter();</span>
+<span class="nc" id="L239">        serverAddress = new JID(server.getServerInfo().getXMPPDomain());</span>
+
+<span class="nc" id="L241">        JiveGlobals.migrateProperty(&quot;xmpp.offline.quota&quot;);</span>
+<span class="nc" id="L242">        JiveGlobals.migrateProperty(&quot;xmpp.offline.type&quot;);</span>
+
+<span class="nc" id="L244">        String quota = JiveGlobals.getProperty(&quot;xmpp.offline.quota&quot;);</span>
+<span class="nc bnc" id="L245" title="All 4 branches missed.">        if (quota != null &amp;&amp; quota.length() &gt; 0) {</span>
+<span class="nc" id="L246">            OfflineMessageStrategy.quota = Integer.parseInt(quota);</span>
+        }
+<span class="nc" id="L248">        String type = JiveGlobals.getProperty(&quot;xmpp.offline.type&quot;);</span>
+<span class="nc bnc" id="L249" title="All 4 branches missed.">        if (type != null &amp;&amp; type.length() &gt; 0) {</span>
+<span class="nc" id="L250">            OfflineMessageStrategy.type = Type.valueOf(type);</span>
+        }
+<span class="nc" id="L252">    }</span>
+
+    @Override
+    public Iterator&lt;String&gt; getFeatures() {
+<span class="nc bnc" id="L256" title="All 2 branches missed.">        switch (type) {</span>
+            case store:
+            case store_and_bounce:
+            case store_and_drop:
+                // http://xmpp.org/extensions/xep-0160.html#disco
+<span class="nc" id="L261">                return Collections.singleton(&quot;msgoffline&quot;).iterator();</span>
+        }
+<span class="nc" id="L263">        return Collections.&lt;String&gt;emptyList().iterator();</span>
+    }
+
+    /**
+     * Strategy types.
+     */
+<span class="nc" id="L269">    public enum Type {</span>
+
+        /**
+         * All messages are bounced to the sender.
+         */
+<span class="nc" id="L274">        bounce,</span>
+
+        /**
+         * All messages are silently dropped.
+         */
+<span class="nc" id="L279">        drop,</span>
+
+        /**
+         * All messages are stored.
+         */
+<span class="nc" id="L284">        store,</span>
+
+        /**
+         * Messages are stored up to the storage limit, and then bounced.
+         */
+<span class="nc" id="L289">        store_and_bounce,</span>
+
+        /**
+         * Messages are stored up to the storage limit, and then silently dropped.
+         */
+<span class="nc" id="L294">        store_and_drop</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

@@ -1,0 +1,368 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>ScramSha1SaslServer.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.sasl</a> &gt; <span class="el_source">ScramSha1SaslServer.java</span></div><h1>ScramSha1SaslServer.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2015 Surevine Ltd
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.sasl;
+
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.security.SecureRandom;
+import java.util.Arrays;
+import java.util.UUID;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+import javax.security.sasl.Sasl;
+import javax.security.sasl.SaslException;
+import javax.security.sasl.SaslServer;
+import javax.xml.bind.DatatypeConverter;
+
+import org.jivesoftware.openfire.auth.AuthFactory;
+import org.jivesoftware.openfire.auth.ConnectionException;
+import org.jivesoftware.openfire.auth.InternalUnauthenticatedException;
+import org.jivesoftware.openfire.auth.ScramUtils;
+import org.jivesoftware.openfire.user.UserNotFoundException;
+import org.jivesoftware.util.SystemProperty;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Implements the SCRAM-SHA-1 server-side mechanism.
+ *
+ * @author Richard Midwinter
+ */
+public class ScramSha1SaslServer implements SaslServer {
+<span class="nc" id="L48">    public static final SystemProperty&lt;Integer&gt; ITERATION_COUNT = SystemProperty.Builder.ofType(Integer.class)</span>
+<span class="nc" id="L49">        .setKey(&quot;sasl.scram-sha-1.iteration-count&quot;)</span>
+<span class="nc" id="L50">        .setDefaultValue(ScramUtils.DEFAULT_ITERATION_COUNT)</span>
+<span class="nc" id="L51">        .setDynamic(Boolean.TRUE)</span>
+<span class="nc" id="L52">        .build();</span>
+<span class="nc" id="L53">    private static final Logger Log = LoggerFactory.getLogger(ScramSha1SaslServer.class);</span>
+    private static final Pattern
+<span class="nc" id="L55">            CLIENT_FIRST_MESSAGE = Pattern.compile(&quot;^(([pny])=?([^,]*),([^,]*),)(m?=?[^,]*,?n=([^,]*),r=([^,]*),?.*)$&quot;),</span>
+<span class="nc" id="L56">            CLIENT_FINAL_MESSAGE = Pattern.compile(&quot;(c=([^,]*),r=([^,]*)),p=(.*)$&quot;);</span>
+
+    private String username;
+<span class="nc" id="L59">    private State state = State.INITIAL;</span>
+    private String nonce;
+    private String serverFirstMessage;
+    private String clientFirstMessageBare;
+<span class="nc" id="L63">    private SecureRandom random = new SecureRandom();</span>
+
+<span class="nc" id="L65">    private enum State {</span>
+<span class="nc" id="L66">        INITIAL,</span>
+<span class="nc" id="L67">        IN_PROGRESS,</span>
+<span class="nc" id="L68">        COMPLETE;</span>
+    }
+    
+<span class="nc" id="L71">    public ScramSha1SaslServer() {</span>
+<span class="nc" id="L72">    }</span>
+
+    /**
+     * Returns the IANA-registered mechanism name of this SASL server.
+     * (&quot;SCRAM-SHA-1&quot;).
+     * @return A non-null string representing the IANA-registered mechanism name.
+     */
+    @Override
+    public String getMechanismName() {
+<span class="nc" id="L81">        return &quot;SCRAM-SHA-1&quot;;</span>
+    }
+
+    /**
+     * Evaluates the response data and generates a challenge.
+     *
+     * If a response is received from the client during the authentication
+     * process, this method is called to prepare an appropriate next
+     * challenge to submit to the client. The challenge is null if the
+     * authentication has succeeded and no more challenge data is to be sent
+     * to the client. It is non-null if the authentication must be continued
+     * by sending a challenge to the client, or if the authentication has
+     * succeeded but challenge data needs to be processed by the client.
+     * {@code isComplete()} should be called
+     * after each call to {@code evaluateResponse()},to determine if any further
+     * response is needed from the client.
+     *
+     * @param response The non-null (but possibly empty) response sent
+     * by the client.
+     *
+     * @return The possibly null challenge to send to the client.
+     * It is null if the authentication has succeeded and there is
+     * no more challenge data to be sent to the client.
+     * @exception SaslException If an error occurred while processing
+     * the response or generating a challenge.
+     */
+    @Override
+    public byte[] evaluateResponse(final byte[] response) throws SaslException {
+        try {
+            byte[] challenge;
+<span class="nc bnc" id="L111" title="All 4 branches missed.">            switch (state)</span>
+            {
+                case INITIAL:
+<span class="nc" id="L114">                    challenge = generateServerFirstMessage(response);</span>
+<span class="nc" id="L115">                    state = State.IN_PROGRESS;</span>
+<span class="nc" id="L116">                    break;</span>
+                case IN_PROGRESS:
+<span class="nc" id="L118">                    challenge = generateServerFinalMessage(response);</span>
+<span class="nc" id="L119">                    state = State.COMPLETE;</span>
+<span class="nc" id="L120">                    break;</span>
+                case COMPLETE:
+<span class="nc bnc" id="L122" title="All 4 branches missed.">                    if (response == null || response.length == 0)</span>
+                    {
+<span class="nc" id="L124">                        challenge = new byte[0];</span>
+<span class="nc" id="L125">                        break;</span>
+                    }
+                default:
+<span class="nc" id="L128">                    throw new SaslException(&quot;No response expected in state &quot; + state);</span>
+
+            }
+<span class="nc" id="L131">            return challenge;</span>
+<span class="nc" id="L132">        } catch (RuntimeException ex) {</span>
+<span class="nc" id="L133">           throw new SaslException(&quot;Unexpected exception while evaluating SASL response.&quot;, ex);</span>
+        }
+    }
+
+    /**
+     * First response returns:
+     *   - the nonce (client nonce appended with our own random UUID)
+     *   - the salt
+     *   - the number of iterations
+     */
+    private byte[] generateServerFirstMessage(final byte[] response) throws SaslException {
+<span class="nc" id="L144">        String clientFirstMessage = new String(response, StandardCharsets.UTF_8);</span>
+<span class="nc" id="L145">        Matcher m = CLIENT_FIRST_MESSAGE.matcher(clientFirstMessage);</span>
+<span class="nc bnc" id="L146" title="All 2 branches missed.">        if (!m.matches()) {</span>
+<span class="nc" id="L147">            throw new SaslException(&quot;Invalid first client message&quot;);</span>
+        }
+//        String gs2Header = m.group(1);
+//        String gs2CbindFlag = m.group(2);
+//        String gs2CbindName = m.group(3);
+//        String authzId = m.group(4);
+<span class="nc" id="L153">        clientFirstMessageBare = m.group(5);</span>
+<span class="nc" id="L154">        username = m.group(6);</span>
+<span class="nc" id="L155">        String clientNonce = m.group(7);</span>
+<span class="nc" id="L156">        nonce = clientNonce + UUID.randomUUID().toString();</span>
+
+<span class="nc" id="L158">        serverFirstMessage = String.format(&quot;r=%s,s=%s,i=%d&quot;, nonce, DatatypeConverter.printBase64Binary(getSalt(username)),</span>
+<span class="nc" id="L159">                getIterations(username));</span>
+<span class="nc" id="L160">        return serverFirstMessage.getBytes(StandardCharsets.UTF_8);</span>
+    }
+
+    /**
+     * Final response returns the server signature.
+     */
+    private byte[] generateServerFinalMessage(final byte[] response) throws SaslException {
+<span class="nc" id="L167">        String clientFinalMessage = new String(response, StandardCharsets.UTF_8);</span>
+<span class="nc" id="L168">        Matcher m = CLIENT_FINAL_MESSAGE.matcher(clientFinalMessage);</span>
+<span class="nc bnc" id="L169" title="All 2 branches missed.">        if (!m.matches()) {</span>
+<span class="nc" id="L170">            throw new SaslException(&quot;Invalid client final message&quot;);</span>
+        }
+
+<span class="nc" id="L173">        String clientFinalMessageWithoutProof = m.group(1);</span>
+//        String channelBinding = m.group(2);
+<span class="nc" id="L175">        String clientNonce = m.group(3);</span>
+<span class="nc" id="L176">        String proof = m.group(4);</span>
+        
+<span class="nc bnc" id="L178" title="All 2 branches missed.">        if (!nonce.equals(clientNonce)) {</span>
+<span class="nc" id="L179">            throw new SaslException(&quot;Client final message has incorrect nonce value&quot;);</span>
+        }
+
+        try {
+<span class="nc" id="L183">            String authMessage = clientFirstMessageBare + &quot;,&quot; + serverFirstMessage + &quot;,&quot; + clientFinalMessageWithoutProof;</span>
+<span class="nc" id="L184">            byte[] storedKey = getStoredKey( username );</span>
+<span class="nc bnc" id="L185" title="All 2 branches missed.">            if (storedKey == null) {</span>
+<span class="nc" id="L186">                throw new SaslException(&quot;No stored key for user '&quot;+username+&quot;'&quot;);</span>
+            }
+<span class="nc" id="L188">            byte[] serverKey = getServerKey(username);</span>
+<span class="nc bnc" id="L189" title="All 2 branches missed.">            if (serverKey == null) {</span>
+<span class="nc" id="L190">                throw new SaslException(&quot;No server key for user '&quot;+username+&quot;'&quot;);</span>
+            }
+
+<span class="nc" id="L193">            byte[] clientSignature = ScramUtils.computeHmac(storedKey, authMessage);</span>
+<span class="nc" id="L194">            byte[] serverSignature = ScramUtils.computeHmac(serverKey, authMessage);</span>
+            
+<span class="nc" id="L196">            byte[] clientKey = clientSignature.clone();</span>
+<span class="nc" id="L197">            byte[] decodedProof = DatatypeConverter.parseBase64Binary(proof);</span>
+<span class="nc bnc" id="L198" title="All 2 branches missed.">            for (int i = 0; i &lt; clientKey.length; i++) {</span>
+<span class="nc" id="L199">                clientKey[i] ^= decodedProof[i];</span>
+            }
+
+<span class="nc bnc" id="L202" title="All 2 branches missed.">            if (!Arrays.equals(storedKey, MessageDigest.getInstance(&quot;SHA-1&quot;).digest(clientKey))) {</span>
+<span class="nc" id="L203">                throw new SaslException(&quot;Authentication failed&quot;);</span>
+            }
+<span class="nc" id="L205">            return (&quot;v=&quot; + DatatypeConverter.printBase64Binary(serverSignature))</span>
+<span class="nc" id="L206">                    .getBytes(StandardCharsets.UTF_8);</span>
+<span class="nc" id="L207">        } catch (UserNotFoundException | NoSuchAlgorithmException e) {</span>
+<span class="nc" id="L208">            throw new SaslException(e.getMessage(), e);</span>
+        }
+    }
+
+   /**
+      * Determines whether the authentication exchange has completed.
+      * This method is typically called after each invocation of
+      * {@code evaluateResponse()} to determine whether the
+      * authentication has completed successfully or should be continued.
+      * @return true if the authentication exchange has completed; false otherwise.
+      */
+    @Override
+    public boolean isComplete() {
+<span class="nc bnc" id="L221" title="All 2 branches missed.">        return state == State.COMPLETE;</span>
+    }
+
+    /**
+     * Reports the authorization ID in effect for the client of this
+     * session.
+     * This method can only be called if isComplete() returns true.
+     * @return The authorization ID of the client.
+     * @exception IllegalStateException if this authentication session has not completed
+     */
+    @Override
+    public String getAuthorizationID() {
+<span class="nc bnc" id="L233" title="All 2 branches missed.">        if (isComplete()) {</span>
+<span class="nc" id="L234">            return username;</span>
+        } else {
+<span class="nc" id="L236">            throw new IllegalStateException(&quot;SCRAM-SHA-1 authentication not completed&quot;);</span>
+        }
+    }
+
+    /**
+     * Unwraps a byte array received from the client. SCRAM-SHA-1 supports no security layer.
+     * 
+     * @throws SaslException if attempted to use this method.
+     */
+    @Override
+    public byte[] unwrap(byte[] incoming, int offset, int len)
+        throws SaslException {
+<span class="nc bnc" id="L248" title="All 2 branches missed.">        if (isComplete()) {</span>
+<span class="nc" id="L249">            throw new IllegalStateException(&quot;SCRAM-SHA-1 does not support integrity or privacy&quot;);</span>
+        } else {
+<span class="nc" id="L251">            throw new IllegalStateException(&quot;SCRAM-SHA-1 authentication not completed&quot;);</span>
+        }
+    }
+
+    /**
+     * Wraps a byte array to be sent to the client. SCRAM-SHA-1 supports no security layer.
+     *
+     * @throws SaslException if attempted to use this method.
+     */
+    @Override
+    public byte[] wrap(byte[] outgoing, int offset, int len)
+        throws SaslException {
+<span class="nc bnc" id="L263" title="All 2 branches missed.">        if (isComplete()) {</span>
+<span class="nc" id="L264">            throw new IllegalStateException(&quot;SCRAM-SHA-1 does not support integrity or privacy&quot;);</span>
+        } else {
+<span class="nc" id="L266">            throw new IllegalStateException(&quot;SCRAM-SHA-1 authentication not completed&quot;);</span>
+        }
+    }
+
+    /**
+     * Retrieves the negotiated property.
+     * This method can be called only after the authentication exchange has
+     * completed (i.e., when {@code isComplete()} returns true); otherwise, an
+     * {@code IllegalStateException} is thrown.
+     *
+     * @param propName the property
+     * @return The value of the negotiated property. If null, the property was
+     * not negotiated or is not applicable to this mechanism.
+     * @exception IllegalStateException if this authentication exchange has not completed
+     */
+    @Override
+    public Object getNegotiatedProperty(String propName) {
+<span class="nc bnc" id="L283" title="All 2 branches missed.">        if (isComplete()) {</span>
+<span class="nc bnc" id="L284" title="All 2 branches missed.">            if (propName.equals(Sasl.QOP)) {</span>
+<span class="nc" id="L285">                return &quot;auth&quot;;</span>
+            } else {
+<span class="nc" id="L287">                return null;</span>
+            }
+        } else {
+<span class="nc" id="L290">            throw new IllegalStateException(&quot;SCRAM-SHA-1 authentication not completed&quot;);</span>
+        }
+    }
+
+     /**
+      * Disposes of any system resources or security-sensitive information
+      * the SaslServer might be using. Invoking this method invalidates
+      * the SaslServer instance. This method is idempotent.
+      * @throws SaslException If a problem was encountered while disposing
+      * the resources.
+      */
+    @Override
+    public void dispose() throws SaslException {
+<span class="nc" id="L303">        username = null;</span>
+<span class="nc" id="L304">        state = State.INITIAL;</span>
+<span class="nc" id="L305">    }</span>
+    
+    /**
+     * Retrieve the salt from the database for a given username.
+     * 
+     * Returns a random salt if the user doesn't exist to mimic an invalid password. 
+     */
+    private byte[] getSalt(final String username) {
+        try {
+<span class="nc" id="L314">            String saltshaker = AuthFactory.getSalt(username);</span>
+            byte[] salt;
+<span class="nc bnc" id="L316" title="All 2 branches missed.">            if (saltshaker == null) {</span>
+<span class="nc" id="L317">                Log.debug(&quot;No salt found, so resetting password.&quot;);</span>
+<span class="nc" id="L318">                String password = AuthFactory.getPassword(username);</span>
+<span class="nc" id="L319">                AuthFactory.setPassword(username, password);</span>
+<span class="nc" id="L320">                salt = DatatypeConverter.parseBase64Binary(AuthFactory.getSalt(username));</span>
+<span class="nc" id="L321">            } else {</span>
+<span class="nc" id="L322">                salt = DatatypeConverter.parseBase64Binary(saltshaker);</span>
+            }
+<span class="nc" id="L324">            return salt;</span>
+<span class="nc" id="L325">        } catch (UserNotFoundException | UnsupportedOperationException | ConnectionException | InternalUnauthenticatedException e) {</span>
+<span class="nc" id="L326">            Log.warn(&quot;Exception in SCRAM.getSalt():&quot;, e);</span>
+<span class="nc" id="L327">            byte[] salt = new byte[24];</span>
+<span class="nc" id="L328">            random.nextBytes(salt);</span>
+<span class="nc" id="L329">            return salt;</span>
+        }
+    }
+    
+    /**
+     * Retrieve the iteration count from the database for a given username.
+     */
+    private int getIterations(final String username) {
+        try {
+<span class="nc" id="L338">            return AuthFactory.getIterations(username);</span>
+<span class="nc" id="L339">        } catch (UserNotFoundException e) {</span>
+<span class="nc" id="L340">            return ITERATION_COUNT.getValue();</span>
+        }
+    }
+    
+    /**
+     * Retrieve the server key from the database for a given username.
+     */
+    private byte[] getServerKey(final String username) throws UserNotFoundException {
+<span class="nc" id="L348">        final String serverKey = AuthFactory.getServerKey(username);</span>
+<span class="nc bnc" id="L349" title="All 2 branches missed.">        if (serverKey == null) {</span>
+<span class="nc" id="L350">            return null;</span>
+        } else {
+<span class="nc" id="L352">            return DatatypeConverter.parseBase64Binary( serverKey );</span>
+        }
+    }
+    
+    /**
+     * Retrieve the stored key from the database for a given username.
+     */
+    private byte[] getStoredKey(final String username) throws UserNotFoundException {
+<span class="nc" id="L360">        final String storedKey = AuthFactory.getStoredKey(username);</span>
+<span class="nc bnc" id="L361" title="All 2 branches missed.">        if (storedKey == null) {</span>
+<span class="nc" id="L362">            return null;</span>
+        } else {
+<span class="nc" id="L364">            return DatatypeConverter.parseBase64Binary( storedKey );</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

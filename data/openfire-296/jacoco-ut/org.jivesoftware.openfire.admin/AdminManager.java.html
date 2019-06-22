@@ -1,0 +1,304 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>AdminManager.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.admin</a> &gt; <span class="el_source">AdminManager.java</span></div><h1>AdminManager.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.jivesoftware.openfire.admin;
+
+import java.util.ArrayList;
+import java.util.List;
+
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.util.SystemProperty;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmpp.packet.JID;
+
+/**
+ * The AdminManager manages the AdminProvider configured for this server, caches knowledge of
+ * accounts with admin permissions, and provides a single point of entry for handling
+ * getting and setting administrative accounts.
+ *
+ * The provider can be specified using the system property:
+ *
+ * &lt;ul&gt;
+ * &lt;li&gt;{@code provider.admin.className = my.admin.provider}&lt;/li&gt;
+ * &lt;/ul&gt;
+ *
+ * @author Daniel Henninger
+ */
+public class AdminManager {
+
+<span class="fc" id="L42">    public static final SystemProperty&lt;Class&gt; ADMIN_PROVIDER = SystemProperty.Builder.ofType(Class.class)</span>
+<span class="fc" id="L43">        .setKey(&quot;provider.admin.className&quot;)</span>
+<span class="fc" id="L44">        .setBaseClass(AdminProvider.class)</span>
+<span class="fc" id="L45">        .setDefaultValue(DefaultAdminProvider.class)</span>
+<span class="fc" id="L46">        .addListener(AdminManager::initProvider)</span>
+<span class="fc" id="L47">        .setDynamic(true)</span>
+<span class="fc" id="L48">        .build();</span>
+
+<span class="fc" id="L50">    private static final Logger Log = LoggerFactory.getLogger(AdminManager.class);</span>
+
+    // Wrap this guy up so we can mock out the AdminManager class.
+<span class="nc" id="L53">    private static class AdminManagerContainer {</span>
+<span class="nc" id="L54">        private static AdminManager instance = new AdminManager();</span>
+    }
+
+    /**
+     * Returns the currently-installed AdminProvider. &lt;b&gt;Warning:&lt;/b&gt; in virtually all
+     * cases the admin provider should not be used directly. Instead, the appropriate
+     * methods in AdminManager should be called. Direct access to the admin provider is
+     * only provided for special-case logic.
+     *
+     * @return the current AdminProvider.
+     */
+    public static AdminProvider getAdminProvider() {
+<span class="nc" id="L66">        return AdminManagerContainer.instance.provider;</span>
+    }
+
+    /**
+     * Returns a singleton instance of AdminManager.
+     *
+     * @return a AdminManager instance.
+     */
+    public static AdminManager getInstance() {
+<span class="nc" id="L75">        return AdminManagerContainer.instance;</span>
+    }
+
+    /* Cache of admin accounts */
+    private List&lt;JID&gt; adminList;
+    private static AdminProvider provider;
+
+    /**
+     * Constructs a AdminManager, propery listener, and setting up the provider.
+     */
+<span class="nc" id="L85">    private AdminManager() {</span>
+        // Load an admin provider.
+<span class="nc" id="L87">        initProvider(ADMIN_PROVIDER.getValue());</span>
+<span class="nc" id="L88">    }</span>
+
+    private static void initProvider(final Class clazz) {
+<span class="nc bnc" id="L91" title="All 4 branches missed.">        if (provider == null || !clazz.equals(provider.getClass())) {</span>
+            try {
+<span class="nc" id="L93">                provider = (AdminProvider) clazz.newInstance();</span>
+            }
+<span class="nc" id="L95">            catch (Exception e) {</span>
+<span class="nc" id="L96">                Log.error(&quot;Error loading admin provider: &quot; + clazz.getName(), e);</span>
+<span class="nc" id="L97">                provider = new DefaultAdminProvider();</span>
+<span class="nc" id="L98">            }</span>
+        }
+<span class="nc" id="L100">    }</span>
+
+    /**
+     * Reads the admin list from the provider and sets up the cache.
+     */
+    private void loadAdminList() {
+<span class="nc" id="L106">        adminList = provider.getAdmins();</span>
+<span class="nc" id="L107">    }</span>
+
+    /**
+     * Refreshs the list of admin users from the provider.
+     */
+    public void refreshAdminAccounts() {
+<span class="nc" id="L113">        loadAdminList();</span>
+<span class="nc" id="L114">    }</span>
+
+    /**
+     * Returns the list of admin users from the provider.
+     *
+     * @return The list of users with admin status.
+     */
+    public List&lt;JID&gt; getAdminAccounts() {
+<span class="nc bnc" id="L122" title="All 2 branches missed.">        if (adminList == null) {</span>
+<span class="nc" id="L123">            loadAdminList();</span>
+        }
+<span class="nc" id="L125">        return adminList;</span>
+    }
+
+    /**
+     * Adds a new account to the list of Admin accounts, based off a username, which will be converted
+     * into a JID.
+     *
+     * @param username Username of account to add to list of admins.
+     */
+    public void addAdminAccount(String username) {
+<span class="nc bnc" id="L135" title="All 2 branches missed.">        if (adminList == null) {</span>
+<span class="nc" id="L136">            loadAdminList();</span>
+        }
+<span class="nc" id="L138">        JID userJID = XMPPServer.getInstance().createJID(username, null);</span>
+<span class="nc bnc" id="L139" title="All 2 branches missed.">        if (adminList.contains(userJID)) {</span>
+            // Already have them.
+<span class="nc" id="L141">            return;</span>
+        }
+        // Add new admin to cache.
+<span class="nc" id="L144">        adminList.add(userJID);</span>
+        // Store updated list of admins with provider.
+<span class="nc" id="L146">        provider.setAdmins(adminList);</span>
+<span class="nc" id="L147">    }</span>
+
+    /**
+     * Adds a new account to the list of Admin accounts, based off a JID.
+     *
+     * @param jid JID of account to add to list of admins.
+     */
+    public void addAdminAccount(JID jid) {
+<span class="nc bnc" id="L155" title="All 2 branches missed.">        if (adminList == null) {</span>
+<span class="nc" id="L156">            loadAdminList();</span>
+        }
+<span class="nc" id="L158">        JID bareJID = jid.asBareJID();</span>
+<span class="nc bnc" id="L159" title="All 2 branches missed.">        if (adminList.contains(bareJID)) {</span>
+            // Already have them.
+<span class="nc" id="L161">            return;</span>
+        }
+        // Add new admin to cache.
+<span class="nc" id="L164">        adminList.add(bareJID);</span>
+        // Store updated list of admins with provider.
+<span class="nc" id="L166">        provider.setAdmins(adminList);</span>
+<span class="nc" id="L167">    }</span>
+
+    /**
+     * Removes an account from the list of Admin accounts, based off username, which will be converted
+     * to a JID.
+     *
+     * @param username Username of user to remove from admin list.
+     */
+    public void removeAdminAccount(String username) {
+<span class="nc bnc" id="L176" title="All 2 branches missed.">        if (adminList == null) {</span>
+<span class="nc" id="L177">            loadAdminList();</span>
+        }
+<span class="nc" id="L179">        JID userJID = XMPPServer.getInstance().createJID(username, null);</span>
+<span class="nc bnc" id="L180" title="All 2 branches missed.">        if (!adminList.contains(userJID)) {</span>
+<span class="nc" id="L181">            return;</span>
+        }
+        // Remove user from admin list cache.
+<span class="nc" id="L184">        adminList.remove(userJID);</span>
+        // Store updated list of admins with provider.
+<span class="nc" id="L186">        provider.setAdmins(adminList);</span>
+<span class="nc" id="L187">    }</span>
+
+    /**
+     * Removes an account from the list of Admin accounts, based off JID.
+     *
+     * @param jid JID of user to remove from admin list.
+     */
+    public void removeAdminAccount(JID jid) {
+<span class="nc bnc" id="L195" title="All 2 branches missed.">        if (adminList == null) {</span>
+<span class="nc" id="L196">            loadAdminList();</span>
+        }
+        
+<span class="nc" id="L199">        JID bareJID = jid.asBareJID();</span>
+<span class="nc bnc" id="L200" title="All 2 branches missed.">        if (!adminList.contains(bareJID)) {</span>
+<span class="nc" id="L201">            return;</span>
+        }
+        // Remove user from admin list cache.
+<span class="nc" id="L204">        adminList.remove(bareJID);</span>
+        // Store updated list of admins with provider.
+<span class="nc" id="L206">        provider.setAdmins(adminList);</span>
+<span class="nc" id="L207">    }</span>
+
+    /**
+     * Returns true if the user is an admin.
+     *
+     * @param username Username of user to check whether they are an admin or not.
+     * @param allowAdminIfEmpty Allows the &quot;admin&quot; user to log in if the adminList is empty.
+     * @return True or false if user is an admin.
+     */
+    public boolean isUserAdmin(String username, boolean allowAdminIfEmpty) {
+<span class="nc bnc" id="L217" title="All 2 branches missed.">        if (adminList == null) {</span>
+<span class="nc" id="L218">            loadAdminList();</span>
+        }
+<span class="nc bnc" id="L220" title="All 4 branches missed.">        if (allowAdminIfEmpty &amp;&amp; adminList.isEmpty()) {</span>
+<span class="nc" id="L221">            return &quot;admin&quot;.equals(username);</span>
+        }
+<span class="nc" id="L223">        JID userJID = XMPPServer.getInstance().createJID(username, null);</span>
+<span class="nc" id="L224">        return adminList.contains(userJID);</span>
+    }
+
+    /**
+     * Returns true if the user is an admin.
+     *
+     * @param jid JID of user to check whether they are an admin or not.
+     * @param allowAdminIfEmpty Allows the &quot;admin&quot; user to log in if the adminList is empty.
+     * @return True or false if user is an admin.
+     */
+    public boolean isUserAdmin(JID jid, boolean allowAdminIfEmpty) {
+<span class="nc bnc" id="L235" title="All 2 branches missed.">        if (adminList == null) {</span>
+<span class="nc" id="L236">            loadAdminList();</span>
+        }
+<span class="nc bnc" id="L238" title="All 4 branches missed.">        if (allowAdminIfEmpty &amp;&amp; adminList.isEmpty()) {</span>
+<span class="nc" id="L239">            return &quot;admin&quot;.equals(jid.getNode());</span>
+        }
+<span class="nc" id="L241">        JID bareJID = jid.asBareJID();</span>
+<span class="nc" id="L242">        return adminList.contains(bareJID);</span>
+    }
+
+    /**
+     * Clears the list of admin users.
+     */
+    public void clearAdminUsers() {
+        // Clear the admin list cache.
+<span class="nc bnc" id="L250" title="All 2 branches missed.">        if (adminList == null) {</span>
+<span class="nc" id="L251">            adminList = new ArrayList&lt;&gt;();</span>
+        }
+        else {
+<span class="nc" id="L254">            adminList.clear();</span>
+        }
+        // Store empty list of admins with provider.
+<span class="nc" id="L257">        provider.setAdmins(adminList);</span>
+<span class="nc" id="L258">    }</span>
+
+    /**
+     * Sets the list of admin users based off of a list of usernames.  Clears list first.
+     *
+     * @param usernames List of usernames to set as admins.
+     */
+    public void setAdminUsers(List&lt;String&gt; usernames) {
+<span class="nc bnc" id="L266" title="All 2 branches missed.">        if (adminList == null) {</span>
+<span class="nc" id="L267">            adminList = new ArrayList&lt;&gt;();</span>
+        }
+        else {
+<span class="nc" id="L270">            adminList.clear();</span>
+        }
+<span class="nc" id="L272">        List&lt;JID&gt; admins = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L273" title="All 2 branches missed.">        for (String username : usernames) {</span>
+<span class="nc" id="L274">            admins.add(XMPPServer.getInstance().createJID(username, null));</span>
+<span class="nc" id="L275">        }</span>
+<span class="nc" id="L276">        adminList.addAll(admins);</span>
+<span class="nc" id="L277">        provider.setAdmins(admins);</span>
+<span class="nc" id="L278">    }</span>
+
+    /**
+     * Sets the list of admin users based off of a list of jids.  Clears list first.
+     *
+     * @param jids List of jids to set as admins.
+     */
+    public void setAdminJIDs(List&lt;JID&gt; jids) {
+<span class="nc bnc" id="L286" title="All 2 branches missed.">        if (adminList == null) {</span>
+<span class="nc" id="L287">            adminList = new ArrayList&lt;&gt;();</span>
+        }
+        else {
+<span class="nc" id="L290">            adminList.clear();</span>
+        }
+
+<span class="nc" id="L293">        List&lt;JID&gt; admins = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L294" title="All 2 branches missed.">        for (JID jid : jids)</span>
+        {
+<span class="nc bnc" id="L296" title="All 2 branches missed.">            if (jid != null) {</span>
+<span class="nc" id="L297">                admins.add(jid.asBareJID());</span>
+            }
+<span class="nc" id="L299">        }</span>
+<span class="nc" id="L300">        adminList.addAll(admins);</span>
+<span class="nc" id="L301">        provider.setAdmins(admins);</span>
+<span class="nc" id="L302">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

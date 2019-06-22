@@ -1,0 +1,562 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>StreamManager.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.streammanagement</a> &gt; <span class="el_source">StreamManager.java</span></div><h1>StreamManager.java</h1><pre class="source lang-java linenums">package org.jivesoftware.openfire.streammanagement;
+
+import java.math.BigInteger;
+import java.net.UnknownHostException;
+import java.nio.charset.StandardCharsets;
+import java.util.*;
+import java.util.concurrent.atomic.AtomicLong;
+
+import org.dom4j.Element;
+import org.dom4j.QName;
+import org.dom4j.dom.DOMElement;
+import org.jivesoftware.openfire.Connection;
+import org.jivesoftware.openfire.PacketRouter;
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.auth.AuthToken;
+import org.jivesoftware.openfire.auth.UnauthorizedException;
+import org.jivesoftware.openfire.session.ClientSession;
+import org.jivesoftware.openfire.session.LocalClientSession;
+import org.jivesoftware.openfire.session.LocalSession;
+import org.jivesoftware.openfire.session.Session;
+import org.jivesoftware.util.JiveGlobals;
+import org.jivesoftware.util.StringUtils;
+import org.jivesoftware.util.XMPPDateTimeFormat;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmpp.packet.*;
+
+/**
+ * XEP-0198 Stream Manager.
+ * Handles client/server messages acknowledgement.
+ *
+ * @author jonnyheavey
+ */
+public class StreamManager {
+
+    private final Logger Log;
+<span class="nc" id="L37">    private boolean resume = false;</span>
+    public static class UnackedPacket {
+        public final long x;
+<span class="nc" id="L40">        public final Date timestamp = new Date();</span>
+        public final Packet packet;
+        
+<span class="nc" id="L43">        public UnackedPacket(long x, Packet p) {</span>
+<span class="nc" id="L44">            this.x = x;</span>
+<span class="nc" id="L45">            packet = p;</span>
+<span class="nc" id="L46">        }</span>
+    }
+    
+    public static boolean isStreamManagementActive() {
+<span class="nc" id="L50">        return JiveGlobals.getBooleanProperty(&quot;stream.management.active&quot;, true);</span>
+    }
+
+    /**
+     * Stanza namespaces
+     */
+    public static final String NAMESPACE_V2 = &quot;urn:xmpp:sm:2&quot;;
+    public static final String NAMESPACE_V3 = &quot;urn:xmpp:sm:3&quot;;
+
+    /**
+     * Session (stream) to client.
+     */
+    private final LocalSession session;
+
+    /**
+     * Namespace to be used in stanzas sent to client (depending on XEP-0198 version used by client)
+     */
+    private String namespace;
+
+    /**
+     * Count of how many stanzas/packets
+     * sent from the client that the server has processed
+     */
+<span class="nc" id="L73">    private AtomicLong serverProcessedStanzas = new AtomicLong( 0 );</span>
+
+    /**
+     * Count of how many stanzas/packets
+     * sent from the server that the client has processed
+     */
+<span class="nc" id="L79">    private AtomicLong clientProcessedStanzas = new AtomicLong( 0 );</span>
+
+    /**
+     * The value (2^32)-1, used to emulate roll-over
+     */
+<span class="nc" id="L84">    private static final long MASK = new BigInteger( &quot;2&quot; ).pow( 32 ).longValue() - 1;</span>
+
+    /**
+     * Collection of stanzas/packets sent to client that haven't been acknowledged.
+     */
+<span class="nc" id="L89">    private Deque&lt;UnackedPacket&gt; unacknowledgedServerStanzas = new LinkedList&lt;&gt;();</span>
+
+<span class="nc" id="L91">    public StreamManager(LocalSession session) {</span>
+        String address;
+        try {
+<span class="nc" id="L94">            address = session.getConnection().getHostAddress();</span>
+        }
+<span class="nc" id="L96">        catch ( UnknownHostException e )</span>
+        {
+<span class="nc" id="L98">            address = null;</span>
+<span class="nc" id="L99">        }</span>
+
+<span class="nc bnc" id="L101" title="All 2 branches missed.">        this.Log = LoggerFactory.getLogger(StreamManager.class + &quot;[&quot;+ (address == null ? &quot;(unknown address)&quot; : address) +&quot;]&quot; );</span>
+<span class="nc" id="L102">        this.session = session;</span>
+<span class="nc" id="L103">    }</span>
+
+    /**
+     * Returns true if a stream is resumable.
+     *
+     * @return True if a stream is resumable.
+     */
+    public boolean getResume() {
+<span class="nc" id="L111">        return resume;</span>
+    }
+
+    /**
+     * Processes a stream management element.
+     *
+     * @param element The stream management element to be processed.
+     */
+    public void process( Element element )
+    {
+<span class="nc bnc" id="L121" title="All 18 branches missed.">        switch(element.getName()) {</span>
+            case &quot;enable&quot;:
+<span class="nc" id="L123">                String resumeString = element.attributeValue(&quot;resume&quot;);</span>
+<span class="nc" id="L124">                boolean resume = false;</span>
+<span class="nc bnc" id="L125" title="All 2 branches missed.">                if (resumeString != null) {</span>
+<span class="nc bnc" id="L126" title="All 6 branches missed.">                    if (resumeString.equalsIgnoreCase(&quot;true&quot;) || resumeString.equalsIgnoreCase(&quot;yes&quot;) || resumeString.equals(&quot;1&quot;)) {</span>
+<span class="nc" id="L127">                        resume = true;</span>
+                    }
+                }
+<span class="nc" id="L130">                enable( element.getNamespace().getStringValue(), resume );</span>
+<span class="nc" id="L131">                break;</span>
+            case &quot;resume&quot;:
+<span class="nc" id="L133">                long h = new Long(element.attributeValue(&quot;h&quot;));</span>
+<span class="nc" id="L134">                String previd = element.attributeValue(&quot;previd&quot;);</span>
+<span class="nc" id="L135">                startResume( element.getNamespaceURI(), previd, h);</span>
+<span class="nc" id="L136">                break;</span>
+            case &quot;r&quot;:
+<span class="nc" id="L138">                sendServerAcknowledgement();</span>
+<span class="nc" id="L139">                break;</span>
+            case &quot;a&quot;:
+<span class="nc" id="L141">                processClientAcknowledgement( element);</span>
+<span class="nc" id="L142">                break;</span>
+            default:
+<span class="nc" id="L144">                sendUnexpectedError();</span>
+        }
+<span class="nc" id="L146">    }</span>
+
+    /**
+     * Should this session be allowed to resume?
+     * This is used while processed &lt;enable/&gt; and &lt;resume/&gt;
+     *
+     * @return True if the session is allowed to resume.
+     */
+    private boolean allowResume() {
+<span class="nc" id="L155">        boolean allow = false;</span>
+        // Ensure that resource binding has occurred.
+<span class="nc bnc" id="L157" title="All 2 branches missed.">        if (session instanceof ClientSession) {</span>
+<span class="nc" id="L158">            AuthToken authToken = ((LocalClientSession)session).getAuthToken();</span>
+<span class="nc bnc" id="L159" title="All 2 branches missed.">            if (authToken != null) {</span>
+<span class="nc bnc" id="L160" title="All 2 branches missed.">                if (!authToken.isAnonymous()) {</span>
+<span class="nc" id="L161">                    allow = true;</span>
+                }
+            }
+        }
+<span class="nc" id="L165">        return allow;</span>
+    }
+
+    /**
+     * Attempts to enable Stream Management for the entity identified by the provided JID.
+     *
+     * @param namespace The namespace that defines what version of SM is to be enabled.
+     * @param resume Whether the client is requesting a resumable session.
+     */
+    private void enable( String namespace, boolean resume )
+    {
+
+
+<span class="nc" id="L178">        boolean offerResume = allowResume();</span>
+        // Ensure that resource binding has occurred.
+<span class="nc bnc" id="L180" title="All 2 branches missed.">        if (session.getStatus() != Session.STATUS_AUTHENTICATED) {</span>
+<span class="nc" id="L181">            this.namespace = namespace;</span>
+<span class="nc" id="L182">            sendUnexpectedError();</span>
+<span class="nc" id="L183">            return;</span>
+        }
+
+<span class="nc" id="L186">        String smId = null;</span>
+
+<span class="nc" id="L188">        synchronized ( this )</span>
+        {
+            // Do nothing if already enabled
+<span class="nc bnc" id="L191" title="All 2 branches missed.">            if ( isEnabled() )</span>
+            {
+<span class="nc" id="L193">                sendUnexpectedError();</span>
+<span class="nc" id="L194">                return;</span>
+            }
+<span class="nc" id="L196">            this.namespace = namespace;</span>
+
+<span class="nc bnc" id="L198" title="All 4 branches missed.">            this.resume = resume &amp;&amp; offerResume;</span>
+<span class="nc bnc" id="L199" title="All 2 branches missed.">            if ( this.resume ) {</span>
+                // Create SM-ID.
+<span class="nc" id="L201">                smId = StringUtils.encodeBase64( session.getAddress().getResource() + &quot;\0&quot; + session.getStreamID().getID());</span>
+            }
+<span class="nc" id="L203">        }</span>
+
+        // Send confirmation to the requestee.
+<span class="nc" id="L206">        Element enabled = new DOMElement(QName.get(&quot;enabled&quot;, namespace));</span>
+<span class="nc bnc" id="L207" title="All 2 branches missed.">        if (this.resume) {</span>
+<span class="nc" id="L208">            enabled.addAttribute(&quot;resume&quot;, &quot;true&quot;);</span>
+<span class="nc" id="L209">            enabled.addAttribute( &quot;id&quot;, smId);</span>
+        }
+<span class="nc" id="L211">        session.deliverRawText(enabled.asXML());</span>
+<span class="nc" id="L212">    }</span>
+
+    private void startResume(String namespace, String previd, long h) {
+<span class="nc" id="L215">        Log.debug(&quot;Attempting resumption for {}, h={}&quot;, previd, h);</span>
+<span class="nc" id="L216">        this.namespace = namespace;</span>
+        // Ensure that resource binding has NOT occurred.
+<span class="nc bnc" id="L218" title="All 2 branches missed.">        if (!allowResume() ) {</span>
+<span class="nc" id="L219">            sendUnexpectedError();</span>
+<span class="nc" id="L220">            return;</span>
+        }
+<span class="nc bnc" id="L222" title="All 2 branches missed.">        if (session.getStatus() == Session.STATUS_AUTHENTICATED) {</span>
+<span class="nc" id="L223">            sendUnexpectedError();</span>
+<span class="nc" id="L224">            return;</span>
+        }
+<span class="nc" id="L226">        AuthToken authToken = null;</span>
+        // Ensure that resource binding has occurred.
+<span class="nc bnc" id="L228" title="All 2 branches missed.">        if (session instanceof ClientSession) {</span>
+<span class="nc" id="L229">            authToken = ((LocalClientSession) session).getAuthToken();</span>
+        }
+<span class="nc bnc" id="L231" title="All 2 branches missed.">        if (authToken == null) {</span>
+<span class="nc" id="L232">            sendUnexpectedError();</span>
+<span class="nc" id="L233">            return;</span>
+        }
+        // Decode previd.
+        String resource;
+        String streamId;
+        try {
+<span class="nc" id="L239">            StringTokenizer toks = new StringTokenizer(new String(StringUtils.decodeBase64(previd), StandardCharsets.UTF_8), &quot;\0&quot;);</span>
+<span class="nc" id="L240">            resource = toks.nextToken();</span>
+<span class="nc" id="L241">            streamId = toks.nextToken();</span>
+<span class="nc" id="L242">        } catch (Exception e) {</span>
+<span class="nc" id="L243">            Log.debug(&quot;Exception from previd decode:&quot;, e);</span>
+<span class="nc" id="L244">            sendUnexpectedError();</span>
+<span class="nc" id="L245">            return;</span>
+<span class="nc" id="L246">        }</span>
+        final JID fullJid;
+<span class="nc bnc" id="L248" title="All 2 branches missed.">        if ( authToken.isAnonymous() ){</span>
+<span class="nc" id="L249">            fullJid = new JID(resource, authToken.getDomain(), resource, true);</span>
+        } else {
+<span class="nc" id="L251">            fullJid = new JID(authToken.getUsername(), authToken.getDomain(), resource, true);</span>
+        }
+<span class="nc" id="L253">        Log.debug(&quot;Resuming session {}&quot;, fullJid);</span>
+
+        // Locate existing session.
+<span class="nc" id="L256">        LocalClientSession otherSession = (LocalClientSession)XMPPServer.getInstance().getRoutingTable().getClientRoute(fullJid);</span>
+<span class="nc bnc" id="L257" title="All 2 branches missed.">        if (otherSession == null) {</span>
+<span class="nc" id="L258">            sendError(new PacketError(PacketError.Condition.item_not_found));</span>
+<span class="nc" id="L259">            return;</span>
+        }
+<span class="nc bnc" id="L261" title="All 2 branches missed.">        if (!otherSession.getStreamID().getID().equals(streamId)) {</span>
+<span class="nc" id="L262">            sendError(new PacketError(PacketError.Condition.item_not_found));</span>
+<span class="nc" id="L263">            return;</span>
+        }
+<span class="nc" id="L265">        Log.debug(&quot;Found existing session, checking status&quot;);</span>
+        // Previd identifies proper session. Now check SM status
+<span class="nc bnc" id="L267" title="All 2 branches missed.">        if (!otherSession.getStreamManager().resume) {</span>
+<span class="nc" id="L268">            Log.debug(&quot;Not allowing a client to resume a session, the session to be resumed does not have the stream management resumption feature enabled.&quot; );</span>
+<span class="nc" id="L269">            sendError(new PacketError(PacketError.Condition.unexpected_request));</span>
+<span class="nc" id="L270">            return;</span>
+        }
+<span class="nc bnc" id="L272" title="All 2 branches missed.">        if (!otherSession.getStreamManager().namespace.equals(namespace)) {</span>
+<span class="nc" id="L273">            Log.debug(&quot;Not allowing a client to resume a session, the session to be resumed used a different version ({}) of the session management resumption feature as compared to the version that's requested now: {}.&quot;, otherSession.getStreamManager().namespace, namespace);</span>
+<span class="nc" id="L274">            sendError(new PacketError(PacketError.Condition.unexpected_request));</span>
+<span class="nc" id="L275">            return;</span>
+        }
+<span class="nc bnc" id="L277" title="All 2 branches missed.">        if (!otherSession.getStreamManager().validateClientAcknowledgement(h)) {</span>
+<span class="nc" id="L278">            Log.debug(&quot;Not allowing a client to resume a session, as it reports it received more stanzas from us than that we've send it.&quot; );</span>
+<span class="nc" id="L279">            sendError(new PacketError(PacketError.Condition.unexpected_request));</span>
+<span class="nc" id="L280">            return;</span>
+        }
+<span class="nc bnc" id="L282" title="All 2 branches missed.">        if (!otherSession.isDetached()) {</span>
+<span class="nc" id="L283">            Log.debug(&quot;Existing session is not detached; detaching.&quot;);</span>
+<span class="nc" id="L284">            Connection oldConnection = otherSession.getConnection();</span>
+<span class="nc" id="L285">            otherSession.setDetached();</span>
+<span class="nc" id="L286">            oldConnection.close();</span>
+        }
+<span class="nc" id="L288">        Log.debug(&quot;Attaching to other session.&quot;);</span>
+        // If we're all happy, disconnect this session.
+<span class="nc" id="L290">        Connection conn = session.getConnection();</span>
+<span class="nc" id="L291">        session.setDetached();</span>
+        // Connect new session.
+<span class="nc" id="L293">        otherSession.reattach(conn, h);</span>
+<span class="nc" id="L294">        Log.debug( &quot;Perform resumption on session {}. Closing session {}&quot;, otherSession, session );</span>
+<span class="nc" id="L295">        session.close();</span>
+<span class="nc" id="L296">    }</span>
+
+    /**
+     * Called when a session receives a closing stream tag, this prevents the
+     * session from being detached.
+     */
+    public void formalClose() {
+<span class="nc" id="L303">        this.resume = false;</span>
+<span class="nc" id="L304">    }</span>
+
+    /**
+     * Sends XEP-0198 acknowledgement &amp;lt;a /&amp;gt; to client from server
+     */
+    public void sendServerAcknowledgement() {
+<span class="nc bnc" id="L310" title="All 2 branches missed.">        if(isEnabled()) {</span>
+<span class="nc bnc" id="L311" title="All 2 branches missed.">            if (session.isDetached()) {</span>
+<span class="nc" id="L312">                Log.debug(&quot;Session is detached, won't request an ack.&quot;);</span>
+<span class="nc" id="L313">                return;</span>
+            }
+<span class="nc" id="L315">            String ack = String.format(&quot;&lt;a xmlns='%s' h='%s' /&gt;&quot;, namespace, serverProcessedStanzas.get() &amp; MASK );</span>
+<span class="nc" id="L316">            session.deliverRawText( ack );</span>
+        }
+<span class="nc" id="L318">    }</span>
+
+    /**
+     * Sends XEP-0198 request &lt;r /&gt; to client from server
+     */
+    private void sendServerRequest() {
+<span class="nc bnc" id="L324" title="All 2 branches missed.">        if(isEnabled()) {</span>
+<span class="nc bnc" id="L325" title="All 2 branches missed.">            if (session.isDetached()) {</span>
+<span class="nc" id="L326">                Log.debug(&quot;Session is detached, won't request an ack.&quot;);</span>
+<span class="nc" id="L327">                return;</span>
+            }
+<span class="nc" id="L329">            String request = String.format(&quot;&lt;r xmlns='%s' /&gt;&quot;, namespace);</span>
+<span class="nc" id="L330">            session.deliverRawText( request );</span>
+        }
+<span class="nc" id="L332">    }</span>
+
+    /**
+     * Send an error if a XEP-0198 stanza is received at an unexpected time.
+     * e.g. before resource-binding has completed.
+     */
+    private void sendUnexpectedError() {
+<span class="nc" id="L339">        sendError(new PacketError( PacketError.Condition.unexpected_request ));</span>
+<span class="nc" id="L340">    }</span>
+
+    /**
+     * Send a generic failed error.
+     *
+     * @param error PacketError describing the failure.
+     */
+    private void sendError(PacketError error) {
+<span class="nc" id="L348">        session.deliverRawText(</span>
+<span class="nc" id="L349">            String.format(&quot;&lt;failed xmlns='%s'&gt;&quot;, namespace)</span>
+<span class="nc" id="L350">                + String.format(&quot;&lt;%s xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/&gt;&quot;, error.getCondition().toXMPP())</span>
+                + &quot;&lt;/failed&gt;&quot;
+        );
+<span class="nc" id="L353">        this.namespace = null; // isEnabled() is testing this.</span>
+<span class="nc" id="L354">    }</span>
+
+    /**
+     * Checks if the amount of stanzas that the client acknowledges is equal to or less than the amount of stanzas that
+     * we've sent to the client.
+     *
+     * @param h Then number of stanzas that the client acknowledges it has received from us.
+     * @return false if we sent less stanzas to the client than the number it is acknowledging.
+     */
+    private synchronized boolean validateClientAcknowledgement(long h) {
+<span class="nc bnc" id="L364" title="All 4 branches missed.">        return h &lt;= ( unacknowledgedServerStanzas.isEmpty() ? clientProcessedStanzas.get() : unacknowledgedServerStanzas.getLast().x );</span>
+    }
+
+    /**
+     * Process client acknowledgements for a given value of h.
+     *
+     * @param h Last handled stanza to be acknowledged.
+     */
+    private void processClientAcknowledgement(long h) {
+<span class="nc" id="L373">        synchronized (this) {</span>
+
+<span class="nc bnc" id="L375" title="All 2 branches missed.">            if ( !validateClientAcknowledgement(h) ) {</span>
+                // All paths leading up to here should have checked for this. Race condition?
+<span class="nc" id="L377">                throw new IllegalStateException( &quot;Client acknowledges stanzas that we didn't send! Client Ack h: &quot;+h+&quot;, our last stanza: &quot; + unacknowledgedServerStanzas.getLast().x );</span>
+            }
+
+<span class="nc" id="L380">            clientProcessedStanzas.set( h );</span>
+
+            // Remove stanzas from temporary storage as now acknowledged
+<span class="nc" id="L383">            Log.trace( &quot;Before processing client Ack (h={}): {} unacknowledged stanzas.&quot;, h, unacknowledgedServerStanzas.size() );</span>
+
+            // Pop all acknowledged stanzas.
+<span class="nc bnc" id="L386" title="All 4 branches missed.">            while( !unacknowledgedServerStanzas.isEmpty() &amp;&amp; unacknowledgedServerStanzas.getFirst().x &lt;= h )</span>
+            {
+<span class="nc" id="L388">                unacknowledgedServerStanzas.removeFirst();</span>
+            }
+
+            // Ensure that unacknowledged stanzas are purged after the client rolled over 'h' which occurs at h= (2^32)-1
+<span class="nc" id="L392">            final int maxUnacked = getMaximumUnacknowledgedStanzas();</span>
+<span class="nc bnc" id="L393" title="All 6 branches missed.">            final boolean clientHadRollOver = h &lt; maxUnacked &amp;&amp; !unacknowledgedServerStanzas.isEmpty() &amp;&amp; unacknowledgedServerStanzas.getLast().x &gt; MASK - maxUnacked;</span>
+<span class="nc bnc" id="L394" title="All 2 branches missed.">            if ( clientHadRollOver )</span>
+            {
+<span class="nc" id="L396">                Log.info( &quot;Client rolled over 'h'. Purging high-numbered unacknowledged stanzas.&quot; );</span>
+<span class="nc bnc" id="L397" title="All 4 branches missed.">                while ( !unacknowledgedServerStanzas.isEmpty() &amp;&amp; unacknowledgedServerStanzas.getLast().x &gt; MASK - maxUnacked)</span>
+                {
+<span class="nc" id="L399">                    unacknowledgedServerStanzas.removeLast();</span>
+                }
+            }
+
+<span class="nc" id="L403">            Log.trace( &quot;After processing client Ack (h={}): {} unacknowledged stanzas.&quot;, h, unacknowledgedServerStanzas.size());</span>
+<span class="nc" id="L404">        }</span>
+<span class="nc" id="L405">    }</span>
+
+    /**
+     * Receive and process acknowledgement packet from client
+     * @param ack XEP-0198 acknowledgement &lt;a /&gt; stanza to process
+     */
+    private void processClientAcknowledgement(Element ack) {
+<span class="nc bnc" id="L412" title="All 2 branches missed.">        if(isEnabled()) {</span>
+<span class="nc bnc" id="L413" title="All 2 branches missed.">            if (ack.attribute(&quot;h&quot;) != null) {</span>
+<span class="nc" id="L414">                final long h = Long.valueOf(ack.attributeValue(&quot;h&quot;));</span>
+
+<span class="nc" id="L416">                Log.debug( &quot;Received acknowledgement from client: h={}&quot;, h );</span>
+
+<span class="nc bnc" id="L418" title="All 2 branches missed.">                if (!validateClientAcknowledgement(h)) {</span>
+<span class="nc" id="L419">                    Log.warn( &quot;Closing client session. Client acknowledges stanzas that we didn't send! Client Ack h: {}, our last stanza: {}, affected session: {}&quot;, h, unacknowledgedServerStanzas.getLast().x, session );</span>
+<span class="nc" id="L420">                    final StreamError error = new StreamError( StreamError.Condition.undefined_condition, &quot;You acknowledged stanzas that we didn't send. Your Ack h: &quot; + h + &quot;, our last stanza: &quot; + unacknowledgedServerStanzas.getLast().x );</span>
+<span class="nc" id="L421">                    session.deliverRawText( error.toXML() );</span>
+<span class="nc" id="L422">                    session.close();</span>
+<span class="nc" id="L423">                    return;</span>
+                }
+
+<span class="nc" id="L426">                processClientAcknowledgement(h);</span>
+            }
+        }
+<span class="nc" id="L429">    }</span>
+
+    /**
+     * Registers that Openfire sends a stanza to the client (which is expected to be acknowledged later).
+     * @param packet The stanza that is sent.
+     */
+    public void sentStanza(Packet packet) {
+
+<span class="nc bnc" id="L437" title="All 2 branches missed.">        if(isEnabled()) {</span>
+<span class="nc" id="L438">            final long requestFrequency = JiveGlobals.getLongProperty( &quot;stream.management.requestFrequency&quot;, 5 );</span>
+            final int size;
+
+<span class="nc" id="L441">            synchronized (this)</span>
+            {
+                // The next ID is one higher than the last stanza that was sent (which might be unacknowledged!)
+<span class="nc bnc" id="L444" title="All 2 branches missed.">                final long x = 1 + ( unacknowledgedServerStanzas.isEmpty() ? clientProcessedStanzas.get() : unacknowledgedServerStanzas.getLast().x );</span>
+<span class="nc" id="L445">                unacknowledgedServerStanzas.addLast( new StreamManager.UnackedPacket( x, packet.createCopy() ) );</span>
+
+<span class="nc" id="L447">                size = unacknowledgedServerStanzas.size();</span>
+
+<span class="nc" id="L449">                Log.trace( &quot;Added stanza of type '{}' to collection of unacknowledged stanzas (x={}). Collection size is now {}.&quot;, packet.getElement().getName(), x, size );</span>
+
+                // Prevent keeping to many stanzas in memory.
+<span class="nc bnc" id="L452" title="All 2 branches missed.">                if ( size &gt; getMaximumUnacknowledgedStanzas() )</span>
+                {
+<span class="nc" id="L454">                    Log.warn( &quot;To many stanzas go unacknowledged for this connection. Clearing queue and disabling functionality.&quot; );</span>
+<span class="nc" id="L455">                    namespace = null;</span>
+<span class="nc" id="L456">                    unacknowledgedServerStanzas.clear();</span>
+<span class="nc" id="L457">                    return;</span>
+                }
+<span class="nc" id="L459">            }</span>
+
+            // When we have a sizable amount of unacknowledged stanzas, request acknowledgement.
+<span class="nc bnc" id="L462" title="All 2 branches missed.">            if ( size % requestFrequency == 0 ) {</span>
+<span class="nc" id="L463">                Log.debug( &quot;Requesting acknowledgement from peer, as we have {} or more unacknowledged stanzas.&quot;, requestFrequency );</span>
+<span class="nc" id="L464">                sendServerRequest();</span>
+            }
+        }
+
+<span class="nc" id="L468">    }</span>
+
+    public void onClose(PacketRouter router, JID serverAddress) {
+        // Re-deliver unacknowledged stanzas from broken stream (XEP-0198)
+<span class="nc" id="L472">        synchronized (this) {</span>
+<span class="nc bnc" id="L473" title="All 2 branches missed.">            if(isEnabled()) {</span>
+<span class="nc" id="L474">                namespace = null; // disable stream management.</span>
+<span class="nc bnc" id="L475" title="All 2 branches missed.">                for (StreamManager.UnackedPacket unacked : unacknowledgedServerStanzas) {</span>
+<span class="nc bnc" id="L476" title="All 2 branches missed.">                    if (unacked.packet instanceof Message) {</span>
+<span class="nc" id="L477">                        Message m = (Message) unacked.packet;</span>
+<span class="nc bnc" id="L478" title="All 2 branches missed.">                        if (m.getExtension(&quot;delay&quot;, &quot;urn:xmpp:delay&quot;) == null) {</span>
+<span class="nc" id="L479">                            Element delayInformation = m.addChildElement(&quot;delay&quot;, &quot;urn:xmpp:delay&quot;);</span>
+<span class="nc" id="L480">                            delayInformation.addAttribute(&quot;stamp&quot;, XMPPDateTimeFormat.format(unacked.timestamp));</span>
+<span class="nc" id="L481">                            delayInformation.addAttribute(&quot;from&quot;, serverAddress.toBareJID());</span>
+                        }
+<span class="nc" id="L483">                        router.route(unacked.packet);</span>
+                    }
+<span class="nc" id="L485">                }</span>
+            }
+<span class="nc" id="L487">        }</span>
+
+<span class="nc" id="L489">    }</span>
+
+    public void onResume(JID serverAddress, long h) {
+<span class="nc" id="L492">        Log.debug(&quot;Agreeing to resume&quot;);</span>
+<span class="nc" id="L493">        Element resumed = new DOMElement(QName.get(&quot;resumed&quot;, namespace));</span>
+<span class="nc" id="L494">        resumed.addAttribute(&quot;previd&quot;, StringUtils.encodeBase64( session.getAddress().getResource() + &quot;\0&quot; + session.getStreamID().getID()));</span>
+<span class="nc" id="L495">        resumed.addAttribute(&quot;h&quot;, Long.toString(serverProcessedStanzas.get()));</span>
+<span class="nc" id="L496">        session.getConnection().deliverRawText(resumed.asXML());</span>
+<span class="nc" id="L497">        Log.debug(&quot;Resuming session: Ack for {}&quot;, h);</span>
+<span class="nc" id="L498">        processClientAcknowledgement(h);</span>
+<span class="nc" id="L499">        Log.debug(&quot;Processing remaining unacked stanzas&quot;);</span>
+        // Re-deliver unacknowledged stanzas from broken stream (XEP-0198)
+<span class="nc" id="L501">        synchronized (this) {</span>
+<span class="nc bnc" id="L502" title="All 2 branches missed.">            if(isEnabled()) {</span>
+<span class="nc bnc" id="L503" title="All 2 branches missed.">                for (StreamManager.UnackedPacket unacked : unacknowledgedServerStanzas) {</span>
+                    try {
+<span class="nc bnc" id="L505" title="All 2 branches missed.">                        if (unacked.packet instanceof Message) {</span>
+<span class="nc" id="L506">                            Message m = (Message) unacked.packet;</span>
+<span class="nc bnc" id="L507" title="All 2 branches missed.">                            if (m.getExtension(&quot;delay&quot;, &quot;urn:xmpp:delay&quot;) == null) {</span>
+<span class="nc" id="L508">                                Element delayInformation = m.addChildElement(&quot;delay&quot;, &quot;urn:xmpp:delay&quot;);</span>
+<span class="nc" id="L509">                                delayInformation.addAttribute(&quot;stamp&quot;, XMPPDateTimeFormat.format(unacked.timestamp));</span>
+<span class="nc" id="L510">                                delayInformation.addAttribute(&quot;from&quot;, serverAddress.toBareJID());</span>
+                            }
+<span class="nc" id="L512">                            session.getConnection().deliver(m);</span>
+<span class="nc bnc" id="L513" title="All 2 branches missed.">                        } else if (unacked.packet instanceof Presence) {</span>
+<span class="nc" id="L514">                            Presence p = (Presence) unacked.packet;</span>
+<span class="nc bnc" id="L515" title="All 2 branches missed.">                            if (p.getExtension(&quot;delay&quot;, &quot;urn:xmpp:delay&quot;) == null) {</span>
+<span class="nc" id="L516">                                Element delayInformation = p.addChildElement(&quot;delay&quot;, &quot;urn:xmpp:delay&quot;);</span>
+<span class="nc" id="L517">                                delayInformation.addAttribute(&quot;stamp&quot;, XMPPDateTimeFormat.format(unacked.timestamp));</span>
+<span class="nc" id="L518">                                delayInformation.addAttribute(&quot;from&quot;, serverAddress.toBareJID());</span>
+                            }
+<span class="nc" id="L520">                            session.getConnection().deliver(p);</span>
+<span class="nc" id="L521">                        } else {</span>
+<span class="nc" id="L522">                            session.getConnection().deliver(unacked.packet);</span>
+                        }
+<span class="nc" id="L524">                    } catch (UnauthorizedException e) {</span>
+<span class="nc" id="L525">                        Log.warn(&quot;Caught unauthorized exception, which seems worrying: &quot;, e);</span>
+<span class="nc" id="L526">                    }</span>
+<span class="nc" id="L527">                }</span>
+
+<span class="nc" id="L529">                sendServerRequest();</span>
+            }
+<span class="nc" id="L531">        }</span>
+<span class="nc" id="L532">    }</span>
+
+    /**
+     * Determines whether Stream Management enabled for session this
+     * manager belongs to.
+     * @return true when stream management is enabled, otherwise false.
+     */
+    public boolean isEnabled() {
+<span class="nc bnc" id="L540" title="All 2 branches missed.">        return namespace != null;</span>
+    }
+
+    /**
+     * Increments the count of stanzas processed by the server since
+     * Stream Management was enabled.
+     */
+    public void incrementServerProcessedStanzas() {
+<span class="nc bnc" id="L548" title="All 2 branches missed.">        if(isEnabled()) {</span>
+<span class="nc" id="L549">            this.serverProcessedStanzas.incrementAndGet();</span>
+        }
+<span class="nc" id="L551">    }</span>
+
+    /**
+     * The maximum amount of stanzas we keep, waiting for ack.
+     * @return The maximum number of stanzas.
+     */
+    private int getMaximumUnacknowledgedStanzas()
+    {
+<span class="nc" id="L559">        return JiveGlobals.getIntProperty( &quot;stream.management.max-unacked&quot;, 10000 );</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

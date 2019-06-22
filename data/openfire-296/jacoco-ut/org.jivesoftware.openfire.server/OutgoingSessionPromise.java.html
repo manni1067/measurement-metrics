@@ -1,0 +1,375 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>OutgoingSessionPromise.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.server</a> &gt; <span class="el_source">OutgoingSessionPromise.java</span></div><h1>OutgoingSessionPromise.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.server;
+
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.locks.Lock;
+
+import org.jivesoftware.openfire.RoutableChannelHandler;
+import org.jivesoftware.openfire.RoutingTable;
+import org.jivesoftware.openfire.SessionManager;
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.cluster.NodeID;
+import org.jivesoftware.openfire.interceptor.InterceptorManager;
+import org.jivesoftware.openfire.interceptor.PacketInterceptor;
+import org.jivesoftware.openfire.interceptor.PacketRejectedException;
+import org.jivesoftware.openfire.session.ClientSession;
+import org.jivesoftware.openfire.session.ConnectionSettings;
+import org.jivesoftware.openfire.session.DomainPair;
+import org.jivesoftware.openfire.session.LocalOutgoingServerSession;
+import org.jivesoftware.openfire.spi.RoutingTableImpl;
+import org.jivesoftware.util.JiveGlobals;
+import org.jivesoftware.util.cache.Cache;
+import org.jivesoftware.util.cache.CacheFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmpp.packet.IQ;
+import org.xmpp.packet.JID;
+import org.xmpp.packet.Message;
+import org.xmpp.packet.Packet;
+import org.xmpp.packet.PacketError;
+import org.xmpp.packet.Presence;
+
+/**
+ * An OutgoingSessionPromise provides an asynchronic way for sending packets to remote servers.
+ * When looking for a route to a remote server that does not have an existing connection, a session
+ * promise is returned.
+ *
+ * This class will queue packets and process them in another thread. The processing thread will
+ * use a pool of thread that will actually do the hard work. The threads in the pool will try
+ * to connect to remote servers and deliver the packets. If an error occurred while establishing
+ * the connection or sending the packet an error will be returned to the sender of the packet.
+ *
+ * @author Gaston Dombiak
+ */
+public class OutgoingSessionPromise implements RoutableChannelHandler {
+
+<span class="nc" id="L62">    private static final Logger Log = LoggerFactory.getLogger(OutgoingSessionPromise.class);</span>
+
+<span class="nc" id="L64">    private static OutgoingSessionPromise instance = new OutgoingSessionPromise();</span>
+
+    /**
+     * Queue that holds the packets pending to be sent to remote servers.
+     */
+<span class="nc" id="L69">    private BlockingQueue&lt;Packet&gt; packets = new LinkedBlockingQueue&lt;&gt;(10000);</span>
+
+    /**
+     * Pool of threads that will create outgoing sessions to remote servers and send
+     * the queued packets.
+     */
+    private ThreadPoolExecutor threadPool;
+
+<span class="nc" id="L77">    private Map&lt;String, PacketsProcessor&gt; packetsProcessors = new HashMap&lt;&gt;();</span>
+
+    /**
+     * Cache (unlimited, never expire) that holds outgoing sessions to remote servers from this server.
+     * Key: server domain, Value: nodeID
+     */
+    private Cache&lt;String, NodeID&gt; serversCache;
+    /**
+     * Flag that indicates if the process that consumed the queued packets should stop.
+     */
+<span class="nc" id="L87">    private boolean shutdown = false;</span>
+    private RoutingTable routingTable;
+
+    private OutgoingSessionPromise() {
+<span class="nc" id="L91">        super();</span>
+<span class="nc" id="L92">        init();</span>
+<span class="nc" id="L93">    }</span>
+
+    private void init() {
+<span class="nc" id="L96">        serversCache = CacheFactory.createCache(RoutingTableImpl.S2S_CACHE_NAME);</span>
+<span class="nc" id="L97">        routingTable = XMPPServer.getInstance().getRoutingTable();</span>
+        // Create a pool of threads that will process queued packets.
+<span class="nc" id="L99">        int maxThreads = JiveGlobals.getIntProperty(ConnectionSettings.Server.QUEUE_MAX_THREADS, 20);</span>
+<span class="nc" id="L100">        int queueSize = JiveGlobals.getIntProperty(ConnectionSettings.Server.QUEUE_SIZE, 50);</span>
+<span class="nc bnc" id="L101" title="All 2 branches missed.">        if (maxThreads &lt; 10) {</span>
+            // Ensure that the max number of threads in the pool is at least 10
+<span class="nc" id="L103">            maxThreads = 10;</span>
+        }
+<span class="nc" id="L105">        threadPool =</span>
+                new ThreadPoolExecutor(maxThreads/4, maxThreads, 60, TimeUnit.SECONDS,
+                        new LinkedBlockingQueue&lt;Runnable&gt;(queueSize),
+                        new ThreadPoolExecutor.CallerRunsPolicy());
+
+        // Start the thread that will consume the queued packets. Each pending packet will
+        // be actually processed by a thread of the pool (when available). If an error occurs
+        // while creating the remote session or sending the packet then a packet with error 502
+        // will be sent to the sender of the packet
+<span class="nc" id="L114">        Thread thread = new Thread(new Runnable() {</span>
+            @Override
+            public void run() {
+<span class="nc bnc" id="L117" title="All 2 branches missed.">                while (!shutdown) {</span>
+                    try {
+<span class="nc bnc" id="L119" title="All 2 branches missed.">                        if (threadPool.getActiveCount() &lt; threadPool.getMaximumPoolSize()) {</span>
+                            // Wait until a packet is available
+<span class="nc" id="L121">                            final Packet packet = packets.take();</span>
+
+<span class="nc" id="L123">                            boolean newProcessor = false;</span>
+                            PacketsProcessor packetsProcessor;
+<span class="nc" id="L125">                            String domain = packet.getTo().getDomain();</span>
+<span class="nc" id="L126">                            synchronized (domain.intern()) {</span>
+<span class="nc" id="L127">                                packetsProcessor = packetsProcessors.get(domain);</span>
+<span class="nc bnc" id="L128" title="All 2 branches missed.">                                if (packetsProcessor == null) {</span>
+<span class="nc" id="L129">                                    packetsProcessor =</span>
+                                            new PacketsProcessor(OutgoingSessionPromise.this, domain);
+<span class="nc" id="L131">                                    packetsProcessors.put(domain, packetsProcessor);</span>
+<span class="nc" id="L132">                                    newProcessor = true;</span>
+                                }
+<span class="nc" id="L134">                                packetsProcessor.addPacket(packet);</span>
+<span class="nc" id="L135">                            }</span>
+
+<span class="nc bnc" id="L137" title="All 2 branches missed.">                            if (newProcessor) {</span>
+                                // Process the packet in another thread
+<span class="nc" id="L139">                                threadPool.execute(packetsProcessor);</span>
+                            }
+<span class="nc" id="L141">                        }</span>
+                        else {
+                            // No threads are available so take a nap :)
+<span class="nc" id="L144">                            Thread.sleep(200);</span>
+                        }
+                    }
+<span class="nc" id="L147">                    catch (InterruptedException e) {</span>
+                        // Do nothing
+                    }
+<span class="nc" id="L150">                    catch (Exception e) {</span>
+<span class="nc" id="L151">                        Log.error(e.getMessage(), e);</span>
+<span class="nc" id="L152">                    }</span>
+                }
+<span class="nc" id="L154">            }</span>
+        }, &quot;Queued Packets Processor&quot;);
+<span class="nc" id="L156">        thread.setDaemon(true);</span>
+<span class="nc" id="L157">        thread.start();</span>
+
+<span class="nc" id="L159">    }</span>
+
+    public static OutgoingSessionPromise getInstance() {
+<span class="nc" id="L162">        return instance;</span>
+    }
+
+    /**
+     * Shuts down the thread that consumes the queued packets and also stops the pool
+     * of threads that actually send the packets to the remote servers.
+     */
+    public void shutdown() {
+<span class="nc" id="L170">        threadPool.shutdown();</span>
+<span class="nc" id="L171">        shutdown = true;</span>
+<span class="nc" id="L172">    }</span>
+
+    @Override
+    public JID getAddress() {
+        // TODO Will somebody send this message to me????
+<span class="nc" id="L177">        return null;</span>
+    }
+
+    @Override
+    public void process(Packet packet) {
+        // Queue the packet. Another process will process the queued packets.
+<span class="nc" id="L183">        packets.add(packet.createCopy());</span>
+<span class="nc" id="L184">    }</span>
+
+    private void processorDone(PacketsProcessor packetsProcessor) {
+<span class="nc" id="L187">        synchronized(packetsProcessor.getDomain().intern()) {</span>
+<span class="nc bnc" id="L188" title="All 2 branches missed.">            if (packetsProcessor.isDone()) {</span>
+<span class="nc" id="L189">                packetsProcessors.remove(packetsProcessor.getDomain());</span>
+            }
+            else {
+<span class="nc" id="L192">                threadPool.execute(packetsProcessor);</span>
+            }
+<span class="nc" id="L194">        }</span>
+<span class="nc" id="L195">    }</span>
+
+    private class PacketsProcessor implements Runnable
+    {
+<span class="nc" id="L199">        private final Logger Log = LoggerFactory.getLogger( PacketsProcessor.class );</span>
+
+        private OutgoingSessionPromise promise;
+        private String domain;
+<span class="nc" id="L203">        private Queue&lt;Packet&gt; packetQueue = new ArrayBlockingQueue&lt;&gt;( JiveGlobals.getIntProperty(ConnectionSettings.Server.QUEUE_SIZE, 50) );</span>
+
+        /**
+         * Keep track of the last time s2s failed. Once a packet failed to be sent to a
+         * remote server this stamp will be used so that for the next 5 seconds future packets
+         * for the same domain will automatically fail. After 5 seconds a new attempt to
+         * establish a s2s connection and deliver pendings packets will be performed.
+         * This optimization is good when the server is receiving many packets per second for the
+         * same domain. This will help reduce high CPU consumption.
+         */
+<span class="nc" id="L213">        private long failureTimestamp = -1;</span>
+
+<span class="nc" id="L215">        public PacketsProcessor(OutgoingSessionPromise promise, String domain) {</span>
+<span class="nc" id="L216">            this.promise = promise;</span>
+<span class="nc" id="L217">            this.domain = domain;</span>
+<span class="nc" id="L218">        }</span>
+
+        @Override
+        public void run() {
+<span class="nc bnc" id="L222" title="All 2 branches missed.">            while (!isDone()) {</span>
+<span class="nc" id="L223">                Packet packet = packetQueue.poll();</span>
+<span class="nc bnc" id="L224" title="All 2 branches missed.">                if (packet != null) {</span>
+                    // Check if s2s already failed
+<span class="nc bnc" id="L226" title="All 2 branches missed.">                    if (failureTimestamp &gt; 0) {</span>
+                        // Check if enough time has passed to attempt a new s2s
+<span class="nc bnc" id="L228" title="All 2 branches missed.">                        if (System.currentTimeMillis() - failureTimestamp &lt; 5000) {</span>
+<span class="nc" id="L229">                            returnErrorToSender(packet);</span>
+<span class="nc" id="L230">                            Log.debug( &quot;Error sending packet to domain '{}' (fast discard): {}&quot;, domain, packet );</span>
+<span class="nc" id="L231">                            continue;</span>
+                        }
+                        else {
+                            // Reset timestamp of last failure since we are ready to try again doing a s2s
+<span class="nc" id="L235">                            failureTimestamp = -1;</span>
+                        }
+                    }
+                    try {
+<span class="nc" id="L239">                        sendPacket(packet);</span>
+                    }
+<span class="nc" id="L241">                    catch (Exception e) {</span>
+<span class="nc" id="L242">                        returnErrorToSender(packet);</span>
+<span class="nc" id="L243">                        Log.debug( &quot;Error sending packet to domain '{}': {}&quot;, domain, packet, e );</span>
+                        // Mark the time when s2s failed
+<span class="nc" id="L245">                        failureTimestamp = System.currentTimeMillis();</span>
+<span class="nc" id="L246">                    }</span>
+                }
+<span class="nc" id="L248">            }</span>
+<span class="nc" id="L249">            promise.processorDone(this);</span>
+<span class="nc" id="L250">        }</span>
+
+        private void sendPacket(Packet packet) throws Exception {
+            // Create a connection to the remote server from the domain where the packet has been sent
+            boolean created;
+            // Make sure that only one cluster node is creating the outgoing connection
+            // TODO: Evaluate why removing the oss part causes nasty s2s and lockup issues.
+<span class="nc" id="L257">            Lock lock = CacheFactory.getLock(domain+&quot;oss&quot;, serversCache);</span>
+            try {
+<span class="nc" id="L259">                lock.lock();</span>
+<span class="nc" id="L260">                created = LocalOutgoingServerSession</span>
+<span class="nc" id="L261">                        .authenticateDomain(packet.getFrom().getDomain(), packet.getTo().getDomain());</span>
+            } finally {
+<span class="nc" id="L263">                lock.unlock();</span>
+<span class="nc" id="L264">            }</span>
+<span class="nc bnc" id="L265" title="All 2 branches missed.">            if (created) {</span>
+<span class="nc bnc" id="L266" title="All 2 branches missed.">                if (!routingTable.hasServerRoute(new DomainPair(packet.getFrom().getDomain(), packet.getTo().getDomain()))) {</span>
+<span class="nc" id="L267">                    throw new Exception(&quot;Route created but not found!!!&quot;);</span>
+                }
+                // A connection to the remote server was created so get the route and send the packet
+<span class="nc" id="L270">                routingTable.routePacket(packet.getTo(), packet, false);</span>
+            }
+            else {
+<span class="nc" id="L273">                throw new Exception(&quot;Failed to create connection to remote server&quot;);</span>
+            }
+<span class="nc" id="L275">        }</span>
+
+        private void returnErrorToSender(Packet packet) {
+<span class="nc" id="L278">            XMPPServer server = XMPPServer.getInstance();</span>
+<span class="nc" id="L279">            JID from = packet.getFrom();</span>
+<span class="nc" id="L280">            JID to = packet.getTo();</span>
+<span class="nc bnc" id="L281" title="All 4 branches missed.">            if (!server.isLocal(from) &amp;&amp; !XMPPServer.getInstance().matchesComponent(from) &amp;&amp;</span>
+<span class="nc bnc" id="L282" title="All 4 branches missed.">                    !server.isLocal(to) &amp;&amp; !XMPPServer.getInstance().matchesComponent(to)) {</span>
+                // Do nothing since the sender and receiver of the packet that failed to reach a remote
+                // server are not local users. This prevents endless loops if the FROM or TO address
+                // are non-existent addresses
+<span class="nc" id="L286">                return;</span>
+            }
+
+<span class="nc" id="L289">            final Set&lt;Packet&gt; replies = new HashSet&lt;&gt;();</span>
+
+            // TODO Send correct error condition: timeout or not_found depending on the real error
+            try {
+<span class="nc bnc" id="L293" title="All 2 branches missed.">                if (packet instanceof IQ) {</span>
+<span class="nc" id="L294">                    IQ reply = new IQ();</span>
+<span class="nc" id="L295">                    reply.setID(packet.getID());</span>
+<span class="nc" id="L296">                    reply.setTo(from);</span>
+<span class="nc" id="L297">                    reply.setFrom(to);</span>
+<span class="nc" id="L298">                    reply.setChildElement(((IQ) packet).getChildElement().createCopy());</span>
+<span class="nc" id="L299">                    reply.setError(PacketError.Condition.remote_server_not_found);</span>
+
+<span class="nc" id="L301">                    replies.add( reply );</span>
+<span class="nc" id="L302">                }</span>
+<span class="nc bnc" id="L303" title="All 2 branches missed.">                else if (packet instanceof Presence) {</span>
+                    // workaround for OF-23. &quot;undo&quot; the 'setFrom' to a bare JID 
+                    // by sending the error to all available resources.
+<span class="nc" id="L306">                    final List&lt;JID&gt; routes = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L307" title="All 4 branches missed.">                    if (from.getResource() == null || from.getResource().trim().length() == 0) {</span>
+<span class="nc" id="L308">                        routes.addAll(routingTable.getRoutes(from, null));</span>
+                    } else {
+<span class="nc" id="L310">                        routes.add(from);</span>
+                    }
+                    
+<span class="nc bnc" id="L313" title="All 2 branches missed.">                    for (JID route : routes) {</span>
+<span class="nc" id="L314">                        Presence reply = new Presence();</span>
+<span class="nc" id="L315">                        reply.setID(packet.getID());</span>
+<span class="nc" id="L316">                        reply.setTo(route);</span>
+<span class="nc" id="L317">                        reply.setFrom(to);</span>
+<span class="nc" id="L318">                        reply.setError(PacketError.Condition.remote_server_not_found);</span>
+
+<span class="nc" id="L320">                        replies.add( reply );</span>
+<span class="nc" id="L321">                    }</span>
+<span class="nc" id="L322">                }</span>
+<span class="nc bnc" id="L323" title="All 2 branches missed.">                else if (packet instanceof Message) {</span>
+<span class="nc" id="L324">                    Message reply = new Message();</span>
+<span class="nc" id="L325">                    reply.setID(packet.getID());</span>
+<span class="nc" id="L326">                    reply.setTo(from);</span>
+<span class="nc" id="L327">                    reply.setFrom(to);</span>
+<span class="nc" id="L328">                    reply.setType(((Message)packet).getType());</span>
+<span class="nc" id="L329">                    reply.setThread(((Message)packet).getThread());</span>
+<span class="nc" id="L330">                    reply.setError(PacketError.Condition.remote_server_not_found);</span>
+
+<span class="nc" id="L332">                    replies.add( reply );</span>
+                }
+
+                // Send all replies.
+<span class="nc" id="L336">                final SessionManager sessionManager = SessionManager.getInstance();</span>
+<span class="nc bnc" id="L337" title="All 2 branches missed.">                for ( final Packet reply : replies )</span>
+                {
+                    try
+                    {
+<span class="nc" id="L341">                        final ClientSession session = sessionManager.getSession( reply.getTo() );</span>
+<span class="nc" id="L342">                        InterceptorManager.getInstance().invokeInterceptors( reply, session, false, false );</span>
+<span class="nc" id="L343">                        routingTable.routePacket( reply.getTo(), reply, true );</span>
+<span class="nc" id="L344">                        InterceptorManager.getInstance().invokeInterceptors( reply, session, false, true );</span>
+                    }
+<span class="nc" id="L346">                    catch ( PacketRejectedException ex )</span>
+                    {
+<span class="nc" id="L348">                        Log.debug( &quot;Reply got rejected by an interceptor: &quot;, reply, ex );</span>
+<span class="nc" id="L349">                    }</span>
+<span class="nc" id="L350">                }</span>
+            }
+<span class="nc" id="L352">            catch (Exception e) {</span>
+<span class="nc" id="L353">                Log.warn( &quot;An exception occurred while trying to returning a remote-server-not-found error (for domain '{}') to the original sender. Original packet: {}&quot;, domain, packet, e );</span>
+<span class="nc" id="L354">            }</span>
+<span class="nc" id="L355">        }</span>
+
+        void addPacket( Packet packet )
+        {
+<span class="nc bnc" id="L359" title="All 2 branches missed.">            if ( !packetQueue.offer( packet ) )</span>
+            {
+<span class="nc" id="L361">                returnErrorToSender(packet);</span>
+<span class="nc" id="L362">                Log.debug( &quot;Error sending packet to domain '{}' (outbound queue full): {}&quot;, domain, packet );</span>
+            }
+<span class="nc" id="L364">        }</span>
+
+        public String getDomain() {
+<span class="nc" id="L367">            return domain;</span>
+        }
+
+        public boolean isDone() {
+<span class="nc" id="L371">            return packetQueue.isEmpty();</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

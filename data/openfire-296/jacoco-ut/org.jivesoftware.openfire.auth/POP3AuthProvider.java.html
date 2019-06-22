@@ -1,0 +1,260 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>POP3AuthProvider.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.auth</a> &gt; <span class="el_source">POP3AuthProvider.java</span></div><h1>POP3AuthProvider.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2004-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.auth;
+
+import java.util.Properties;
+
+import javax.mail.NoSuchProviderException;
+import javax.mail.Session;
+import javax.mail.Store;
+
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.user.UserAlreadyExistsException;
+import org.jivesoftware.openfire.user.UserManager;
+import org.jivesoftware.openfire.user.UserNotFoundException;
+import org.jivesoftware.util.JiveGlobals;
+import org.jivesoftware.util.StringUtils;
+import org.jivesoftware.util.cache.Cache;
+import org.jivesoftware.util.cache.CacheFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * An AuthProvider that authenticates using a POP3 server. It will automatically create
+ * local user accounts as needed. To enable this provider, set system properties as follows:
+ *
+ * &lt;ul&gt;
+ * &lt;li&gt;{@code provider.auth.className = org.jivesoftware.openfire.auth.POP3AuthProvider}&lt;/li&gt;
+ * &lt;li&gt;{@code provider.user.className = org.jivesoftware.openfire.user.POP3UserProvider}&lt;/li&gt;
+ * &lt;/ul&gt;
+ *
+ * The properties to configure the provider are as follows:
+ *
+ * &lt;ul&gt;
+ *      &lt;li&gt;pop3.host -- &lt;i&gt;(required)&lt;/i&gt; the name (or IP) of the POP3 server.
+ *      &lt;li&gt;pop.port -- the port of the POP3 server. The default value is 110 for standard
+ *              connections and 995 for SSL connections.
+ *      &lt;li&gt;pop3.domain -- the mail domain (e.g. gmail.com).
+ *      &lt;li&gt;pop3.authRequiresDomain -- set this to true if the POP3 server requires a
+ *              full email address for authentication (foo@example.com) rather than just
+ *              a username (foo). The default value is false.
+ *      &lt;li&gt;pop3.ssl -- true if an SSL connection to the POP3 server should be used. The default
+ *              is false.
+ *      &lt;li&gt;pop3.debug -- true if debugging output for the POP3 connection should be enabled. The
+ *              default is false.
+ *      &lt;li&gt;pop3.authCache.enabled -- true if authentication checks should be cached locally.
+ *              This will decrease load on the POP3 server if users continually authenticate.
+ *              The default value is false.
+ *      &lt;li&gt;pop3.authCache.size -- the maximum size of the authentication cache (in bytes). The
+ *              default value is 512 K.
+ *      &lt;li&gt;pop3.authCache.maxLifetime -- the maximum lifetime of items in the authentication
+ *              cache (in milliseconds). The default value is one hour.
+ * &lt;/ul&gt;
+ *
+ * @author Sean Meiners
+ */
+public class POP3AuthProvider implements AuthProvider {
+
+<span class="nc" id="L72">    private static final Logger Log = LoggerFactory.getLogger(POP3AuthProvider.class);</span>
+
+<span class="nc" id="L74">    private Cache&lt;String, String&gt; authCache = null;</span>
+<span class="nc" id="L75">    private String host = null;</span>
+<span class="nc" id="L76">    private String domain = null;</span>
+<span class="nc" id="L77">    private int port = -1;</span>
+<span class="nc" id="L78">    private boolean useSSL = false;</span>
+<span class="nc" id="L79">    private boolean authRequiresDomain = false;</span>
+    private boolean debugEnabled;
+
+    /**
+     * Initialiazes the POP3AuthProvider with values from the global config file.
+     */
+<span class="nc" id="L85">    public POP3AuthProvider() {</span>
+        // Convert XML based provider setup to Database based
+<span class="nc" id="L87">        JiveGlobals.migrateProperty(&quot;pop3.authCache.enabled&quot;);</span>
+<span class="nc" id="L88">        JiveGlobals.migrateProperty(&quot;pop3.ssl&quot;);</span>
+<span class="nc" id="L89">        JiveGlobals.migrateProperty(&quot;pop3.authRequiresDomain&quot;);</span>
+<span class="nc" id="L90">        JiveGlobals.migrateProperty(&quot;pop3.host&quot;);</span>
+<span class="nc" id="L91">        JiveGlobals.migrateProperty(&quot;pop3.debug&quot;);</span>
+<span class="nc" id="L92">        JiveGlobals.migrateProperty(&quot;pop3.domain&quot;);</span>
+<span class="nc" id="L93">        JiveGlobals.migrateProperty(&quot;pop3.port&quot;);</span>
+
+<span class="nc bnc" id="L95" title="All 2 branches missed.">        if (Boolean.valueOf(JiveGlobals.getProperty(&quot;pop3.authCache.enabled&quot;))) {</span>
+<span class="nc" id="L96">            String cacheName = &quot;POP3 Authentication&quot;;</span>
+<span class="nc" id="L97">            authCache = CacheFactory.createCache(cacheName);</span>
+        }
+
+<span class="nc" id="L100">        useSSL = Boolean.valueOf(JiveGlobals.getProperty(&quot;pop3.ssl&quot;));</span>
+<span class="nc" id="L101">        authRequiresDomain = Boolean.valueOf(JiveGlobals.getProperty(&quot;pop3.authRequiresDomain&quot;));</span>
+
+<span class="nc" id="L103">        host = JiveGlobals.getProperty(&quot;pop3.host&quot;);</span>
+<span class="nc bnc" id="L104" title="All 4 branches missed.">        if (host == null || host.length() &lt; 1) {</span>
+<span class="nc" id="L105">            throw new IllegalArgumentException(&quot;pop3.host is null or empty&quot;);</span>
+        }
+
+<span class="nc" id="L108">        debugEnabled = Boolean.valueOf(JiveGlobals.getProperty(&quot;pop3.debug&quot;));</span>
+
+<span class="nc" id="L110">        domain = JiveGlobals.getProperty(&quot;pop3.domain&quot;);</span>
+
+<span class="nc bnc" id="L112" title="All 2 branches missed.">        port = JiveGlobals.getIntProperty(&quot;pop3.port&quot;, useSSL ? 995 : 110);</span>
+
+<span class="nc bnc" id="L114" title="All 2 branches missed.">        if (Log.isDebugEnabled()) {</span>
+<span class="nc" id="L115">            Log.debug(&quot;POP3AuthProvider: Created new POP3AuthProvider instance, fields:&quot;);</span>
+<span class="nc" id="L116">            Log.debug(&quot;\t host: &quot; + host);</span>
+<span class="nc" id="L117">            Log.debug(&quot;\t port: &quot; + port);</span>
+<span class="nc" id="L118">            Log.debug(&quot;\t domain: &quot; + domain);</span>
+<span class="nc" id="L119">            Log.debug(&quot;\t useSSL: &quot; + useSSL);</span>
+<span class="nc" id="L120">            Log.debug(&quot;\t authRequiresDomain: &quot; + authRequiresDomain);</span>
+<span class="nc bnc" id="L121" title="All 2 branches missed.">            Log.debug(&quot;\t authCacheEnabled: &quot; + (authCache != null));</span>
+<span class="nc bnc" id="L122" title="All 2 branches missed.">            if (authCache != null) {</span>
+<span class="nc" id="L123">                Log.debug(&quot;\t authCacheSize: &quot; + authCache.getCacheSize());</span>
+<span class="nc" id="L124">                Log.debug(&quot;\t authCacheMaxLifetime: &quot; + authCache.getMaxLifetime());</span>
+            }
+        }
+<span class="nc" id="L127">    }</span>
+
+    @Override
+    public void authenticate(String username, String password) throws UnauthorizedException {
+<span class="nc bnc" id="L131" title="All 4 branches missed.">        if (username == null || password == null) {</span>
+<span class="nc" id="L132">            throw new UnauthorizedException();</span>
+        }
+<span class="nc bnc" id="L134" title="All 2 branches missed.">        if (username.contains(&quot;@&quot;)) {</span>
+            // Check that the specified domain matches the server's domain
+<span class="nc" id="L136">            int index = username.indexOf(&quot;@&quot;);</span>
+<span class="nc" id="L137">            String domain = username.substring(index + 1);</span>
+<span class="nc bnc" id="L138" title="All 2 branches missed.">            if (domain.equals(XMPPServer.getInstance().getServerInfo().getXMPPDomain())) {</span>
+<span class="nc" id="L139">                username = username.substring(0, index);</span>
+            }
+<span class="nc" id="L141">        } else {</span>
+            // Unknown domain. Return authentication failed.
+<span class="nc" id="L143">            throw new UnauthorizedException();</span>
+        }
+
+<span class="nc" id="L146">        Log.debug(&quot;POP3AuthProvider.authenticate(&quot;+username+&quot;, ******)&quot;);</span>
+
+            // If cache is enabled, see if the auth is in cache.
+<span class="nc bnc" id="L149" title="All 4 branches missed.">            if (authCache != null &amp;&amp; authCache.containsKey(username)) {</span>
+<span class="nc" id="L150">                String hash = authCache.get(username);</span>
+<span class="nc bnc" id="L151" title="All 2 branches missed.">                if (StringUtils.hash(password).equals(hash)) {</span>
+<span class="nc" id="L152">                    return;</span>
+                }
+            }
+
+<span class="nc" id="L156">        Properties mailProps = new Properties();</span>
+<span class="nc" id="L157">        mailProps.setProperty(&quot;mail.debug&quot;, String.valueOf(debugEnabled));</span>
+<span class="nc" id="L158">        Session session = Session.getInstance(mailProps, null);</span>
+        Store store;
+        try {
+<span class="nc bnc" id="L161" title="All 2 branches missed.">            store = session.getStore(useSSL ? &quot;pop3s&quot; : &quot;pop3&quot;);</span>
+        }
+<span class="nc" id="L163">        catch(NoSuchProviderException e) {</span>
+<span class="nc" id="L164">            Log.error(e.getMessage(), e);</span>
+<span class="nc" id="L165">            throw new UnauthorizedException(e);</span>
+<span class="nc" id="L166">        }</span>
+
+        try {
+<span class="nc bnc" id="L169" title="All 2 branches missed.">            if (authRequiresDomain) {</span>
+<span class="nc" id="L170">                store.connect(host, port, username + &quot;@&quot; + domain, password);</span>
+            }
+            else {
+<span class="nc" id="L173">                store.connect(host, port, username, password);</span>
+            }
+        }
+<span class="nc" id="L176">        catch(Exception e) {</span>
+<span class="nc" id="L177">            Log.error(e.getMessage(), e);</span>
+<span class="nc" id="L178">            throw new UnauthorizedException(e);</span>
+<span class="nc" id="L179">        }</span>
+
+<span class="nc bnc" id="L181" title="All 2 branches missed.">        if (! store.isConnected()) {</span>
+<span class="nc" id="L182">            throw new UnauthorizedException(&quot;Could not authenticate user&quot;);</span>
+        }
+
+        try {
+<span class="nc" id="L186">            store.close();</span>
+        }
+<span class="nc" id="L188">        catch (Exception e) {</span>
+            // Ignore.
+<span class="nc" id="L190">        }</span>
+
+        // If cache is enabled, add the item to cache.
+<span class="nc bnc" id="L193" title="All 2 branches missed.">        if (authCache != null) {</span>
+<span class="nc" id="L194">            authCache.put(username, StringUtils.hash(password));</span>
+        }
+
+        // See if the user exists in the database. If not, automatically create them.
+<span class="nc" id="L198">        UserManager userManager = UserManager.getInstance();</span>
+        try {
+<span class="nc" id="L200">            userManager.getUser(username);</span>
+        }
+<span class="nc" id="L202">        catch (UserNotFoundException unfe) {</span>
+<span class="nc bnc" id="L203" title="All 2 branches missed.">            String email = username + &quot;@&quot; + (domain!=null?domain:host);</span>
+            try {
+<span class="nc" id="L205">                Log.debug(&quot;POP3AuthProvider: Automatically creating new user account for &quot; + username);</span>
+                // Create user; use a random password for better safety in the future.
+                // Note that we have to go to the user provider directly -- because the
+                // provider is read-only, UserManager will usually deny access to createUser.
+<span class="nc" id="L209">                UserManager.getUserProvider().createUser(username, StringUtils.randomString(8),</span>
+                        null, email);
+            }
+<span class="nc" id="L212">            catch (UserAlreadyExistsException uaee) {</span>
+                // Ignore.
+<span class="nc" id="L214">            }</span>
+<span class="nc" id="L215">        }</span>
+<span class="nc" id="L216">    }</span>
+
+    @Override
+    public String getPassword(String username)
+            throws UserNotFoundException, UnsupportedOperationException
+    {
+<span class="nc" id="L222">        throw new UnsupportedOperationException();</span>
+    }
+
+     @Override
+     public void setPassword(String username, String password) throws UserNotFoundException {
+<span class="nc" id="L227">        throw new UnsupportedOperationException();</span>
+    }
+
+    @Override
+    public boolean supportsPasswordRetrieval() {
+<span class="nc" id="L232">        return false;</span>
+    }
+    
+    @Override
+    public boolean isScramSupported() {
+<span class="nc" id="L237">        return false;</span>
+    }
+
+    @Override
+    public String getSalt(String username) throws UnsupportedOperationException, UserNotFoundException {
+<span class="nc" id="L242">        throw new UnsupportedOperationException();</span>
+    }
+
+    @Override
+    public int getIterations(String username) throws UnsupportedOperationException, UserNotFoundException {
+<span class="nc" id="L247">        throw new UnsupportedOperationException();</span>
+    }
+
+    @Override
+    public String getServerKey(String username) throws UnsupportedOperationException, UserNotFoundException {
+<span class="nc" id="L252">        throw new UnsupportedOperationException();</span>
+    }
+
+    @Override
+    public String getStoredKey(String username) throws UnsupportedOperationException, UserNotFoundException {
+<span class="nc" id="L257">        throw new UnsupportedOperationException();</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

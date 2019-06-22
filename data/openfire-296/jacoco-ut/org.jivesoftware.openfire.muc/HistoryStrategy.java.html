@@ -1,0 +1,357 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>HistoryStrategy.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.muc</a> &gt; <span class="el_source">HistoryStrategy.java</span></div><h1>HistoryStrategy.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2004-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.muc;
+
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.Iterator;
+import java.util.LinkedList;
+import java.util.ListIterator;
+import java.util.concurrent.ConcurrentLinkedQueue;
+
+import org.jivesoftware.openfire.muc.cluster.UpdateHistoryStrategy;
+import org.jivesoftware.openfire.muc.spi.MUCPersistenceManager;
+import org.jivesoftware.util.JiveGlobals;
+import org.jivesoftware.util.cache.CacheFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmpp.packet.Message;
+
+/**
+ * &lt;p&gt;Multi-User Chat rooms may cache history of the conversations in the room in order to
+ * play them back to newly arriving members.&lt;/p&gt;
+ * 
+ * &lt;p&gt;This class is an internal component of MUCRoomHistory that describes the strategy that can 
+ * be used, and provides a method of administering the history behavior.&lt;/p&gt;
+ *
+ * @author Gaston Dombiak
+ * @author Derek DeMoro
+ */
+public class HistoryStrategy {
+
+<span class="nc" id="L46">    private static final Logger Log = LoggerFactory.getLogger(HistoryStrategy.class);</span>
+
+    /**
+     * The type of strategy being used.
+     */
+<span class="nc" id="L51">    private Type type = Type.number;</span>
+
+    /**
+     * List containing the history of messages.
+     */
+<span class="nc" id="L56">    private ConcurrentLinkedQueue&lt;Message&gt; history = new ConcurrentLinkedQueue&lt;&gt;();</span>
+    /**
+     * Default max number.
+     */
+    private static final int DEFAULT_MAX_NUMBER = 25;
+    /**
+     * The maximum number of chat history messages stored for the room.
+     */
+    private int maxNumber;
+    /**
+     * The parent history used for default settings, or null if no parent
+     * (chat server defaults).
+     */
+    private HistoryStrategy parent;
+    /**
+     * Track the latest room subject change or null if none exists yet.
+     */
+<span class="nc" id="L73">    private Message roomSubject = null;</span>
+    /**
+     * The string prefix to be used on the context property names
+     * (do not include trailing dot).
+     */
+<span class="nc" id="L78">    private String contextPrefix = null;</span>
+    /**
+     * The subdomain of the service the properties are set on.
+     */
+<span class="nc" id="L82">    private String contextSubdomain = null;</span>
+
+    /**
+     * Create a history strategy with the given parent strategy (for defaults) or null if no 
+     * parent exists.
+     *
+     * @param parentStrategy The parent strategy of this strategy or null if none exists.
+     */
+<span class="nc" id="L90">    public HistoryStrategy(HistoryStrategy parentStrategy) {</span>
+<span class="nc" id="L91">        this.parent = parentStrategy;</span>
+<span class="nc bnc" id="L92" title="All 2 branches missed.">        if (parent == null) {</span>
+<span class="nc" id="L93">            maxNumber = DEFAULT_MAX_NUMBER;</span>
+        }
+        else {
+<span class="nc" id="L96">            type = Type.defaulType;</span>
+<span class="nc" id="L97">            maxNumber = parent.getMaxNumber();</span>
+        }
+<span class="nc" id="L99">    }</span>
+
+    /**
+     * Obtain the maximum number of messages for strategies using message number limitations.
+     *
+     * @return The maximum number of messages to store in applicable strategies.
+     */
+    public int getMaxNumber() {
+<span class="nc" id="L107">        return maxNumber;</span>
+    }
+
+    /**
+     * Set the maximum number of messages for strategies using message number limitations.
+     *
+     * @param max the maximum number of messages to store in applicable strategies.
+     */
+    public void setMaxNumber(int max) {
+<span class="nc bnc" id="L116" title="All 2 branches missed.">        if (maxNumber == max) {</span>
+            // Do nothing since value has not changed
+<span class="nc" id="L118">            return;</span>
+        }
+<span class="nc" id="L120">        this.maxNumber = max;</span>
+<span class="nc bnc" id="L121" title="All 2 branches missed.">        if (contextPrefix != null){</span>
+<span class="nc" id="L122">            MUCPersistenceManager.setProperty(contextSubdomain, contextPrefix + &quot;.maxNumber&quot;, Integer.toString(maxNumber));</span>
+        }
+<span class="nc bnc" id="L124" title="All 2 branches missed.">        if (parent == null) {</span>
+            // Update the history strategy of the MUC service
+<span class="nc" id="L126">            CacheFactory.doClusterTask(new UpdateHistoryStrategy(contextSubdomain, this));</span>
+        }
+<span class="nc" id="L128">    }</span>
+
+    /**
+     * Set the type of history strategy being used.
+     *
+     * @param newType The new type of chat history to use.
+     */
+    public void setType(Type newType){
+<span class="nc bnc" id="L136" title="All 2 branches missed.">        if (type == newType) {</span>
+            // Do nothing since value has not changed
+<span class="nc" id="L138">            return;</span>
+        }
+<span class="nc bnc" id="L140" title="All 2 branches missed.">        if (newType != null){</span>
+<span class="nc" id="L141">            type = newType;</span>
+        }
+<span class="nc bnc" id="L143" title="All 2 branches missed.">        if (contextPrefix != null){</span>
+<span class="nc" id="L144">            MUCPersistenceManager.setProperty(contextSubdomain, contextPrefix + &quot;.type&quot;, type.toString());</span>
+        }
+<span class="nc bnc" id="L146" title="All 2 branches missed.">        if (parent == null) {</span>
+            // Update the history strategy of the MUC service
+<span class="nc" id="L148">            CacheFactory.doClusterTask(new UpdateHistoryStrategy(contextSubdomain, this));</span>
+        }
+<span class="nc" id="L150">    }</span>
+
+    /**
+     * Obtain the type of history strategy being used.
+     *
+     * @return The current type of strategy being used.
+     */
+    public Type getType(){
+<span class="nc" id="L158">        return type;</span>
+    }
+
+    /**
+     * Add a message to the current chat history. The strategy type will determine what 
+     * actually happens to the message.
+     *
+     * @param packet The packet to add to the chatroom's history.
+     */
+    public void addMessage(Message packet){
+        // get the conditions based on default or not
+        Type strategyType;
+        int strategyMaxNumber;
+<span class="nc bnc" id="L171" title="All 4 branches missed.">        if (type == Type.defaulType &amp;&amp; parent != null) {</span>
+<span class="nc" id="L172">            strategyType = parent.getType();</span>
+<span class="nc" id="L173">            strategyMaxNumber = parent.getMaxNumber();</span>
+        }
+        else {
+<span class="nc" id="L176">            strategyType = type;</span>
+<span class="nc" id="L177">            strategyMaxNumber = maxNumber;</span>
+        }
+
+        // Room subject change messages are special
+<span class="nc" id="L181">        boolean subjectChange = isSubjectChangeRequest(packet);</span>
+<span class="nc bnc" id="L182" title="All 2 branches missed.">        if (subjectChange) {</span>
+<span class="nc" id="L183">            roomSubject = packet;</span>
+<span class="nc" id="L184">            return;</span>
+        }
+
+        // store message according to active strategy
+<span class="nc bnc" id="L188" title="All 2 branches missed.">        if (strategyType == Type.all) {</span>
+<span class="nc" id="L189">            history.add(packet);</span>
+        }
+<span class="nc bnc" id="L191" title="All 2 branches missed.">        else if (strategyType == Type.number) {</span>
+<span class="nc bnc" id="L192" title="All 2 branches missed.">            if (history.size() &gt;= strategyMaxNumber) {</span>
+                // We have to remove messages so the new message won't exceed
+                // the max history size
+                // This is complicated somewhat because we must skip over the
+                // last room subject
+                // message because we want to preserve the room subject if
+                // possible.
+<span class="nc" id="L199">                Iterator&lt;Message&gt; historyIter = history.iterator();</span>
+<span class="nc bnc" id="L200" title="All 4 branches missed.">                while (historyIter.hasNext() &amp;&amp; history.size() &gt;= strategyMaxNumber) {</span>
+<span class="nc bnc" id="L201" title="All 2 branches missed.">                    if (historyIter.next() != roomSubject) {</span>
+<span class="nc" id="L202">                        historyIter.remove();</span>
+                    }
+                }
+            }
+<span class="nc" id="L206">            history.add(packet);</span>
+        }
+<span class="nc" id="L208">    }</span>
+
+    boolean isHistoryEnabled() {
+<span class="nc" id="L211">        Type strategyType = type;</span>
+<span class="nc bnc" id="L212" title="All 4 branches missed.">        if (type == Type.defaulType &amp;&amp; parent != null) {</span>
+<span class="nc" id="L213">            strategyType = parent.getType();</span>
+        }
+<span class="nc bnc" id="L215" title="All 2 branches missed.">        return strategyType != HistoryStrategy.Type.none;</span>
+    }
+
+    /**
+     * Obtain the current history as an iterator of messages to play back to a new room member.
+     * 
+     * @return An iterator of Message objects to be sent to the new room member.
+     */
+    public Iterator&lt;Message&gt; getMessageHistory(){
+<span class="nc" id="L224">        LinkedList&lt;Message&gt; list = new LinkedList&lt;&gt;(history);</span>
+        // Sort messages. Messages may be out of order when running inside of a cluster
+<span class="nc" id="L226">        Collections.sort(list, new MessageComparator());</span>
+<span class="nc" id="L227">        return list.iterator();</span>
+    }
+
+    /**
+     * Obtain the current history to be iterated in reverse mode. This means that the returned list 
+     * iterator will be positioned at the end of the history so senders of this message must 
+     * traverse the list in reverse mode.
+     * 
+     * @return A list iterator of Message objects positioned at the end of the list.
+     */
+    public ListIterator&lt;Message&gt; getReverseMessageHistory(){
+<span class="nc" id="L238">        LinkedList&lt;Message&gt; list = new LinkedList&lt;&gt;(history);</span>
+        // Sort messages. Messages may be out of order when running inside of a cluster
+<span class="nc" id="L240">        Collections.sort(list, new MessageComparator());</span>
+<span class="nc" id="L241">        return list.listIterator(list.size());</span>
+    }
+
+    /**
+     * Strategy type.
+     */
+<span class="nc" id="L247">    public enum Type {</span>
+<span class="nc" id="L248">        defaulType, none, all, number;</span>
+    }
+
+    /**
+     * Obtain the strategy type from string name. See the Type enumeration name
+     * strings for the names strings supported. If nothing matches
+     * and parent is not null, then the default strategy is used. Otherwise the number
+     * strategy is used.
+     *
+     * @param typeName the text name of the strategy type.
+     */
+    public void setTypeFromString(String typeName) {
+        try {
+<span class="nc" id="L261">            type = Type.valueOf(typeName);</span>
+        }
+<span class="nc" id="L263">        catch (Exception e) {</span>
+<span class="nc bnc" id="L264" title="All 2 branches missed.">            if (parent != null) {</span>
+<span class="nc" id="L265">                type = Type.defaulType;</span>
+            }
+            else {
+<span class="nc" id="L268">                type = Type.number;</span>
+            }
+<span class="nc" id="L270">        }</span>
+<span class="nc" id="L271">    }</span>
+
+    /**
+     * Sets the prefix to use for retrieving and saving settings (and also
+     * triggers an immediate loading of properties).
+     *
+     * @param subdomain the subdomain of the muc service to pull properties for.
+     * @param prefix the prefix to use (without trailing dot) on property names.
+     */
+    public void setContext(String subdomain, String prefix) {
+<span class="nc" id="L281">        this.contextSubdomain = subdomain;</span>
+<span class="nc" id="L282">        this.contextPrefix = prefix;</span>
+<span class="nc" id="L283">        setTypeFromString(MUCPersistenceManager.getProperty(subdomain, prefix + &quot;.type&quot;));</span>
+<span class="nc" id="L284">        String maxNumberString = MUCPersistenceManager.getProperty(subdomain, prefix + &quot;.maxNumber&quot;);</span>
+<span class="nc bnc" id="L285" title="All 4 branches missed.">        if (maxNumberString != null &amp;&amp; maxNumberString.trim().length() &gt; 0){</span>
+            try {
+<span class="nc" id="L287">                this.maxNumber = Integer.parseInt(maxNumberString);</span>
+            }
+<span class="nc" id="L289">            catch (Exception e){</span>
+<span class="nc" id="L290">                Log.info(&quot;Jive property &quot; + prefix + &quot;.maxNumber not a valid number.&quot;);</span>
+<span class="nc" id="L291">            }</span>
+        }
+<span class="nc" id="L293">    }</span>
+
+    /**
+     * Returns true if there is a message within the history of the room that has changed the
+     * room's subject.
+     *
+     * @return true if there is a message within the history of the room that has changed the
+     *         room's subject.
+     */
+    public boolean hasChangedSubject() {
+<span class="nc bnc" id="L303" title="All 2 branches missed.">        return roomSubject != null;</span>
+    }
+
+    /**
+     * Returns the message within the history of the room that has changed the
+     * room's subject.
+     * 
+     * @return the latest room subject change or null if none exists yet.
+     */
+    public Message getChangedSubject() {
+<span class="nc" id="L313">        return roomSubject;</span>
+    }
+
+    /**
+     * Returns true if the given message qualifies as a subject change request for
+     * the target MUC room, per XEP-0045. Note that this does not validate whether 
+     * the sender has permission to make the change, because subject change requests
+     * may be loaded from history or processed &quot;live&quot; during a user's session.
+     * 
+     * Refer to http://xmpp.org/extensions/xep-0045.html#subject-mod for details.
+     *
+     * @param message the message to check
+     * @return true if the given packet is a subject change request
+     */
+    public boolean isSubjectChangeRequest(Message message) {
+        
+        // The subject is changed by sending a message of type &quot;groupchat&quot; to the &lt;room@service&gt;, 
+        // where the &lt;message/&gt; MUST contain a &lt;subject/&gt; element that specifies the new subject 
+        // but MUST NOT contain a &lt;body/&gt; element (or a &lt;thread/&gt; element).
+        // Unfortunately, many clients do not follow these strict guidelines from the specs, so we
+        // allow a lenient policy for detecting non-conforming subject change requests. This can be
+        // configured by setting the &quot;xmpp.muc.subject.change.strict&quot; property to false (true by default).
+        // An empty &lt;subject/&gt; value means that the room subject should be removed.
+
+<span class="nc bnc" id="L337" title="All 2 branches missed.">        return Message.Type.groupchat == message.getType() &amp;&amp; </span>
+<span class="nc bnc" id="L338" title="All 2 branches missed.">                message.getSubject() != null &amp;&amp; </span>
+<span class="nc bnc" id="L339" title="All 2 branches missed.">                (!isSubjectChangeStrict() || </span>
+<span class="nc bnc" id="L340" title="All 2 branches missed.">                    (message.getBody() == null &amp;&amp; </span>
+<span class="nc bnc" id="L341" title="All 2 branches missed.">                     message.getThread() == null));</span>
+    }
+
+    private boolean isSubjectChangeStrict() {
+<span class="nc" id="L345">        return JiveGlobals.getBooleanProperty(&quot;xmpp.muc.subject.change.strict&quot;, true);</span>
+    }
+
+<span class="nc" id="L348">    private static class MessageComparator implements Comparator&lt;Message&gt; {</span>
+        @Override
+        public int compare(Message o1, Message o2) {
+<span class="nc" id="L351">            String stamp1 = o1.getChildElement(&quot;delay&quot;, &quot;urn:xmpp:delay&quot;).attributeValue(&quot;stamp&quot;);</span>
+<span class="nc" id="L352">            String stamp2 = o2.getChildElement(&quot;delay&quot;, &quot;urn:xmpp:delay&quot;).attributeValue(&quot;stamp&quot;);</span>
+<span class="nc" id="L353">            return stamp1.compareTo(stamp2);</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

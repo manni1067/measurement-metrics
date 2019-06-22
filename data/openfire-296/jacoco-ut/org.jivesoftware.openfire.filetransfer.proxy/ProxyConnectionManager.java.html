@@ -1,0 +1,387 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>ProxyConnectionManager.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.filetransfer.proxy</a> &gt; <span class="el_source">ProxyConnectionManager.java</span></div><h1>ProxyConnectionManager.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 1999-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.jivesoftware.openfire.filetransfer.proxy;
+
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.InetAddress;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+
+import org.jivesoftware.openfire.auth.UnauthorizedException;
+import org.jivesoftware.openfire.filetransfer.FileTransferManager;
+import org.jivesoftware.openfire.filetransfer.FileTransferRejectedException;
+import org.jivesoftware.openfire.stats.Statistic;
+import org.jivesoftware.openfire.stats.StatisticsManager;
+import org.jivesoftware.openfire.stats.i18nStatistic;
+import org.jivesoftware.util.ClassUtils;
+import org.jivesoftware.util.JiveGlobals;
+import org.jivesoftware.util.StringUtils;
+import org.jivesoftware.util.cache.Cache;
+import org.jivesoftware.util.cache.CacheFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmpp.packet.JID;
+
+/**
+ * Manages the connections to the proxy server. The connections go through two stages before
+ * file transfer begins. The first stage is when the file transfer target initiates a connection
+ * to this manager. Stage two is when the initiator connects, the manager will then match the two
+ * connections using the unique SHA-1 hash defined in the SOCKS5 protocol.
+ *
+ * @author Alexander Wenckus
+ */
+public class ProxyConnectionManager {
+
+<span class="nc" id="L55">    private static final Logger Log = LoggerFactory.getLogger(ProxyConnectionManager.class);</span>
+
+    private static final String proxyTransferRate = &quot;proxyTransferRate&quot;;
+
+    private Cache&lt;String, ProxyTransfer&gt; connectionMap;
+
+<span class="nc" id="L61">    private final Object connectionLock = new Object();</span>
+
+<span class="nc" id="L63">    private ExecutorService executor = Executors.newCachedThreadPool();</span>
+
+    private Future&lt;?&gt; socketProcess;
+
+    private ServerSocket serverSocket;
+
+    private int proxyPort;
+
+    private FileTransferManager transferManager;
+
+    private String className;
+
+<span class="nc" id="L75">    public ProxyConnectionManager(FileTransferManager manager) {</span>
+<span class="nc" id="L76">        String cacheName = &quot;File Transfer&quot;;</span>
+<span class="nc" id="L77">        connectionMap = CacheFactory.createCache(cacheName);</span>
+
+<span class="nc" id="L79">        className = JiveGlobals.getProperty(&quot;provider.transfer.proxy&quot;,</span>
+                &quot;org.jivesoftware.openfire.filetransfer.proxy.DefaultProxyTransfer&quot;);
+
+<span class="nc" id="L82">        transferManager = manager;</span>
+<span class="nc" id="L83">        StatisticsManager.getInstance().addStatistic(proxyTransferRate, new ProxyTracker());</span>
+<span class="nc" id="L84">    }</span>
+
+    /*
+    * Processes the clients connecting to the proxy matching the initiator and target together.
+    * This is the main loop of the manager which will run until the process is canceled.
+    */
+    synchronized void processConnections(final InetAddress bindInterface, final int port) {
+<span class="nc bnc" id="L91" title="All 2 branches missed.">        if (socketProcess != null) {</span>
+<span class="nc bnc" id="L92" title="All 2 branches missed.">            if (proxyPort == port) {</span>
+<span class="nc" id="L93">                return;</span>
+            }
+        }
+<span class="nc" id="L96">        reset();</span>
+<span class="nc" id="L97">        socketProcess = executor.submit(new Runnable() {</span>
+            @Override
+            public void run() {
+                try {
+<span class="nc" id="L101">                    serverSocket = new ServerSocket(port, -1, bindInterface);</span>
+                }
+<span class="nc" id="L103">                catch (IOException e) {</span>
+<span class="nc" id="L104">                    Log.error(&quot;Error creating server socket&quot;, e);</span>
+<span class="nc" id="L105">                    return;</span>
+<span class="nc" id="L106">                }</span>
+<span class="nc bnc" id="L107" title="All 2 branches missed.">                while (serverSocket.isBound()) {</span>
+                    final Socket socket;
+                    try {
+<span class="nc" id="L110">                        socket = serverSocket.accept();</span>
+                    }
+<span class="nc" id="L112">                    catch (IOException e) {</span>
+<span class="nc bnc" id="L113" title="All 2 branches missed.">                        if (!serverSocket.isClosed()) {</span>
+<span class="nc" id="L114">                            Log.error(&quot;Error accepting proxy connection&quot;, e);</span>
+<span class="nc" id="L115">                            continue;</span>
+                        }
+                        else {
+<span class="nc" id="L118">                            break;</span>
+                        }
+<span class="nc" id="L120">                    }</span>
+<span class="nc" id="L121">                    executor.submit(new Runnable() {</span>
+                        @Override
+                        public void run() {
+                            try {
+<span class="nc" id="L125">                                processConnection(socket);</span>
+                            }
+<span class="nc" id="L127">                            catch (IOException ie) {</span>
+<span class="nc" id="L128">                                Log.error(&quot;Error processing file transfer proxy connection&quot;,</span>
+                                        ie);
+                                try {
+<span class="nc" id="L131">                                    socket.close();</span>
+                                }
+<span class="nc" id="L133">                                catch (IOException e) {</span>
+                                    /* Do Nothing */
+<span class="nc" id="L135">                                }</span>
+<span class="nc" id="L136">                            }</span>
+<span class="nc" id="L137">                        }</span>
+                    });
+<span class="nc" id="L139">                }</span>
+<span class="nc" id="L140">            }</span>
+        });
+<span class="nc" id="L142">        proxyPort = port;</span>
+<span class="nc" id="L143">    }</span>
+
+    public int getProxyPort() {
+<span class="nc" id="L146">        return proxyPort;</span>
+    }
+
+    private void processConnection(Socket connection) throws IOException {
+<span class="nc" id="L150">        OutputStream out = new DataOutputStream(connection.getOutputStream());</span>
+<span class="nc" id="L151">        InputStream in = new DataInputStream(connection.getInputStream());</span>
+
+        // first byte is version should be 5
+<span class="nc" id="L154">        int b = in.read();</span>
+<span class="nc bnc" id="L155" title="All 2 branches missed.">        if (b != 5) {</span>
+<span class="nc" id="L156">            throw new IOException(&quot;Only SOCKS5 supported&quot;);</span>
+        }
+
+        // second byte number of authentication methods supported
+<span class="nc" id="L160">        b = in.read();</span>
+<span class="nc" id="L161">        int[] auth = new int[b];</span>
+<span class="nc bnc" id="L162" title="All 2 branches missed.">        for (int i = 0; i &lt; b; i++) {</span>
+<span class="nc" id="L163">            auth[i] = in.read();</span>
+        }
+
+<span class="nc" id="L166">        int authMethod = -1;</span>
+<span class="nc bnc" id="L167" title="All 2 branches missed.">        for (int anAuth : auth) {</span>
+<span class="nc bnc" id="L168" title="All 2 branches missed.">            authMethod = (anAuth == 0 ? 0 : -1); // only auth method</span>
+            // 0, no
+            // authentication,
+            // supported
+<span class="nc bnc" id="L172" title="All 2 branches missed.">            if (authMethod == 0) {</span>
+<span class="nc" id="L173">                break;</span>
+            }
+        }
+<span class="nc bnc" id="L176" title="All 2 branches missed.">        if (authMethod != 0) {</span>
+<span class="nc" id="L177">            throw new IOException(&quot;Authentication method not supported&quot;);</span>
+        }
+
+        // No auth method so respond with success
+<span class="nc" id="L181">        byte[] cmd = new byte[2];</span>
+<span class="nc" id="L182">        cmd[0] = (byte) 0x05;</span>
+<span class="nc" id="L183">        cmd[1] = (byte) 0x00;</span>
+<span class="nc" id="L184">        out.write(cmd);</span>
+
+<span class="nc" id="L186">        String responseDigest = processIncomingSocks5Message(in);</span>
+        try {
+<span class="nc" id="L188">            synchronized (connectionLock) {</span>
+<span class="nc" id="L189">                ProxyTransfer transfer = connectionMap.get(responseDigest);</span>
+<span class="nc bnc" id="L190" title="All 2 branches missed.">                if (transfer == null) {</span>
+<span class="nc" id="L191">                    transfer = createProxyTransfer(responseDigest, connection);</span>
+<span class="nc" id="L192">                    transferManager.registerProxyTransfer(responseDigest, transfer);</span>
+<span class="nc" id="L193">                    connectionMap.put(responseDigest, transfer);</span>
+                }
+                else {
+<span class="nc" id="L196">                    transfer.setInputStream(connection.getInputStream());</span>
+                }
+<span class="nc" id="L198">            }</span>
+<span class="nc" id="L199">            cmd = createOutgoingSocks5Message(0, responseDigest);</span>
+<span class="nc" id="L200">            out.write(cmd);</span>
+        }
+<span class="nc" id="L202">        catch (UnauthorizedException eu) {</span>
+<span class="nc" id="L203">            cmd = createOutgoingSocks5Message(2, responseDigest);</span>
+<span class="nc" id="L204">            out.write(cmd);</span>
+<span class="nc" id="L205">            throw new IOException(&quot;Illegal proxy transfer&quot;);</span>
+<span class="nc" id="L206">        }</span>
+<span class="nc" id="L207">    }</span>
+
+    private ProxyTransfer createProxyTransfer(String transferDigest, Socket targetSocket)
+            throws IOException {
+        ProxyTransfer provider;
+        try {
+<span class="nc" id="L213">            Class c = ClassUtils.forName(className);</span>
+<span class="nc" id="L214">            provider = (ProxyTransfer) c.newInstance();</span>
+        }
+<span class="nc" id="L216">        catch (Exception e) {</span>
+<span class="nc" id="L217">            Log.error(&quot;Error loading proxy transfer provider: &quot; + className, e);</span>
+<span class="nc" id="L218">            provider = new DefaultProxyTransfer();</span>
+<span class="nc" id="L219">        }</span>
+
+<span class="nc" id="L221">        provider.setTransferDigest(transferDigest);</span>
+<span class="nc" id="L222">        provider.setOutputStream(targetSocket.getOutputStream());</span>
+<span class="nc" id="L223">        return provider;</span>
+    }
+
+    @SuppressWarnings({&quot;ResultOfMethodCallIgnored&quot;})
+    private static String processIncomingSocks5Message(InputStream in)
+            throws IOException {
+        // read the version and command
+<span class="nc" id="L230">        byte[] cmd = new byte[5];</span>
+<span class="nc" id="L231">        int read = in.read(cmd, 0, 5);</span>
+<span class="nc bnc" id="L232" title="All 2 branches missed.">        if (read != 5) {</span>
+<span class="nc" id="L233">            throw new IOException(&quot;Error reading Socks5 version and command&quot;);</span>
+        }
+
+        // read the digest
+<span class="nc" id="L237">        byte[] addr = new byte[cmd[4]];</span>
+<span class="nc" id="L238">        read = in.read(addr, 0, addr.length);</span>
+<span class="nc bnc" id="L239" title="All 2 branches missed.">        if (read != addr.length) {</span>
+<span class="nc" id="L240">            throw new IOException(&quot;Error reading provided address&quot;);</span>
+        }
+<span class="nc" id="L242">        String digest = new String(addr);</span>
+
+<span class="nc" id="L244">        in.read();</span>
+<span class="nc" id="L245">        in.read();</span>
+
+<span class="nc" id="L247">        return digest;</span>
+    }
+
+    private static byte[] createOutgoingSocks5Message(int cmd, String digest) {
+<span class="nc" id="L251">        byte addr[] = digest.getBytes();</span>
+
+<span class="nc" id="L253">        byte[] data = new byte[7 + addr.length];</span>
+<span class="nc" id="L254">        data[0] = (byte) 5;</span>
+<span class="nc" id="L255">        data[1] = (byte) cmd;</span>
+<span class="nc" id="L256">        data[2] = (byte) 0;</span>
+<span class="nc" id="L257">        data[3] = (byte) 0x3;</span>
+<span class="nc" id="L258">        data[4] = (byte) addr.length;</span>
+
+<span class="nc" id="L260">        System.arraycopy(addr, 0, data, 5, addr.length);</span>
+<span class="nc" id="L261">        data[data.length - 2] = (byte) 0;</span>
+<span class="nc" id="L262">        data[data.length - 1] = (byte) 0;</span>
+
+<span class="nc" id="L264">        return data;</span>
+    }
+
+    synchronized void shutdown() {
+<span class="nc" id="L268">        disable();</span>
+<span class="nc" id="L269">        executor.shutdown();</span>
+<span class="nc" id="L270">        StatisticsManager.getInstance().removeStatistic(proxyTransferRate);</span>
+<span class="nc" id="L271">    }</span>
+
+    /**
+     * Activates the stream, this method should be called when the initiator sends the activate
+     * packet after both parties have connected to the proxy.
+     *
+     * @param initiator The initiator or sender of the file transfer.
+     * @param target The target or receiver of the file transfer.
+     * @param sid The session id that uniquely identifies the transfer between the two participants.
+     * @throws IllegalArgumentException This exception is thrown when the activated transfer does
+     *                                  not exist or is missing one or both of the sockets.
+     */
+    void activate(JID initiator, JID target, String sid) {
+<span class="nc" id="L284">        final String digest = createDigest(sid, initiator, target);</span>
+
+        ProxyTransfer temp;
+<span class="nc" id="L287">        synchronized (connectionLock) {</span>
+<span class="nc" id="L288">            temp = connectionMap.get(digest);</span>
+<span class="nc" id="L289">        }</span>
+<span class="nc" id="L290">        final ProxyTransfer transfer = temp;</span>
+        // check to make sure we have all the required
+        // information to start the transfer
+<span class="nc bnc" id="L293" title="All 4 branches missed.">        if (transfer == null || !transfer.isActivatable()) {</span>
+<span class="nc" id="L294">            throw new IllegalArgumentException(&quot;Transfer doesn't exist or is missing parameters&quot;);</span>
+        }
+
+<span class="nc" id="L297">        transfer.setInitiator(initiator.toString());</span>
+<span class="nc" id="L298">        transfer.setTarget(target.toString());</span>
+<span class="nc" id="L299">        transfer.setSessionID(sid);</span>
+<span class="nc" id="L300">        transfer.setTransferFuture(executor.submit(new Runnable() {</span>
+            @Override
+            public void run() {
+                try {
+<span class="nc" id="L304">                    transferManager.fireFileTransferStart( transfer.getSessionID(), true );</span>
+                }
+<span class="nc" id="L306">                catch (FileTransferRejectedException e) {</span>
+<span class="nc" id="L307">                    notifyFailure(transfer, e);</span>
+<span class="nc" id="L308">                    return;</span>
+<span class="nc" id="L309">                }</span>
+                try {
+<span class="nc" id="L311">                    transfer.doTransfer();</span>
+<span class="nc" id="L312">                    transferManager.fireFileTransferCompleted( transfer.getSessionID(), true );</span>
+                }
+<span class="nc" id="L314">                catch (IOException e) {</span>
+<span class="nc" id="L315">                    Log.error(&quot;Error during file transfer&quot;, e);</span>
+<span class="nc" id="L316">                    transferManager.fireFileTransferCompleted( transfer.getSessionID(), false );</span>
+                }
+                finally {
+<span class="nc" id="L319">                    connectionMap.remove(digest);</span>
+<span class="nc" id="L320">                }</span>
+<span class="nc" id="L321">            }</span>
+        }));
+<span class="nc" id="L323">    }</span>
+
+    private void notifyFailure(ProxyTransfer transfer, FileTransferRejectedException e) {
+
+<span class="nc" id="L327">    }</span>
+
+    /**
+     * Creates the digest needed for a byte stream. It is the SHA1(sessionID +
+     * initiator + target).
+     *
+     * @param sessionID The sessionID of the stream negotiation
+     * @param initiator The initiator of the stream negotiation
+     * @param target The target of the stream negotiation
+     * @return SHA-1 hash of the three parameters
+     */
+    public static String createDigest(final String sessionID, final JID initiator,
+                                      final JID target) {
+<span class="nc" id="L340">        return StringUtils.hash(sessionID + initiator.getNode()</span>
+<span class="nc" id="L341">                + &quot;@&quot; + initiator.getDomain() + &quot;/&quot;</span>
+<span class="nc" id="L342">                + initiator.getResource()</span>
+<span class="nc" id="L343">                + target.getNode() + &quot;@&quot;</span>
+<span class="nc" id="L344">                + target.getDomain() + &quot;/&quot;</span>
+<span class="nc" id="L345">                + target.getResource(), &quot;SHA-1&quot;);</span>
+    }
+
+    public boolean isRunning() {
+<span class="nc bnc" id="L349" title="All 4 branches missed.">        return socketProcess != null &amp;&amp; !socketProcess.isDone();</span>
+    }
+
+    public void disable() {
+<span class="nc" id="L353">        reset();</span>
+<span class="nc" id="L354">    }</span>
+
+    private void reset() {
+<span class="nc bnc" id="L357" title="All 2 branches missed.">        if (socketProcess != null) {</span>
+<span class="nc" id="L358">            socketProcess.cancel(true);</span>
+<span class="nc" id="L359">            socketProcess = null;</span>
+        }
+<span class="nc bnc" id="L361" title="All 2 branches missed.">        if (serverSocket != null) {</span>
+            try {
+<span class="nc" id="L363">                serverSocket.close();</span>
+            }
+<span class="nc" id="L365">            catch (IOException e) {</span>
+<span class="nc" id="L366">                Log.warn(&quot;Error closing proxy listening socket&quot;, e);</span>
+<span class="nc" id="L367">            }</span>
+        }
+<span class="nc" id="L369">    }</span>
+
+    private static class ProxyTracker extends i18nStatistic {
+        public ProxyTracker() {
+<span class="nc" id="L373">            super(&quot;filetransferproxy.transfered&quot;, Statistic.Type.rate);</span>
+<span class="nc" id="L374">        }</span>
+
+        @Override
+        public double sample() {
+<span class="nc" id="L378">            return (ProxyOutputStream.amountTransferred.getAndSet(0) / 1000d);</span>
+        }
+
+        @Override
+        public boolean isPartialSample() {
+<span class="nc" id="L383">            return true;</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

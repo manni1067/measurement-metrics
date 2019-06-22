@@ -1,0 +1,546 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>JDBCAuthProvider.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.auth</a> &gt; <span class="el_source">JDBCAuthProvider.java</span></div><h1>JDBCAuthProvider.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.auth;
+
+import java.security.SecureRandom;
+import java.security.MessageDigest;
+import java.security.Security;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import org.bouncycastle.crypto.generators.OpenBSDBCrypt;
+import org.bouncycastle.jce.provider.BouncyCastleProvider;
+import org.bouncycastle.util.encoders.Hex;
+
+import org.jivesoftware.database.DbConnectionManager;
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.user.UserAlreadyExistsException;
+import org.jivesoftware.openfire.user.UserManager;
+import org.jivesoftware.openfire.user.UserNotFoundException;
+import org.jivesoftware.util.JiveGlobals;
+import org.jivesoftware.util.PropertyEventDispatcher;
+import org.jivesoftware.util.PropertyEventListener;
+import org.jivesoftware.util.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * The JDBC auth provider allows you to authenticate users against any database
+ * that you can connect to with JDBC. It can be used along with the
+ * {@link HybridAuthProvider hybrid} auth provider, so that you can also have
+ * XMPP-only users that won't pollute your external data.&lt;p&gt;
+ *
+ * To enable this provider, set the following in the system properties:
+ * &lt;ul&gt;
+ * &lt;li&gt;{@code provider.auth.className = org.jivesoftware.openfire.auth.JDBCAuthProvider}&lt;/li&gt;
+ * &lt;/ul&gt;
+ *
+ * You'll also need to set your JDBC driver, connection string, and SQL statements:
+ *
+ * &lt;ul&gt;
+ * &lt;li&gt;{@code jdbcProvider.driver = com.mysql.jdbc.Driver}&lt;/li&gt;
+ * &lt;li&gt;{@code jdbcProvider.connectionString = jdbc:mysql://localhost/dbname?user=username&amp;amp;password=secret}&lt;/li&gt;
+ * &lt;li&gt;{@code jdbcAuthProvider.passwordSQL = SELECT password FROM user_account WHERE username=?}&lt;/li&gt;
+ * &lt;li&gt;{@code jdbcAuthProvider.passwordType = plain}&lt;/li&gt;
+ * &lt;li&gt;{@code jdbcAuthProvider.allowUpdate = true}&lt;/li&gt;
+ * &lt;li&gt;{@code jdbcAuthProvider.setPasswordSQL = UPDATE user_account SET password=? WHERE username=?}&lt;/li&gt;
+ * &lt;li&gt;{@code jdbcAuthProvider.bcrypt.cost = 12}&lt;/li&gt;
+ * &lt;/ul&gt;
+ * 
+ * &lt;p&gt;jdbcAuthProvider.passwordType can accept a comma separated string of password types.  This can be useful in 
+ * situations where legacy (ex/md5) password hashes were stored and then &quot;upgraded&quot; to a stronger hash algorithm.
+ * Hashes are executed left to right.&lt;/p&gt;
+ * &lt;p&gt;Example Setting: &quot;md5,sha1&quot;&lt;br&gt;  
+ * Usage: password -&amp;gt;&lt;br&gt;
+ * (md5)&amp;nbsp;286755fad04869ca523320acce0dc6a4&amp;nbsp;-&amp;gt;&lt;br&gt;
+ * (sha1)&amp;nbsp;0524b1fc84d315b08db890413e65260040b08caa&amp;nbsp;-&amp;gt;&lt;/p&gt;
+ * 
+ * &lt;p&gt;Bcrypt is supported as a passwordType; however, when chaining password types it MUST be the last type given. (bcrypt hashes are different 
+ * every time they are generated)&lt;/p&gt;
+ * &lt;p&gt;Optional bcrypt configuration:&lt;/p&gt;
+ * &lt;ul&gt;
+ * &lt;li&gt;&lt;b&gt;jdbcAuthProvider.bcrypt.cost&lt;/b&gt;: The BCrypt cost.  Default: BCrypt.GENSALT_DEFAULT_LOG2_ROUNDS  (currently: 10)&lt;/li&gt;
+ * &lt;/ul&gt;
+ *
+ * In order to use the configured JDBC connection provider do not use a JDBC
+ * connection string, set the following property
+ *
+ * &lt;ul&gt;
+ * &lt;li&gt;{@code jdbcAuthProvider.useConnectionProvider = true}&lt;/li&gt;
+ * &lt;/ul&gt;
+ *
+ * The passwordType setting tells Openfire how the password is stored. Setting the value
+ * is optional (when not set, it defaults to &quot;plain&quot;). The valid values are:&lt;ul&gt;
+ *      &lt;li&gt;{@link PasswordType#plain plain}
+ *      &lt;li&gt;{@link PasswordType#md5 md5}
+ *      &lt;li&gt;{@link PasswordType#sha1 sha1}
+ *      &lt;li&gt;{@link PasswordType#sha256 sha256}
+ *      &lt;li&gt;{@link PasswordType#sha512 sha512}
+ *      &lt;li&gt;{@link PasswordType#bcrypt bcrypt}
+ *      &lt;li&gt;{@link PasswordType#nt nt}
+ *  &lt;/ul&gt;
+ *
+ * @author David Snopek
+ */
+public class JDBCAuthProvider implements AuthProvider, PropertyEventListener {
+
+<span class="fc" id="L110">    private static final Logger Log = LoggerFactory.getLogger(JDBCAuthProvider.class);</span>
+    private static final int DEFAULT_BCRYPT_COST = 10; // Current (2015) value provided by Mindrot's BCrypt.GENSALT_DEFAULT_LOG2_ROUNDS value
+
+    private String connectionString;
+
+    private String passwordSQL;
+    private String setPasswordSQL;
+    private List&lt;PasswordType&gt; passwordTypes;
+    private boolean allowUpdate;
+    private boolean useConnectionProvider;
+    private int bcryptCost;
+
+    /**
+     * Constructs a new JDBC authentication provider.
+     */
+<span class="fc" id="L125">    public JDBCAuthProvider() {</span>
+        // Convert XML based provider setup to Database based
+<span class="fc" id="L127">        JiveGlobals.migrateProperty(&quot;jdbcProvider.driver&quot;);</span>
+<span class="fc" id="L128">        JiveGlobals.migrateProperty(&quot;jdbcProvider.connectionString&quot;);</span>
+<span class="fc" id="L129">        JiveGlobals.migrateProperty(&quot;jdbcAuthProvider.passwordSQL&quot;);</span>
+<span class="fc" id="L130">        JiveGlobals.migrateProperty(&quot;jdbcAuthProvider.passwordType&quot;);</span>
+<span class="fc" id="L131">        JiveGlobals.migrateProperty(&quot;jdbcAuthProvider.setPasswordSQL&quot;);</span>
+<span class="fc" id="L132">        JiveGlobals.migrateProperty(&quot;jdbcAuthProvider.allowUpdate&quot;);</span>
+<span class="fc" id="L133">        JiveGlobals.migrateProperty(&quot;jdbcAuthProvider.bcrypt.cost&quot;);</span>
+<span class="fc" id="L134">        JiveGlobals.migrateProperty(&quot;jdbcAuthProvider.useConnectionProvider&quot;);</span>
+<span class="fc" id="L135">        JiveGlobals.migrateProperty(&quot;jdbcAuthProvider.acceptPreHashedPassword&quot;);</span>
+        
+<span class="fc" id="L137">        useConnectionProvider = JiveGlobals.getBooleanProperty(&quot;jdbcAuthProvider.useConnectionProvider&quot;);</span>
+        
+<span class="pc bpc" id="L139" title="1 of 2 branches missed.">        if (!useConnectionProvider) {</span>
+            // Load the JDBC driver and connection string.
+<span class="fc" id="L141">            String jdbcDriver = JiveGlobals.getProperty(&quot;jdbcProvider.driver&quot;);</span>
+            try {
+<span class="nc" id="L143">               Class.forName(jdbcDriver).newInstance();</span>
+            }
+<span class="fc" id="L145">            catch (Exception e) {</span>
+<span class="fc" id="L146">                Log.error(&quot;Unable to load JDBC driver: &quot; + jdbcDriver, e);</span>
+<span class="fc" id="L147">                return;</span>
+<span class="nc" id="L148">            }</span>
+<span class="nc" id="L149">            connectionString = JiveGlobals.getProperty(&quot;jdbcProvider.connectionString&quot;);</span>
+        }
+
+        // Load SQL statements.
+<span class="nc" id="L153">        passwordSQL = JiveGlobals.getProperty(&quot;jdbcAuthProvider.passwordSQL&quot;);</span>
+<span class="nc" id="L154">        setPasswordSQL = JiveGlobals.getProperty(&quot;jdbcAuthProvider.setPasswordSQL&quot;);</span>
+
+<span class="nc" id="L156">        allowUpdate = JiveGlobals.getBooleanProperty(&quot;jdbcAuthProvider.allowUpdate&quot;,false);</span>
+
+<span class="nc" id="L158">        setPasswordTypes(JiveGlobals.getProperty(&quot;jdbcAuthProvider.passwordType&quot;, &quot;plain&quot;));</span>
+<span class="nc" id="L159">        bcryptCost = JiveGlobals.getIntProperty(&quot;jdbcAuthProvider.bcrypt.cost&quot;, -1);</span>
+<span class="nc" id="L160">        PropertyEventDispatcher.addListener(this);</span>
+<span class="nc bnc" id="L161" title="All 2 branches missed.">        if (Security.getProvider(BouncyCastleProvider.PROVIDER_NAME) == null) {</span>
+<span class="nc" id="L162">            java.security.Security.addProvider(new BouncyCastleProvider());</span>
+        }
+<span class="nc" id="L164">    }</span>
+    
+    private void setPasswordTypes(String passwordTypeProperty){
+<span class="fc" id="L167">        Collection&lt;String&gt; passwordTypeStringList = StringUtils.stringToCollection(passwordTypeProperty);</span>
+<span class="fc" id="L168">        List&lt;PasswordType&gt; passwordTypeList = new ArrayList&lt;&gt;(passwordTypeStringList.size());</span>
+<span class="fc" id="L169">        Iterator&lt;String&gt; it = passwordTypeStringList.iterator();</span>
+<span class="fc bfc" id="L170" title="All 2 branches covered.">        while(it.hasNext()){</span>
+            try {
+<span class="fc" id="L172">                PasswordType type = PasswordType.valueOf(it.next().toLowerCase());</span>
+<span class="fc" id="L173">                passwordTypeList.add(type);</span>
+<span class="fc bfc" id="L174" title="All 2 branches covered.">                if(type == PasswordType.bcrypt){</span>
+                    // Do not support chained hashes beyond bcrypt
+<span class="fc bfc" id="L176" title="All 2 branches covered.">                    if(it.hasNext()){</span>
+<span class="fc" id="L177">                        Log.warn(&quot;The jdbcAuthProvider.passwordType setting in invalid.  Bcrypt must be the final hashType if a series is given.  Ignoring all hash types beyond bcrypt: {}&quot;, passwordTypeProperty);</span>
+                    }
+<span class="fc" id="L179">                    break;</span>
+                }
+            }
+<span class="fc" id="L182">            catch (IllegalArgumentException iae) { }</span>
+        }
+<span class="fc bfc" id="L184" title="All 2 branches covered.">        if(passwordTypeList.isEmpty()){</span>
+<span class="fc" id="L185">            Log.warn(&quot;The jdbcAuthProvider.passwordType setting is not set or contains invalid values.  Setting the type to 'plain'&quot;);</span>
+<span class="fc" id="L186">            passwordTypeList.add(PasswordType.plain);</span>
+        }
+<span class="fc" id="L188">        passwordTypes = passwordTypeList;</span>
+<span class="fc" id="L189">    }    </span>
+
+    @Override
+    public void authenticate(String username, String password) throws UnauthorizedException {
+<span class="nc bnc" id="L193" title="All 4 branches missed.">        if (username == null || password == null) {</span>
+<span class="nc" id="L194">            throw new UnauthorizedException();</span>
+        }
+<span class="nc" id="L196">        username = username.trim().toLowerCase();</span>
+<span class="nc bnc" id="L197" title="All 2 branches missed.">        if (username.contains(&quot;@&quot;)) {</span>
+            // Check that the specified domain matches the server's domain
+<span class="nc" id="L199">            int index = username.indexOf(&quot;@&quot;);</span>
+<span class="nc" id="L200">            String domain = username.substring(index + 1);</span>
+<span class="nc bnc" id="L201" title="All 2 branches missed.">            if (domain.equals(XMPPServer.getInstance().getServerInfo().getXMPPDomain())) {</span>
+<span class="nc" id="L202">                username = username.substring(0, index);</span>
+            } else {
+                // Unknown domain. Return authentication failed.
+<span class="nc" id="L205">                throw new UnauthorizedException();</span>
+            }
+        }
+        String userPassword;
+        try {
+<span class="nc" id="L210">            userPassword = getPasswordValue(username);</span>
+        }
+<span class="nc" id="L212">        catch (UserNotFoundException unfe) {</span>
+<span class="nc" id="L213">            throw new UnauthorizedException();</span>
+<span class="nc" id="L214">        }</span>
+        
+<span class="nc bnc" id="L216" title="All 2 branches missed.">        if (comparePasswords(password, userPassword)) {</span>
+            // Got this far, so the user must be authorized.
+<span class="nc" id="L218">            createUser(username);</span>
+        } else {
+<span class="nc" id="L220">            throw new UnauthorizedException();</span>
+        }
+<span class="nc" id="L222">    }</span>
+    
+    // @VisibleForTesting
+    protected boolean comparePasswords(String plainText, String hashed) {
+<span class="fc" id="L226">        int lastIndex = passwordTypes.size() - 1;</span>
+<span class="fc bfc" id="L227" title="All 2 branches covered.">        if (passwordTypes.get(lastIndex) == PasswordType.bcrypt) {</span>
+<span class="pc bpc" id="L228" title="1 of 2 branches missed.">            for (int i = 0; i &lt; lastIndex; i++) {</span>
+<span class="nc" id="L229">                plainText = hashPassword(plainText, passwordTypes.get(i));</span>
+            }
+<span class="fc" id="L231">            return OpenBSDBCrypt.checkPassword(hashed, plainText.toCharArray());</span>
+        }
+
+<span class="fc" id="L234">        return hashPassword(plainText).equals(hashed);</span>
+    }
+
+    private String hashPassword(String password) {
+<span class="fc bfc" id="L238" title="All 2 branches covered.">        for (PasswordType type : passwordTypes) {</span>
+<span class="fc" id="L239">            password = hashPassword(password, type);</span>
+<span class="fc" id="L240">        }</span>
+<span class="fc" id="L241">        return password;</span>
+    }
+
+    // @VisibleForTesting
+    protected String hashPassword(String password, PasswordType type) {
+<span class="pc bpc" id="L246" title="1 of 7 branches missed.">        switch (type) {</span>
+            case md5:
+<span class="fc" id="L248">                return StringUtils.hash(password, &quot;MD5&quot;);</span>
+            case sha1:
+<span class="fc" id="L250">                return StringUtils.hash(password, &quot;SHA-1&quot;);</span>
+            case sha256:
+<span class="fc" id="L252">                return StringUtils.hash(password, &quot;SHA-256&quot;);</span>
+            case sha512:
+<span class="fc" id="L254">                return StringUtils.hash(password, &quot;SHA-512&quot;);</span>
+            case bcrypt:
+<span class="fc" id="L256">                byte[] salt = new byte[16];</span>
+<span class="fc" id="L257">                new SecureRandom().nextBytes(salt);</span>
+<span class="pc bpc" id="L258" title="3 of 4 branches missed.">                int cost = (bcryptCost &lt; 4 || bcryptCost &gt; 31) ? DEFAULT_BCRYPT_COST : bcryptCost;</span>
+<span class="fc" id="L259">                return OpenBSDBCrypt.generate(password.toCharArray(), salt, cost);</span>
+            case nt:
+                byte[] digestBytes;
+<span class="nc" id="L262">                byte[] utf16leBytes = null;</span>
+                try {
+<span class="nc" id="L264">                  MessageDigest md = MessageDigest.getInstance(&quot;MD4&quot;);</span>
+<span class="nc" id="L265">                  utf16leBytes = password.getBytes(&quot;UTF-16LE&quot;);</span>
+<span class="nc" id="L266">                  digestBytes = md.digest(utf16leBytes);</span>
+<span class="nc" id="L267">                  return new String(new String(Hex.encode(digestBytes)));</span>
+                }
+<span class="nc" id="L269">                catch (Exception e) {</span>
+<span class="nc" id="L270">                  return null;</span>
+                }
+            case plain:
+            default:
+<span class="fc" id="L274">                return password;</span>
+        }
+    }
+
+    @Override
+    public String getPassword(String username) throws UserNotFoundException,
+            UnsupportedOperationException
+    {
+
+<span class="nc bnc" id="L283" title="All 2 branches missed.">        if (!supportsPasswordRetrieval()) {</span>
+<span class="nc" id="L284">            throw new UnsupportedOperationException();</span>
+        }
+<span class="nc bnc" id="L286" title="All 2 branches missed.">        if (username.contains(&quot;@&quot;)) {</span>
+            // Check that the specified domain matches the server's domain
+<span class="nc" id="L288">            int index = username.indexOf(&quot;@&quot;);</span>
+<span class="nc" id="L289">            String domain = username.substring(index + 1);</span>
+<span class="nc bnc" id="L290" title="All 2 branches missed.">            if (domain.equals(XMPPServer.getInstance().getServerInfo().getXMPPDomain())) {</span>
+<span class="nc" id="L291">                username = username.substring(0, index);</span>
+            } else {
+                // Unknown domain.
+<span class="nc" id="L294">                throw new UserNotFoundException();</span>
+            }
+        }
+<span class="nc" id="L297">        return getPasswordValue(username);</span>
+    }
+
+    @Override
+    public void setPassword(String username, String password)
+            throws UserNotFoundException, UnsupportedOperationException
+    {
+<span class="nc bnc" id="L304" title="All 4 branches missed.">        if (allowUpdate &amp;&amp; setPasswordSQL != null) {</span>
+<span class="nc" id="L305">            setPasswordValue(username, password);</span>
+        } else { 
+<span class="nc" id="L307">            throw new UnsupportedOperationException();</span>
+        }
+<span class="nc" id="L309">    }</span>
+
+    @Override
+    public boolean supportsPasswordRetrieval() {
+<span class="nc bnc" id="L313" title="All 6 branches missed.">        return (passwordSQL != null &amp;&amp; passwordTypes.size() == 1 &amp;&amp; passwordTypes.get(0) == PasswordType.plain);</span>
+    }
+
+    private Connection getConnection() throws SQLException {
+<span class="nc bnc" id="L317" title="All 2 branches missed.">        if (useConnectionProvider)</span>
+<span class="nc" id="L318">            return DbConnectionManager.getConnection();</span>
+<span class="nc" id="L319">        return DriverManager.getConnection(connectionString);</span>
+    }
+
+    /**
+     * Returns the value of the password field. It will be in plain text or hashed
+     * format, depending on the password type.
+     *
+     * @param username user to retrieve the password field for
+     * @return the password value.
+     * @throws UserNotFoundException if the given user could not be loaded.
+     */
+    private String getPasswordValue(String username) throws UserNotFoundException {
+<span class="nc" id="L331">        String password = null;</span>
+<span class="nc" id="L332">        Connection con = null;</span>
+<span class="nc" id="L333">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L334">        ResultSet rs = null;</span>
+<span class="nc bnc" id="L335" title="All 2 branches missed.">        if (username.contains(&quot;@&quot;)) {</span>
+            // Check that the specified domain matches the server's domain
+<span class="nc" id="L337">            int index = username.indexOf(&quot;@&quot;);</span>
+<span class="nc" id="L338">            String domain = username.substring(index + 1);</span>
+<span class="nc bnc" id="L339" title="All 2 branches missed.">            if (domain.equals(XMPPServer.getInstance().getServerInfo().getXMPPDomain())) {</span>
+<span class="nc" id="L340">                username = username.substring(0, index);</span>
+            } else {
+                // Unknown domain.
+<span class="nc" id="L343">                throw new UserNotFoundException();</span>
+            }
+        }
+        try {
+<span class="nc" id="L347">            con = getConnection();</span>
+<span class="nc" id="L348">            pstmt = con.prepareStatement(passwordSQL);</span>
+<span class="nc" id="L349">            pstmt.setString(1, username);</span>
+
+<span class="nc" id="L351">            rs = pstmt.executeQuery();</span>
+
+            // If the query had no results, the username and password
+            // did not match a user record. Therefore, throw an exception.
+<span class="nc bnc" id="L355" title="All 2 branches missed.">            if (!rs.next()) {</span>
+<span class="nc" id="L356">                throw new UserNotFoundException();</span>
+            }
+<span class="nc" id="L358">            password = rs.getString(1);</span>
+        }
+<span class="nc" id="L360">        catch (SQLException e) {</span>
+<span class="nc" id="L361">            Log.error(&quot;Exception in JDBCAuthProvider&quot;, e);</span>
+<span class="nc" id="L362">            throw new UserNotFoundException();</span>
+        }
+        finally {
+<span class="nc" id="L365">            DbConnectionManager.closeConnection(rs, pstmt, con);</span>
+<span class="nc" id="L366">        }</span>
+<span class="nc" id="L367">        return password;</span>
+    }
+
+    private void setPasswordValue(String username, String password) throws UserNotFoundException {
+<span class="nc" id="L371">        Connection con = null;</span>
+<span class="nc" id="L372">        PreparedStatement pstmt = null;</span>
+<span class="nc bnc" id="L373" title="All 2 branches missed.">        if (username.contains(&quot;@&quot;)) {</span>
+            // Check that the specified domain matches the server's domain
+<span class="nc" id="L375">            int index = username.indexOf(&quot;@&quot;);</span>
+<span class="nc" id="L376">            String domain = username.substring(index + 1);</span>
+<span class="nc bnc" id="L377" title="All 2 branches missed.">            if (domain.equals(XMPPServer.getInstance().getServerInfo().getXMPPDomain())) {</span>
+<span class="nc" id="L378">                username = username.substring(0, index);</span>
+            } else {
+                // Unknown domain.
+<span class="nc" id="L381">                throw new UserNotFoundException();</span>
+            }
+        }
+        try {
+<span class="nc" id="L385">            con = getConnection();</span>
+<span class="nc" id="L386">            pstmt = con.prepareStatement(setPasswordSQL);</span>
+<span class="nc" id="L387">            pstmt.setString(2, username);</span>
+<span class="nc" id="L388">            password = hashPassword(password);</span>
+<span class="nc" id="L389">            pstmt.setString(1, password);</span>
+<span class="nc" id="L390">            pstmt.executeQuery();</span>
+        }
+<span class="nc" id="L392">        catch (SQLException e) {</span>
+<span class="nc" id="L393">            Log.error(&quot;Exception in JDBCAuthProvider&quot;, e);</span>
+<span class="nc" id="L394">            throw new UserNotFoundException();</span>
+        }
+        finally {
+<span class="nc" id="L397">            DbConnectionManager.closeConnection(pstmt, con);</span>
+<span class="nc" id="L398">        }</span>
+        
+<span class="nc" id="L400">    }</span>
+
+    /**
+     * Indicates how the password is stored.
+     */
+<span class="fc" id="L405">    @SuppressWarnings({&quot;UnnecessarySemicolon&quot;})  // Support for QDox Parser</span>
+<span class="fc" id="L406">    public enum PasswordType {</span>
+
+        /**
+         * The password is stored as plain text.
+         */
+<span class="fc" id="L411">        plain,</span>
+
+        /**
+         * The password is stored as a hex-encoded MD5 hash.
+         */
+<span class="fc" id="L416">        md5,</span>
+
+        /**
+         * The password is stored as a hex-encoded SHA-1 hash.
+         */
+<span class="fc" id="L421">        sha1,</span>
+        
+        /**
+         * The password is stored as a hex-encoded SHA-256 hash.
+         */
+<span class="fc" id="L426">        sha256,</span>
+              
+        /**
+          * The password is stored as a hex-encoded SHA-512 hash.
+          */
+<span class="fc" id="L431">        sha512,</span>
+              
+        /**
+          * The password is stored as a bcrypt hash.
+          */
+<span class="fc" id="L436">        bcrypt,</span>
+
+        /**
+          * The password is stored as an nt hash.
+          */
+<span class="fc" id="L441">        nt;</span>
+   }
+
+    /**
+     * Checks to see if the user exists; if not, a new user is created.
+     *
+     * @param username the username.
+     */
+    // @VisibleForTesting
+    protected void createUser(String username) {
+        // See if the user exists in the database. If not, automatically create them.
+<span class="nc" id="L452">        UserManager userManager = UserManager.getInstance();</span>
+        try {
+<span class="nc" id="L454">            userManager.getUser(username);</span>
+        }
+<span class="nc" id="L456">        catch (UserNotFoundException unfe) {</span>
+            try {
+<span class="nc" id="L458">                Log.debug(&quot;JDBCAuthProvider: Automatically creating new user account for &quot; + username);</span>
+<span class="nc" id="L459">                UserManager.getUserProvider().createUser(username, StringUtils.randomString(8),</span>
+                        null, null);
+            }
+<span class="nc" id="L462">            catch (UserAlreadyExistsException uaee) {</span>
+                // Ignore.
+<span class="nc" id="L464">            }</span>
+<span class="nc" id="L465">        }</span>
+<span class="nc" id="L466">    }</span>
+
+    @Override
+    public boolean isScramSupported() {
+        // TODO Auto-generated method stub
+<span class="nc" id="L471">        return false;</span>
+    }
+
+    @Override
+    public String getSalt(String username) throws UnsupportedOperationException, UserNotFoundException {
+<span class="nc" id="L476">        throw new UnsupportedOperationException();</span>
+    }
+
+    @Override
+    public int getIterations(String username) throws UnsupportedOperationException, UserNotFoundException {
+<span class="nc" id="L481">        throw new UnsupportedOperationException();</span>
+    }
+
+    @Override
+    public String getServerKey(String username) throws UnsupportedOperationException, UserNotFoundException {
+<span class="nc" id="L486">        throw new UnsupportedOperationException();</span>
+    }
+
+    @Override
+    public String getStoredKey(String username) throws UnsupportedOperationException, UserNotFoundException {
+<span class="nc" id="L491">        throw new UnsupportedOperationException();</span>
+    }
+
+    /**
+     * Support a subset of JDBCAuthProvider properties when updated via REST,
+     * web GUI, or other sources. Provider strings (and related settings) must
+     * be set via XML.
+     *
+     * @param property the name of the property.
+     * @param params event parameters.
+     */
+    @Override
+    public void propertySet(String property, Map&lt;String, Object&gt; params) {
+<span class="fc" id="L504">        String value = (String) params.get(&quot;value&quot;);</span>
+<span class="pc bpc" id="L505" title="19 of 22 branches missed.">        switch (property) {</span>
+            case &quot;jdbcAuthProvider.passwordSQL&quot;:
+<span class="nc" id="L507">                passwordSQL = value;</span>
+<span class="nc" id="L508">                Log.debug(&quot;jdbcAuthProvider.passwordSQL configured to: {}&quot;, passwordSQL);</span>
+<span class="nc" id="L509">                break;</span>
+            case &quot;jdbcAuthProvider.setPasswordSQL&quot;:
+<span class="nc" id="L511">                setPasswordSQL = value;</span>
+<span class="nc" id="L512">                Log.debug(&quot;jdbcAuthProvider.setPasswordSQL configured to: {}&quot;, setPasswordSQL);</span>
+<span class="nc" id="L513">                break;</span>
+            case &quot;jdbcAuthProvider.allowUpdate&quot;:
+<span class="nc" id="L515">                allowUpdate = Boolean.parseBoolean(value);</span>
+<span class="nc" id="L516">                Log.debug(&quot;jdbcAuthProvider.allowUpdate configured to: {}&quot;, allowUpdate);</span>
+<span class="nc" id="L517">                break;</span>
+            case &quot;jdbcAuthProvider.passwordType&quot;:
+<span class="fc" id="L519">                setPasswordTypes(value);</span>
+<span class="fc" id="L520">                Log.debug(&quot;jdbcAuthProvider.passwordType configured to: {}&quot;, Arrays.toString(passwordTypes.toArray()));</span>
+<span class="fc" id="L521">                break;</span>
+            case &quot;jdbcAuthProvider.bcrypt.cost&quot;:
+                try {
+<span class="nc" id="L524">                    bcryptCost = Integer.parseInt(value);</span>
+<span class="nc" id="L525">                } catch (NumberFormatException e) {</span>
+<span class="nc" id="L526">                    bcryptCost = -1;</span>
+<span class="nc" id="L527">                }</span>
+<span class="nc" id="L528">                Log.debug(&quot;jdbcAuthProvider.bcrypt.cost configured to: {}&quot;, bcryptCost);</span>
+                break;
+        }
+<span class="fc" id="L531">    }</span>
+
+    @Override
+    public void propertyDeleted(String property, Map&lt;String, Object&gt; params) {
+<span class="nc" id="L535">        propertySet(property, Collections.&lt;String, Object&gt;emptyMap());</span>
+<span class="nc" id="L536">    }</span>
+
+    @Override
+    public void xmlPropertySet(String property, Map&lt;String, Object&gt; params) {
+<span class="nc" id="L540">    }</span>
+
+    @Override
+    public void xmlPropertyDeleted(String property, Map&lt;String, Object&gt; params) {
+<span class="nc" id="L544">    }                            </span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

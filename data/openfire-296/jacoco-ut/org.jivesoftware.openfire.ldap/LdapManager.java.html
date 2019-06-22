@@ -1,0 +1,2436 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>LdapManager.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.ldap</a> &gt; <span class="el_source">LdapManager.java</span></div><h1>LdapManager.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2004-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.ldap;
+
+import java.io.Serializable;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
+import java.text.MessageFormat;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Hashtable;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.StringTokenizer;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+import javax.naming.Context;
+import javax.naming.NamingEnumeration;
+import javax.naming.NamingException;
+import javax.naming.directory.DirContext;
+import javax.naming.directory.InitialDirContext;
+import javax.naming.directory.SearchControls;
+import javax.naming.directory.SearchResult;
+import javax.naming.ldap.Control;
+import javax.naming.ldap.LdapContext;
+import javax.naming.ldap.PagedResultsControl;
+import javax.naming.ldap.PagedResultsResponseControl;
+import javax.naming.ldap.SortControl;
+import javax.naming.ldap.StartTlsRequest;
+import javax.naming.ldap.StartTlsResponse;
+import javax.net.ssl.SSLSession;
+
+import org.jivesoftware.openfire.group.GroupNotFoundException;
+import org.jivesoftware.openfire.user.UserNotFoundException;
+import org.jivesoftware.util.JiveGlobals;
+import org.jivesoftware.util.JiveInitialLdapContext;
+import org.jivesoftware.util.cache.Cache;
+import org.jivesoftware.util.cache.CacheFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmpp.packet.JID;
+
+/**
+ * Centralized administration of LDAP connections. The {@link #getInstance()} method
+ * should be used to get an instace. The following properties configure this manager:
+ *
+ * &lt;ul&gt;
+ *      &lt;li&gt;ldap.host&lt;/li&gt;
+ *      &lt;li&gt;ldap.port&lt;/li&gt;
+ *      &lt;li&gt;ldap.baseDN&lt;/li&gt;
+ *      &lt;li&gt;ldap.alternateBaseDN&lt;/li&gt;
+ *      &lt;li&gt;ldap.adminDN&lt;/li&gt;
+ *      &lt;li&gt;ldap.adminPassword&lt;/li&gt;
+ *      &lt;li&gt;ldap.encloseDNs&lt;/li&gt;
+ *      &lt;li&gt;ldap.usernameField -- default value is &quot;uid&quot;.&lt;/li&gt;
+ *      &lt;li&gt;ldap.usernameSuffix -- default value is &quot;&quot;.&lt;/li&gt;
+ *      &lt;li&gt;ldap.nameField -- default value is &quot;cn&quot;.&lt;/li&gt;
+ *      &lt;li&gt;ldap.emailField -- default value is &quot;mail&quot;.&lt;/li&gt;
+ *      &lt;li&gt;ldap.searchFilter -- the filter used to load the list of users. When defined, it
+ *              will be used with the default filter, which is &quot;([usernameField]={0})&quot; where
+ *              [usernameField] is the value of ldap.usernameField.
+ *      &lt;li&gt;ldap.groupNameField&lt;/li&gt;
+ *      &lt;li&gt;ldap.groupMemberField&lt;/li&gt;
+ *      &lt;li&gt;ldap.groupDescriptionField&lt;/li&gt;
+ *      &lt;li&gt;ldap.posixMode&lt;/li&gt;
+ *      &lt;li&gt;ldap.groupSearchFilter&lt;/li&gt;
+ *      &lt;li&gt;ldap.debugEnabled&lt;/li&gt;
+ *      &lt;li&gt;ldap.sslEnabled&lt;/li&gt;
+ *      &lt;li&gt;ldap.startTlsEnabled&lt;/li&gt;
+ *      &lt;li&gt;ldap.autoFollowReferrals&lt;/li&gt;
+ *      &lt;li&gt;ldap.autoFollowAliasReferrals&lt;/li&gt;
+ *      &lt;li&gt;ldap.initialContextFactory --  if this value is not specified,
+ *          &quot;com.sun.jndi.ldap.LdapCtxFactory&quot; will be used.&lt;/li&gt;
+ *      &lt;li&gt;ldap.connectionPoolEnabled -- true if an LDAP connection pool should be used.
+ *          False if not set.&lt;/li&gt;
+ * &lt;/ul&gt;
+ *
+ * @author Matt Tucker
+ */
+public class LdapManager {
+
+<span class="fc" id="L99">    private static final Logger Log = LoggerFactory.getLogger(LdapManager.class);</span>
+    private static final String DEFAULT_LDAP_CONTEXT_FACTORY = &quot;com.sun.jndi.ldap.LdapCtxFactory&quot;;
+
+    private static LdapManager instance;
+    static {
+        // Create a special Map implementation to wrap XMLProperties. We only implement
+        // the get, put, and remove operations, since those are the only ones used. Using a Map
+        // makes it easier to perform LdapManager testing.
+<span class="fc" id="L107">        Map&lt;String, String&gt; properties = new Map&lt;String, String&gt;() {</span>
+
+            @Override
+            public String get(Object key) {
+<span class="fc" id="L111">                return JiveGlobals.getProperty((String)key);</span>
+            }
+
+            @Override
+            public String put(String key, String value) {
+<span class="nc" id="L116">                JiveGlobals.setProperty(key, value);</span>
+                // Always return null since XMLProperties doesn't support the normal semantics.
+<span class="nc" id="L118">                return null;</span>
+            }
+
+            @Override
+            public String remove(Object key) {
+<span class="nc" id="L123">                JiveGlobals.deleteProperty((String)key);</span>
+                // Always return null since XMLProperties doesn't support the normal semantics.
+<span class="nc" id="L125">                return null;</span>
+            }
+
+
+            @Override
+            public int size() {
+<span class="nc" id="L131">                return 0;</span>
+            }
+
+            @Override
+            public boolean isEmpty() {
+<span class="nc" id="L136">                return false;</span>
+            }
+
+            @Override
+            public boolean containsKey(Object key) {
+<span class="nc" id="L141">                return false;</span>
+            }
+
+            @Override
+            public boolean containsValue(Object value) {
+<span class="nc" id="L146">                return false;</span>
+            }
+
+            @Override
+            public void putAll(Map&lt;? extends String, ? extends String&gt; t) {
+<span class="nc" id="L151">            }</span>
+
+            @Override
+            public void clear() {
+<span class="nc" id="L155">            }</span>
+
+            @Override
+            public Set&lt;String&gt; keySet() {
+<span class="nc" id="L159">                return null;</span>
+            }
+
+            @Override
+            public Collection&lt;String&gt; values() {
+<span class="nc" id="L164">                return null;</span>
+            }
+
+            @Override
+            public Set&lt;Entry&lt;String, String&gt;&gt; entrySet() {
+<span class="nc" id="L169">                return null;</span>
+            }
+        };
+<span class="fc" id="L172">        instance = new LdapManager(properties);</span>
+<span class="fc" id="L173">    }</span>
+
+
+<span class="fc" id="L176">    private Collection&lt;String&gt; hosts = new ArrayList&lt;&gt;();</span>
+    private int port;
+<span class="fc" id="L178">    private int connTimeout = -1;</span>
+<span class="fc" id="L179">    private int readTimeout = -1;</span>
+    private String usernameField;
+    private String usernameSuffix;
+    private String nameField;
+    private String emailField;
+    private String baseDN;
+<span class="fc" id="L185">    private String alternateBaseDN = null;</span>
+<span class="fc" id="L186">    private String adminDN = null;</span>
+    private String adminPassword;
+    private boolean encloseDNs;
+<span class="fc" id="L189">    private boolean ldapDebugEnabled = false;</span>
+<span class="fc" id="L190">    private boolean sslEnabled = false;</span>
+    private String initialContextFactory;
+<span class="fc" id="L192">    private boolean followReferrals = false;</span>
+<span class="fc" id="L193">    private boolean followAliasReferrals = true;</span>
+<span class="fc" id="L194">    private boolean connectionPoolEnabled = true;</span>
+<span class="fc" id="L195">    private String searchFilter = null;</span>
+    private boolean subTreeSearch;
+    private boolean encloseUserDN;
+    private boolean encloseGroupDN;
+<span class="fc" id="L199">    private boolean startTlsEnabled = false;</span>
+
+    private String groupNameField;
+    private String groupMemberField;
+    private String groupDescriptionField;
+<span class="fc" id="L204">    private boolean posixMode = false;</span>
+<span class="fc" id="L205">    private String groupSearchFilter = null;</span>
+
+    private final Map&lt;String, String&gt; properties;
+
+<span class="fc" id="L209">    private Cache&lt;String, DNCacheEntry&gt; userDNCache = null;</span>
+
+    /**
+     * Provides singleton access to an instance of the LdapManager class.
+     *
+     * @return an LdapManager instance.
+     */
+    public static LdapManager getInstance() {
+<span class="nc" id="L217">        return instance;</span>
+    }
+
+    /**
+     * Constructs a new LdapManager instance. Typically, {@link #getInstance()} should be
+     * called instead of this method. LdapManager instances should only be created directly
+     * for testing purposes.
+     *
+     * @param properties the Map that contains properties used by the LDAP manager, such as
+     *      LDAP host and base DN.
+     */
+<span class="fc" id="L228">    public LdapManager(Map&lt;String, String&gt; properties) {</span>
+<span class="fc" id="L229">        this.properties = properties;</span>
+
+        // Convert XML based provider setup to Database based
+<span class="fc" id="L232">        JiveGlobals.migrateProperty(&quot;ldap.host&quot;);</span>
+<span class="fc" id="L233">        JiveGlobals.migrateProperty(&quot;ldap.port&quot;);</span>
+<span class="fc" id="L234">        JiveGlobals.migrateProperty(&quot;ldap.readTimeout&quot;);</span>
+<span class="fc" id="L235">        JiveGlobals.migrateProperty(&quot;ldap.usernameField&quot;);</span>
+<span class="fc" id="L236">        JiveGlobals.migrateProperty(&quot;ldap.usernameSuffix&quot;);</span>
+<span class="fc" id="L237">        JiveGlobals.migrateProperty(&quot;ldap.baseDN&quot;);</span>
+<span class="fc" id="L238">        JiveGlobals.migrateProperty(&quot;ldap.alternateBaseDN&quot;);</span>
+<span class="fc" id="L239">        JiveGlobals.migrateProperty(&quot;ldap.nameField&quot;);</span>
+<span class="fc" id="L240">        JiveGlobals.migrateProperty(&quot;ldap.emailField&quot;);</span>
+<span class="fc" id="L241">        JiveGlobals.migrateProperty(&quot;ldap.connectionPoolEnabled&quot;);</span>
+<span class="fc" id="L242">        JiveGlobals.migrateProperty(&quot;ldap.searchFilter&quot;);</span>
+<span class="fc" id="L243">        JiveGlobals.migrateProperty(&quot;ldap.subTreeSearch&quot;);</span>
+<span class="fc" id="L244">        JiveGlobals.migrateProperty(&quot;ldap.groupNameField&quot;);</span>
+<span class="fc" id="L245">        JiveGlobals.migrateProperty(&quot;ldap.groupMemberField&quot;);</span>
+<span class="fc" id="L246">        JiveGlobals.migrateProperty(&quot;ldap.groupDescriptionField&quot;);</span>
+<span class="fc" id="L247">        JiveGlobals.migrateProperty(&quot;ldap.posixMode&quot;);</span>
+<span class="fc" id="L248">        JiveGlobals.migrateProperty(&quot;ldap.groupSearchFilter&quot;);</span>
+<span class="fc" id="L249">        JiveGlobals.migrateProperty(&quot;ldap.adminDN&quot;);</span>
+<span class="fc" id="L250">        JiveGlobals.migrateProperty(&quot;ldap.adminPassword&quot;);</span>
+<span class="fc" id="L251">        JiveGlobals.migrateProperty(&quot;ldap.debugEnabled&quot;);</span>
+<span class="fc" id="L252">        JiveGlobals.migrateProperty(&quot;ldap.sslEnabled&quot;);</span>
+<span class="fc" id="L253">        JiveGlobals.migrateProperty(&quot;ldap.startTlsEnabled&quot;);</span>
+<span class="fc" id="L254">        JiveGlobals.migrateProperty(&quot;ldap.autoFollowReferrals&quot;);</span>
+<span class="fc" id="L255">        JiveGlobals.migrateProperty(&quot;ldap.autoFollowAliasReferrals&quot;);</span>
+<span class="fc" id="L256">        JiveGlobals.migrateProperty(&quot;ldap.encloseUserDN&quot;);</span>
+<span class="fc" id="L257">        JiveGlobals.migrateProperty(&quot;ldap.encloseGroupDN&quot;);</span>
+<span class="fc" id="L258">        JiveGlobals.migrateProperty(&quot;ldap.encloseDNs&quot;);</span>
+<span class="fc" id="L259">        JiveGlobals.migrateProperty(&quot;ldap.initialContextFactory&quot;);</span>
+<span class="fc" id="L260">        JiveGlobals.migrateProperty(&quot;ldap.pagedResultsSize&quot;);</span>
+<span class="fc" id="L261">        JiveGlobals.migrateProperty(&quot;ldap.clientSideSorting&quot;);</span>
+<span class="fc" id="L262">        JiveGlobals.migrateProperty(&quot;ldap.ldapDebugEnabled&quot;);</span>
+<span class="fc" id="L263">        JiveGlobals.migrateProperty(&quot;ldap.encodeMultibyteCharacters&quot;);</span>
+
+<span class="pc bpc" id="L265" title="1 of 2 branches missed.">        if (JiveGlobals.getBooleanProperty(&quot;ldap.userDNCache.enabled&quot;, true)) {</span>
+<span class="fc" id="L266">            String cacheName = &quot;LDAP UserDN&quot;;</span>
+<span class="fc" id="L267">            userDNCache = CacheFactory.createCache( cacheName );</span>
+        }
+
+<span class="fc" id="L270">        String host = properties.get(&quot;ldap.host&quot;);</span>
+<span class="pc bpc" id="L271" title="1 of 2 branches missed.">        if (host != null) {</span>
+            // Parse the property and check if many hosts were defined. Hosts can be separated
+            // by commas or white spaces
+<span class="nc" id="L274">            StringTokenizer st = new StringTokenizer(host, &quot; ,\t\n\r\f&quot;);</span>
+<span class="nc bnc" id="L275" title="All 2 branches missed.">            while (st.hasMoreTokens()) {</span>
+<span class="nc" id="L276">                hosts.add(st.nextToken());</span>
+            }
+        }
+<span class="fc" id="L279">        String portStr = properties.get(&quot;ldap.port&quot;);</span>
+<span class="fc" id="L280">        port = 389;</span>
+<span class="pc bpc" id="L281" title="1 of 2 branches missed.">        if (portStr != null) {</span>
+            try {
+<span class="nc" id="L283">                this.port = Integer.parseInt(portStr);</span>
+            }
+<span class="nc" id="L285">            catch (NumberFormatException nfe) {</span>
+<span class="nc" id="L286">                Log.error(nfe.getMessage(), nfe);</span>
+<span class="nc" id="L287">            }</span>
+        }
+<span class="fc" id="L289">        String cTimeout = properties.get(&quot;ldap.connectionTimeout&quot;);</span>
+<span class="pc bpc" id="L290" title="1 of 2 branches missed.">        if (cTimeout != null) {</span>
+            try {
+<span class="nc" id="L292">                this.connTimeout = Integer.parseInt(cTimeout);</span>
+            }
+<span class="nc" id="L294">            catch (NumberFormatException nfe) {</span>
+<span class="nc" id="L295">                Log.error(nfe.getMessage(), nfe);</span>
+<span class="nc" id="L296">            }</span>
+        }
+<span class="fc" id="L298">        String timeout = properties.get(&quot;ldap.readTimeout&quot;);</span>
+<span class="pc bpc" id="L299" title="1 of 2 branches missed.">        if (timeout != null) {</span>
+            try {
+<span class="nc" id="L301">                this.readTimeout = Integer.parseInt(timeout);</span>
+            }
+<span class="nc" id="L303">            catch (NumberFormatException nfe) {</span>
+<span class="nc" id="L304">                Log.error(nfe.getMessage(), nfe);</span>
+<span class="nc" id="L305">            }</span>
+        }
+
+<span class="fc" id="L308">        usernameField = properties.get(&quot;ldap.usernameField&quot;);</span>
+<span class="pc bpc" id="L309" title="1 of 2 branches missed.">        if (usernameField == null) {</span>
+<span class="fc" id="L310">            usernameField = &quot;uid&quot;;</span>
+        }
+<span class="fc" id="L312">        usernameSuffix = properties.get(&quot;ldap.usernameSuffix&quot;);</span>
+<span class="pc bpc" id="L313" title="1 of 2 branches missed.">        if (usernameSuffix == null) {</span>
+<span class="fc" id="L314">            usernameSuffix = &quot;&quot;;</span>
+        }
+
+        // are we going to enclose DN values with quotes? (needed when DNs contain non-delimiting commas)
+<span class="fc" id="L318">        encloseDNs = true;</span>
+<span class="fc" id="L319">        String encloseStr = properties.get(&quot;ldap.encloseDNs&quot;);</span>
+<span class="pc bpc" id="L320" title="1 of 2 branches missed.">        if (encloseStr != null) {</span>
+<span class="nc" id="L321">            encloseDNs = Boolean.valueOf(encloseStr);</span>
+        }
+
+<span class="fc" id="L324">        baseDN = properties.get(&quot;ldap.baseDN&quot;);</span>
+<span class="pc bpc" id="L325" title="1 of 2 branches missed.">        if (baseDN == null) {</span>
+<span class="fc" id="L326">            baseDN = &quot;&quot;;</span>
+        }
+<span class="pc bpc" id="L328" title="1 of 2 branches missed.">        if (encloseDNs) {</span>
+<span class="fc" id="L329">           baseDN = getEnclosedDN(baseDN);</span>
+        }
+
+<span class="fc" id="L332">        alternateBaseDN = properties.get(&quot;ldap.alternateBaseDN&quot;);</span>
+<span class="pc bpc" id="L333" title="2 of 4 branches missed.">        if (encloseDNs &amp;&amp; alternateBaseDN != null) {</span>
+<span class="nc" id="L334">           alternateBaseDN = getEnclosedDN(alternateBaseDN);</span>
+        }
+
+<span class="fc" id="L337">        nameField = properties.get(&quot;ldap.nameField&quot;);</span>
+<span class="pc bpc" id="L338" title="1 of 2 branches missed.">        if (nameField == null) {</span>
+<span class="fc" id="L339">            nameField = &quot;cn&quot;;</span>
+        }
+<span class="fc" id="L341">        emailField = properties.get(&quot;ldap.emailField&quot;);</span>
+<span class="pc bpc" id="L342" title="1 of 2 branches missed.">        if (emailField == null) {</span>
+<span class="fc" id="L343">            emailField = &quot;mail&quot;;</span>
+        }
+<span class="fc" id="L345">        connectionPoolEnabled = true;</span>
+<span class="fc" id="L346">        String connectionPoolStr = properties.get(&quot;ldap.connectionPoolEnabled&quot;);</span>
+<span class="pc bpc" id="L347" title="1 of 2 branches missed.">        if (connectionPoolStr != null) {</span>
+<span class="nc" id="L348">            connectionPoolEnabled = Boolean.valueOf(connectionPoolStr);</span>
+        }
+<span class="fc" id="L350">        searchFilter = properties.get(&quot;ldap.searchFilter&quot;);</span>
+<span class="fc" id="L351">        subTreeSearch = true;</span>
+<span class="fc" id="L352">        String subTreeStr = properties.get(&quot;ldap.subTreeSearch&quot;);</span>
+<span class="pc bpc" id="L353" title="1 of 2 branches missed.">        if (subTreeStr != null) {</span>
+<span class="nc" id="L354">            subTreeSearch = Boolean.valueOf(subTreeStr);</span>
+        }
+<span class="fc" id="L356">        groupNameField = properties.get(&quot;ldap.groupNameField&quot;);</span>
+<span class="pc bpc" id="L357" title="1 of 2 branches missed.">        if (groupNameField == null) {</span>
+<span class="fc" id="L358">            groupNameField = &quot;cn&quot;;</span>
+        }
+<span class="fc" id="L360">        groupMemberField = properties.get(&quot;ldap.groupMemberField&quot;);</span>
+<span class="pc bpc" id="L361" title="1 of 2 branches missed.">        if (groupMemberField ==null) {</span>
+<span class="fc" id="L362">            groupMemberField = &quot;member&quot;;</span>
+        }
+<span class="fc" id="L364">        groupDescriptionField = properties.get(&quot;ldap.groupDescriptionField&quot;);</span>
+<span class="pc bpc" id="L365" title="1 of 2 branches missed.">        if (groupDescriptionField == null) {</span>
+<span class="fc" id="L366">            groupDescriptionField = &quot;description&quot;;</span>
+        }
+<span class="fc" id="L368">        posixMode = false;</span>
+<span class="fc" id="L369">        String posixStr = properties.get(&quot;ldap.posixMode&quot;);</span>
+<span class="pc bpc" id="L370" title="1 of 2 branches missed.">        if (posixStr != null) {</span>
+<span class="nc" id="L371">            posixMode = Boolean.valueOf(posixStr);</span>
+        }
+<span class="fc" id="L373">        groupSearchFilter = properties.get(&quot;ldap.groupSearchFilter&quot;);</span>
+
+<span class="fc" id="L375">        adminDN = properties.get(&quot;ldap.adminDN&quot;);</span>
+<span class="pc bpc" id="L376" title="3 of 4 branches missed.">        if (adminDN != null &amp;&amp; adminDN.trim().equals(&quot;&quot;)) {</span>
+<span class="nc" id="L377">            adminDN = null;</span>
+        }
+<span class="pc bpc" id="L379" title="2 of 4 branches missed.">        if (encloseDNs &amp;&amp; adminDN != null) {</span>
+<span class="nc" id="L380">           adminDN = getEnclosedDN(adminDN);</span>
+        }
+
+<span class="fc" id="L383">        adminPassword = properties.get(&quot;ldap.adminPassword&quot;);</span>
+<span class="fc" id="L384">        ldapDebugEnabled = false;</span>
+<span class="fc" id="L385">        String ldapDebugStr = properties.get(&quot;ldap.debugEnabled&quot;);</span>
+<span class="pc bpc" id="L386" title="1 of 2 branches missed.">        if (ldapDebugStr != null) {</span>
+<span class="nc" id="L387">            ldapDebugEnabled = Boolean.valueOf(ldapDebugStr);</span>
+        }
+<span class="fc" id="L389">        sslEnabled = false;</span>
+<span class="fc" id="L390">        String sslEnabledStr = properties.get(&quot;ldap.sslEnabled&quot;);</span>
+<span class="pc bpc" id="L391" title="1 of 2 branches missed.">        if (sslEnabledStr != null) {</span>
+<span class="nc" id="L392">            sslEnabled = Boolean.valueOf(sslEnabledStr);</span>
+        }
+<span class="fc" id="L394">        startTlsEnabled = false;</span>
+<span class="fc" id="L395">        String startTlsEnabledStr = properties.get(&quot;ldap.startTlsEnabled&quot;);</span>
+<span class="pc bpc" id="L396" title="1 of 2 branches missed.">        if (startTlsEnabledStr != null) {</span>
+<span class="nc" id="L397">            startTlsEnabled = Boolean.valueOf(startTlsEnabledStr);</span>
+        }
+<span class="fc" id="L399">        followReferrals = false;</span>
+<span class="fc" id="L400">        String followReferralsStr = properties.get(&quot;ldap.autoFollowReferrals&quot;);</span>
+<span class="pc bpc" id="L401" title="1 of 2 branches missed.">        if (followReferralsStr != null) {</span>
+<span class="nc" id="L402">            followReferrals = Boolean.valueOf(followReferralsStr);</span>
+        }
+<span class="fc" id="L404">        followAliasReferrals = true;</span>
+<span class="fc" id="L405">        String followAliasReferralsStr = properties.get(&quot;ldap.autoFollowAliasReferrals&quot;);</span>
+<span class="pc bpc" id="L406" title="1 of 2 branches missed.">        if (followAliasReferralsStr != null) {</span>
+<span class="nc" id="L407">            followAliasReferrals = Boolean.valueOf(followAliasReferralsStr);</span>
+        }
+        // the following two properties have been deprecated by ldap.encloseDNs.  keeping around for backwards compatibility
+<span class="fc" id="L410">        encloseUserDN = true;</span>
+<span class="fc" id="L411">        String encloseUserStr = properties.get(&quot;ldap.encloseUserDN&quot;);</span>
+<span class="pc bpc" id="L412" title="1 of 2 branches missed.">        if (encloseUserStr != null) {</span>
+<span class="nc bnc" id="L413" title="All 4 branches missed.">            encloseUserDN = Boolean.valueOf(encloseUserStr) || encloseDNs;</span>
+        }
+<span class="fc" id="L415">        encloseGroupDN = true;</span>
+<span class="fc" id="L416">        String encloseGroupStr = properties.get(&quot;ldap.encloseGroupDN&quot;);</span>
+<span class="pc bpc" id="L417" title="1 of 2 branches missed.">        if (encloseGroupStr != null) {</span>
+<span class="nc bnc" id="L418" title="All 4 branches missed.">            encloseGroupDN = Boolean.valueOf(encloseGroupStr) || encloseDNs;</span>
+        }
+<span class="fc" id="L420">        this.initialContextFactory = properties.get(&quot;ldap.initialContextFactory&quot;);</span>
+<span class="pc bpc" id="L421" title="1 of 2 branches missed.">        if (initialContextFactory != null) {</span>
+            try {
+<span class="nc" id="L423">                Class.forName(initialContextFactory);</span>
+            }
+<span class="nc" id="L425">            catch (ClassNotFoundException cnfe) {</span>
+<span class="nc" id="L426">                Log.error(&quot;Initial context factory class failed to load: &quot; + initialContextFactory +</span>
+                        &quot;.  Using default initial context factory class instead.&quot;);
+<span class="nc" id="L428">                initialContextFactory = DEFAULT_LDAP_CONTEXT_FACTORY;</span>
+<span class="nc" id="L429">            }</span>
+        }
+        // Use default value if none was set.
+        else {
+<span class="fc" id="L433">            initialContextFactory = DEFAULT_LDAP_CONTEXT_FACTORY;</span>
+        }
+
+<span class="fc" id="L436">        StringBuilder buf = new StringBuilder();</span>
+<span class="fc" id="L437">        buf.append(&quot;Created new LdapManager() instance, fields:\n&quot;);</span>
+<span class="fc" id="L438">        buf.append(&quot;\t host: &quot;).append(hosts).append(&quot;\n&quot;);</span>
+<span class="fc" id="L439">        buf.append(&quot;\t port: &quot;).append(port).append(&quot;\n&quot;);</span>
+<span class="fc" id="L440">        buf.append(&quot;\t usernamefield: &quot;).append(usernameField).append(&quot;\n&quot;);</span>
+<span class="fc" id="L441">        buf.append(&quot;\t usernameSuffix: &quot;).append(usernameSuffix).append(&quot;\n&quot;);</span>
+<span class="fc" id="L442">        buf.append(&quot;\t baseDN: &quot;).append(baseDN).append(&quot;\n&quot;);</span>
+<span class="fc" id="L443">        buf.append(&quot;\t alternateBaseDN: &quot;).append(alternateBaseDN).append(&quot;\n&quot;);</span>
+<span class="fc" id="L444">        buf.append(&quot;\t nameField: &quot;).append(nameField).append(&quot;\n&quot;);</span>
+<span class="fc" id="L445">        buf.append(&quot;\t emailField: &quot;).append(emailField).append(&quot;\n&quot;);</span>
+<span class="fc" id="L446">        buf.append(&quot;\t adminDN: &quot;).append(adminDN).append(&quot;\n&quot;);</span>
+<span class="fc" id="L447">        buf.append(&quot;\t adminPassword: &quot;).append(adminPassword).append(&quot;\n&quot;);</span>
+<span class="fc" id="L448">        buf.append(&quot;\t searchFilter: &quot;).append(searchFilter).append(&quot;\n&quot;);</span>
+<span class="fc" id="L449">        buf.append(&quot;\t subTreeSearch:&quot;).append(subTreeSearch).append(&quot;\n&quot;);</span>
+<span class="fc" id="L450">        buf.append(&quot;\t ldapDebugEnabled: &quot;).append(ldapDebugEnabled).append(&quot;\n&quot;);</span>
+<span class="fc" id="L451">        buf.append(&quot;\t sslEnabled: &quot;).append(sslEnabled).append(&quot;\n&quot;);</span>
+<span class="fc" id="L452">        buf.append(&quot;\t startTlsEnabled: &quot;).append(startTlsEnabled).append(&quot;\n&quot;);</span>
+<span class="fc" id="L453">        buf.append(&quot;\t initialContextFactory: &quot;).append(initialContextFactory).append(&quot;\n&quot;);</span>
+<span class="fc" id="L454">        buf.append(&quot;\t connectionPoolEnabled: &quot;).append(connectionPoolEnabled).append(&quot;\n&quot;);</span>
+<span class="fc" id="L455">        buf.append(&quot;\t autoFollowReferrals: &quot;).append(followReferrals).append(&quot;\n&quot;);</span>
+<span class="fc" id="L456">        buf.append(&quot;\t autoFollowAliasReferrals: &quot;).append(followAliasReferrals).append(&quot;\n&quot;);</span>
+<span class="fc" id="L457">        buf.append(&quot;\t groupNameField: &quot;).append(groupNameField).append(&quot;\n&quot;);</span>
+<span class="fc" id="L458">        buf.append(&quot;\t groupMemberField: &quot;).append(groupMemberField).append(&quot;\n&quot;);</span>
+<span class="fc" id="L459">        buf.append(&quot;\t groupDescriptionField: &quot;).append(groupDescriptionField).append(&quot;\n&quot;);</span>
+<span class="fc" id="L460">        buf.append(&quot;\t posixMode: &quot;).append(posixMode).append(&quot;\n&quot;);</span>
+<span class="fc" id="L461">        buf.append(&quot;\t groupSearchFilter: &quot;).append(groupSearchFilter).append(&quot;\n&quot;);</span>
+
+<span class="pc bpc" id="L463" title="1 of 2 branches missed.">        if (Log.isDebugEnabled()) {</span>
+<span class="nc" id="L464">            Log.debug(&quot;LdapManager: &quot;+buf.toString());</span>
+        }
+<span class="pc bpc" id="L466" title="1 of 2 branches missed.">        if (ldapDebugEnabled) {</span>
+<span class="nc" id="L467">            System.err.println(buf.toString());</span>
+        }
+<span class="fc" id="L469">    }</span>
+
+    /**
+     * Returns a DirContext for the LDAP server that can be used to perform
+     * lookups and searches using the default base DN. The alternate DN will be used
+     * in case there is a {@link NamingException} using base DN. The context uses the
+     * admin login that is defined by {@code adminDN} and {@code adminPassword}.
+     *
+     * @return a connection to the LDAP server.
+     * @throws NamingException if there is an error making the LDAP connection.
+     */
+    public LdapContext getContext() throws NamingException {
+        try {
+<span class="nc" id="L482">            return getContext(baseDN);</span>
+        }
+<span class="nc" id="L484">        catch (NamingException e) {</span>
+<span class="nc bnc" id="L485" title="All 2 branches missed.">            if (alternateBaseDN != null) {</span>
+<span class="nc" id="L486">                return getContext(alternateBaseDN);</span>
+            } else {
+<span class="nc" id="L488">                throw(e);</span>
+            }
+        }
+    }
+
+    /**
+     * Returns a DirContext for the LDAP server that can be used to perform
+     * lookups and searches using the specified base DN. The context uses the
+     * admin login that is defined by {@code adminDN} and {@code adminPassword}.
+     *
+     * @param baseDN the base DN to use for the context.
+     * @return a connection to the LDAP server.
+     * @throws NamingException if there is an error making the LDAP connection.
+     */
+    public LdapContext getContext(String baseDN) throws NamingException {
+<span class="nc" id="L503">        boolean debug = Log.isDebugEnabled();</span>
+<span class="nc bnc" id="L504" title="All 2 branches missed.">        if (debug) {</span>
+<span class="nc" id="L505">            Log.debug(&quot;LdapManager: Creating a DirContext in LdapManager.getContext()...&quot;);</span>
+<span class="nc bnc" id="L506" title="All 4 branches missed.">            if (!sslEnabled &amp;&amp; !startTlsEnabled) {</span>
+<span class="nc" id="L507">                Log.debug(&quot;LdapManager: Warning: Using unencrypted connection to LDAP service!&quot;);</span>
+            }
+        }
+
+        // Set up the environment for creating the initial context
+<span class="nc" id="L512">        Hashtable&lt;String, Object&gt; env = new Hashtable&lt;&gt;();</span>
+<span class="nc" id="L513">        env.put(Context.INITIAL_CONTEXT_FACTORY, initialContextFactory);</span>
+<span class="nc" id="L514">        env.put(Context.PROVIDER_URL, getProviderURL(baseDN));</span>
+
+        // SSL
+<span class="nc bnc" id="L517" title="All 2 branches missed.">        if (sslEnabled) {</span>
+<span class="nc" id="L518">            env.put(&quot;java.naming.ldap.factory.socket&quot;, &quot;org.jivesoftware.util.SimpleSSLSocketFactory&quot;);</span>
+<span class="nc" id="L519">            env.put(Context.SECURITY_PROTOCOL, &quot;ssl&quot;);</span>
+        }
+
+        // Use simple authentication to connect as the admin.
+<span class="nc bnc" id="L523" title="All 2 branches missed.">        if (adminDN != null) {</span>
+            /* If startTLS is requested we MUST NOT bind() before
+             * the secure connection has been established. */
+<span class="nc bnc" id="L526" title="All 4 branches missed.">            if (!(startTlsEnabled &amp;&amp; !sslEnabled)) {</span>
+<span class="nc" id="L527">                env.put(Context.SECURITY_AUTHENTICATION, &quot;simple&quot;);</span>
+<span class="nc" id="L528">                env.put(Context.SECURITY_PRINCIPAL, adminDN);</span>
+<span class="nc bnc" id="L529" title="All 2 branches missed.">                if (adminPassword != null) {</span>
+<span class="nc" id="L530">                    env.put(Context.SECURITY_CREDENTIALS, adminPassword);</span>
+                }
+            }
+        }
+        // No login information so attempt to use anonymous login.
+        else {
+<span class="nc" id="L536">            env.put(Context.SECURITY_AUTHENTICATION, &quot;none&quot;);</span>
+        }
+
+<span class="nc bnc" id="L539" title="All 2 branches missed.">        if (ldapDebugEnabled) {</span>
+<span class="nc" id="L540">            env.put(&quot;com.sun.jndi.ldap.trace.ber&quot;, System.err);</span>
+        }
+<span class="nc bnc" id="L542" title="All 2 branches missed.">        if (connectionPoolEnabled) {</span>
+<span class="nc bnc" id="L543" title="All 2 branches missed.">            if (!startTlsEnabled) {</span>
+<span class="nc" id="L544">                env.put(&quot;com.sun.jndi.ldap.connect.pool&quot;, &quot;true&quot;);</span>
+<span class="nc" id="L545">                System.setProperty(&quot;com.sun.jndi.ldap.connect.pool.protocol&quot;, &quot;plain ssl&quot;);</span>
+            } else {
+<span class="nc bnc" id="L547" title="All 2 branches missed.">                if (debug) {</span>
+                    // See http://java.sun.com/products/jndi/tutorial/ldap/connect/pool.html
+                    // &quot;When Not to Use Pooling&quot;
+<span class="nc" id="L550">                    Log.debug(&quot;LdapManager: connection pooling was requested but has been disabled because of StartTLS.&quot;);</span>
+                }
+<span class="nc" id="L552">                env.put(&quot;com.sun.jndi.ldap.connect.pool&quot;, &quot;false&quot;);</span>
+            }
+        } else {
+<span class="nc" id="L555">            env.put(&quot;com.sun.jndi.ldap.connect.pool&quot;, &quot;false&quot;);</span>
+        }
+<span class="nc bnc" id="L557" title="All 2 branches missed.">        if (connTimeout &gt; 0) {</span>
+<span class="nc" id="L558">            env.put(&quot;com.sun.jndi.ldap.connect.timeout&quot;, String.valueOf(connTimeout));</span>
+        } else {
+<span class="nc" id="L560">            env.put(&quot;com.sun.jndi.ldap.connect.timeout&quot;, &quot;10000&quot;);</span>
+        }
+
+<span class="nc bnc" id="L563" title="All 2 branches missed.">        if (readTimeout &gt; 0) {</span>
+<span class="nc" id="L564">            env.put(&quot;com.sun.jndi.ldap.read.timeout&quot;, String.valueOf(readTimeout));</span>
+        }
+<span class="nc bnc" id="L566" title="All 2 branches missed.">        if (followReferrals) {</span>
+<span class="nc" id="L567">            env.put(Context.REFERRAL, &quot;follow&quot;);</span>
+        }
+<span class="nc bnc" id="L569" title="All 2 branches missed.">        if (!followAliasReferrals) {</span>
+<span class="nc" id="L570">            env.put(&quot;java.naming.ldap.derefAliases&quot;, &quot;never&quot;);</span>
+        }
+
+<span class="nc bnc" id="L573" title="All 2 branches missed.">        if (debug) {</span>
+<span class="nc" id="L574">            Log.debug(&quot;LdapManager: Created hashtable with context values, attempting to create context...&quot;);</span>
+        }
+        // Create new initial context
+<span class="nc" id="L577">        JiveInitialLdapContext context = new JiveInitialLdapContext(env, null);</span>
+
+        // TLS http://www.ietf.org/rfc/rfc2830.txt (&quot;1.3.6.1.4.1.1466.20037&quot;)
+<span class="nc bnc" id="L580" title="All 4 branches missed.">        if (startTlsEnabled &amp;&amp; !sslEnabled) {</span>
+<span class="nc bnc" id="L581" title="All 2 branches missed.">            if (debug) {</span>
+<span class="nc" id="L582">                Log.debug(&quot;LdapManager: ... StartTlsRequest&quot;);</span>
+            }
+<span class="nc bnc" id="L584" title="All 2 branches missed.">            if (followReferrals) {</span>
+<span class="nc" id="L585">                Log.warn(&quot;\tConnections to referrals are unencrypted! If you do not want this, please turn off ldap.autoFollowReferrals&quot;);</span>
+            }
+
+            // Perform a StartTLS extended operation
+<span class="nc" id="L589">            StartTlsResponse tls = (StartTlsResponse)</span>
+<span class="nc" id="L590">                context.extendedOperation(new StartTlsRequest());</span>
+
+
+            /* Open a TLS connection (over the existing LDAP association) and
+               get details of the negotiated TLS session: cipher suite,
+               peer certificate, etc. */
+            try {
+<span class="nc" id="L597">                SSLSession session = tls.negotiate(new org.jivesoftware.util.SimpleSSLSocketFactory());</span>
+
+<span class="nc" id="L599">                context.setTlsResponse(tls);</span>
+<span class="nc" id="L600">                context.setSslSession(session);</span>
+
+<span class="nc bnc" id="L602" title="All 2 branches missed.">                if (debug) {</span>
+<span class="nc" id="L603">                    Log.debug(&quot;LdapManager: ... peer host: &quot;</span>
+<span class="nc" id="L604">                            + session.getPeerHost()</span>
+<span class="nc" id="L605">                            + &quot;, CipherSuite: &quot; + session.getCipherSuite());</span>
+                }
+
+                /* Set login credentials only if SSL session has been
+                 * negotiated successfully - otherwise user/password
+                 * could be transmitted in clear text. */
+<span class="nc bnc" id="L611" title="All 2 branches missed.">                if (adminDN != null) {</span>
+<span class="nc" id="L612">                    context.addToEnvironment(</span>
+                            Context.SECURITY_AUTHENTICATION,
+                            &quot;simple&quot;);
+<span class="nc" id="L615">                    context.addToEnvironment(</span>
+                            Context.SECURITY_PRINCIPAL,
+                            adminDN);
+<span class="nc bnc" id="L618" title="All 2 branches missed.">                    if (adminPassword != null) {</span>
+<span class="nc" id="L619">                        context.addToEnvironment(</span>
+                                Context.SECURITY_CREDENTIALS,
+                                adminPassword);
+                    }
+                }
+<span class="nc" id="L624">            } catch (java.io.IOException ex) {</span>
+<span class="nc" id="L625">                Log.error(ex.getMessage(), ex);</span>
+<span class="nc" id="L626">            }</span>
+        }
+
+<span class="nc bnc" id="L629" title="All 2 branches missed.">        if (debug) {</span>
+<span class="nc" id="L630">            Log.debug(&quot;LdapManager: ... context created successfully, returning.&quot;);</span>
+        }
+
+<span class="nc" id="L633">        return context;</span>
+    }
+
+    /**
+     * Returns true if the user is able to successfully authenticate against
+     * the LDAP server. The &quot;simple&quot; authentication protocol is used.
+     *
+     * @param userDN the user's dn to authenticate (relative to {@code baseDN}).
+     * @param password the user's password.
+     * @return true if the user successfully authenticates.
+     */
+    public boolean checkAuthentication(String userDN, String password) {
+<span class="nc" id="L645">        boolean debug = Log.isDebugEnabled();</span>
+<span class="nc bnc" id="L646" title="All 2 branches missed.">        if (debug) {</span>
+<span class="nc" id="L647">            Log.debug(&quot;LdapManager: In LdapManager.checkAuthentication(userDN, password), userDN is: &quot; + userDN + &quot;...&quot;);</span>
+
+<span class="nc bnc" id="L649" title="All 4 branches missed.">            if (!sslEnabled &amp;&amp; !startTlsEnabled) {</span>
+<span class="nc" id="L650">                Log.debug(&quot;LdapManager: Warning: Using unencrypted connection to LDAP service!&quot;);</span>
+            }
+        }
+
+<span class="nc" id="L654">        JiveInitialLdapContext ctx = null;</span>
+        try {
+            // See if the user authenticates.
+<span class="nc" id="L657">            Hashtable&lt;String, Object&gt; env = new Hashtable&lt;&gt;();</span>
+<span class="nc" id="L658">            env.put(Context.INITIAL_CONTEXT_FACTORY, initialContextFactory);</span>
+<span class="nc" id="L659">            env.put(Context.PROVIDER_URL, getProviderURL(baseDN));</span>
+<span class="nc bnc" id="L660" title="All 2 branches missed.">            if (sslEnabled) {</span>
+<span class="nc" id="L661">                env.put(&quot;java.naming.ldap.factory.socket&quot;, &quot;org.jivesoftware.util.SimpleSSLSocketFactory&quot;);</span>
+<span class="nc" id="L662">                env.put(Context.SECURITY_PROTOCOL, &quot;ssl&quot;);</span>
+            }
+
+            /* If startTLS is requested we MUST NOT bind() before
+             * the secure connection has been established. */
+<span class="nc bnc" id="L667" title="All 4 branches missed.">            if (!(startTlsEnabled &amp;&amp; !sslEnabled)) {</span>
+<span class="nc" id="L668">                env.put(Context.SECURITY_AUTHENTICATION, &quot;simple&quot;);</span>
+<span class="nc" id="L669">                env.put(Context.SECURITY_PRINCIPAL, userDN + &quot;,&quot; + baseDN);</span>
+<span class="nc" id="L670">                env.put(Context.SECURITY_CREDENTIALS, password);</span>
+            } else {
+<span class="nc bnc" id="L672" title="All 2 branches missed.">                if (followReferrals) {</span>
+<span class="nc" id="L673">                    Log.warn(&quot;\tConnections to referrals are unencrypted! If you do not want this, please turn off ldap.autoFollowReferrals&quot;);</span>
+                }
+            }
+
+
+
+<span class="nc bnc" id="L679" title="All 2 branches missed.">            if (connTimeout &gt; 0) {</span>
+<span class="nc" id="L680">                    env.put(&quot;com.sun.jndi.ldap.connect.timeout&quot;, String.valueOf(connTimeout));</span>
+                } else {
+<span class="nc" id="L682">                    env.put(&quot;com.sun.jndi.ldap.connect.timeout&quot;, &quot;10000&quot;);</span>
+                }
+
+<span class="nc bnc" id="L685" title="All 2 branches missed.">            if (readTimeout &gt; 0) {</span>
+<span class="nc" id="L686">                env.put(&quot;com.sun.jndi.ldap.read.timeout&quot;, String.valueOf(readTimeout));</span>
+            }
+<span class="nc bnc" id="L688" title="All 2 branches missed.">            if (ldapDebugEnabled) {</span>
+<span class="nc" id="L689">                env.put(&quot;com.sun.jndi.ldap.trace.ber&quot;, System.err);</span>
+            }
+<span class="nc bnc" id="L691" title="All 2 branches missed.">            if (followReferrals) {</span>
+<span class="nc" id="L692">                env.put(Context.REFERRAL, &quot;follow&quot;);</span>
+            }
+<span class="nc bnc" id="L694" title="All 2 branches missed.">            if (!followAliasReferrals) {</span>
+<span class="nc" id="L695">                env.put(&quot;java.naming.ldap.derefAliases&quot;, &quot;never&quot;);</span>
+            }
+
+<span class="nc bnc" id="L698" title="All 2 branches missed.">            if (debug) {</span>
+<span class="nc" id="L699">                Log.debug(&quot;LdapManager: Created context values, attempting to create context...&quot;);</span>
+            }
+<span class="nc" id="L701">            ctx = new JiveInitialLdapContext(env, null);</span>
+
+<span class="nc bnc" id="L703" title="All 4 branches missed.">            if (startTlsEnabled &amp;&amp; !sslEnabled) {</span>
+
+<span class="nc bnc" id="L705" title="All 2 branches missed.">                if (debug) {</span>
+<span class="nc" id="L706">                    Log.debug(&quot;LdapManager: ... StartTlsRequest&quot;);</span>
+                }
+
+                // Perform a StartTLS extended operation
+<span class="nc" id="L710">                StartTlsResponse tls = (StartTlsResponse)</span>
+<span class="nc" id="L711">                    ctx.extendedOperation(new StartTlsRequest());</span>
+
+                /* Open a TLS connection (over the existing LDAP association) and
+                   get details of the negotiated TLS session: cipher suite,
+                   peer certificate, etc. */
+                try {
+<span class="nc" id="L717">                    SSLSession session = tls.negotiate(new org.jivesoftware.util.SimpleSSLSocketFactory());</span>
+
+<span class="nc" id="L719">                    ctx.setTlsResponse(tls);</span>
+<span class="nc" id="L720">                    ctx.setSslSession(session);</span>
+
+<span class="nc bnc" id="L722" title="All 2 branches missed.">                    if (debug) {</span>
+<span class="nc" id="L723">                        Log.debug(&quot;LdapManager: ... peer host: &quot;</span>
+<span class="nc" id="L724">                                + session.getPeerHost()</span>
+<span class="nc" id="L725">                                + &quot;, CipherSuite: &quot; + session.getCipherSuite());</span>
+                    }
+
+<span class="nc" id="L728">                    ctx.addToEnvironment(Context.SECURITY_AUTHENTICATION, &quot;simple&quot;);</span>
+<span class="nc" id="L729">                    ctx.addToEnvironment(Context.SECURITY_PRINCIPAL,</span>
+                            userDN + &quot;,&quot; + baseDN);
+<span class="nc" id="L731">                    ctx.addToEnvironment(Context.SECURITY_CREDENTIALS, password);</span>
+
+<span class="nc" id="L733">                } catch (java.io.IOException ex) {</span>
+<span class="nc" id="L734">                    Log.error(&quot;Unable to upgrade connection to TLS; failing user authentication&quot;, ex);</span>
+<span class="nc" id="L735">                    return false;</span>
+<span class="nc" id="L736">                }</span>
+
+                // make at least one lookup to check authorization
+<span class="nc" id="L739">                lookupExistence(</span>
+                        ctx,
+                        userDN + &quot;,&quot; + baseDN,
+                        new String[] {usernameField});
+            }
+
+<span class="nc bnc" id="L745" title="All 2 branches missed.">            if (debug) {</span>
+<span class="nc" id="L746">                Log.debug(&quot;LdapManager: ... context created successfully, returning.&quot;);</span>
+            }
+        }
+<span class="nc" id="L749">        catch (NamingException ne) {</span>
+            // If an alt baseDN is defined, attempt a lookup there.
+<span class="nc bnc" id="L751" title="All 2 branches missed.">            if (alternateBaseDN != null) {</span>
+                try {
+<span class="nc bnc" id="L753" title="All 2 branches missed.">                    if (ctx != null) {</span>
+<span class="nc" id="L754">                        ctx.close();</span>
+                    }
+                }
+<span class="nc" id="L757">                catch (Exception e) {</span>
+<span class="nc" id="L758">                    Log.error(e.getMessage(), e);</span>
+<span class="nc" id="L759">                }</span>
+                try {
+                    // See if the user authenticates.
+<span class="nc" id="L762">                    Hashtable&lt;String, Object&gt; env = new Hashtable&lt;&gt;();</span>
+                    // Use a custom initial context factory if specified. Otherwise, use the default.
+<span class="nc" id="L764">                    env.put(Context.INITIAL_CONTEXT_FACTORY, initialContextFactory);</span>
+<span class="nc" id="L765">                    env.put(Context.PROVIDER_URL, getProviderURL(alternateBaseDN));</span>
+<span class="nc bnc" id="L766" title="All 2 branches missed.">                    if (sslEnabled) {</span>
+<span class="nc" id="L767">                        env.put(&quot;java.naming.ldap.factory.socket&quot;, &quot;org.jivesoftware.util.SimpleSSLSocketFactory&quot;);</span>
+<span class="nc" id="L768">                        env.put(Context.SECURITY_PROTOCOL, &quot;ssl&quot;);</span>
+                    }
+
+                    /* If startTLS is requested we MUST NOT bind() before
+                     * the secure connection has been established. */
+<span class="nc bnc" id="L773" title="All 4 branches missed.">                    if (!(startTlsEnabled &amp;&amp; !sslEnabled)) {</span>
+<span class="nc" id="L774">                        env.put(Context.SECURITY_AUTHENTICATION, &quot;simple&quot;);</span>
+<span class="nc" id="L775">                        env.put(Context.SECURITY_PRINCIPAL, userDN + &quot;,&quot; + alternateBaseDN);</span>
+<span class="nc" id="L776">                        env.put(Context.SECURITY_CREDENTIALS, password);</span>
+                    }
+
+<span class="nc" id="L779">                        env.put(&quot;com.sun.jndi.ldap.connect.timeout&quot;, &quot;10000&quot;);</span>
+
+<span class="nc bnc" id="L781" title="All 2 branches missed.">                    if (ldapDebugEnabled) {</span>
+<span class="nc" id="L782">                        env.put(&quot;com.sun.jndi.ldap.trace.ber&quot;, System.err);</span>
+                    }
+<span class="nc bnc" id="L784" title="All 2 branches missed.">                    if (followReferrals) {</span>
+<span class="nc" id="L785">                        env.put(Context.REFERRAL, &quot;follow&quot;);</span>
+                    }
+<span class="nc bnc" id="L787" title="All 2 branches missed.">                    if (!followAliasReferrals) {</span>
+<span class="nc" id="L788">                        env.put(&quot;java.naming.ldap.derefAliases&quot;, &quot;never&quot;);</span>
+                    }
+<span class="nc bnc" id="L790" title="All 2 branches missed.">                    if (debug) {</span>
+<span class="nc" id="L791">                        Log.debug(&quot;LdapManager: Created context values, attempting to create context...&quot;);</span>
+                    }
+<span class="nc" id="L793">                    ctx = new JiveInitialLdapContext(env, null);</span>
+
+<span class="nc bnc" id="L795" title="All 4 branches missed.">                    if (startTlsEnabled &amp;&amp; !sslEnabled) {</span>
+
+<span class="nc bnc" id="L797" title="All 2 branches missed.">                        if (debug) {</span>
+<span class="nc" id="L798">                            Log.debug(&quot;LdapManager: ... StartTlsRequest&quot;);</span>
+                        }
+
+                        // Perform a StartTLS extended operation
+<span class="nc" id="L802">                        StartTlsResponse tls = (StartTlsResponse)</span>
+<span class="nc" id="L803">                            ctx.extendedOperation(new StartTlsRequest());</span>
+
+                        /* Open a TLS connection (over the existing LDAP association) and
+                           get details of the negotiated TLS session: cipher suite,
+                           peer certificate, etc. */
+                        try {
+<span class="nc" id="L809">                            SSLSession session = tls.negotiate(new org.jivesoftware.util.SimpleSSLSocketFactory());</span>
+
+<span class="nc" id="L811">                            ctx.setTlsResponse(tls);</span>
+<span class="nc" id="L812">                            ctx.setSslSession(session);</span>
+
+<span class="nc bnc" id="L814" title="All 2 branches missed.">                            if (debug) {</span>
+<span class="nc" id="L815">                                Log.debug(&quot;LdapManager: ... peer host: &quot;</span>
+<span class="nc" id="L816">                                        + session.getPeerHost()</span>
+<span class="nc" id="L817">                                        + &quot;, CipherSuite: &quot; + session.getCipherSuite());</span>
+                            }
+
+<span class="nc" id="L820">                            ctx.addToEnvironment(Context.SECURITY_AUTHENTICATION, &quot;simple&quot;);</span>
+<span class="nc" id="L821">                            ctx.addToEnvironment(Context.SECURITY_PRINCIPAL,</span>
+                                    userDN + &quot;,&quot; + alternateBaseDN);
+<span class="nc" id="L823">                            ctx.addToEnvironment(Context.SECURITY_CREDENTIALS, password);</span>
+
+<span class="nc" id="L825">                        } catch (java.io.IOException ex) {</span>
+<span class="nc" id="L826">                            Log.error(&quot;Unable to upgrade connection to TLS; failing user authentication&quot;, ex);</span>
+<span class="nc" id="L827">                            return false;</span>
+<span class="nc" id="L828">                        }</span>
+
+                        // make at least one lookup to check user authorization
+<span class="nc" id="L831">                        lookupExistence(</span>
+                                ctx,
+                                userDN + &quot;,&quot; + alternateBaseDN,
+                                new String[] {usernameField});
+                    }
+                }
+<span class="nc" id="L837">                catch (NamingException e) {</span>
+<span class="nc bnc" id="L838" title="All 2 branches missed.">                    if (debug) {</span>
+<span class="nc" id="L839">                        Log.debug(&quot;LdapManager: Caught a naming exception when creating InitialContext&quot;, ne);</span>
+                    }
+<span class="nc" id="L841">                    return false;</span>
+<span class="nc" id="L842">                }</span>
+            }
+            else {
+<span class="nc bnc" id="L845" title="All 2 branches missed.">                if (debug) {</span>
+<span class="nc" id="L846">                    Log.debug(&quot;LdapManager: Caught a naming exception when creating InitialContext&quot;, ne);</span>
+                }
+<span class="nc" id="L848">                return false;</span>
+            }
+        }
+        finally {
+<span class="nc" id="L852">            try {</span>
+<span class="nc bnc" id="L853" title="All 14 branches missed.">                if (ctx != null) {</span>
+<span class="nc" id="L854">                    ctx.close();</span>
+                }
+            }
+<span class="nc" id="L857">            catch (Exception e) {</span>
+<span class="nc" id="L858">                Log.error(e.getMessage(), e);</span>
+<span class="nc" id="L859">            }</span>
+<span class="nc" id="L860">        }</span>
+<span class="nc" id="L861">        return true;</span>
+    }
+
+    /**
+     * Looks up an LDAP object by its DN and returns {@code true} if
+     * the search was successful.
+     *
+     * @param ctx the Context to use for the lookup.
+     * @param dn the object's dn to lookup.
+     * @return true if the lookup was successful.
+     * @throws NamingException if login credentials were wrong.
+     */
+    private Boolean lookupExistence(InitialDirContext ctx, String dn, String[] returnattrs) throws NamingException {
+<span class="nc" id="L874">        boolean debug = Log.isDebugEnabled();</span>
+
+<span class="nc bnc" id="L876" title="All 2 branches missed.">        if (debug) {</span>
+<span class="nc" id="L877">            Log.debug(&quot;LdapManager: In lookupExistence(ctx, dn, returnattrs), searchdn is: &quot; + dn);</span>
+        }
+
+        // Bind to the object's DN
+<span class="nc" id="L881">        ctx.addToEnvironment(Context.PROVIDER_URL, getProviderURL(dn));</span>
+
+<span class="nc" id="L883">        String filter = &quot;(&amp;(objectClass=*))&quot;;</span>
+<span class="nc" id="L884">        SearchControls srcnt = new SearchControls();</span>
+<span class="nc" id="L885">        srcnt.setSearchScope(SearchControls.OBJECT_SCOPE);</span>
+<span class="nc" id="L886">        srcnt.setReturningAttributes(returnattrs);</span>
+
+<span class="nc" id="L888">        NamingEnumeration&lt;SearchResult&gt; answer = null;</span>
+
+        try {
+<span class="nc" id="L891">            answer = ctx.search(</span>
+                    &quot;&quot;,
+                    filter,
+                    srcnt);
+<span class="nc" id="L895">        } catch (javax.naming.NameNotFoundException nex) {</span>
+            // DN not found
+<span class="nc" id="L897">        } catch (NamingException ex){</span>
+<span class="nc" id="L898">            throw ex;</span>
+<span class="nc" id="L899">        }</span>
+
+<span class="nc bnc" id="L901" title="All 4 branches missed.">        if (answer == null || !answer.hasMoreElements())</span>
+        {
+<span class="nc" id="L903">            Log.debug(&quot;LdapManager: .... lookupExistence: DN not found.&quot;);</span>
+<span class="nc" id="L904">            return false;</span>
+        }
+        else
+        {
+<span class="nc" id="L908">            Log.debug(&quot;LdapManager: .... lookupExistence: DN found.&quot;);</span>
+<span class="nc" id="L909">            return true;</span>
+        }
+    }
+
+    /**
+     * Finds a user's dn using their username. Normally, this search will
+     * be performed using the field &quot;uid&quot;, but this can be changed by setting
+     * the {@code usernameField} property.&lt;p&gt;
+     *
+     * Searches are performed over all subtrees relative to the {@code baseDN}.
+     * If the search fails in the {@code baseDN} then another search will be
+     * performed in the {@code alternateBaseDN}. For example, if the {@code baseDN}
+     * is &quot;o=jivesoftware, o=com&quot; and we do a search for &quot;mtucker&quot;, then we might
+     * find a userDN of &quot;uid=mtucker,ou=People&quot;. This kind of searching is a good
+     * thing since it doesn't make the assumption that all user records are stored
+     * in a flat structure. However, it does add the requirement that &quot;uid&quot; field
+     * (or the other field specified) must be unique over the entire subtree from
+     * the {@code baseDN}. For example, it's entirely possible to create two dn's
+     * in your LDAP directory with the same uid: &quot;uid=mtucker,ou=People&quot; and
+     * &quot;uid=mtucker,ou=Administrators&quot;. In such a case, it's not possible to
+     * uniquely identify a user, so this method will throw an error.&lt;p&gt;
+     *
+     * The dn that's returned is relative to the default {@code baseDN}.
+     *
+     * @param username the username to lookup the dn for.
+     * @return the dn associated with {@code username}.
+     * @throws Exception if the search for the dn fails.
+     */
+    public String findUserDN( String username ) throws Exception
+    {
+<span class="nc bnc" id="L939" title="All 2 branches missed.">        if ( userDNCache != null )</span>
+        {
+            // Return a cache entry if one exists.
+<span class="nc" id="L942">            final DNCacheEntry dnCacheEntry = userDNCache.get( username );</span>
+<span class="nc bnc" id="L943" title="All 2 branches missed.">            if ( dnCacheEntry != null )</span>
+            {
+<span class="nc" id="L945">                return dnCacheEntry.getUserDN();</span>
+            }
+        }
+
+        // No cache entry. Query for the value, and add that to the cache.
+        try
+        {
+<span class="nc" id="L952">            final String userDN = findUserDN( username, baseDN );</span>
+<span class="nc bnc" id="L953" title="All 2 branches missed.">            if ( userDNCache != null )</span>
+            {
+<span class="nc" id="L955">                userDNCache.put( username, new DNCacheEntry( userDN, baseDN ) );</span>
+            }
+<span class="nc" id="L957">            return userDN;</span>
+        }
+<span class="nc" id="L959">        catch ( Exception e )</span>
+        {
+<span class="nc bnc" id="L961" title="All 2 branches missed.">            if ( alternateBaseDN != null )</span>
+            {
+<span class="nc" id="L963">                final String userDN = findUserDN( username, alternateBaseDN );</span>
+<span class="nc bnc" id="L964" title="All 2 branches missed.">                if ( userDNCache != null )</span>
+                {
+<span class="nc" id="L966">                    userDNCache.put( username, new DNCacheEntry( userDN, alternateBaseDN ) );</span>
+                }
+<span class="nc" id="L968">                return userDN;</span>
+            }
+            else
+            {
+<span class="nc" id="L972">                throw e;</span>
+            }
+        }
+    }
+
+    /**
+     * Finds a user's dn using their username in the specified baseDN. Normally, this search
+     * will be performed using the field &quot;uid&quot;, but this can be changed by setting
+     * the {@code usernameField} property.&lt;p&gt;
+     *
+     * Searches are performed over all sub-trees relative to the {@code baseDN} unless
+     * sub-tree searching has been disabled. For example, if the {@code baseDN} is
+     * &quot;o=jivesoftware, o=com&quot; and we do a search for &quot;mtucker&quot;, then we might find a userDN of
+     * &quot;uid=mtucker,ou=People&quot;. This kind of searching is a good thing since
+     * it doesn't make the assumption that all user records are stored in a flat
+     * structure. However, it does add the requirement that &quot;uid&quot; field (or the
+     * other field specified) must be unique over the entire subtree from the
+     * {@code baseDN}. For example, it's entirely possible to create two dn's
+     * in your LDAP directory with the same uid: &quot;uid=mtucker,ou=People&quot; and
+     * &quot;uid=mtucker,ou=Administrators&quot;. In such a case, it's not possible to
+     * uniquely identify a user, so this method will throw an error.&lt;p&gt;
+     *
+     * The DN that's returned is relative to the {@code baseDN}.
+     *
+     * @param username the username to lookup the dn for.
+     * @param baseDN the base DN to use for this search.
+     * @return the dn associated with {@code username}.
+     * @throws Exception if the search for the dn fails.
+     * @see #findUserDN(String) to search using the default baseDN and alternateBaseDN.
+     */
+    public String findUserDN(String username, String baseDN) throws Exception {
+<span class="nc" id="L1003">        boolean debug = Log.isDebugEnabled();</span>
+        //Support for usernameSuffix
+<span class="nc" id="L1005">        username = username + usernameSuffix;</span>
+<span class="nc bnc" id="L1006" title="All 2 branches missed.">        if (debug) {</span>
+<span class="nc" id="L1007">            Log.debug(&quot;LdapManager: Trying to find a user's DN based on their username. &quot; + usernameField + &quot;: &quot; + username</span>
+                    + &quot;, Base DN: &quot; + baseDN + &quot;...&quot;);
+        }
+<span class="nc" id="L1010">        DirContext ctx = null;</span>
+        try {
+<span class="nc" id="L1012">            ctx = getContext(baseDN);</span>
+<span class="nc bnc" id="L1013" title="All 2 branches missed.">            if (debug) {</span>
+<span class="nc" id="L1014">                Log.debug(&quot;LdapManager: Starting LDAP search...&quot;);</span>
+            }
+            // Search for the dn based on the username.
+<span class="nc" id="L1017">            SearchControls constraints = new SearchControls();</span>
+            // If sub-tree searching is enabled (default is true) then search the entire tree.
+<span class="nc bnc" id="L1019" title="All 2 branches missed.">            if (subTreeSearch) {</span>
+<span class="nc" id="L1020">                constraints.setSearchScope(SearchControls.SUBTREE_SCOPE);</span>
+            }
+            // Otherwise, only search a single level.
+            else {
+<span class="nc" id="L1024">                constraints.setSearchScope(SearchControls.ONELEVEL_SCOPE);</span>
+            }
+<span class="nc" id="L1026">            constraints.setReturningAttributes(new String[] { usernameField });</span>
+
+            // NOTE: this assumes that the username has already been JID-unescaped
+<span class="nc" id="L1029">            NamingEnumeration&lt;SearchResult&gt; answer = ctx.search(&quot;&quot;, getSearchFilter(), </span>
+<span class="nc" id="L1030">                    new String[] {sanitizeSearchFilter(username)},</span>
+                    constraints);
+
+<span class="nc bnc" id="L1033" title="All 2 branches missed.">            if (debug) {</span>
+<span class="nc" id="L1034">                Log.debug(&quot;LdapManager: ... search finished&quot;);</span>
+            }
+
+<span class="nc bnc" id="L1037" title="All 4 branches missed.">            if (answer == null || !answer.hasMoreElements()) {</span>
+<span class="nc bnc" id="L1038" title="All 2 branches missed.">                if (debug) {</span>
+<span class="nc" id="L1039">                    Log.debug(&quot;LdapManager: User DN based on username '&quot; + username + &quot;' not found.&quot;);</span>
+                }
+<span class="nc" id="L1041">                throw new UserNotFoundException(&quot;Username &quot; + username + &quot; not found&quot;);</span>
+            }
+<span class="nc" id="L1043">            String userDN = answer.next().getName();</span>
+            // Make sure there are no more search results. If there are, then
+            // the username isn't unique on the LDAP server (a perfectly possible
+            // scenario since only fully qualified dn's need to be unqiue).
+            // There really isn't a way to handle this, so throw an exception.
+            // The baseDN must be set correctly so that this doesn't happen.
+<span class="nc bnc" id="L1049" title="All 2 branches missed.">            if (answer.hasMoreElements()) {</span>
+<span class="nc bnc" id="L1050" title="All 2 branches missed.">                if (debug) {</span>
+<span class="nc" id="L1051">                    Log.debug(&quot;LdapManager: Search for userDN based on username '&quot; + username + &quot;' found multiple &quot; +</span>
+                            &quot;responses, throwing exception.&quot;);
+                }
+<span class="nc" id="L1054">                throw new UserNotFoundException(&quot;LDAP username lookup for &quot; + username +</span>
+                        &quot; matched multiple entries.&quot;);
+            }
+            // Close the enumeration.
+<span class="nc" id="L1058">            answer.close();</span>
+            // All other methods assume that userDN is not a full LDAP string.
+            // However if a referal was followed this is not the case.  The
+            // following code converts a referral back to a &quot;partial&quot; LDAP string.
+<span class="nc bnc" id="L1062" title="All 2 branches missed.">            if (userDN.startsWith(&quot;ldap://&quot;)) {</span>
+<span class="nc" id="L1063">                userDN = userDN.replace(&quot;,&quot; + baseDN, &quot;&quot;);</span>
+<span class="nc" id="L1064">                userDN = userDN.substring(userDN.lastIndexOf(&quot;/&quot;) + 1);</span>
+<span class="nc" id="L1065">                userDN = java.net.URLDecoder.decode(userDN, &quot;UTF-8&quot;);</span>
+            }
+<span class="nc bnc" id="L1067" title="All 2 branches missed.">            if (encloseUserDN) {</span>
+<span class="nc" id="L1068">                userDN = getEnclosedDN(userDN);</span>
+            }
+<span class="nc" id="L1070">            return userDN;</span>
+<span class="nc" id="L1071">        } catch (final UserNotFoundException e) {</span>
+<span class="nc" id="L1072">            Log.trace(&quot;LdapManager: UserNotFoundException thrown&quot;, e);</span>
+<span class="nc" id="L1073">            throw e;</span>
+<span class="nc" id="L1074">        } catch (final Exception e) {</span>
+<span class="nc" id="L1075">            Log.debug(&quot;LdapManager: Exception thrown when searching for userDN based on username '&quot; + username + &quot;'&quot;, e);</span>
+<span class="nc" id="L1076">            throw e;</span>
+        }
+        finally {
+<span class="nc" id="L1079">            try { ctx.close(); }</span>
+<span class="nc" id="L1080">            catch (Exception ignored) {</span>
+                // Ignore.
+<span class="nc" id="L1082">            }</span>
+<span class="nc" id="L1083">        }</span>
+    }
+
+    /**
+     * Finds a groups's dn using it's group name. Normally, this search will
+     * be performed using the field &quot;cn&quot;, but this can be changed by setting
+     * the {@code groupNameField} property.&lt;p&gt;
+     *
+     * Searches are performed over all subtrees relative to the {@code baseDN}.
+     * If the search fails in the {@code baseDN} then another search will be
+     * performed in the {@code alternateBaseDN}. For example, if the {@code baseDN}
+     * is &quot;o=jivesoftware, o=com&quot; and we do a search for &quot;managers&quot;, then we might
+     * find a groupDN of &quot;uid=managers,ou=Groups&quot;. This kind of searching is a good
+     * thing since it doesn't make the assumption that all user records are stored
+     * in a flat structure. However, it does add the requirement that &quot;cn&quot; field
+     * (or the other field specified) must be unique over the entire subtree from
+     * the {@code baseDN}. For example, it's entirely possible to create two dn's
+     * in your LDAP directory with the same cn: &quot;cn=managers,ou=Financial&quot; and
+     * &quot;cn=managers,ou=Engineers&quot;. In such a case, it's not possible to
+     * uniquely identify a group, so this method will throw an error.&lt;p&gt;
+     *
+     * The dn that's returned is relative to the default {@code baseDN}.
+     *
+     * @param groupname the groupname to lookup the dn for.
+     * @return the dn associated with {@code groupname}.
+     * @throws Exception if the search for the dn fails.
+     */
+    public String findGroupDN(String groupname) throws Exception {
+        try {
+<span class="nc" id="L1112">            return findGroupDN(groupname, baseDN);</span>
+        }
+<span class="nc" id="L1114">        catch (Exception e) {</span>
+<span class="nc bnc" id="L1115" title="All 2 branches missed.">            if (alternateBaseDN != null) {</span>
+<span class="nc" id="L1116">                return findGroupDN(groupname, alternateBaseDN);</span>
+            }
+            else {
+<span class="nc" id="L1119">                throw e;</span>
+            }
+        }
+    }
+
+    /**
+     * Finds a groups's dn using it's group name. Normally, this search will
+     * be performed using the field &quot;cn&quot;, but this can be changed by setting
+     * the {@code groupNameField} property.&lt;p&gt;
+     *
+     * Searches are performed over all subtrees relative to the {@code baseDN}.
+     * If the search fails in the {@code baseDN} then another search will be
+     * performed in the {@code alternateBaseDN}. For example, if the {@code baseDN}
+     * is &quot;o=jivesoftware, o=com&quot; and we do a search for &quot;managers&quot;, then we might
+     * find a groupDN of &quot;uid=managers,ou=Groups&quot;. This kind of searching is a good
+     * thing since it doesn't make the assumption that all user records are stored
+     * in a flat structure. However, it does add the requirement that &quot;cn&quot; field
+     * (or the other field specified) must be unique over the entire subtree from
+     * the {@code baseDN}. For example, it's entirely possible to create two dn's
+     * in your LDAP directory with the same cn: &quot;cn=managers,ou=Financial&quot; and
+     * &quot;cn=managers,ou=Engineers&quot;. In such a case, it's not possible to
+     * uniquely identify a group, so this method will throw an error.&lt;p&gt;
+     *
+     * The dn that's returned is relative to the default {@code baseDN}.
+     *
+     * @param groupname the groupname to lookup the dn for.
+     * @param baseDN the base DN to use for this search.
+     * @return the dn associated with {@code groupname}.
+     * @throws Exception if the search for the dn fails.
+     * @see #findGroupDN(String) to search using the default baseDN and alternateBaseDN.
+     */
+    public String findGroupDN(String groupname, String baseDN) throws Exception {
+<span class="nc" id="L1151">        boolean debug = Log.isDebugEnabled();</span>
+<span class="nc bnc" id="L1152" title="All 2 branches missed.">        if (debug) {</span>
+<span class="nc" id="L1153">            Log.debug(&quot;LdapManager: Trying to find a groups's DN based on it's groupname. &quot; + groupNameField + &quot;: &quot; + groupname</span>
+                    + &quot;, Base DN: &quot; + baseDN + &quot;...&quot;);
+        }
+<span class="nc" id="L1156">        DirContext ctx = null;</span>
+        try {
+<span class="nc" id="L1158">            ctx = getContext(baseDN);</span>
+<span class="nc bnc" id="L1159" title="All 2 branches missed.">            if (debug) {</span>
+<span class="nc" id="L1160">                Log.debug(&quot;LdapManager: Starting LDAP search...&quot;);</span>
+            }
+            // Search for the dn based on the groupname.
+<span class="nc" id="L1163">            SearchControls constraints = new SearchControls();</span>
+            // If sub-tree searching is enabled (default is true) then search the entire tree.
+<span class="nc bnc" id="L1165" title="All 2 branches missed.">            if (subTreeSearch) {</span>
+<span class="nc" id="L1166">                constraints.setSearchScope(SearchControls.SUBTREE_SCOPE);</span>
+            }
+            // Otherwise, only search a single level.
+            else {
+<span class="nc" id="L1170">                constraints.setSearchScope(SearchControls.ONELEVEL_SCOPE);</span>
+            }
+<span class="nc" id="L1172">            constraints.setReturningAttributes(new String[] { groupNameField });</span>
+
+<span class="nc" id="L1174">            String filter = MessageFormat.format(getGroupSearchFilter(), sanitizeSearchFilter(groupname));</span>
+<span class="nc" id="L1175">            NamingEnumeration&lt;SearchResult&gt; answer = ctx.search(&quot;&quot;, filter, constraints);</span>
+
+<span class="nc bnc" id="L1177" title="All 2 branches missed.">            if (debug) {</span>
+<span class="nc" id="L1178">                Log.debug(&quot;LdapManager: ... search finished&quot;);</span>
+            }
+
+<span class="nc bnc" id="L1181" title="All 4 branches missed.">            if (answer == null || !answer.hasMoreElements()) {</span>
+<span class="nc bnc" id="L1182" title="All 2 branches missed.">                if (debug) {</span>
+<span class="nc" id="L1183">                    Log.debug(&quot;LdapManager: Group DN based on groupname '&quot; + groupname + &quot;' not found.&quot;);</span>
+                }
+<span class="nc" id="L1185">                throw new GroupNotFoundException(&quot;Groupname &quot; + groupname + &quot; not found&quot;);</span>
+            }
+<span class="nc" id="L1187">            String groupDN = answer.next().getName();</span>
+            // Make sure there are no more search results. If there are, then
+            // the groupname isn't unique on the LDAP server (a perfectly possible
+            // scenario since only fully qualified dn's need to be unqiue).
+            // There really isn't a way to handle this, so throw an exception.
+            // The baseDN must be set correctly so that this doesn't happen.
+<span class="nc bnc" id="L1193" title="All 2 branches missed.">            if (answer.hasMoreElements()) {</span>
+<span class="nc bnc" id="L1194" title="All 2 branches missed.">                if (debug) {</span>
+<span class="nc" id="L1195">                    Log.debug(&quot;LdapManager: Search for groupDN based on groupname '&quot; + groupname + &quot;' found multiple &quot; +</span>
+                            &quot;responses, throwing exception.&quot;);
+                }
+<span class="nc" id="L1198">                throw new GroupNotFoundException(&quot;LDAP groupname lookup for &quot; + groupname +</span>
+                        &quot; matched multiple entries.&quot;);
+            }
+            // Close the enumeration.
+<span class="nc" id="L1202">            answer.close();</span>
+            // All other methods assume that groupDN is not a full LDAP string.
+            // However if a referal was followed this is not the case.  The
+            // following code converts a referral back to a &quot;partial&quot; LDAP string.
+<span class="nc bnc" id="L1206" title="All 2 branches missed.">            if (groupDN.startsWith(&quot;ldap://&quot;)) {</span>
+<span class="nc" id="L1207">                groupDN = groupDN.replace(&quot;,&quot; + baseDN, &quot;&quot;);</span>
+<span class="nc" id="L1208">                groupDN = groupDN.substring(groupDN.lastIndexOf(&quot;/&quot;) + 1);</span>
+<span class="nc" id="L1209">                groupDN = java.net.URLDecoder.decode(groupDN, &quot;UTF-8&quot;);</span>
+            }
+<span class="nc bnc" id="L1211" title="All 2 branches missed.">            if (encloseGroupDN) {</span>
+<span class="nc" id="L1212">                groupDN = getEnclosedDN(groupDN);</span>
+            }
+<span class="nc" id="L1214">            return groupDN;</span>
+<span class="nc" id="L1215">        } catch (final GroupNotFoundException e) {</span>
+<span class="nc" id="L1216">            Log.trace(&quot;LdapManager: GroupNotFoundException thrown&quot;, e);</span>
+<span class="nc" id="L1217">            throw e;</span>
+<span class="nc" id="L1218">        } catch (final Exception e) {</span>
+<span class="nc" id="L1219">            Log.debug(&quot;LdapManager: Exception thrown when searching for groupDN based on groupname '&quot; + groupname + &quot;'&quot;, e);</span>
+<span class="nc" id="L1220">            throw e;</span>
+        }
+        finally {
+<span class="nc" id="L1223">            try { ctx.close(); }</span>
+<span class="nc" id="L1224">            catch (Exception ignored) {</span>
+                // Ignore.
+<span class="nc" id="L1226">            }</span>
+<span class="nc" id="L1227">        }</span>
+    }
+
+    /**
+     * Returns a properly encoded URL for use as the PROVIDER_URL.
+     * If the encoding fails then the URL will contain the raw base dn.
+     *
+     * @param baseDN the base dn to use in the URL.
+     * @return the properly encoded URL for use in as PROVIDER_URL.
+     */
+    private String getProviderURL(String baseDN) {
+<span class="nc" id="L1238">        StringBuffer ldapURL = new StringBuffer();</span>
+        try {
+<span class="nc" id="L1240">            baseDN = URLEncoder.encode(baseDN, &quot;UTF-8&quot;);</span>
+            // The java.net.URLEncoder class encodes spaces as +, but they need to be %20
+<span class="nc" id="L1242">            baseDN = baseDN.replaceAll(&quot;\\+&quot;, &quot;%20&quot;);</span>
+        }
+<span class="nc" id="L1244">        catch (java.io.UnsupportedEncodingException e) {</span>
+            // UTF-8 is not supported, fall back to using raw baseDN
+<span class="nc" id="L1246">        }</span>
+<span class="nc bnc" id="L1247" title="All 2 branches missed.">        for (String host : hosts) {</span>
+            // Create a correctly-encoded ldap URL for the PROVIDER_URL
+<span class="nc" id="L1249">            ldapURL.append(&quot;ldap://&quot;);</span>
+<span class="nc" id="L1250">            ldapURL.append(host);</span>
+<span class="nc" id="L1251">            ldapURL.append(':');</span>
+<span class="nc" id="L1252">            ldapURL.append(port);</span>
+<span class="nc" id="L1253">            ldapURL.append('/');</span>
+<span class="nc" id="L1254">            ldapURL.append(baseDN);</span>
+<span class="nc" id="L1255">            ldapURL.append(' ');</span>
+<span class="nc" id="L1256">        }</span>
+<span class="nc" id="L1257">        return ldapURL.toString();</span>
+    }
+
+    /**
+     * Returns the LDAP servers hosts; e.g. {@code localhost} or
+     * {@code machine.example.com}, etc. This value is stored as the Jive
+     * Property {@code ldap.host}.
+     *
+     * @return the LDAP server host name.
+     */
+    public Collection&lt;String&gt; getHosts() {
+<span class="nc" id="L1268">        return hosts;</span>
+    }
+
+    /**
+     * Sets the list of LDAP servers host; e.g., {@code localhost} or
+     * {@code machine.example.com}, etc. This value is store as the Jive
+     * Property {@code ldap.host} using a comma as a delimiter for each host.&lt;p&gt;
+     *
+     * Note that all LDAP servers have to share the same configuration.
+     *
+     * @param hosts the LDAP servers host names.
+     */
+    public void setHosts(Collection&lt;String&gt; hosts) {
+<span class="nc" id="L1281">        this.hosts = hosts;</span>
+<span class="nc" id="L1282">        StringBuilder hostProperty = new StringBuilder();</span>
+<span class="nc bnc" id="L1283" title="All 2 branches missed.">        for (String host : hosts) {</span>
+<span class="nc" id="L1284">            hostProperty.append(host).append(',');</span>
+<span class="nc" id="L1285">        }</span>
+<span class="nc bnc" id="L1286" title="All 2 branches missed.">        if (!hosts.isEmpty()) {</span>
+            // Remove the last comma
+<span class="nc" id="L1288">            hostProperty.setLength(hostProperty.length()-1);</span>
+        }
+<span class="nc" id="L1290">        properties.put(&quot;ldap.host&quot;, hostProperty.toString());</span>
+<span class="nc" id="L1291">    }</span>
+
+    /**
+     * Returns the LDAP server port number. The default is 389. This value is
+     * stored as the Jive Property {@code ldap.port}.
+     *
+     * @return the LDAP server port number.
+     */
+    public int getPort() {
+<span class="nc" id="L1300">        return port;</span>
+    }
+
+    /**
+     * Sets the LDAP server port number. The default is 389. This value is
+     * stored as the Jive property {@code ldap.port}.
+     *
+     * @param port the LDAP server port number.
+     */
+    public void setPort(int port) {
+<span class="nc" id="L1310">        this.port = port;</span>
+<span class="nc" id="L1311">        properties.put(&quot;ldap.port&quot;, Integer.toString(port));</span>
+<span class="nc" id="L1312">    }</span>
+
+    /**
+     * Returns true if LDAP connection debugging is turned on. When on, trace
+     * information about BER buffers sent and received by the LDAP provider is
+     * written to System.out. Debugging is turned off by default.
+     *
+     * @return true if LDAP debugging is turned on.
+     */
+    public boolean isDebugEnabled() {
+<span class="nc" id="L1322">        return ldapDebugEnabled;</span>
+    }
+
+    /**
+     * Sets whether LDAP connection debugging is turned on. When on, trace
+     * information about BER buffers sent and received by the LDAP provider is
+     * written to System.out. Debugging is turned off by default.
+     *
+     * @param debugEnabled true if debugging should be turned on.
+     */
+    public void setDebugEnabled(boolean debugEnabled) {
+<span class="nc" id="L1333">        this.ldapDebugEnabled = debugEnabled;</span>
+<span class="nc" id="L1334">        properties.put(&quot;ldap.ldapDebugEnabled&quot;, Boolean.toString(debugEnabled));</span>
+<span class="nc" id="L1335">    }</span>
+
+    /**
+     * Returns true if LDAP connection is via SSL or not. SSL is turned off by default.
+     *
+     * @return true if SSL connections are enabled or not.
+     */
+    public boolean isSslEnabled() {
+<span class="nc" id="L1343">        return sslEnabled;</span>
+    }
+
+    /**
+     * Sets whether the connection to the LDAP server should be made via ssl or not.
+     *
+     * @param sslEnabled true if ssl should be enabled, false otherwise.
+     */
+    public void setSslEnabled(boolean sslEnabled) {
+<span class="nc" id="L1352">        this.sslEnabled = sslEnabled;</span>
+<span class="nc" id="L1353">        properties.put(&quot;ldap.sslEnabled&quot;, Boolean.toString(sslEnabled));</span>
+<span class="nc" id="L1354">    }</span>
+
+    /**
+     * Returns true if LDAP connection is via START or not. TLS is turned off by default.
+     *
+     * @return true if StartTLS connections are enabled or not.
+     */
+    public boolean isStartTlsEnabled() {
+<span class="nc" id="L1362">        return startTlsEnabled;</span>
+    }
+
+    /**
+     * Sets whether the connection to the LDAP server should be made via StartTLS or not.
+     *
+     * @param startTlsEnabled true if StartTLS should be used, false otherwise.
+     */
+    public void setStartTlsEnabled(boolean startTlsEnabled) {
+<span class="nc" id="L1371">        this.startTlsEnabled = startTlsEnabled;</span>
+<span class="nc" id="L1372">        properties.put(&quot;ldap.startTlsEnabled&quot;, Boolean.toString(startTlsEnabled));</span>
+<span class="nc" id="L1373">    }</span>
+
+
+    /**
+     * Returns the LDAP field name that the username lookup will be performed
+     * on. By default this is &quot;uid&quot;.
+     *
+     * @return the LDAP field that the username lookup will be performed on.
+     */
+    public String getUsernameField() {
+<span class="nc" id="L1383">        return usernameField;</span>
+    }
+
+    /**
+     * Returns the suffix appended to the username when LDAP lookups are performed.
+     * By default this is &quot;&quot;.
+     *
+     * @return the suffix appened to usernames when LDAP lookups are performed.
+     */
+    public String getUsernameSuffix() {
+<span class="nc" id="L1393">        return usernameSuffix;</span>
+    }
+
+    /**
+     * Sets the LDAP field name that the username lookup will be performed on.
+     * By default this is &quot;uid&quot;.
+     *
+     * @param usernameField the LDAP field that the username lookup will be
+     *      performed on.
+     */
+    public void setUsernameField(String usernameField) {
+<span class="nc" id="L1404">        this.usernameField = usernameField;</span>
+<span class="nc bnc" id="L1405" title="All 2 branches missed.">        if (usernameField == null) {</span>
+<span class="nc" id="L1406">            properties.remove(&quot;ldap.usernameField&quot;);</span>
+<span class="nc" id="L1407">            this.usernameField = &quot;uid&quot;;</span>
+        }
+        else {
+<span class="nc" id="L1410">            properties.put(&quot;ldap.usernameField&quot;, usernameField);</span>
+        }
+<span class="nc" id="L1412">    }</span>
+
+    /**
+     * Set the suffix appended to the username whenever LDAP lookups are performed.
+     *
+     * @param usernameSuffix the String to append to usernames for lookups
+     */
+    public void setUsernameSuffix(String usernameSuffix) {
+<span class="nc" id="L1420">        this.usernameSuffix = usernameSuffix;</span>
+<span class="nc bnc" id="L1421" title="All 2 branches missed.">        if (usernameSuffix == null) {</span>
+<span class="nc" id="L1422">            properties.remove(&quot;ldap.usernameSuffix&quot;);</span>
+<span class="nc" id="L1423">            this.usernameSuffix = &quot;&quot;;</span>
+        }
+        else {
+<span class="nc" id="L1426">            properties.put(&quot;ldap.usernameSuffix&quot;, usernameSuffix);</span>
+        }
+<span class="nc" id="L1428">    }</span>
+
+    /**
+     * Returns the LDAP field name that the user's name is stored in. By default
+     * this is &quot;cn&quot;. Another common value is &quot;displayName&quot;.
+     *
+     * @return the LDAP field that that corresponds to the user's name.
+     */
+    public String getNameField() {
+<span class="nc" id="L1437">        return nameField;</span>
+    }
+
+    /**
+     * Sets the LDAP field name that the user's name is stored in. By default
+     * this is &quot;cn&quot;. Another common value is &quot;displayName&quot;.
+     *
+     * @param nameField the LDAP field that that corresponds to the user's name.
+     */
+    public void setNameField(String nameField) {
+<span class="nc" id="L1447">        this.nameField = nameField;</span>
+<span class="nc bnc" id="L1448" title="All 2 branches missed.">        if (nameField == null) {</span>
+<span class="nc" id="L1449">            properties.remove(&quot;ldap.nameField&quot;);</span>
+        }
+        else {
+<span class="nc" id="L1452">            properties.put(&quot;ldap.nameField&quot;, nameField);</span>
+        }
+<span class="nc" id="L1454">    }</span>
+
+    /**
+     * Returns the LDAP field name that the user's email address is stored in.
+     * By default this is &quot;mail&quot;.
+     *
+     * @return the LDAP field that that corresponds to the user's email
+     *      address.
+     */
+    public String getEmailField() {
+<span class="nc" id="L1464">        return emailField;</span>
+    }
+
+    /**
+     * Sets the LDAP field name that the user's email address is stored in.
+     * By default this is &quot;mail&quot;.
+     *
+     * @param emailField the LDAP field that that corresponds to the user's
+     *      email address.
+     */
+    public void setEmailField(String emailField) {
+<span class="nc" id="L1475">        this.emailField = emailField;</span>
+<span class="nc bnc" id="L1476" title="All 2 branches missed.">        if (emailField == null) {</span>
+<span class="nc" id="L1477">            properties.remove(&quot;ldap.emailField&quot;);</span>
+        }
+        else {
+<span class="nc" id="L1480">            properties.put(&quot;ldap.emailField&quot;, emailField);</span>
+        }
+<span class="nc" id="L1482">    }</span>
+
+    /**
+     * Returns the starting DN that searches for users will performed with.
+     * Searches will performed on the entire sub-tree under the base DN.
+     *
+     * @return the starting DN used for performing searches.
+     */
+    public String getBaseDN() {
+<span class="nc bnc" id="L1491" title="All 2 branches missed.">        if (encloseDNs) {</span>
+<span class="nc" id="L1492">            return getEnclosedDN(baseDN);</span>
+        } else {
+<span class="nc" id="L1494">            return baseDN;</span>
+        }
+    }
+
+    /**
+     * Sets the starting DN that searches for users will performed with.
+     * Searches will performed on the entire sub-tree under the base DN.
+     *
+     * @param baseDN the starting DN used for performing searches.
+     */
+    public void setBaseDN(String baseDN) {
+<span class="nc" id="L1505">        this.baseDN = baseDN;</span>
+<span class="nc" id="L1506">        properties.put(&quot;ldap.baseDN&quot;, baseDN);</span>
+<span class="nc" id="L1507">    }</span>
+
+    /**
+     * Returns the alternate starting DN that searches for users will performed with.
+     * Searches will performed on the entire sub-tree under the alternate base DN after
+     * they are performed on the main base DN.
+     *
+     * @return the alternate starting DN used for performing searches. If no alternate
+     *      DN is set, this method will return {@code null}.
+     */
+    public String getAlternateBaseDN() {
+<span class="nc" id="L1518">        return getEnclosedDN(alternateBaseDN);</span>
+    }
+
+    /**
+     * Sets the alternate starting DN that searches for users will performed with.
+     * Searches will performed on the entire sub-tree under the alternate base DN after
+     * they are performed on the main base dn.
+     *
+     * @param alternateBaseDN the alternate starting DN used for performing searches.
+     */
+    public void setAlternateBaseDN(String alternateBaseDN) {
+<span class="nc" id="L1529">        this.alternateBaseDN = alternateBaseDN;</span>
+<span class="nc bnc" id="L1530" title="All 2 branches missed.">        if (alternateBaseDN == null) {</span>
+<span class="nc" id="L1531">            properties.remove(&quot;ldap.alternateBaseDN&quot;);</span>
+        }
+        else {
+<span class="nc" id="L1534">            properties.put(&quot;ldap.alternateBaseDN&quot;, alternateBaseDN);</span>
+        }
+<span class="nc" id="L1536">    }</span>
+
+    /**
+     * Returns the BaseDN for the given username.
+     *
+     * @param username username to return its base DN.
+     * @return the BaseDN for the given username. If no baseDN is found,
+     *         this method will return {@code null}.
+     */
+    public String getUsersBaseDN( String username )
+    {
+<span class="nc bnc" id="L1547" title="All 2 branches missed.">        if ( userDNCache != null )</span>
+        {
+            // Return a cache entry if one exists.
+<span class="nc" id="L1550">            final DNCacheEntry dnCacheEntry = userDNCache.get( username );</span>
+<span class="nc bnc" id="L1551" title="All 2 branches missed.">            if ( dnCacheEntry != null )</span>
+            {
+<span class="nc" id="L1553">                return dnCacheEntry.getBaseDN();</span>
+            }
+        }
+
+        // No cache entry. Query for the value, and add that to the cache.
+        try
+        {
+<span class="nc" id="L1560">            final String userDN = findUserDN( username, baseDN );</span>
+<span class="nc bnc" id="L1561" title="All 2 branches missed.">            if ( userDNCache != null )</span>
+            {
+<span class="nc" id="L1563">                userDNCache.put( username, new DNCacheEntry( userDN, baseDN ) );</span>
+            }
+<span class="nc" id="L1565">            return baseDN;</span>
+        }
+<span class="nc" id="L1567">        catch ( Exception e )</span>
+        {
+            try
+            {
+<span class="nc bnc" id="L1571" title="All 2 branches missed.">                if ( alternateBaseDN != null )</span>
+                {
+<span class="nc" id="L1573">                    final String userDN = findUserDN( username, alternateBaseDN );</span>
+<span class="nc bnc" id="L1574" title="All 2 branches missed.">                    if ( userDNCache != null )</span>
+                    {
+<span class="nc" id="L1576">                        userDNCache.put( username, new DNCacheEntry( userDN, alternateBaseDN ) );</span>
+                    }
+<span class="nc" id="L1578">                    return alternateBaseDN;</span>
+                }
+            }
+<span class="nc" id="L1581">            catch ( Exception ex )</span>
+            {
+<span class="nc" id="L1583">                Log.debug( ex.getMessage(), ex );</span>
+<span class="nc" id="L1584">            }</span>
+        }
+
+<span class="nc" id="L1587">        return null;</span>
+    }
+
+    /**
+     * Returns the BaseDN for the given groupname.
+     *
+     * @param groupname groupname to return its base DN.
+     * @return the BaseDN for the given groupname. If no baseDN is found,
+     *         this method will return {@code null}.
+     */
+    public String getGroupsBaseDN(String groupname) {
+        try {
+<span class="nc" id="L1599">            findGroupDN(groupname, baseDN);</span>
+<span class="nc" id="L1600">            return baseDN;</span>
+        }
+<span class="nc" id="L1602">        catch (Exception e) {</span>
+            try {
+<span class="nc bnc" id="L1604" title="All 2 branches missed.">                if (alternateBaseDN != null) {</span>
+<span class="nc" id="L1605">                    findGroupDN(groupname, alternateBaseDN);</span>
+<span class="nc" id="L1606">                    return alternateBaseDN;</span>
+                }
+            }
+<span class="nc" id="L1609">            catch (Exception ex) {</span>
+<span class="nc" id="L1610">                Log.debug(ex.getMessage(), ex);</span>
+<span class="nc" id="L1611">            }</span>
+        }
+<span class="nc" id="L1613">        return null;</span>
+    }
+
+    /**
+     * Returns the starting admin DN that searches for admins will performed with.
+     * Searches will performed on the entire sub-tree under the admin DN.
+     *
+     * @return the starting DN used for performing searches.
+     */
+    public String getAdminDN() {
+<span class="nc bnc" id="L1623" title="All 2 branches missed.">        if (encloseDNs) {</span>
+<span class="nc" id="L1624">            return getEnclosedDN(adminDN);</span>
+        } else {
+<span class="nc" id="L1626">            return adminDN;</span>
+        }
+    }
+
+    /**
+     * Sets the starting admin DN that searches for admins will performed with.
+     * Searches will performed on the entire sub-tree under the admins DN.
+     *
+     * @param adminDN the starting DN used for performing admin searches.
+     */
+    public void setAdminDN(String adminDN) {
+<span class="nc" id="L1637">        this.adminDN = adminDN;</span>
+<span class="nc" id="L1638">        properties.put(&quot;ldap.adminDN&quot;, adminDN);</span>
+<span class="nc" id="L1639">    }</span>
+
+    /**
+     * Returns the starting admin DN that searches for admins will performed with.
+     * Searches will performed on the entire sub-tree under the admin DN.
+     *
+     * @return the starting DN used for performing searches.
+     */
+    public String getAdminPassword() {
+<span class="nc" id="L1648">        return adminPassword;</span>
+    }
+
+    /**
+     * Sets the admin password for the LDAP server we're connecting to.
+     *
+     * @param adminPassword the admin password for the LDAP server we're
+     * connecting to.
+     */
+    public void setAdminPassword(String adminPassword) {
+<span class="nc" id="L1658">        this.adminPassword = adminPassword;</span>
+<span class="nc" id="L1659">        properties.put(&quot;ldap.adminPassword&quot;, adminPassword);</span>
+<span class="nc" id="L1660">    }</span>
+
+    /**
+     * Sets whether an LDAP connection pool should be used or not.
+     *
+     * @param connectionPoolEnabled true if an LDAP connection pool should be used.
+     */
+    public void setConnectionPoolEnabled(boolean connectionPoolEnabled) {
+<span class="nc" id="L1668">        this.connectionPoolEnabled = connectionPoolEnabled;</span>
+<span class="nc" id="L1669">        properties.put(&quot;ldap.connectionPoolEnabled&quot;, Boolean.toString(connectionPoolEnabled));</span>
+<span class="nc" id="L1670">    }</span>
+
+    /**
+     * Returns whether an LDAP connection pool should be used or not.
+     *
+     * @return true if an LDAP connection pool should be used.
+     */
+    public boolean isConnectionPoolEnabled() {
+<span class="nc" id="L1678">        return connectionPoolEnabled;</span>
+    }
+
+    /**
+     * Returns the filter used for searching the directory for users, which includes
+     * the default filter (username field search) plus any custom-defined search filter.
+     *
+     * @return the search filter.
+     */
+    public String getSearchFilter() {
+<span class="nc" id="L1688">        StringBuilder filter = new StringBuilder();</span>
+<span class="nc bnc" id="L1689" title="All 2 branches missed.">        if (searchFilter == null) {</span>
+<span class="nc" id="L1690">            filter.append('(').append(usernameField).append(&quot;={0})&quot;);</span>
+        }
+        else {
+<span class="nc" id="L1693">            filter.append(&quot;(&amp;(&quot;).append(usernameField).append(&quot;={0})&quot;);</span>
+<span class="nc" id="L1694">            filter.append(searchFilter).append(')');</span>
+        }
+<span class="nc" id="L1696">        return filter.toString();</span>
+    }
+
+    /**
+     * Sets the search filter appended to the default filter when searching for users.
+     *
+     * @param searchFilter the search filter appended to the default filter
+     *      when searching for users.
+     */
+    public void setSearchFilter(String searchFilter) {
+<span class="nc" id="L1706">        this.searchFilter = searchFilter;</span>
+<span class="nc" id="L1707">        properties.put(&quot;ldap.searchFilter&quot;, searchFilter);</span>
+<span class="nc" id="L1708">    }</span>
+
+    /**
+     * Returns true if the entire tree under the base DN will be searched (recursive search)
+     * when doing LDAP queries (finding users, groups, etc). When false, only a single level
+     * under the base DN will be searched. The default is {@code true} which is the best
+     * option for most LDAP setups. In only a few cases will the directory be setup in such
+     * a way that it's better to do single level searching.
+     *
+     * @return true if the entire tree under the base DN will be searched.
+     */
+    public boolean isSubTreeSearch() {
+<span class="nc" id="L1720">        return subTreeSearch;</span>
+    }
+
+    /**
+     * Sets whether the entire tree under the base DN will be searched (recursive search)
+     * when doing LDAP queries (finding users, groups, etc). When false, only a single level
+     * under the base DN will be searched. The default is {@code true} which is the best
+     * option for most LDAP setups. In only a few cases will the directory be setup in such
+     * a way that it's better to do single level searching.
+     *
+     * @param subTreeSearch true if the entire tree under the base DN will be searched.
+     */
+    public void setSubTreeSearch(boolean subTreeSearch) {
+<span class="nc" id="L1733">        this.subTreeSearch = subTreeSearch;</span>
+<span class="nc" id="L1734">        properties.put(&quot;ldap.subTreeSearch&quot;, String.valueOf(subTreeSearch));</span>
+<span class="nc" id="L1735">    }</span>
+
+    /**
+     * Returns true if LDAP referrals will automatically be followed when found.
+     *
+     * @return true if LDAP referrals are automatically followed.
+     */
+    public boolean isFollowReferralsEnabled() {
+<span class="nc" id="L1743">        return followReferrals;</span>
+    }
+
+    /**
+     * Sets whether LDAP referrals should be automatically followed.
+     *
+     * @param followReferrals true if LDAP referrals should be automatically followed.
+     */
+    public void setFollowReferralsEnabled(boolean followReferrals) {
+<span class="nc" id="L1752">        this.followReferrals = followReferrals;</span>
+<span class="nc" id="L1753">        properties.put(&quot;ldap.autoFollowReferrals&quot;, String.valueOf(followReferrals));</span>
+<span class="nc" id="L1754">    }</span>
+
+    /**
+     * Returns true if LDAP alias referrals will automatically be followed when found.
+     *
+     * @return true if LDAP alias referrals are automatically followed.
+     */
+    public boolean isFollowAliasReferralsEnabled() {
+<span class="nc" id="L1762">        return followAliasReferrals;</span>
+    }
+
+    /**
+     * Sets whether LDAP alias referrals should be automatically followed.
+     *
+     * @param followAliasReferrals true if LDAP alias referrals should be automatically followed.
+     */
+    public void setFollowAliasReferralsEnabled(boolean followAliasReferrals) {
+<span class="nc" id="L1771">        this.followAliasReferrals = followAliasReferrals;</span>
+<span class="nc" id="L1772">        properties.put(&quot;ldap.autoFollowAliasReferrals&quot;, String.valueOf(followAliasReferrals));</span>
+<span class="nc" id="L1773">    }</span>
+
+    /**
+     * Returns the field name used for groups.
+     * Value of groupNameField defaults to &quot;cn&quot;.
+     *
+     * @return the field used for groups.
+     */
+    public String getGroupNameField() {
+<span class="nc" id="L1782">        return groupNameField;</span>
+    }
+
+    /**
+     * Sets the field name used for groups.
+     *
+     * @param groupNameField the field used for groups.
+     */
+    public void setGroupNameField(String groupNameField) {
+<span class="nc" id="L1791">        this.groupNameField = groupNameField;</span>
+<span class="nc" id="L1792">        properties.put(&quot;ldap.groupNameField&quot;, groupNameField);</span>
+<span class="nc" id="L1793">    }</span>
+
+    /**
+     * Return the field used to list members within a group.
+     * Value of groupMemberField defaults to &quot;member&quot;.
+     *
+     * @return the field used to list members within a group.
+     */
+    public String getGroupMemberField() {
+<span class="nc" id="L1802">        return groupMemberField;</span>
+    }
+
+    /**
+     * Sets the field used to list members within a group.
+     * Value of groupMemberField defaults to &quot;member&quot;.
+     *
+     * @param groupMemberField the field used to list members within a group.
+     */
+    public void setGroupMemberField(String groupMemberField) {
+<span class="nc" id="L1812">        this.groupMemberField = groupMemberField;</span>
+<span class="nc" id="L1813">        properties.put(&quot;ldap.groupMemberField&quot;, groupMemberField);</span>
+<span class="nc" id="L1814">    }</span>
+
+    /**
+     * Return the field used to describe a group.
+     * Value of groupDescriptionField defaults to &quot;description&quot;.
+     *
+     * @return the field used to describe a group.
+     */
+    public String getGroupDescriptionField() {
+<span class="nc" id="L1823">        return groupDescriptionField;</span>
+    }
+
+    /**
+     * Sets the field used to describe a group.
+     * Value of groupDescriptionField defaults to &quot;description&quot;.
+     *
+     * @param groupDescriptionField the field used to describe a group.
+     */
+    public void setGroupDescriptionField(String groupDescriptionField) {
+<span class="nc" id="L1833">        this.groupDescriptionField = groupDescriptionField;</span>
+<span class="nc" id="L1834">        properties.put(&quot;ldap.groupDescriptionField&quot;, groupDescriptionField);</span>
+<span class="nc" id="L1835">    }</span>
+
+    /**
+     * Return true if the LDAP server is operating in Posix mode. By default
+     * false is returned. When in Posix mode, users are stored within a group
+     * by their username alone. When not enabled, users are stored in a group using
+     * their entire DN.
+     *
+     * @return true if posix mode is being used by the LDAP server.
+     */
+    public boolean isPosixMode() {
+<span class="nc" id="L1846">        return posixMode;</span>
+    }
+
+    /**
+     * Sets whether the LDAP server is operating in Posix mode. When in Posix mode,
+     * users are stored within a group by their username alone. When not enabled,
+     * users are stored in a group using their entire DN.
+     *
+     * @param posixMode true if posix mode is being used by the LDAP server.
+     */
+    public void setPosixMode(boolean posixMode) {
+<span class="nc" id="L1857">        this.posixMode = posixMode;</span>
+<span class="nc" id="L1858">        properties.put(&quot;ldap.posixMode&quot;, String.valueOf(posixMode));</span>
+<span class="nc" id="L1859">    }</span>
+
+    /**
+     * Returns the filter used for searching the directory for groups, which includes
+     * the default filter plus any custom-defined search filter.
+     *
+     * @return the search filter when searching for groups.
+     */
+    public String getGroupSearchFilter() {
+<span class="nc" id="L1868">        StringBuilder groupFilter = new StringBuilder();</span>
+<span class="nc bnc" id="L1869" title="All 2 branches missed.">        if (groupSearchFilter == null) {</span>
+<span class="nc" id="L1870">            groupFilter.append('(').append(groupNameField).append(&quot;={0})&quot;);</span>
+        }
+        else {
+<span class="nc" id="L1873">            groupFilter.append(&quot;(&amp;(&quot;).append(groupNameField).append(&quot;={0})&quot;);</span>
+<span class="nc" id="L1874">            groupFilter.append(groupSearchFilter).append(')');</span>
+        }
+<span class="nc" id="L1876">        return groupFilter.toString();</span>
+    }
+
+    /**
+     * Sets the search filter appended to the default filter when searching for groups.
+     *
+     * @param groupSearchFilter the search filter appended to the default filter
+     *      when searching for groups.
+     */
+    public void setGroupSearchFilter(String groupSearchFilter) {
+<span class="nc" id="L1886">        this.groupSearchFilter = groupSearchFilter;</span>
+<span class="nc" id="L1887">        properties.put(&quot;ldap.groupSearchFilter&quot;, groupSearchFilter);</span>
+<span class="nc" id="L1888">    }</span>
+
+    public boolean isEnclosingDNs() {
+<span class="nc" id="L1891">        String encloseStr = properties.get(&quot;ldap.encloseDNs&quot;);</span>
+<span class="nc bnc" id="L1892" title="All 2 branches missed.">        if (encloseStr != null) {</span>
+<span class="nc" id="L1893">            encloseDNs = Boolean.valueOf(encloseStr);</span>
+        } else {
+<span class="nc" id="L1895">            encloseDNs = true;</span>
+        }
+
+<span class="nc" id="L1898">        return encloseDNs;</span>
+    }
+
+    public void setIsEnclosingDNs(boolean enable) {
+<span class="nc" id="L1902">        this.encloseDNs = enable;</span>
+<span class="nc" id="L1903">        properties.put(&quot;ldap.encloseDNs&quot;, Boolean.toString(enable));</span>
+<span class="nc" id="L1904">    }</span>
+
+    /**
+     * Generic routine for retrieving a list of results from the LDAP server.  It's meant to be very
+     * flexible so that just about any query for a list of results can make use of it without having
+     * to reimplement their own calls to LDAP.  This routine also accounts for sorting settings,
+     * paging settings, any other global settings, and alternate DNs.
+     *
+     * The passed in filter string needs to be pre-prepared!  In other words, nothing will be changed
+     * in the string before it is used as a string.
+     *
+     * @param attribute LDAP attribute to be pulled from each result and placed in the return results.
+     *     Typically pulled from this manager.
+     * @param searchFilter Filter to use to perform the search.  Typically pulled from this manager.
+     * @param startIndex Number/index of first result to include in results.  (-1 for no limit)
+     * @param numResults Number of results to include.  (-1 for no limit)
+     * @param suffixToTrim An arbitrary string to trim from the end of every attribute returned.  null to disable.
+     * @return A simple list of strings (that should be sorted) of the results.
+     */
+    public List&lt;String&gt; retrieveList(String attribute, String searchFilter, int startIndex, int numResults, String suffixToTrim) {
+<span class="nc" id="L1924">        return retrieveList(attribute, searchFilter, startIndex, numResults, suffixToTrim, false);</span>
+    }
+
+    /**
+     * Generic routine for retrieving a list of results from the LDAP server.  It's meant to be very
+     * flexible so that just about any query for a list of results can make use of it without having
+     * to reimplement their own calls to LDAP.  This routine also accounts for sorting settings,
+     * paging settings, any other global settings, and alternate DNs.
+     *
+     * The passed in filter string needs to be pre-prepared!  In other words, nothing will be changed
+     * in the string before it is used as a string.
+     *
+     * @param attribute LDAP attribute to be pulled from each result and placed in the return results.
+     *     Typically pulled from this manager.
+     * @param searchFilter Filter to use to perform the search.  Typically pulled from this manager.
+     * @param startIndex Number/index of first result to include in results.  (-1 for no limit)
+     * @param numResults Number of results to include.  (-1 for no limit)
+     * @param suffixToTrim An arbitrary string to trim from the end of every attribute returned.  null to disable.
+     * @param escapeJIDs Use JID-escaping for returned results (e.g. usernames)
+     * @return A simple list of strings (that should be sorted) of the results.
+     */
+    public List&lt;String&gt; retrieveList(String attribute, String searchFilter, int startIndex, int numResults, String suffixToTrim, boolean escapeJIDs) {
+<span class="nc" id="L1946">        List&lt;String&gt; results = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L1947">        int pageSize = -1;</span>
+<span class="nc" id="L1948">        String pageSizeStr = properties.get(&quot;ldap.pagedResultsSize&quot;);</span>
+<span class="nc bnc" id="L1949" title="All 2 branches missed.">        if (pageSizeStr != null)</span>
+        {
+            try {
+<span class="nc" id="L1952">                 pageSize = Integer.parseInt(pageSizeStr); /* radix -1 is invalid */</span>
+            }
+<span class="nc" id="L1954">            catch (NumberFormatException e) {</span>
+                // poorly formatted number, ignoring
+<span class="nc" id="L1956">            }</span>
+        }
+<span class="nc" id="L1958">        Boolean clientSideSort = false;</span>
+<span class="nc" id="L1959">        String clientSideSortStr = properties.get(&quot;ldap.clientSideSorting&quot;);</span>
+<span class="nc bnc" id="L1960" title="All 2 branches missed.">        if (clientSideSortStr != null) {</span>
+<span class="nc" id="L1961">            clientSideSort = Boolean.valueOf(clientSideSortStr);</span>
+        }
+<span class="nc" id="L1963">        LdapContext ctx = null;</span>
+<span class="nc" id="L1964">        LdapContext ctx2 = null;</span>
+        try {
+<span class="nc" id="L1966">            ctx = getContext(baseDN);</span>
+
+            // Set up request controls, if appropriate.
+<span class="nc" id="L1969">            List&lt;Control&gt; baseTmpRequestControls = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L1970" title="All 2 branches missed.">            if (!clientSideSort) {</span>
+                // Server side sort on username field.
+<span class="nc" id="L1972">                baseTmpRequestControls.add(new SortControl(new String[]{attribute}, Control.NONCRITICAL));</span>
+            }
+<span class="nc bnc" id="L1974" title="All 2 branches missed.">            if (pageSize &gt; 0) {</span>
+                // Server side paging.
+<span class="nc" id="L1976">                baseTmpRequestControls.add(new PagedResultsControl(pageSize, Control.NONCRITICAL));</span>
+            }
+<span class="nc" id="L1978">            Control[] baseRequestControls = baseTmpRequestControls.toArray(new Control[baseTmpRequestControls.size()]);</span>
+<span class="nc" id="L1979">            ctx.setRequestControls(baseRequestControls);</span>
+
+<span class="nc" id="L1981">            SearchControls searchControls = new SearchControls();</span>
+            // See if recursive searching is enabled. Otherwise, only search one level.
+<span class="nc bnc" id="L1983" title="All 2 branches missed.">            if (isSubTreeSearch()) {</span>
+<span class="nc" id="L1984">                searchControls.setSearchScope(SearchControls.SUBTREE_SCOPE);</span>
+            }
+            else {
+<span class="nc" id="L1987">                searchControls.setSearchScope(SearchControls.ONELEVEL_SCOPE);</span>
+            }
+<span class="nc" id="L1989">            searchControls.setReturningAttributes(new String[] { attribute });</span>
+            // If server side sort, we'll skip the initial ones we don't want, and stop when we've hit
+            // the amount we do want.
+<span class="nc" id="L1992">            int skip = -1;</span>
+<span class="nc" id="L1993">            int lastRes = -1;</span>
+<span class="nc bnc" id="L1994" title="All 2 branches missed.">            if (!clientSideSort) {</span>
+<span class="nc bnc" id="L1995" title="All 2 branches missed.">                if (startIndex != -1) {</span>
+<span class="nc" id="L1996">                    skip = startIndex;</span>
+                }
+<span class="nc bnc" id="L1998" title="All 2 branches missed.">                if (numResults != -1) {</span>
+<span class="nc" id="L1999">                    lastRes = startIndex + numResults;</span>
+                }
+            }
+            byte[] cookie;
+<span class="nc" id="L2003">            int count = 0;</span>
+            // Run through all pages of results (one page is also possible  ;)  )
+            do {
+<span class="nc" id="L2006">                cookie = null;</span>
+<span class="nc" id="L2007">                NamingEnumeration&lt;SearchResult&gt; answer = ctx.search(&quot;&quot;, searchFilter, searchControls);</span>
+
+                // Examine all of the results on this page
+<span class="nc bnc" id="L2010" title="All 2 branches missed.">                while (answer.hasMoreElements()) {</span>
+<span class="nc" id="L2011">                    count++;</span>
+<span class="nc bnc" id="L2012" title="All 4 branches missed.">                    if (skip &gt; 0 &amp;&amp; count &lt;= skip) {</span>
+<span class="nc" id="L2013">                        answer.next();</span>
+<span class="nc" id="L2014">                        continue;</span>
+                    }
+<span class="nc bnc" id="L2016" title="All 4 branches missed.">                    if (lastRes != -1 &amp;&amp; count &gt; lastRes) {</span>
+<span class="nc" id="L2017">                        answer.next();</span>
+<span class="nc" id="L2018">                        break;</span>
+                    }
+
+                    // Get the next result.
+<span class="nc" id="L2022">                    String result = (String)answer.next().getAttributes().get(attribute).get();</span>
+                    // Remove suffixToTrim if set
+<span class="nc bnc" id="L2024" title="All 6 branches missed.">                    if (suffixToTrim != null &amp;&amp; suffixToTrim.length() &gt; 0 &amp;&amp; result.endsWith(suffixToTrim)) {</span>
+<span class="nc" id="L2025">                        result = result.substring(0,result.length()-suffixToTrim.length());</span>
+                    }
+                    // Add this to the result.
+<span class="nc bnc" id="L2028" title="All 2 branches missed.">                    results.add(escapeJIDs ? JID.escapeNode(result) : result);</span>
+<span class="nc" id="L2029">                }</span>
+                // Examine the paged results control response
+<span class="nc" id="L2031">                Control[] controls = ctx.getResponseControls();</span>
+<span class="nc bnc" id="L2032" title="All 2 branches missed.">                if (controls != null) {</span>
+<span class="nc bnc" id="L2033" title="All 2 branches missed.">                    for (Control control : controls) {</span>
+<span class="nc bnc" id="L2034" title="All 2 branches missed.">                        if (control instanceof PagedResultsResponseControl) {</span>
+<span class="nc" id="L2035">                            PagedResultsResponseControl prrc = (PagedResultsResponseControl) control;</span>
+<span class="nc" id="L2036">                            cookie = prrc.getCookie();</span>
+                        }
+                    }
+                }
+                // Close the enumeration.
+<span class="nc" id="L2041">                answer.close();</span>
+                // Re-activate paged results; affects nothing if no paging support
+<span class="nc" id="L2043">                List&lt;Control&gt; tmpRequestControls = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L2044" title="All 2 branches missed.">                if (!clientSideSort) {</span>
+                    // Server side sort on username field.
+<span class="nc" id="L2046">                    tmpRequestControls.add(new SortControl(new String[]{attribute}, Control.NONCRITICAL));</span>
+                }
+<span class="nc bnc" id="L2048" title="All 2 branches missed.">                if (pageSize &gt; 0) {</span>
+                    // Server side paging.
+<span class="nc" id="L2050">                    tmpRequestControls.add(new PagedResultsControl(pageSize, cookie, Control.CRITICAL));</span>
+                }
+<span class="nc" id="L2052">                Control[] requestControls = tmpRequestControls.toArray(new Control[tmpRequestControls.size()]);</span>
+<span class="nc" id="L2053">                ctx.setRequestControls(requestControls);</span>
+<span class="nc bnc" id="L2054" title="All 6 branches missed.">            } while (cookie != null &amp;&amp; (lastRes == -1 || count &lt;= lastRes));</span>
+
+            // Add groups found in alternate DN
+<span class="nc bnc" id="L2057" title="All 6 branches missed.">            if (alternateBaseDN != null &amp;&amp; (lastRes == -1 || count &lt;= lastRes)) {</span>
+<span class="nc" id="L2058">                ctx2 = getContext(alternateBaseDN);</span>
+<span class="nc" id="L2059">                ctx2.setRequestControls(baseRequestControls);</span>
+
+                // Run through all pages of results (one page is also possible  ;)  )
+                do {
+<span class="nc" id="L2063">                    cookie = null;</span>
+<span class="nc" id="L2064">                    NamingEnumeration&lt;SearchResult&gt; answer = ctx2.search(&quot;&quot;, searchFilter, searchControls);</span>
+
+                    // Examine all of the results on this page
+<span class="nc bnc" id="L2067" title="All 2 branches missed.">                    while (answer.hasMoreElements()) {</span>
+<span class="nc" id="L2068">                        count++;</span>
+<span class="nc bnc" id="L2069" title="All 4 branches missed.">                        if (skip &gt; 0 &amp;&amp; count &lt;= skip) {</span>
+<span class="nc" id="L2070">                            answer.next();</span>
+<span class="nc" id="L2071">                            continue;</span>
+                        }
+<span class="nc bnc" id="L2073" title="All 4 branches missed.">                        if (lastRes != -1 &amp;&amp; count &gt; lastRes) {</span>
+<span class="nc" id="L2074">                            answer.next();</span>
+<span class="nc" id="L2075">                            break;</span>
+                        }
+
+                        // Get the next result.
+<span class="nc" id="L2079">                        String result = (String)answer.next().getAttributes().get(attribute).get();</span>
+                        // Remove suffixToTrim if set
+<span class="nc bnc" id="L2081" title="All 6 branches missed.">                        if (suffixToTrim != null &amp;&amp; suffixToTrim.length() &gt; 0 &amp;&amp; result.endsWith(suffixToTrim)) {</span>
+<span class="nc" id="L2082">                            result = result.substring(0,result.length()-suffixToTrim.length());</span>
+                        }
+                        // Add this to the result.
+<span class="nc bnc" id="L2085" title="All 2 branches missed.">                        results.add(escapeJIDs ? JID.escapeNode(result) : result);</span>
+<span class="nc" id="L2086">                    }</span>
+                    // Examine the paged results control response
+<span class="nc" id="L2088">                    Control[] controls = ctx2.getResponseControls();</span>
+<span class="nc bnc" id="L2089" title="All 2 branches missed.">                    if (controls != null) {</span>
+<span class="nc bnc" id="L2090" title="All 2 branches missed.">                        for (Control control : controls) {</span>
+<span class="nc bnc" id="L2091" title="All 2 branches missed.">                            if (control instanceof PagedResultsResponseControl) {</span>
+<span class="nc" id="L2092">                                PagedResultsResponseControl prrc = (PagedResultsResponseControl) control;</span>
+<span class="nc" id="L2093">                                cookie = prrc.getCookie();</span>
+                            }
+                        }
+                    }
+                    // Close the enumeration.
+<span class="nc" id="L2098">                    answer.close();</span>
+                    // Re-activate paged results; affects nothing if no paging support
+<span class="nc" id="L2100">                    List&lt;Control&gt; tmpRequestControls = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L2101" title="All 2 branches missed.">                    if (!clientSideSort) {</span>
+                        // Server side sort on username field.
+<span class="nc" id="L2103">                        tmpRequestControls.add(new SortControl(new String[]{attribute}, Control.NONCRITICAL));</span>
+                    }
+<span class="nc bnc" id="L2105" title="All 2 branches missed.">                    if (pageSize &gt; 0) {</span>
+                        // Server side paging.
+<span class="nc" id="L2107">                        tmpRequestControls.add(new PagedResultsControl(pageSize, cookie, Control.CRITICAL));</span>
+                    }
+<span class="nc" id="L2109">                    Control[] requestControls = tmpRequestControls.toArray(new Control[tmpRequestControls.size()]);</span>
+<span class="nc" id="L2110">                    ctx2.setRequestControls(requestControls);</span>
+<span class="nc bnc" id="L2111" title="All 6 branches missed.">                } while (cookie != null &amp;&amp; (lastRes == -1 || count &lt;= lastRes));</span>
+            }
+
+            // If client-side sorting is enabled, sort and trim.
+<span class="nc bnc" id="L2115" title="All 2 branches missed.">            if (clientSideSort) {</span>
+<span class="nc" id="L2116">                Collections.sort(results);</span>
+<span class="nc bnc" id="L2117" title="All 4 branches missed.">                if (startIndex != -1 || numResults != -1) {</span>
+<span class="nc bnc" id="L2118" title="All 2 branches missed.">                    if (startIndex == -1) {</span>
+<span class="nc" id="L2119">                        startIndex = 0;</span>
+                    }
+<span class="nc bnc" id="L2121" title="All 2 branches missed.">                    if (numResults == -1) {</span>
+<span class="nc" id="L2122">                        numResults = results.size();</span>
+                    }
+<span class="nc" id="L2124">                    int endIndex = Math.min(startIndex + numResults, results.size()-1);</span>
+<span class="nc" id="L2125">                    results = results.subList(startIndex, endIndex);</span>
+                }
+            }
+        }
+<span class="nc" id="L2129">        catch (Exception e) {</span>
+<span class="nc" id="L2130">            Log.error(e.getMessage(), e);</span>
+        }
+        finally {
+<span class="nc" id="L2133">            try {</span>
+<span class="nc bnc" id="L2134" title="All 6 branches missed.">                if (ctx != null) {</span>
+<span class="nc" id="L2135">                    ctx.setRequestControls(null);</span>
+<span class="nc" id="L2136">                    ctx.close();</span>
+                }
+<span class="nc bnc" id="L2138" title="All 6 branches missed.">                if (ctx2 != null) {</span>
+<span class="nc" id="L2139">                    ctx2.setRequestControls(null);</span>
+<span class="nc" id="L2140">                    ctx2.close();</span>
+                }
+            }
+<span class="nc" id="L2143">            catch (Exception ignored) {</span>
+                // Ignore.
+<span class="nc" id="L2145">            }</span>
+<span class="nc" id="L2146">        }</span>
+<span class="nc" id="L2147">        return results;</span>
+    }
+
+    /**
+     * Generic routine for retrieving the number of available results from the LDAP server that
+     * match the passed search filter.  This routine also accounts for paging settings and
+     * alternate DNs.
+     *
+     * The passed in filter string needs to be pre-prepared!  In other words, nothing will be changed
+     * in the string before it is used as a string.
+     *
+     * @param attribute LDAP attribute to be pulled from each result and used in the query.
+     *     Typically pulled from this manager.
+     * @param searchFilter Filter to use to perform the search.  Typically pulled from this manager.
+     * @return The number of entries that match the filter.
+     */
+    public Integer retrieveListCount(String attribute, String searchFilter) {
+<span class="nc" id="L2164">        int pageSize = -1;</span>
+<span class="nc" id="L2165">        String pageSizeStr = properties.get(&quot;ldap.pagedResultsSize&quot;);</span>
+<span class="nc bnc" id="L2166" title="All 2 branches missed.">        if (pageSizeStr != null) {</span>
+            try {
+<span class="nc" id="L2168">                pageSize = Integer.parseInt(pageSizeStr); /* radix -1 is invalid */</span>
+           }
+<span class="nc" id="L2170">           catch (NumberFormatException e) {</span>
+               // poorly formatted number, ignoring
+<span class="nc" id="L2172">           }</span>
+        }
+<span class="nc" id="L2174">        LdapContext ctx = null;</span>
+<span class="nc" id="L2175">        LdapContext ctx2 = null;</span>
+<span class="nc" id="L2176">        Integer count = 0;</span>
+        try {
+<span class="nc" id="L2178">            ctx = getContext(baseDN);</span>
+
+            // Set up request controls, if appropriate.
+<span class="nc" id="L2181">            List&lt;Control&gt; baseTmpRequestControls = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L2182" title="All 2 branches missed.">            if (pageSize &gt; 0) {</span>
+                // Server side paging.
+<span class="nc" id="L2184">                baseTmpRequestControls.add(new PagedResultsControl(pageSize, Control.NONCRITICAL));</span>
+            }
+<span class="nc" id="L2186">            Control[] baseRequestControls = baseTmpRequestControls.toArray(new Control[baseTmpRequestControls.size()]);</span>
+<span class="nc" id="L2187">            ctx.setRequestControls(baseRequestControls);</span>
+
+<span class="nc" id="L2189">            SearchControls searchControls = new SearchControls();</span>
+            // See if recursive searching is enabled. Otherwise, only search one level.
+<span class="nc bnc" id="L2191" title="All 2 branches missed.">            if (isSubTreeSearch()) {</span>
+<span class="nc" id="L2192">                searchControls.setSearchScope(SearchControls.SUBTREE_SCOPE);</span>
+            }
+            else {
+<span class="nc" id="L2195">                searchControls.setSearchScope(SearchControls.ONELEVEL_SCOPE);</span>
+            }
+<span class="nc" id="L2197">            searchControls.setReturningAttributes(new String[] { attribute });</span>
+            byte[] cookie;
+            // Run through all pages of results (one page is also possible  ;)  )
+            do {
+<span class="nc" id="L2201">                cookie = null;</span>
+<span class="nc" id="L2202">                NamingEnumeration&lt;SearchResult&gt; answer = ctx.search(&quot;&quot;, searchFilter, searchControls);</span>
+
+                // Examine all of the results on this page
+<span class="nc bnc" id="L2205" title="All 2 branches missed.">                while (answer.hasMoreElements()) {</span>
+<span class="nc" id="L2206">                    answer.next();</span>
+<span class="nc" id="L2207">                    count++;</span>
+                }
+                // Examine the paged results control response
+<span class="nc" id="L2210">                Control[] controls = ctx.getResponseControls();</span>
+<span class="nc bnc" id="L2211" title="All 2 branches missed.">                if (controls != null) {</span>
+<span class="nc bnc" id="L2212" title="All 2 branches missed.">                    for (Control control : controls) {</span>
+<span class="nc bnc" id="L2213" title="All 2 branches missed.">                        if (control instanceof PagedResultsResponseControl) {</span>
+<span class="nc" id="L2214">                            PagedResultsResponseControl prrc = (PagedResultsResponseControl) control;</span>
+<span class="nc" id="L2215">                            cookie = prrc.getCookie();</span>
+                        }
+                    }
+                }
+                // Close the enumeration.
+<span class="nc" id="L2220">                answer.close();</span>
+                // Re-activate paged results; affects nothing if no paging support
+<span class="nc" id="L2222">                List&lt;Control&gt; tmpRequestControls = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L2223" title="All 2 branches missed.">                if (pageSize &gt; 0) {</span>
+                    // Server side paging.
+<span class="nc" id="L2225">                    tmpRequestControls.add(new PagedResultsControl(pageSize, cookie, Control.CRITICAL));</span>
+                }
+<span class="nc" id="L2227">                Control[] requestControls = tmpRequestControls.toArray(new Control[tmpRequestControls.size()]);</span>
+<span class="nc" id="L2228">                ctx.setRequestControls(requestControls);</span>
+<span class="nc bnc" id="L2229" title="All 2 branches missed.">            } while (cookie != null);</span>
+
+            // Add groups found in alternate DN
+<span class="nc bnc" id="L2232" title="All 2 branches missed.">            if (alternateBaseDN != null) {</span>
+<span class="nc" id="L2233">                ctx2 = getContext(alternateBaseDN);</span>
+<span class="nc" id="L2234">                ctx2.setRequestControls(baseRequestControls);</span>
+
+                // Run through all pages of results (one page is also possible  ;)  )
+                do {
+<span class="nc" id="L2238">                    cookie = null;</span>
+<span class="nc" id="L2239">                    NamingEnumeration&lt;SearchResult&gt; answer = ctx2.search(&quot;&quot;, searchFilter, searchControls);</span>
+
+                    // Examine all of the results on this page
+<span class="nc bnc" id="L2242" title="All 2 branches missed.">                    while (answer.hasMoreElements()) {</span>
+<span class="nc" id="L2243">                        answer.next();</span>
+<span class="nc" id="L2244">                        count++;</span>
+                    }
+                    // Examine the paged results control response
+<span class="nc" id="L2247">                    Control[] controls = ctx2.getResponseControls();</span>
+<span class="nc bnc" id="L2248" title="All 2 branches missed.">                    if (controls != null) {</span>
+<span class="nc bnc" id="L2249" title="All 2 branches missed.">                        for (Control control : controls) {</span>
+<span class="nc bnc" id="L2250" title="All 2 branches missed.">                            if (control instanceof PagedResultsResponseControl) {</span>
+<span class="nc" id="L2251">                                PagedResultsResponseControl prrc = (PagedResultsResponseControl) control;</span>
+<span class="nc" id="L2252">                                cookie = prrc.getCookie();</span>
+                            }
+                        }
+                    }
+                    // Close the enumeration.
+<span class="nc" id="L2257">                    answer.close();</span>
+                    // Re-activate paged results; affects nothing if no paging support
+<span class="nc" id="L2259">                    List&lt;Control&gt; tmpRequestControls = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L2260" title="All 2 branches missed.">                    if (pageSize &gt; 0) {</span>
+                        // Server side paging.
+<span class="nc" id="L2262">                        tmpRequestControls.add(new PagedResultsControl(pageSize, cookie, Control.CRITICAL));</span>
+                    }
+<span class="nc" id="L2264">                    Control[] requestControls = tmpRequestControls.toArray(new Control[tmpRequestControls.size()]);</span>
+<span class="nc" id="L2265">                    ctx2.setRequestControls(requestControls);</span>
+<span class="nc bnc" id="L2266" title="All 2 branches missed.">                } while (cookie != null);</span>
+            }
+        }
+<span class="nc" id="L2269">        catch (Exception e) {</span>
+<span class="nc" id="L2270">            Log.error(e.getMessage(), e);</span>
+        }
+        finally {
+<span class="nc" id="L2273">            try {</span>
+<span class="nc bnc" id="L2274" title="All 6 branches missed.">                if (ctx != null) {</span>
+<span class="nc" id="L2275">                    ctx.setRequestControls(null);</span>
+<span class="nc" id="L2276">                    ctx.close();</span>
+                }
+<span class="nc bnc" id="L2278" title="All 6 branches missed.">                if (ctx2 != null) {</span>
+<span class="nc" id="L2279">                    ctx2.setRequestControls(null);</span>
+<span class="nc" id="L2280">                    ctx2.close();</span>
+                }
+            }
+<span class="nc" id="L2283">            catch (Exception ignored) {</span>
+                // Ignore.
+<span class="nc" id="L2285">            }</span>
+<span class="nc" id="L2286">        }</span>
+<span class="nc" id="L2287">        return count;</span>
+    }
+    
+    /**
+     * Escapes any special chars (RFC 4515) from a string representing
+     * a search filter assertion value.
+     *
+     * @param value The input string.
+     *
+     * @return A assertion value string ready for insertion into a 
+     *         search filter string.
+     */
+    public static String sanitizeSearchFilter(final String value) {
+<span class="fc" id="L2300">      return sanitizeSearchFilter(value, false);</span>
+      
+    }
+      
+    /**
+     * Escapes any special chars (RFC 4515) from a string representing
+     * a search filter assertion value, with the exception of the '*' wildcard sign
+     *
+     * @param value The input string.
+     * @param acceptWildcard {@code true} to accept wildcards, otherwise {@code false}
+     *
+     * @return A assertion value string ready for insertion into a 
+     *         search filter string.
+     */
+    public static String sanitizeSearchFilter(final String value, boolean acceptWildcard ) {
+
+
+<span class="fc" id="L2317">            StringBuilder result = new StringBuilder();</span>
+
+<span class="fc bfc" id="L2319" title="All 2 branches covered.">            for (int i=0; i&lt; value.length(); i++) {</span>
+
+<span class="fc" id="L2321">                char c = value.charAt(i);</span>
+
+<span class="pc bpc" id="L2323" title="3 of 11 branches missed.">                switch(c) {</span>
+<span class="fc" id="L2324">                    case '!':		result.append(&quot;\\21&quot;);	break;</span>
+<span class="fc" id="L2325">                    case '&amp;':		result.append(&quot;\\26&quot;);	break;</span>
+<span class="fc" id="L2326">                    case '(':		result.append(&quot;\\28&quot;);	break;</span>
+<span class="fc" id="L2327">                    case ')':		result.append(&quot;\\29&quot;);	break;</span>
+<span class="fc bfc" id="L2328" title="All 2 branches covered.">                    case '*':		result.append(acceptWildcard ? &quot;*&quot; : &quot;\\2a&quot;);	break;</span>
+<span class="nc" id="L2329">                    case ':':		result.append(&quot;\\3a&quot;);	break;</span>
+<span class="nc" id="L2330">                    case '\\':		result.append(&quot;\\5c&quot;);	break;</span>
+<span class="fc" id="L2331">                    case '|':		result.append(&quot;\\7c&quot;);	break;</span>
+<span class="fc" id="L2332">                    case '~':		result.append(&quot;\\7e&quot;);	break;</span>
+<span class="nc" id="L2333">                    case '\u0000':	result.append(&quot;\\00&quot;);	break;</span>
+                default:
+<span class="pc bpc" id="L2335" title="1 of 2 branches missed.">                    if (c &lt;= 0x7f) {</span>
+                        // regular 1-byte UTF-8 char
+<span class="fc" id="L2337">                        result.append(String.valueOf(c));</span>
+                    }
+<span class="nc bnc" id="L2339" title="All 2 branches missed.">                    else if (c &gt;= 0x080) {</span>
+                        // higher-order 2, 3 and 4-byte UTF-8 chars
+<span class="nc bnc" id="L2341" title="All 2 branches missed.">                        if ( JiveGlobals.getBooleanProperty( &quot;ldap.encodeMultibyteCharacters&quot;, false ) )</span>
+                        {
+<span class="nc" id="L2343">                            byte[] utf8bytes = String.valueOf( c ).getBytes( StandardCharsets.UTF_8 );</span>
+<span class="nc bnc" id="L2344" title="All 2 branches missed.">                            for ( byte b : utf8bytes )</span>
+                            {
+<span class="nc" id="L2346">                                result.append( String.format( &quot;\\%02x&quot;, b ) );</span>
+                            }
+<span class="nc" id="L2348">                        }</span>
+                        else
+                        {
+<span class="nc" id="L2351">                            result.append(String.valueOf(c));</span>
+                        }
+                    }
+                }
+            }
+<span class="fc" id="L2356">            return result.toString();</span>
+    }
+    
+
+    /**
+     * Encloses DN values with &quot;
+     *
+     * @param dnValue the unenclosed value of a DN (e.g. ou=Jive Software\, Inc,dc=support,dc=jive,dc=com)
+     * @return String the enclosed value of the DN (e.g. ou=&quot;Jive Software\, Inc&quot;,dc=&quot;support&quot;,dc=&quot;jive&quot;,dc=&quot;com&quot;)
+     */
+    public static String getEnclosedDN(String dnValue) {
+<span class="pc bpc" id="L2367" title="1 of 4 branches missed.">        if (dnValue == null || dnValue.equals(&quot;&quot;)) {</span>
+<span class="fc" id="L2368">            return dnValue;</span>
+        }
+
+<span class="fc bfc" id="L2371" title="All 2 branches covered.">        if (dnPattern == null) {</span>
+<span class="fc" id="L2372">            dnPattern = Pattern.compile(&quot;([^\\\\]=)([^\&quot;]*?[^\\\\])(,|$)&quot;);</span>
+        }
+
+<span class="fc" id="L2375">        Matcher matcher = dnPattern.matcher(dnValue);</span>
+<span class="fc" id="L2376">        dnValue = matcher.replaceAll(&quot;$1\&quot;$2\&quot;$3&quot;);</span>
+<span class="fc" id="L2377">        dnValue = dnValue.replace(&quot;\\,&quot;, &quot;,&quot;);</span>
+
+<span class="fc" id="L2379">        return dnValue;</span>
+    }
+
+    // Set the pattern to use to wrap DN values with &quot;
+    private static Pattern dnPattern;
+
+    private static class DNCacheEntry implements Serializable
+    {
+        private final String userDN;
+        private final String baseDN;
+
+        public DNCacheEntry( String userDN, String baseDN )
+<span class="nc" id="L2391">        {</span>
+<span class="nc" id="L2392">            this.userDN = userDN;</span>
+<span class="nc" id="L2393">            this.baseDN = baseDN;</span>
+<span class="nc" id="L2394">        }</span>
+
+        public String getUserDN()
+        {
+<span class="nc" id="L2398">            return userDN;</span>
+        }
+
+        public String getBaseDN()
+        {
+<span class="nc" id="L2403">            return baseDN;</span>
+        }
+
+        @Override
+        public boolean equals( Object o )
+        {
+<span class="nc bnc" id="L2409" title="All 2 branches missed.">            if ( this == o )</span>
+            {
+<span class="nc" id="L2411">                return true;</span>
+            }
+<span class="nc bnc" id="L2413" title="All 4 branches missed.">            if ( o == null || getClass() != o.getClass() )</span>
+            {
+<span class="nc" id="L2415">                return false;</span>
+            }
+
+<span class="nc" id="L2418">            DNCacheEntry that = (DNCacheEntry) o;</span>
+
+<span class="nc bnc" id="L2420" title="All 6 branches missed.">            if ( userDN != null ? !userDN.equals( that.userDN ) : that.userDN != null )</span>
+            {
+<span class="nc" id="L2422">                return false;</span>
+            }
+<span class="nc bnc" id="L2424" title="All 4 branches missed.">            return baseDN != null ? baseDN.equals( that.baseDN ) : that.baseDN == null;</span>
+        }
+
+        @Override
+        public int hashCode()
+        {
+<span class="nc bnc" id="L2430" title="All 2 branches missed.">            int result = userDN != null ? userDN.hashCode() : 0;</span>
+<span class="nc bnc" id="L2431" title="All 2 branches missed.">            result = 31 * result + ( baseDN != null ? baseDN.hashCode() : 0 );</span>
+<span class="nc" id="L2432">            return result;</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

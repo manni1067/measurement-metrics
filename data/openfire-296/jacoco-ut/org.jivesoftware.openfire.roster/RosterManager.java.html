@@ -1,0 +1,1030 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>RosterManager.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.roster</a> &gt; <span class="el_source">RosterManager.java</span></div><h1>RosterManager.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2004-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.roster;
+
+import org.jivesoftware.openfire.RoutingTable;
+import org.jivesoftware.openfire.SharedGroupException;
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.container.BasicModule;
+import org.jivesoftware.openfire.event.GroupEventDispatcher;
+import org.jivesoftware.openfire.event.GroupEventListener;
+import org.jivesoftware.openfire.event.UserEventDispatcher;
+import org.jivesoftware.openfire.event.UserEventListener;
+import org.jivesoftware.openfire.group.Group;
+import org.jivesoftware.openfire.group.GroupManager;
+import org.jivesoftware.openfire.group.GroupNotFoundException;
+import org.jivesoftware.openfire.user.User;
+import org.jivesoftware.openfire.user.UserManager;
+import org.jivesoftware.openfire.user.UserNotFoundException;
+import org.jivesoftware.util.ClassUtils;
+import org.jivesoftware.util.JiveGlobals;
+import org.jivesoftware.util.PropertyEventDispatcher;
+import org.jivesoftware.util.PropertyEventListener;
+import org.jivesoftware.util.cache.Cache;
+import org.jivesoftware.util.cache.CacheFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmpp.packet.JID;
+import org.xmpp.packet.Presence;
+
+import java.util.*;
+
+/**
+ * A simple service that allows components to retrieve a roster based solely on the ID
+ * of the owner. Users have convenience methods for obtaining a roster associated with
+ * the owner. However there are many components that need to retrieve the roster
+ * based solely on the generic ID owner key. This interface defines a service that can
+ * do that. This allows classes that generically manage resource for resource owners
+ * (such as presence updates) to generically offer their services without knowing or
+ * caring if the roster owner is a user, chatbot, etc.
+ *
+ * @author Iain Shigeoka
+ */
+public class RosterManager extends BasicModule implements GroupEventListener, UserEventListener {
+
+<span class="nc" id="L59">    private static final Logger Log = LoggerFactory.getLogger(RosterManager.class);</span>
+
+    private static final String MUTEX_SUFFIX = &quot; ro&quot;;
+    
+<span class="nc" id="L63">    private Cache&lt;String, Roster&gt; rosterCache = null;</span>
+    private XMPPServer server;
+    private RoutingTable routingTable;
+    private RosterItemProvider provider;
+
+    /**
+     * Returns true if the roster service is enabled. When disabled it is not possible to
+     * retrieve users rosters or broadcast presence packets to roster contacts.
+     *
+     * @return true if the roster service is enabled.
+     */
+    public static boolean isRosterServiceEnabled() {
+<span class="nc" id="L75">        return JiveGlobals.getBooleanProperty(&quot;xmpp.client.roster.active&quot;, true);</span>
+    }
+
+    /**
+     * Returns true if the roster versioning is enabled.
+     *
+     * @return true if the roster versioning is enabled.
+     */
+    public static boolean isRosterVersioningEnabled() {
+<span class="nc" id="L84">        return JiveGlobals.getBooleanProperty(&quot;xmpp.client.roster.versioning.active&quot;, true);</span>
+    }
+
+    public RosterManager() {
+<span class="nc" id="L88">        super(&quot;Roster Manager&quot;);</span>
+<span class="nc" id="L89">        rosterCache = CacheFactory.createCache(&quot;Roster&quot;);</span>
+
+<span class="nc" id="L91">        initProvider();</span>
+
+<span class="nc" id="L93">        PropertyEventDispatcher.addListener(new PropertyEventListener() {</span>
+            @Override
+            public void propertySet(String property, Map params) {
+<span class="nc bnc" id="L96" title="All 2 branches missed.">                if (property.equals(&quot;provider.roster.className&quot;)) {</span>
+<span class="nc" id="L97">                    initProvider();</span>
+                }
+<span class="nc" id="L99">            }</span>
+            @Override
+<span class="nc" id="L101">            public void propertyDeleted(String property, Map params) {}</span>
+            @Override
+<span class="nc" id="L103">            public void xmlPropertySet(String property, Map params) {}</span>
+            @Override
+<span class="nc" id="L105">            public void xmlPropertyDeleted(String property, Map params) {}</span>
+        });
+
+<span class="nc" id="L108">    }</span>
+
+    /**
+     * Returns the roster for the given username.
+     *
+     * @param username the username to search for.
+     * @return the roster associated with the ID.
+     * @throws org.jivesoftware.openfire.user.UserNotFoundException if the ID does not correspond
+     *         to a known entity on the server.
+     */
+    public Roster getRoster(String username) throws UserNotFoundException {
+<span class="nc" id="L119">        Roster roster = rosterCache.get(username);</span>
+<span class="nc bnc" id="L120" title="All 2 branches missed.">        if (roster == null) {</span>
+            // Synchronize using a unique key so that other threads loading the User
+            // and not the Roster cannot produce a deadlock
+<span class="nc" id="L123">           synchronized ((username  + MUTEX_SUFFIX).intern()) {</span>
+<span class="nc" id="L124">                roster = rosterCache.get(username);</span>
+<span class="nc bnc" id="L125" title="All 2 branches missed.">                if (roster == null) {</span>
+                    // Not in cache so load a new one:
+<span class="nc" id="L127">                    roster = new Roster(username);</span>
+<span class="nc" id="L128">                    rosterCache.put(username, roster);</span>
+                }
+<span class="nc" id="L130">            }</span>
+        }
+<span class="nc" id="L132">        return roster;</span>
+    }
+
+    /**
+     * Removes the entire roster of a given user. This is necessary when a user
+     * account is being deleted from the server.
+     *
+     * @param user the user.
+     */
+    public void deleteRoster(JID user) {
+<span class="nc bnc" id="L142" title="All 2 branches missed.">        if (!server.isLocal(user)) {</span>
+            // Ignore request if user is not a local user
+<span class="nc" id="L144">            return;</span>
+        }
+        try {
+<span class="nc" id="L147">            String username = user.getNode();</span>
+            // Get the roster of the deleted user
+<span class="nc" id="L149">            Roster roster = getRoster(username);</span>
+            // Remove each roster item from the user's roster
+<span class="nc bnc" id="L151" title="All 2 branches missed.">            for (RosterItem item : roster.getRosterItems()) {</span>
+                try {
+<span class="nc" id="L153">                    roster.deleteRosterItem(item.getJid(), false);</span>
+                }
+<span class="nc" id="L155">                catch (SharedGroupException e) {</span>
+                    // Do nothing. We shouldn't have this exception since we disabled the checkings
+<span class="nc" id="L157">                    Log.warn( &quot;Unexpected exception while deleting roster of user '{}' .&quot;, user, e );</span>
+<span class="nc" id="L158">                }</span>
+<span class="nc" id="L159">            }</span>
+            // Remove the cached roster from memory
+<span class="nc" id="L161">            rosterCache.remove(username);</span>
+
+            // Get the rosters that have a reference to the deleted user
+<span class="nc" id="L164">            Iterator&lt;String&gt; usernames = provider.getUsernames(user.toBareJID());</span>
+<span class="nc bnc" id="L165" title="All 2 branches missed.">            while (usernames.hasNext()) {</span>
+<span class="nc" id="L166">                username = usernames.next();</span>
+                try {
+                    // Get the roster that has a reference to the deleted user
+<span class="nc" id="L169">                    roster = getRoster(username);</span>
+                    // Remove the deleted user reference from this roster
+<span class="nc" id="L171">                    roster.deleteRosterItem(user, false);</span>
+                }
+<span class="nc" id="L173">                catch (SharedGroupException e) {</span>
+                    // Do nothing. We shouldn't have this exception since we disabled the checkings
+<span class="nc" id="L175">                    Log.warn( &quot;Unexpected exception while deleting roster of user '{}' .&quot;, user, e );</span>
+                }
+<span class="nc" id="L177">                catch (UserNotFoundException e) {</span>
+                    // Deleted user had user that no longer exists on their roster. Ignore and move on.
+<span class="nc" id="L179">                }</span>
+            }
+        }
+<span class="nc" id="L182">        catch (UnsupportedOperationException | UserNotFoundException e) {</span>
+            // Do nothing
+<span class="nc" id="L184">        }</span>
+<span class="nc" id="L185">    }</span>
+
+    /**
+     * Returns a collection with all the groups that the user may include in his roster. The
+     * following criteria will be used to select the groups: 1) Groups that are configured so that
+     * everybody can include in his roster, 2) Groups that are configured so that its users may
+     * include the group in their rosters and the user is a group user of the group and 3) User
+     * belongs to a Group that may see a Group that whose members may include the Group in their
+     * rosters.
+     *
+     * @param username the username of the user to return his shared groups.
+     * @return a collection with all the groups that the user may include in his roster.
+     */
+    public Collection&lt;Group&gt; getSharedGroups(String username) {
+<span class="nc" id="L199">        Collection&lt;Group&gt; answer = new HashSet&lt;&gt;();</span>
+<span class="nc" id="L200">        Collection&lt;Group&gt; groups = GroupManager.getInstance().getSharedGroups(username);</span>
+<span class="nc bnc" id="L201" title="All 2 branches missed.">        for (Group group : groups) {</span>
+<span class="nc" id="L202">            String showInRoster = group.getProperties().get(&quot;sharedRoster.showInRoster&quot;);</span>
+<span class="nc bnc" id="L203" title="All 2 branches missed.">            if (&quot;onlyGroup&quot;.equals(showInRoster)) {</span>
+<span class="nc bnc" id="L204" title="All 2 branches missed.">                if (group.isUser(username)) {</span>
+                    // The user belongs to the group so add the group to the answer
+<span class="nc" id="L206">                    answer.add(group);</span>
+                }
+                else {
+                    // Check if the user belongs to a group that may see this group
+<span class="nc" id="L210">                    Collection&lt;Group&gt; groupList = parseGroups(group.getProperties().get(&quot;sharedRoster.groupList&quot;));</span>
+<span class="nc bnc" id="L211" title="All 2 branches missed.">                    for (Group groupInList : groupList) {</span>
+<span class="nc bnc" id="L212" title="All 2 branches missed.">                        if (groupInList.isUser(username)) {</span>
+<span class="nc" id="L213">                            answer.add(group);</span>
+                        }
+<span class="nc" id="L215">                    }</span>
+<span class="nc" id="L216">                }</span>
+            }
+<span class="nc bnc" id="L218" title="All 2 branches missed.">            else if (&quot;everybody&quot;.equals(showInRoster)) {</span>
+                // Anyone can see this group so add the group to the answer
+<span class="nc" id="L220">                answer.add(group);</span>
+            }
+<span class="nc" id="L222">        }</span>
+<span class="nc" id="L223">        return answer;</span>
+    }
+
+    /**
+     * Returns the list of shared groups whose visibility is public.
+     *
+     * @return the list of shared groups whose visibility is public.
+     */
+    public Collection&lt;Group&gt; getPublicSharedGroups() {
+<span class="nc" id="L232">        return GroupManager.getInstance().getPublicSharedGroups();</span>
+    }
+
+    /**
+     * Returns a collection of Groups obtained by parsing a comma delimited String with the name
+     * of groups.
+     *
+     * @param groupNames a comma delimited string with group names.
+     * @return a collection of Groups obtained by parsing a comma delimited String with the name
+     *         of groups.
+     */
+    private Collection&lt;Group&gt; parseGroups(String groupNames) {
+<span class="nc" id="L244">        Collection&lt;Group&gt; answer = new HashSet&lt;&gt;();</span>
+<span class="nc bnc" id="L245" title="All 2 branches missed.">        for (String groupName : parseGroupNames(groupNames)) {</span>
+            try {
+<span class="nc" id="L247">                answer.add(GroupManager.getInstance().getGroup(groupName));</span>
+            }
+<span class="nc" id="L249">            catch (GroupNotFoundException e) {</span>
+                // Do nothing. Silently ignore the invalid reference to the group
+<span class="nc" id="L251">            }</span>
+<span class="nc" id="L252">        }</span>
+<span class="nc" id="L253">        return answer;</span>
+    }
+
+    /**
+     * Returns a collection of Groups obtained by parsing a comma delimited String with the name
+     * of groups.
+     *
+     * @param groupNames a comma delimited string with group names.
+     * @return a collection of Groups obtained by parsing a comma delimited String with the name
+     *         of groups.
+     */
+    private static Collection&lt;String&gt; parseGroupNames(String groupNames) {
+<span class="nc" id="L265">        Collection&lt;String&gt; answer = new HashSet&lt;&gt;();</span>
+<span class="nc bnc" id="L266" title="All 2 branches missed.">        if (groupNames != null) {</span>
+<span class="nc" id="L267">            StringTokenizer tokenizer = new StringTokenizer(groupNames, &quot;,&quot;);</span>
+<span class="nc bnc" id="L268" title="All 2 branches missed.">            while (tokenizer.hasMoreTokens()) {</span>
+<span class="nc" id="L269">                answer.add(tokenizer.nextToken());</span>
+            }
+        }
+<span class="nc" id="L272">        return answer;</span>
+    }
+
+    @Override
+    public void groupCreated(Group group, Map params) {
+        //Do nothing
+<span class="nc" id="L278">    }</span>
+
+    @Override
+    public void groupDeleting(Group group, Map params) {
+        // Get group members
+<span class="nc" id="L283">        Collection&lt;JID&gt; users = new HashSet&lt;&gt;(group.getMembers());</span>
+<span class="nc" id="L284">        users.addAll(group.getAdmins());</span>
+        // Get users whose roster will be updated
+<span class="nc" id="L286">        Collection&lt;JID&gt; affectedUsers = getAffectedUsers(group);</span>
+        // Iterate on group members and update rosters of affected users
+<span class="nc bnc" id="L288" title="All 2 branches missed.">        for (JID deletedUser : users) {</span>
+<span class="nc" id="L289">            groupUserDeleted(group, affectedUsers, deletedUser);</span>
+<span class="nc" id="L290">        }</span>
+<span class="nc" id="L291">    }</span>
+
+    @Override
+    public void groupModified(Group group, Map params) {
+        // Do nothing if no group property has been modified
+<span class="nc bnc" id="L296" title="All 2 branches missed.">        if (&quot;propertyDeleted&quot;.equals(params.get(&quot;type&quot;))) {</span>
+<span class="nc" id="L297">             return;</span>
+        }
+<span class="nc" id="L299">        String keyChanged = (String) params.get(&quot;propertyKey&quot;);</span>
+<span class="nc" id="L300">        String originalValue = (String) params.get(&quot;originalValue&quot;);</span>
+
+
+<span class="nc bnc" id="L303" title="All 2 branches missed.">        if (&quot;sharedRoster.showInRoster&quot;.equals(keyChanged)) {</span>
+<span class="nc" id="L304">            String currentValue = group.getProperties().get(&quot;sharedRoster.showInRoster&quot;);</span>
+            // Nothing has changed so do nothing.
+<span class="nc bnc" id="L306" title="All 2 branches missed.">            if (currentValue.equals(originalValue)) {</span>
+<span class="nc" id="L307">                return;</span>
+            }
+            // Get the users of the group
+<span class="nc" id="L310">            Collection&lt;JID&gt; users = new HashSet&lt;&gt;(group.getMembers());</span>
+<span class="nc" id="L311">            users.addAll(group.getAdmins());</span>
+            // Get the users whose roster will be affected
+<span class="nc" id="L313">            Collection&lt;JID&gt; affectedUsers = getAffectedUsers(group, originalValue,</span>
+<span class="nc" id="L314">                    group.getProperties().get(&quot;sharedRoster.groupList&quot;));</span>
+            // Remove the group members from the affected rosters
+<span class="nc bnc" id="L316" title="All 2 branches missed.">            for (JID deletedUser : users) {</span>
+<span class="nc" id="L317">                groupUserDeleted(group, affectedUsers, deletedUser);</span>
+<span class="nc" id="L318">            }</span>
+
+            // Simulate that the group users has been added to the group. This will cause to push
+            // roster items to the &quot;affected&quot; users for the group users
+<span class="nc bnc" id="L322" title="All 2 branches missed.">            for (JID user : users) {</span>
+<span class="nc" id="L323">                groupUserAdded(group, user);</span>
+<span class="nc" id="L324">            }</span>
+<span class="nc" id="L325">        }</span>
+<span class="nc bnc" id="L326" title="All 2 branches missed.">        else if (&quot;sharedRoster.groupList&quot;.equals(keyChanged)) {</span>
+<span class="nc" id="L327">            String currentValue = group.getProperties().get(&quot;sharedRoster.groupList&quot;);</span>
+            // Nothing has changed so do nothing.
+<span class="nc bnc" id="L329" title="All 2 branches missed.">            if (currentValue.equals(originalValue)) {</span>
+<span class="nc" id="L330">                return;</span>
+            }
+            // Get the users of the group
+<span class="nc" id="L333">            Collection&lt;JID&gt; users = new HashSet&lt;&gt;(group.getMembers());</span>
+<span class="nc" id="L334">            users.addAll(group.getAdmins());</span>
+            // Get the users whose roster will be affected
+<span class="nc" id="L336">            Collection&lt;JID&gt; affectedUsers = getAffectedUsers(group,</span>
+<span class="nc" id="L337">                    group.getProperties().get(&quot;sharedRoster.showInRoster&quot;), originalValue);</span>
+            // Remove the group members from the affected rosters
+<span class="nc bnc" id="L339" title="All 2 branches missed.">            for (JID deletedUser : users) {</span>
+<span class="nc" id="L340">                groupUserDeleted(group, affectedUsers, deletedUser);</span>
+<span class="nc" id="L341">            }</span>
+
+            // Simulate that the group users has been added to the group. This will cause to push
+            // roster items to the &quot;affected&quot; users for the group users
+<span class="nc bnc" id="L345" title="All 2 branches missed.">            for (JID user : users) {</span>
+<span class="nc" id="L346">                groupUserAdded(group, user);</span>
+<span class="nc" id="L347">            }</span>
+<span class="nc" id="L348">        }</span>
+<span class="nc bnc" id="L349" title="All 2 branches missed.">        else if (&quot;sharedRoster.displayName&quot;.equals(keyChanged)) {</span>
+<span class="nc" id="L350">            String currentValue = group.getProperties().get(&quot;sharedRoster.displayName&quot;);</span>
+            // Nothing has changed so do nothing.
+<span class="nc bnc" id="L352" title="All 2 branches missed.">            if (currentValue.equals(originalValue)) {</span>
+<span class="nc" id="L353">                return;</span>
+            }
+            // Do nothing if the group is not being shown in users' rosters
+<span class="nc bnc" id="L356" title="All 2 branches missed.">            if (!isSharedGroup(group)) {</span>
+<span class="nc" id="L357">                return;</span>
+            }
+            // Get all the affected users
+<span class="nc" id="L360">            Collection&lt;JID&gt; users = getAffectedUsers(group);</span>
+            // Iterate on all the affected users and update their rosters
+<span class="nc bnc" id="L362" title="All 2 branches missed.">            for (JID updatedUser : users) {</span>
+                // Get the roster to update.
+                Roster roster;
+<span class="nc bnc" id="L365" title="All 2 branches missed.">                if (server.isLocal(updatedUser)) {</span>
+                    try {
+<span class="nc" id="L367">                        roster = getRoster(updatedUser.getNode());</span>
+
+                        // Update the roster with the new group display name
+<span class="nc" id="L370">                        roster.shareGroupRenamed(users);</span>
+<span class="nc" id="L371">                    } catch (UserNotFoundException e) {</span>
+<span class="nc" id="L372">                        Log.debug( &quot;Unexpected exception while applying group modification for user '{}' .&quot;, updatedUser.getNode(), e );</span>
+<span class="nc" id="L373">                    }</span>
+                }
+<span class="nc" id="L375">            }</span>
+        }
+<span class="nc" id="L377">    }</span>
+
+    @Override
+    public void initialize(XMPPServer server) {
+<span class="nc" id="L381">        super.initialize(server);</span>
+<span class="nc" id="L382">        this.server = server;</span>
+<span class="nc" id="L383">        this.routingTable = server.getRoutingTable();</span>
+
+<span class="nc" id="L385">        RosterEventDispatcher.addListener(new RosterEventListener() {</span>
+            @Override
+            public void rosterLoaded(Roster roster) {
+                // Do nothing
+<span class="nc" id="L389">            }</span>
+
+            @Override
+            public boolean addingContact(Roster roster, RosterItem item, boolean persistent) {
+                // Do nothing
+<span class="nc" id="L394">                return true;</span>
+            }
+
+            @Override
+            public void contactAdded(Roster roster, RosterItem item) {
+                // Set object again in cache. This is done so that other cluster nodes
+                // get refreshed with latest version of the object
+<span class="nc" id="L401">                rosterCache.put(roster.getUsername(), roster);</span>
+<span class="nc" id="L402">            }</span>
+
+            @Override
+            public void contactUpdated(Roster roster, RosterItem item) {
+                // Set object again in cache. This is done so that other cluster nodes
+                // get refreshed with latest version of the object
+<span class="nc" id="L408">                rosterCache.put(roster.getUsername(), roster);</span>
+<span class="nc" id="L409">            }</span>
+
+            @Override
+            public void contactDeleted(Roster roster, RosterItem item) {
+                // Set object again in cache. This is done so that other cluster nodes
+                // get refreshed with latest version of the object
+<span class="nc" id="L415">                rosterCache.put(roster.getUsername(), roster);</span>
+<span class="nc" id="L416">            }</span>
+        });
+<span class="nc" id="L418">    }</span>
+
+    /**
+     * Returns true if the specified Group may be included in a user roster. The decision is made
+     * based on the group properties that are configurable through the Admin Console.
+     *
+     * @param group the group to check if it may be considered a shared group.
+     * @return true if the specified Group may be included in a user roster.
+     */
+    public static boolean isSharedGroup(Group group) {
+<span class="nc" id="L428">        String showInRoster = group.getProperties().get(&quot;sharedRoster.showInRoster&quot;);</span>
+<span class="nc bnc" id="L429" title="All 4 branches missed.">        if (&quot;onlyGroup&quot;.equals(showInRoster) || &quot;everybody&quot;.equals(showInRoster)) {</span>
+<span class="nc" id="L430">            return true;</span>
+        }
+<span class="nc" id="L432">        return false;</span>
+    }
+
+    /**
+     * Returns true if the specified Group may be seen by all users in the system. The decision
+     * is made based on the group properties that are configurable through the Admin Console.
+     *
+     * @param group the group to check if it may be seen by all users in the system.
+     * @return true if the specified Group may be seen by all users in the system.
+     */
+    public static boolean isPublicSharedGroup(Group group) {
+<span class="nc" id="L443">        String showInRoster = group.getProperties().get(&quot;sharedRoster.showInRoster&quot;);</span>
+<span class="nc bnc" id="L444" title="All 2 branches missed.">        if (&quot;everybody&quot;.equals(showInRoster)) {</span>
+<span class="nc" id="L445">            return true;</span>
+        }
+<span class="nc" id="L447">        return false;</span>
+    }
+
+    @Override
+    public void memberAdded(Group group, Map params) {
+<span class="nc" id="L452">        JID addedUser = new JID((String) params.get(&quot;member&quot;));</span>
+        // Do nothing if the user was an admin that became a member
+<span class="nc bnc" id="L454" title="All 2 branches missed.">        if (group.getAdmins().contains(addedUser)) {</span>
+<span class="nc" id="L455">            return;</span>
+        }
+<span class="nc bnc" id="L457" title="All 2 branches missed.">        if (!isSharedGroup(group)) {</span>
+<span class="nc bnc" id="L458" title="All 2 branches missed.">            for (Group visibleGroup : getVisibleGroups(group)) {</span>
+                // Get the list of affected users
+<span class="nc" id="L460">                Collection&lt;JID&gt; users = new HashSet&lt;&gt;(visibleGroup.getMembers());</span>
+<span class="nc" id="L461">                users.addAll(visibleGroup.getAdmins());</span>
+<span class="nc" id="L462">                groupUserAdded(visibleGroup, users, addedUser);</span>
+<span class="nc" id="L463">            }</span>
+        }
+        else {
+<span class="nc" id="L466">            groupUserAdded(group, addedUser);</span>
+        }
+<span class="nc" id="L468">    }</span>
+
+    @Override
+    public void memberRemoved(Group group, Map params) {
+<span class="nc" id="L472">        String member = (String) params.get(&quot;member&quot;);</span>
+<span class="nc bnc" id="L473" title="All 2 branches missed.">        if (member == null) {</span>
+<span class="nc" id="L474">            return;</span>
+        }
+<span class="nc" id="L476">        JID deletedUser = new JID(member);</span>
+        // Do nothing if the user is still an admin
+<span class="nc bnc" id="L478" title="All 2 branches missed.">        if (group.getAdmins().contains(deletedUser)) {</span>
+<span class="nc" id="L479">            return;</span>
+        }
+<span class="nc bnc" id="L481" title="All 2 branches missed.">        if (!isSharedGroup(group)) {</span>
+<span class="nc bnc" id="L482" title="All 2 branches missed.">            for (Group visibleGroup : getVisibleGroups(group)) {</span>
+                // Get the list of affected users
+<span class="nc" id="L484">                Collection&lt;JID&gt; users = new HashSet&lt;&gt;(visibleGroup.getMembers());</span>
+<span class="nc" id="L485">                users.addAll(visibleGroup.getAdmins());</span>
+<span class="nc" id="L486">                groupUserDeleted(visibleGroup, users, deletedUser);</span>
+<span class="nc" id="L487">            }</span>
+        }
+        else {
+<span class="nc" id="L490">            groupUserDeleted(group, deletedUser);</span>
+        }
+<span class="nc" id="L492">    }</span>
+
+    @Override
+    public void adminAdded(Group group, Map params) {
+<span class="nc" id="L496">        JID addedUser = new JID((String) params.get(&quot;admin&quot;));</span>
+        // Do nothing if the user was a member that became an admin
+<span class="nc bnc" id="L498" title="All 2 branches missed.">        if (group.getMembers().contains(addedUser)) {</span>
+<span class="nc" id="L499">            return;</span>
+        }
+<span class="nc bnc" id="L501" title="All 2 branches missed.">        if (!isSharedGroup(group)) {</span>
+<span class="nc bnc" id="L502" title="All 2 branches missed.">            for (Group visibleGroup : getVisibleGroups(group)) {</span>
+                // Get the list of affected users
+<span class="nc" id="L504">                Collection&lt;JID&gt; users = new HashSet&lt;&gt;(visibleGroup.getMembers());</span>
+<span class="nc" id="L505">                users.addAll(visibleGroup.getAdmins());</span>
+<span class="nc" id="L506">                groupUserAdded(visibleGroup, users, addedUser);</span>
+<span class="nc" id="L507">            }</span>
+        }
+        else {
+<span class="nc" id="L510">            groupUserAdded(group, addedUser);</span>
+        }
+<span class="nc" id="L512">    }</span>
+
+    @Override
+    public void adminRemoved(Group group, Map params) {
+<span class="nc" id="L516">        JID deletedUser = new JID((String) params.get(&quot;admin&quot;));</span>
+        // Do nothing if the user is still a member
+<span class="nc bnc" id="L518" title="All 2 branches missed.">        if (group.getMembers().contains(deletedUser)) {</span>
+<span class="nc" id="L519">            return;</span>
+        }
+        // Do nothing if the group is not being shown in group members' rosters
+<span class="nc bnc" id="L522" title="All 2 branches missed.">        if (!isSharedGroup(group)) {</span>
+<span class="nc bnc" id="L523" title="All 2 branches missed.">            for (Group visibleGroup : getVisibleGroups(group)) {</span>
+                // Get the list of affected users
+<span class="nc" id="L525">                Collection&lt;JID&gt; users = new HashSet&lt;&gt;(visibleGroup.getMembers());</span>
+<span class="nc" id="L526">                users.addAll(visibleGroup.getAdmins());</span>
+<span class="nc" id="L527">                groupUserDeleted(visibleGroup, users, deletedUser);</span>
+<span class="nc" id="L528">            }</span>
+        }
+        else {
+<span class="nc" id="L531">            groupUserDeleted(group, deletedUser);</span>
+        }
+<span class="nc" id="L533">    }</span>
+
+    /**
+     * A new user has been created so members of public shared groups need to have
+     * their rosters updated. Members of public shared groups need to have a roster
+     * item with subscription FROM for the new user since the new user can see them.
+     *
+     * @param newUser the newly created user.
+     * @param params event parameters.
+     */
+    @Override
+    public void userCreated(User newUser, Map&lt;String,Object&gt; params) {
+<span class="nc" id="L545">        JID newUserJID = server.createJID(newUser.getUsername(), null);</span>
+        // Shared public groups that are public should have a presence subscription
+        // of type FROM for the new user
+<span class="nc bnc" id="L548" title="All 2 branches missed.">        for (Group group : getPublicSharedGroups()) {</span>
+            // Get group members of public group
+<span class="nc" id="L550">            Collection&lt;JID&gt; users = new HashSet&lt;&gt;(group.getMembers());</span>
+<span class="nc" id="L551">            users.addAll(group.getAdmins());</span>
+            // Update the roster of each group member to include a subscription of type FROM
+<span class="nc bnc" id="L553" title="All 2 branches missed.">            for (JID userToUpdate : users) {</span>
+                // Get the roster to update
+<span class="nc" id="L555">                Roster roster = null;</span>
+<span class="nc bnc" id="L556" title="All 2 branches missed.">                if (server.isLocal(userToUpdate)) {</span>
+                    // Get the roster. If the user does not exist then continue with the next user
+                    try {
+<span class="nc" id="L559">                        roster = getRoster(userToUpdate.getNode());</span>
+                    }
+<span class="nc" id="L561">                    catch (UserNotFoundException e) {</span>
+<span class="nc" id="L562">                        continue;</span>
+<span class="nc" id="L563">                    }</span>
+                }
+                // Update roster
+<span class="nc" id="L566">                roster.addSharedUser(group, newUserJID);</span>
+
+<span class="nc bnc" id="L568" title="All 2 branches missed.">                if (!server.isLocal(userToUpdate)) {</span>
+                    // Susbcribe to the presence of the remote user. This is only necessary for
+                    // remote users and may only work with remote users that **automatically**
+                    // accept presence subscription requests
+<span class="nc" id="L572">                    sendSubscribeRequest(newUserJID, userToUpdate, true);</span>
+                }
+<span class="nc" id="L574">            }</span>
+<span class="nc" id="L575">        }</span>
+<span class="nc" id="L576">    }</span>
+
+    @Override
+    public void userDeleting(User user, Map&lt;String,Object&gt; params) {
+        // Shared public groups that have a presence subscription of type FROM
+        // for the deleted user should no longer have a reference to the deleted user
+<span class="nc" id="L582">        JID userJID = server.createJID(user.getUsername(), null);</span>
+        // Shared public groups that are public should have a presence subscription
+        // of type FROM for the new user
+<span class="nc bnc" id="L585" title="All 2 branches missed.">        for (Group group : getPublicSharedGroups()) {</span>
+            // Get group members of public group
+<span class="nc" id="L587">            Collection&lt;JID&gt; users = new HashSet&lt;&gt;(group.getMembers());</span>
+<span class="nc" id="L588">            users.addAll(group.getAdmins());</span>
+            // Update the roster of each group member to include a subscription of type FROM
+<span class="nc bnc" id="L590" title="All 2 branches missed.">            for (JID userToUpdate : users) {</span>
+                // Get the roster to update
+<span class="nc" id="L592">                Roster roster = null;</span>
+<span class="nc bnc" id="L593" title="All 2 branches missed.">                if (server.isLocal(userToUpdate)) {</span>
+                    // Get the roster. If the user does not exist then continue with the next user
+                    try {
+<span class="nc" id="L596">                        roster = getRoster(userToUpdate.getNode());</span>
+                    }
+<span class="nc" id="L598">                    catch (UserNotFoundException e) {</span>
+<span class="nc" id="L599">                        continue;</span>
+<span class="nc" id="L600">                    }</span>
+                }
+                // Update roster
+<span class="nc" id="L603">                roster.deleteSharedUser(group, userJID);</span>
+
+<span class="nc bnc" id="L605" title="All 2 branches missed.">                if (!server.isLocal(userToUpdate)) {</span>
+                    // Unsusbcribe from the presence of the remote user. This is only necessary for
+                    // remote users and may only work with remote users that **automatically**
+                    // accept presence subscription requests
+<span class="nc" id="L609">                    sendSubscribeRequest(userJID, userToUpdate, false);</span>
+                }
+<span class="nc" id="L611">            }</span>
+<span class="nc" id="L612">        }</span>
+
+<span class="nc" id="L614">        deleteRoster(userJID);</span>
+<span class="nc" id="L615">    }</span>
+
+    @Override
+    public void userModified(User user, Map&lt;String,Object&gt; params) {
+<span class="nc bnc" id="L619" title="All 2 branches missed.">        if (&quot;nameModified&quot;.equals(params.get(&quot;type&quot;))) {</span>
+
+<span class="nc bnc" id="L621" title="All 2 branches missed.">            for (Group group : getSharedGroups(user.getUsername())) {</span>
+<span class="nc" id="L622">                ArrayList&lt;JID&gt; groupUsers = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L623">                groupUsers.addAll(group.getAdmins());</span>
+<span class="nc" id="L624">                groupUsers.addAll(group.getMembers());</span>
+
+<span class="nc bnc" id="L626" title="All 2 branches missed.">                for (JID groupUser : groupUsers) {</span>
+<span class="nc" id="L627">                    rosterCache.remove(groupUser.getNode());</span>
+<span class="nc" id="L628">                }</span>
+<span class="nc" id="L629">            }</span>
+        }
+<span class="nc" id="L631">    }</span>
+
+    /**
+     * Notification that a Group user has been added. Update the group users' roster accordingly.
+     *
+     * @param group the group where the user was added.
+     * @param addedUser the username of the user that has been added to the group.
+     */
+    private void groupUserAdded(Group group, JID addedUser) {
+<span class="nc" id="L640">        groupUserAdded(group, getAffectedUsers(group), addedUser);</span>
+<span class="nc" id="L641">    }</span>
+
+    /**
+     * Notification that a Group user has been added. Update the group users' roster accordingly.
+     *
+     * @param group the group where the user was added.
+     * @param users the users to update their rosters
+     * @param addedUser the username of the user that has been added to the group.
+     */
+    private void groupUserAdded(Group group, Collection&lt;JID&gt; users, JID addedUser) {
+        // Get the roster of the added user.
+<span class="nc" id="L652">        Roster addedUserRoster = null;</span>
+<span class="nc bnc" id="L653" title="All 2 branches missed.">        if (server.isLocal(addedUser)) {</span>
+            try {
+                // force the roster reload to get fresh subscription in the rosterItems
+<span class="nc" id="L656">                String username = addedUser.getNode();</span>
+<span class="nc" id="L657">                synchronized ((username + &quot; ro&quot;).intern()) {</span>
+<span class="nc" id="L658">                    rosterCache.remove(username);</span>
+<span class="nc" id="L659">                    addedUserRoster = getRoster(username);</span>
+<span class="nc" id="L660">                }</span>
+<span class="nc" id="L661">            } catch (UserNotFoundException e) {</span>
+<span class="nc" id="L662">                Log.warn( &quot;Unexpected exception while adding user '{}' to group '{}'.&quot;, addedUser, group, e );</span>
+<span class="nc" id="L663">            }</span>
+        }
+
+        // Iterate on all the affected users and update their rosters
+<span class="nc bnc" id="L667" title="All 2 branches missed.">        for (JID userToUpdate : users) {</span>
+<span class="nc bnc" id="L668" title="All 2 branches missed.">            if (!addedUser.equals(userToUpdate)) {</span>
+                // Get the roster to update
+<span class="nc" id="L670">                Roster roster = null;</span>
+<span class="nc bnc" id="L671" title="All 2 branches missed.">                if (server.isLocal(userToUpdate)) {</span>
+                    // Get the roster. If the user does not exist then continue with the next user
+                    try {
+<span class="nc" id="L674">                        roster = getRoster(userToUpdate.getNode());</span>
+                    }
+<span class="nc" id="L676">                    catch (UserNotFoundException e) {</span>
+<span class="nc" id="L677">                        continue;</span>
+<span class="nc" id="L678">                    }</span>
+                }
+                // Update roster
+<span class="nc" id="L681">                roster.addSharedUser(group, addedUser);</span>
+
+                // Check if the roster is still not in memory
+<span class="nc bnc" id="L684" title="All 4 branches missed.">                if (addedUserRoster == null &amp;&amp; server.isLocal(addedUser)) {</span>
+                    try {
+<span class="nc" id="L686">                        addedUserRoster =</span>
+<span class="nc" id="L687">                                getRoster(addedUser.getNode());</span>
+<span class="nc" id="L688">                    } catch (UserNotFoundException e) {</span>
+<span class="nc" id="L689">                        Log.warn( &quot;Unexpected exception while adding user '{}' to group '{}'.&quot;, addedUser, group, e );</span>
+<span class="nc" id="L690">                    }</span>
+                }
+                // Update the roster of the newly added group user.
+<span class="nc bnc" id="L693" title="All 2 branches missed.">                if (addedUserRoster != null) {</span>
+<span class="nc" id="L694">                    Collection&lt;Group&gt; groups = GroupManager.getInstance().getGroups(userToUpdate);</span>
+<span class="nc" id="L695">                    addedUserRoster.addSharedUser(userToUpdate, groups, group);</span>
+                }
+<span class="nc bnc" id="L697" title="All 2 branches missed.">                if (!server.isLocal(addedUser)) {</span>
+                    // Susbcribe to the presence of the remote user. This is only necessary for
+                    // remote users and may only work with remote users that **automatically**
+                    // accept presence subscription requests
+<span class="nc" id="L701">                    sendSubscribeRequest(userToUpdate, addedUser, true);</span>
+                }
+<span class="nc bnc" id="L703" title="All 2 branches missed.">                if (!server.isLocal(userToUpdate)) {</span>
+                    // Susbcribe to the presence of the remote user. This is only necessary for
+                    // remote users and may only work with remote users that **automatically**
+                    // accept presence subscription requests
+<span class="nc" id="L707">                    sendSubscribeRequest(addedUser, userToUpdate, true);</span>
+                }
+            }
+<span class="nc" id="L710">        }</span>
+<span class="nc" id="L711">    }</span>
+
+    /**
+     * Notification that a Group user has been deleted. Update the group users' roster accordingly.
+     *
+     * @param group the group from where the user was deleted.
+     * @param deletedUser the username of the user that has been deleted from the group.
+     */
+    private void groupUserDeleted(Group group, JID deletedUser) {
+<span class="nc" id="L720">        groupUserDeleted(group, getAffectedUsers(group), deletedUser);</span>
+<span class="nc" id="L721">    }</span>
+
+    /**
+     * Notification that a Group user has been deleted. Update the group users' roster accordingly.
+     *
+     * @param group the group from where the user was deleted.
+     * @param users the users to update their rosters
+     * @param deletedUser the username of the user that has been deleted from the group.
+     */
+    private void groupUserDeleted(Group group, Collection&lt;JID&gt; users, JID deletedUser) {
+        // Get the roster of the deleted user.
+<span class="nc" id="L732">        Roster deletedUserRoster = null;</span>
+<span class="nc bnc" id="L733" title="All 2 branches missed.">        if (server.isLocal(deletedUser)) {</span>
+            try {
+<span class="nc" id="L735">                deletedUserRoster = getRoster(deletedUser.getNode());</span>
+<span class="nc" id="L736">            } catch (UserNotFoundException e) {</span>
+<span class="nc" id="L737">                Log.warn( &quot;Unexpected exception while deleting user '{}' from group '{}'.&quot;, deletedUser, group, e );</span>
+<span class="nc" id="L738">            }</span>
+        }
+
+        // Iterate on all the affected users and update their rosters
+<span class="nc bnc" id="L742" title="All 2 branches missed.">        for (JID userToUpdate : users) {</span>
+            // Get the roster to update
+<span class="nc" id="L744">            Roster roster = null;</span>
+<span class="nc bnc" id="L745" title="All 2 branches missed.">            if (server.isLocal(userToUpdate)) {</span>
+                // Get the roster. If the user does not exist then continue with the next user
+                try {
+<span class="nc" id="L748">                    roster = getRoster(userToUpdate.getNode());</span>
+                }
+<span class="nc" id="L750">                catch (UserNotFoundException e) {</span>
+<span class="nc" id="L751">                    continue;</span>
+<span class="nc" id="L752">                } </span>
+            }
+            // Update roster
+<span class="nc" id="L755">            roster.deleteSharedUser(group, deletedUser);</span>
+
+            // Update the roster of the newly deleted group user.
+<span class="nc bnc" id="L758" title="All 2 branches missed.">            if (deletedUserRoster != null) {</span>
+<span class="nc" id="L759">                deletedUserRoster.deleteSharedUser(userToUpdate, group);</span>
+            }
+<span class="nc bnc" id="L761" title="All 2 branches missed.">            if (!server.isLocal(deletedUser)) {</span>
+                // Unsusbcribe from the presence of the remote user. This is only necessary for
+                // remote users and may only work with remote users that **automatically**
+                // accept presence subscription requests
+<span class="nc" id="L765">                sendSubscribeRequest(userToUpdate, deletedUser, false);</span>
+            }
+<span class="nc bnc" id="L767" title="All 2 branches missed.">            if (!server.isLocal(userToUpdate)) {</span>
+                // Unsusbcribe from the presence of the remote user. This is only necessary for
+                // remote users and may only work with remote users that **automatically**
+                // accept presence subscription requests
+<span class="nc" id="L771">                sendSubscribeRequest(deletedUser, userToUpdate, false);</span>
+            }
+<span class="nc" id="L773">        }</span>
+<span class="nc" id="L774">    }</span>
+
+    private void sendSubscribeRequest(JID sender, JID recipient, boolean isSubscribe) {
+<span class="nc" id="L777">        Presence presence = new Presence();</span>
+<span class="nc" id="L778">        presence.setFrom(sender);</span>
+<span class="nc" id="L779">        presence.setTo(recipient);</span>
+<span class="nc bnc" id="L780" title="All 2 branches missed.">        if (isSubscribe) {</span>
+<span class="nc" id="L781">            presence.setType(Presence.Type.subscribe);</span>
+        }
+        else {
+<span class="nc" id="L784">            presence.setType(Presence.Type.unsubscribe);</span>
+        }
+<span class="nc" id="L786">        routingTable.routePacket(recipient, presence, false);</span>
+<span class="nc" id="L787">    }</span>
+
+    private Collection&lt;Group&gt; getVisibleGroups(Group groupToCheck) {
+<span class="nc" id="L790">        return GroupManager.getInstance().getVisibleGroups(groupToCheck);</span>
+    }
+
+    /**
+     * Returns true if a given group is visible to a given user. That means, if the user can
+     * see the group in his roster.
+     *
+     * @param group the group to check if the user can see.
+     * @param user the JID of the user to check if he may see the group.
+     * @return true if a given group is visible to a given user.
+     */
+    public boolean isGroupVisible(Group group, JID user) {
+<span class="nc" id="L802">        String showInRoster = group.getProperties().get(&quot;sharedRoster.showInRoster&quot;);</span>
+<span class="nc bnc" id="L803" title="All 2 branches missed.">        if (&quot;everybody&quot;.equals(showInRoster)) {</span>
+<span class="nc" id="L804">            return true;</span>
+        }
+<span class="nc bnc" id="L806" title="All 2 branches missed.">        else if (&quot;onlyGroup&quot;.equals(showInRoster)) {</span>
+<span class="nc bnc" id="L807" title="All 2 branches missed.">            if (group.isUser(user)) {</span>
+<span class="nc" id="L808">                 return true;</span>
+            }
+            // Check if the user belongs to a group that may see this group
+<span class="nc" id="L811">            Collection&lt;Group&gt; groupList = parseGroups(group.getProperties().get(</span>
+                    &quot;sharedRoster.groupList&quot;));
+<span class="nc bnc" id="L813" title="All 2 branches missed.">            for (Group groupInList : groupList) {</span>
+<span class="nc bnc" id="L814" title="All 2 branches missed.">                if (groupInList.isUser(user)) {</span>
+<span class="nc" id="L815">                    return true;</span>
+                }
+<span class="nc" id="L817">            }</span>
+        }
+<span class="nc" id="L819">        return false;</span>
+    }
+
+    /**
+     * Returns all the users that are related to a shared group. This is the logic that we are
+     * using: 1) If the group visiblity is configured as &quot;Everybody&quot; then all users in the system or
+     * all logged users in the system will be returned (configurable thorugh the &quot;filterOffline&quot;
+     * flag), 2) if the group visiblity is configured as &quot;onlyGroup&quot; then all the group users will
+     * be included in the answer and 3) if the group visiblity is configured as &quot;onlyGroup&quot; and
+     * the group allows other groups to include the group in the groups users' roster then all
+     * the users of the allowed groups will be included in the answer.
+     */
+    private Collection&lt;JID&gt; getAffectedUsers(Group group) {
+<span class="nc" id="L832">        return getAffectedUsers(group, group.getProperties().get(&quot;sharedRoster.showInRoster&quot;),</span>
+<span class="nc" id="L833">                group.getProperties().get(&quot;sharedRoster.groupList&quot;));</span>
+    }
+
+    /**
+     * This method is similar to {@link #getAffectedUsers(Group)} except that it receives
+     * some group properties. The group properties are passed as parameters since the called of this
+     * method may want to obtain the related users of the group based in some properties values.
+     *
+     * This is useful when the group is being edited and some properties has changed and we need to
+     * obtain the related users of the group based on the previous group state.
+     */
+    private Collection&lt;JID&gt; getAffectedUsers(Group group, String showInRoster, String groupNames) {
+        // Answer an empty collection if the group is not being shown in users' rosters
+<span class="nc bnc" id="L846" title="All 4 branches missed.">        if (!&quot;onlyGroup&quot;.equals(showInRoster) &amp;&amp; !&quot;everybody&quot;.equals(showInRoster)) {</span>
+<span class="nc" id="L847">            return new ArrayList&lt;&gt;();</span>
+        }
+        // Add the users of the group
+<span class="nc" id="L850">        Collection&lt;JID&gt; users = new HashSet&lt;&gt;(group.getMembers());</span>
+<span class="nc" id="L851">        users.addAll(group.getAdmins());</span>
+        // Check if anyone can see this shared group
+<span class="nc bnc" id="L853" title="All 2 branches missed.">        if (&quot;everybody&quot;.equals(showInRoster)) {</span>
+            // Add all users in the system
+<span class="nc bnc" id="L855" title="All 2 branches missed.">            for (String username : UserManager.getInstance().getUsernames()) {</span>
+<span class="nc" id="L856">                users.add(server.createJID(username, null, true));</span>
+<span class="nc" id="L857">            }</span>
+            // Add all logged users. We don't need to add all users in the system since only the
+            // logged ones will be affected.
+            //users.addAll(SessionManager.getInstance().getSessionUsers());
+        }
+        else {
+            // Add the users that may see the group
+<span class="nc" id="L864">            Collection&lt;Group&gt; groupList = parseGroups(groupNames);</span>
+<span class="nc bnc" id="L865" title="All 2 branches missed.">            for (Group groupInList : groupList) {</span>
+<span class="nc" id="L866">                users.addAll(groupInList.getMembers());</span>
+<span class="nc" id="L867">                users.addAll(groupInList.getAdmins());</span>
+<span class="nc" id="L868">            }</span>
+        }
+<span class="nc" id="L870">        return users;</span>
+    }
+
+    Collection&lt;JID&gt; getSharedUsersForRoster(Group group, Roster roster) {
+<span class="nc" id="L874">        String showInRoster = group.getProperties().get(&quot;sharedRoster.showInRoster&quot;);</span>
+<span class="nc" id="L875">        String groupNames = group.getProperties().get(&quot;sharedRoster.groupList&quot;);</span>
+
+        // Answer an empty collection if the group is not being shown in users' rosters
+<span class="nc bnc" id="L878" title="All 4 branches missed.">        if (!&quot;onlyGroup&quot;.equals(showInRoster) &amp;&amp; !&quot;everybody&quot;.equals(showInRoster)) {</span>
+<span class="nc" id="L879">            return new ArrayList&lt;&gt;();</span>
+        }
+
+        // Add the users of the group
+<span class="nc" id="L883">        Collection&lt;JID&gt; users = new HashSet&lt;&gt;(group.getMembers());</span>
+<span class="nc" id="L884">        users.addAll(group.getAdmins());</span>
+
+        // If the user of the roster belongs to the shared group then we should return
+        // users that need to be in the roster with subscription &quot;from&quot;
+<span class="nc bnc" id="L888" title="All 2 branches missed.">        if (group.isUser(roster.getUsername())) {</span>
+            // Check if anyone can see this shared group
+<span class="nc bnc" id="L890" title="All 2 branches missed.">            if (&quot;everybody&quot;.equals(showInRoster)) {</span>
+                // Add all users in the system
+<span class="nc bnc" id="L892" title="All 2 branches missed.">                for (String username : UserManager.getInstance().getUsernames()) {</span>
+<span class="nc" id="L893">                    users.add(server.createJID(username, null, true));</span>
+<span class="nc" id="L894">                }</span>
+            }
+            else {
+                // Add the users that may see the group
+<span class="nc" id="L898">                Collection&lt;Group&gt; groupList = parseGroups(groupNames);</span>
+<span class="nc bnc" id="L899" title="All 2 branches missed.">                for (Group groupInList : groupList) {</span>
+<span class="nc" id="L900">                    users.addAll(groupInList.getMembers());</span>
+<span class="nc" id="L901">                    users.addAll(groupInList.getAdmins());</span>
+<span class="nc" id="L902">                }</span>
+            }
+        }
+<span class="nc" id="L905">        return users;</span>
+    }
+
+    /**
+     * Returns true if a group in the first collection may mutually see a group of the
+     * second collection. More precisely, return true if both collections contain a public
+     * group (i.e. anybody can see the group) or if both collection have a group that may see
+     * each other and the users are members of those groups or if one group is public and the
+     * other group allowed the public group to see it.
+     *
+     * @param user the name of the user associated to the first collection of groups. This is always a local user.
+     * @param groups a collection of groups to check against the other collection of groups.
+     * @param otherUser the JID of the user associated to the second collection of groups.
+     * @param otherGroups the other collection of groups to check against the first collection.
+     * @return true if a group in the first collection may mutually see a group of the
+     *         second collection.
+     */
+    boolean hasMutualVisibility(String user, Collection&lt;Group&gt; groups, JID otherUser,
+            Collection&lt;Group&gt; otherGroups) {
+<span class="nc bnc" id="L924" title="All 2 branches missed.">        for (Group group : groups) {</span>
+<span class="nc bnc" id="L925" title="All 2 branches missed.">            for (Group otherGroup : otherGroups) {</span>
+                // Skip this groups if the users are not group users of the groups
+<span class="nc bnc" id="L927" title="All 4 branches missed.">                if (!group.isUser(user) || !otherGroup.isUser(otherUser)) {</span>
+<span class="nc" id="L928">                    continue;</span>
+                }
+<span class="nc bnc" id="L930" title="All 2 branches missed.">                if (group.equals(otherGroup)) {</span>
+<span class="nc" id="L931">                     return true;</span>
+                }
+<span class="nc" id="L933">                String showInRoster = group.getProperties().get(&quot;sharedRoster.showInRoster&quot;);</span>
+<span class="nc" id="L934">                String otherShowInRoster = otherGroup.getProperties().get(&quot;sharedRoster.showInRoster&quot;);</span>
+                // Return true if both groups are public groups (i.e. anybody can see them)
+<span class="nc bnc" id="L936" title="All 4 branches missed.">                if (&quot;everybody&quot;.equals(showInRoster) &amp;&amp; &quot;everybody&quot;.equals(otherShowInRoster)) {</span>
+<span class="nc" id="L937">                    return true;</span>
+                }
+<span class="nc bnc" id="L939" title="All 4 branches missed.">                else if (&quot;onlyGroup&quot;.equals(showInRoster) &amp;&amp; &quot;onlyGroup&quot;.equals(otherShowInRoster)) {</span>
+<span class="nc" id="L940">                    String groupNames = group.getProperties().get(&quot;sharedRoster.groupList&quot;);</span>
+<span class="nc" id="L941">                    String otherGroupNames = otherGroup.getProperties().get(&quot;sharedRoster.groupList&quot;);</span>
+                    // Return true if each group may see the other group
+<span class="nc bnc" id="L943" title="All 4 branches missed.">                    if (groupNames != null &amp;&amp; otherGroupNames != null) {</span>
+<span class="nc bnc" id="L944" title="All 2 branches missed.">                        if (groupNames.contains(otherGroup.getName()) &amp;&amp;</span>
+<span class="nc bnc" id="L945" title="All 2 branches missed.">                                otherGroupNames.contains(group.getName())) {</span>
+<span class="nc" id="L946">                            return true;</span>
+                        }
+                        // Check if each shared group can be seen by a group where each user belongs
+<span class="nc" id="L949">                        Collection&lt;Group&gt; groupList = parseGroups(groupNames);</span>
+<span class="nc" id="L950">                        Collection&lt;Group&gt; otherGroupList = parseGroups(otherGroupNames);</span>
+<span class="nc bnc" id="L951" title="All 2 branches missed.">                        for (Group groupName : groupList) {</span>
+<span class="nc bnc" id="L952" title="All 2 branches missed.">                            if (groupName.isUser(otherUser)) {</span>
+<span class="nc bnc" id="L953" title="All 2 branches missed.">                                for (Group otherGroupName : otherGroupList) {</span>
+<span class="nc bnc" id="L954" title="All 2 branches missed.">                                    if (otherGroupName.isUser(user)) {</span>
+<span class="nc" id="L955">                                        return true;</span>
+                                    }
+<span class="nc" id="L957">                                }</span>
+                            }
+<span class="nc" id="L959">                        }</span>
+                    }
+<span class="nc" id="L961">                }</span>
+<span class="nc bnc" id="L962" title="All 4 branches missed.">                else if (&quot;everybody&quot;.equals(showInRoster) &amp;&amp; &quot;onlyGroup&quot;.equals(otherShowInRoster)) {</span>
+                    // Return true if one group is public and the other group allowed the public
+                    // group to see him
+<span class="nc" id="L965">                    String otherGroupNames = otherGroup.getProperties().get(&quot;sharedRoster.groupList&quot;);</span>
+<span class="nc bnc" id="L966" title="All 4 branches missed.">                    if (otherGroupNames != null &amp;&amp; otherGroupNames.contains(group.getName())) {</span>
+<span class="nc" id="L967">                            return true;</span>
+                    }
+<span class="nc" id="L969">                }</span>
+<span class="nc bnc" id="L970" title="All 4 branches missed.">                else if (&quot;onlyGroup&quot;.equals(showInRoster) &amp;&amp; &quot;everybody&quot;.equals(otherShowInRoster)) {</span>
+                    // Return true if one group is public and the other group allowed the public
+                    // group to see him
+<span class="nc" id="L973">                    String groupNames = group.getProperties().get(&quot;sharedRoster.groupList&quot;);</span>
+                    // Return true if each group may see the other group
+<span class="nc bnc" id="L975" title="All 4 branches missed.">                    if (groupNames != null &amp;&amp; groupNames.contains(otherGroup.getName())) {</span>
+<span class="nc" id="L976">                            return true;</span>
+                    }
+                }
+<span class="nc" id="L979">            }</span>
+<span class="nc" id="L980">        }</span>
+<span class="nc" id="L981">        return false;</span>
+    }
+
+    @Override
+    public void start() throws IllegalStateException {
+<span class="nc" id="L986">        super.start();</span>
+
+        // Make the GroupManager listeners be registered first
+<span class="nc" id="L989">        GroupManager.getInstance();</span>
+
+        // Add this module as a user event listener so we can update
+        // rosters when users are created or deleted
+<span class="nc" id="L993">        UserEventDispatcher.addListener(this);</span>
+        // Add the new instance as a listener of group events
+<span class="nc" id="L995">        GroupEventDispatcher.addListener(this);</span>
+<span class="nc" id="L996">    }</span>
+
+    @Override
+    public void stop() {
+<span class="nc" id="L1000">        super.stop();</span>
+        // Remove this module as a user event listener
+<span class="nc" id="L1002">        UserEventDispatcher.removeListener(this);</span>
+        // Remove this module as a listener of group events
+<span class="nc" id="L1004">        GroupEventDispatcher.removeListener(this);</span>
+<span class="nc" id="L1005">    }</span>
+
+    public static RosterItemProvider getRosterItemProvider() {
+<span class="nc" id="L1008">        return XMPPServer.getInstance().getRosterManager().provider;</span>
+    }
+
+    private void initProvider() {
+<span class="nc" id="L1012">        JiveGlobals.migrateProperty(&quot;provider.roster.className&quot;);</span>
+<span class="nc" id="L1013">        String className = JiveGlobals.getProperty(&quot;provider.roster.className&quot;,</span>
+                &quot;org.jivesoftware.openfire.roster.DefaultRosterItemProvider&quot;);
+
+<span class="nc bnc" id="L1016" title="All 4 branches missed.">        if (provider == null || !className.equals(provider.getClass().getName())) {</span>
+            try {
+<span class="nc" id="L1018">                Class c = ClassUtils.forName(className);</span>
+<span class="nc" id="L1019">                provider = (RosterItemProvider) c.newInstance();</span>
+            }
+<span class="nc" id="L1021">            catch (Exception e) {</span>
+<span class="nc" id="L1022">                Log.error(&quot;Error loading roster provider: &quot; + className, e);</span>
+<span class="nc" id="L1023">                provider = new DefaultRosterItemProvider();</span>
+<span class="nc" id="L1024">            }</span>
+        }
+
+<span class="nc" id="L1027">    }</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

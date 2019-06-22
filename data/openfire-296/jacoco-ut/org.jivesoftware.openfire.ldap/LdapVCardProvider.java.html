@@ -1,0 +1,574 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>LdapVCardProvider.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.ldap</a> &gt; <span class="el_source">LdapVCardProvider.java</span></div><h1>LdapVCardProvider.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.ldap;
+
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Set;
+import java.util.StringTokenizer;
+import java.util.regex.Matcher;
+
+import javax.naming.directory.Attributes;
+import javax.naming.directory.DirContext;
+
+import org.dom4j.Document;
+import org.dom4j.DocumentHelper;
+import org.dom4j.Element;
+import org.dom4j.Node;
+import org.jivesoftware.openfire.vcard.DefaultVCardProvider;
+import org.jivesoftware.openfire.vcard.PhotoResizer;
+import org.jivesoftware.openfire.vcard.VCardManager;
+import org.jivesoftware.openfire.vcard.VCardProvider;
+import org.jivesoftware.util.AlreadyExistsException;
+import org.jivesoftware.util.Base64;
+import org.jivesoftware.util.JiveGlobals;
+import org.jivesoftware.util.NotFoundException;
+import org.jivesoftware.util.PropertyEventDispatcher;
+import org.jivesoftware.util.PropertyEventListener;
+import org.jivesoftware.util.SystemProperty;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmpp.packet.JID;
+
+/**
+ * Read-only LDAP provider for vCards.Configuration consists of adding a provider:
+ * &lt;p&gt;
+ * {@code provider.vcard.className = org.jivesoftware.openfire.ldap.LdapVCardProvider}
+ * &lt;/p&gt;
+ * &lt;p&gt;and an xml vcard-mapping in the system properties.&lt;/p&gt;
+ * &lt;p&gt;
+ * The vcard attributes can be configured by adding an &lt;code&gt;attrs=&quot;attr1,attr2&quot;&lt;/code&gt;
+ * attribute to the vcard elements.&lt;/p&gt;
+ * &lt;p&gt;
+ * Arbitrary text can be used for the element values as well as &lt;code&gt;MessageFormat&lt;/code&gt;
+ * style placeholders for the ldap attributes. For example, if you wanted to map the LDAP
+ * attribute &lt;code&gt;displayName&lt;/code&gt; to the vcard element &lt;code&gt;FN&lt;/code&gt;, the xml
+ * nippet would be:&lt;/p&gt;&lt;br&gt;&lt;pre&gt;&amp;lt;FN attrs=&amp;quot;displayName&amp;quot;&amp;gt;{0}&amp;lt;/FN&amp;gt;&lt;/pre&gt;
+ * &lt;p&gt;
+ * The vCard XML must be escaped in CDATA and must also be well formed. It is the exact
+ * XML this provider will send to a client after after stripping &lt;code&gt;attr&lt;/code&gt; attributes
+ * and populating the placeholders with the data retrieved from LDAP. This system should
+ * be flexible enough to handle any client's vCard format. An example mapping follows.&lt;br&gt;
+ * &lt;/p&gt;
+ * {@code ldap.vcard-mapping =
+ *        &amp;lt;![CDATA[
+ *    		&amp;lt;vCard xmlns='vcard-temp'&amp;gt;
+ *    			&amp;lt;FN attrs=&amp;quot;displayName&amp;quot;&amp;gt;{0}&amp;lt;/FN&amp;gt;
+ *    			&amp;lt;NICKNAME attrs=&amp;quot;uid&amp;quot;&amp;gt;{0}&amp;lt;/NICKNAME&amp;gt;
+ *    			&amp;lt;BDAY attrs=&amp;quot;dob&amp;quot;&amp;gt;{0}&amp;lt;/BDAY&amp;gt;
+ *    			&amp;lt;ADR&amp;gt;
+ *    				&amp;lt;HOME/&amp;gt;
+ *    				&amp;lt;EXTADR&amp;gt;Ste 500&amp;lt;/EXTADR&amp;gt;
+ *    				&amp;lt;STREET&amp;gt;317 SW Alder St&amp;lt;/STREET&amp;gt;
+ *    				&amp;lt;LOCALITY&amp;gt;Portland&amp;lt;/LOCALITY&amp;gt;
+ *    				&amp;lt;REGION&amp;gt;Oregon&amp;lt;/REGION&amp;gt;
+ *    				&amp;lt;PCODE&amp;gt;97204&amp;lt;/PCODE&amp;gt;
+ *    				&amp;lt;CTRY&amp;gt;USA&amp;lt;/CTRY&amp;gt;
+ *    			&amp;lt;/ADR&amp;gt;
+ *    			&amp;lt;TEL&amp;gt;
+ *    				&amp;lt;HOME/&amp;gt;
+ *    				&amp;lt;VOICE/&amp;gt;
+ *    				&amp;lt;NUMBER attrs=&amp;quot;telephoneNumber&amp;quot;&amp;gt;{0}&amp;lt;/NUMBER&amp;gt;
+ *    			&amp;lt;/TEL&amp;gt;
+ *    			&amp;lt;EMAIL&amp;gt;
+ *    				&amp;lt;INTERNET/&amp;gt;
+ *    				&amp;lt;USERID attrs=&amp;quot;mail&amp;quot;&amp;gt;{0}&amp;lt;/USERID&amp;gt;
+ *    			&amp;lt;/EMAIL&amp;gt;
+ *    			&amp;lt;TITLE attrs=&amp;quot;title&amp;quot;&amp;gt;{0}&amp;lt;/TITLE&amp;gt;
+ *    			&amp;lt;ROLE attrs=&amp;quot;&amp;quot;&amp;gt;{0}&amp;lt;/ROLE&amp;gt;
+ *    			&amp;lt;ORG&amp;gt;
+ *    				&amp;lt;ORGNAME attrs=&amp;quot;o&amp;quot;&amp;gt;{0}&amp;lt;/ORGNAME&amp;gt;
+ *    				&amp;lt;ORGUNIT attrs=&amp;quot;&amp;quot;&amp;gt;{0}&amp;lt;/ORGUNIT&amp;gt;
+ *    			&amp;lt;/ORG&amp;gt;
+ *    			&amp;lt;URL attrs=&amp;quot;labeledURI&amp;quot;&amp;gt;{0}&amp;lt;/URL&amp;gt;
+ *    			&amp;lt;DESC attrs=&amp;quot;uidNumber,homeDirectory,loginShell&amp;quot;&amp;gt;
+ *    				uid: {0} home: {1} shell: {2}
+ *    			&amp;lt;/DESC&amp;gt;
+ *    		&amp;lt;/vCard&amp;gt;
+ *        ]]&amp;gt;
+ * }
+ * &lt;p&gt;
+ * An easy way to get the vcard format your client needs, assuming you've been
+ * using the database store, is to do a &lt;code&gt;SELECT value FROM ofVCard WHERE
+ * username='some_user'&lt;/code&gt; in your favorite sql querier and paste the result
+ * into the &lt;code&gt;vcard-mapping&lt;/code&gt; (don't forget the CDATA).&lt;/p&gt;
+ *
+ * @author rkelly
+ */
+public class LdapVCardProvider implements VCardProvider, PropertyEventListener {
+
+<span class="nc" id="L116">    public static final SystemProperty&lt;Boolean&gt; STORE_AVATAR_IN_DB = SystemProperty.Builder.ofType(Boolean.class)</span>
+<span class="nc" id="L117">        .setKey(&quot;ldap.override.avatar&quot;)</span>
+<span class="nc" id="L118">        .setDefaultValue(false)</span>
+<span class="nc" id="L119">        .setDynamic(true)</span>
+<span class="nc" id="L120">        .addListener(LdapVCardProvider::setDbStorageEnabled)</span>
+<span class="nc" id="L121">        .build();</span>
+
+<span class="nc" id="L123">    private static final Logger Log = LoggerFactory.getLogger(LdapVCardProvider.class);</span>
+
+    private LdapManager manager;
+    private VCardTemplate template;
+<span class="nc" id="L127">    private static boolean dbStorageEnabled = false;</span>
+
+    /**
+     * The default vCard provider is used to handle the vCard in the database. vCard
+     * fields that can be overriden are stored in the database.
+     *
+     * This is used/created only if we are storing avatars in the database.
+     */
+<span class="nc" id="L135">    private DefaultVCardProvider defaultProvider = null;</span>
+
+<span class="nc" id="L137">    public LdapVCardProvider() {</span>
+        // Convert XML based provider setup to Database based
+<span class="nc" id="L139">        JiveGlobals.migrateProperty(&quot;ldap.vcard-mapping&quot;);</span>
+
+<span class="nc" id="L141">        manager = LdapManager.getInstance();</span>
+<span class="nc" id="L142">        initTemplate();</span>
+        // Listen to property events so that the template is always up to date
+<span class="nc" id="L144">        PropertyEventDispatcher.addListener(this);</span>
+        // DB vcard provider used for loading properties overwritten in the DB
+<span class="nc" id="L146">        defaultProvider = new DefaultVCardProvider();</span>
+        // Check of avatars can be overwritten (and stored in the database)
+<span class="nc" id="L148">        setDbStorageEnabled(STORE_AVATAR_IN_DB.getValue());</span>
+<span class="nc" id="L149">    }</span>
+
+    private static void setDbStorageEnabled(final boolean value) {
+<span class="nc" id="L152">        dbStorageEnabled = value;</span>
+<span class="nc" id="L153">    }</span>
+
+    /**
+     * Initializes the VCard template as set by the administrator.
+     */
+    private void initTemplate() {
+<span class="nc" id="L159">        String property = JiveGlobals.getProperty(&quot;ldap.vcard-mapping&quot;);</span>
+<span class="nc" id="L160">        Log.debug(&quot;LdapVCardProvider: Found vcard mapping: '&quot; + property);</span>
+        try {
+            // Remove CDATA wrapping element
+<span class="nc bnc" id="L163" title="All 2 branches missed.">            if (property.startsWith(&quot;&lt;![CDATA[&quot;)) {</span>
+<span class="nc" id="L164">                property = property.substring(9, property.length()-3);</span>
+            }
+<span class="nc" id="L166">            Document document = DocumentHelper.parseText(property);</span>
+<span class="nc" id="L167">            template = new VCardTemplate(document);</span>
+        }
+<span class="nc" id="L169">        catch (Exception e) {</span>
+<span class="nc" id="L170">            Log.error(&quot;Error loading vcard mapping: &quot; + e.getMessage());</span>
+<span class="nc" id="L171">        }</span>
+
+<span class="nc" id="L173">        Log.debug(&quot;LdapVCardProvider: attributes size==&quot; + template.getAttributes().length);</span>
+<span class="nc" id="L174">    }</span>
+
+    /**
+     * Creates a mapping of requested LDAP attributes to their values for the given user.
+     *
+     * @param username User we are looking up in LDAP.
+     * @return Map of LDAP attribute to setting.
+     */
+    private Map&lt;String, String&gt; getLdapAttributes(String username) {
+        // Un-escape username
+<span class="nc" id="L184">        username = JID.unescapeNode(username);</span>
+<span class="nc" id="L185">        Map&lt;String, String&gt; map = new HashMap&lt;&gt;();</span>
+
+<span class="nc" id="L187">        DirContext ctx = null;</span>
+        try {
+<span class="nc" id="L189">            String userDN = manager.findUserDN(username);</span>
+
+<span class="nc" id="L191">            ctx = manager.getContext(manager.getUsersBaseDN(username));</span>
+<span class="nc" id="L192">            Attributes attrs = ctx.getAttributes(userDN, template.getAttributes());</span>
+
+<span class="nc bnc" id="L194" title="All 2 branches missed.">            for (String attribute : template.getAttributes()) {</span>
+<span class="nc" id="L195">                javax.naming.directory.Attribute attr = attrs.get(attribute);</span>
+                String value;
+<span class="nc bnc" id="L197" title="All 2 branches missed.">                if (attr == null) {</span>
+<span class="nc" id="L198">                    Log.debug(&quot;LdapVCardProvider: No ldap value found for attribute '&quot; + attribute + &quot;'&quot;);</span>
+<span class="nc" id="L199">                    value = &quot;&quot;;</span>
+                }
+                else {
+<span class="nc" id="L202">                    Object ob = attrs.get(attribute).get();</span>
+<span class="nc" id="L203">                    Log.debug(&quot;LdapVCardProvider: Found attribute &quot;+attribute+&quot; of type: &quot;+ob.getClass());</span>
+<span class="nc bnc" id="L204" title="All 2 branches missed.">                    if(ob instanceof String) {</span>
+<span class="nc" id="L205">                        value = (String)ob;</span>
+                    } else {
+<span class="nc" id="L207">                        value = Base64.encodeBytes((byte[])ob);</span>
+                    }
+                }
+<span class="nc" id="L210">                Log.debug(&quot;LdapVCardProvider: Ldap attribute '&quot; + attribute + &quot;'=&gt;'&quot; + value + &quot;'&quot;);</span>
+<span class="nc" id="L211">                map.put(attribute, value);</span>
+            }
+<span class="nc" id="L213">            return map;</span>
+        }
+<span class="nc" id="L215">        catch (Exception e) {</span>
+<span class="nc" id="L216">            Log.error(e.getMessage(), e);</span>
+<span class="nc" id="L217">            return Collections.emptyMap();</span>
+        }
+        finally {
+<span class="nc" id="L220">            try {</span>
+<span class="nc bnc" id="L221" title="All 6 branches missed.">                if (ctx != null) {</span>
+<span class="nc" id="L222">                    ctx.close();</span>
+                }
+            }
+<span class="nc" id="L225">            catch (Exception e) {</span>
+                // Ignore.
+<span class="nc" id="L227">            }</span>
+<span class="nc" id="L228">        }</span>
+    }
+
+    /**
+     * Loads the avatar from LDAP, based off the vcard template.
+     *
+     * If enabled, will replace a blank PHOTO element with one from a DB stored vcard.
+     *
+     * @param username User we are loading the vcard for.
+     * @return The loaded vcard element, or null if none found.
+     */
+    @Override
+    public Element loadVCard(String username) {
+        // Un-escape username.
+<span class="nc" id="L242">        username = JID.unescapeNode(username);</span>
+<span class="nc" id="L243">        Map&lt;String, String&gt; map = getLdapAttributes(username);</span>
+<span class="nc" id="L244">        Log.debug(&quot;LdapVCardProvider: Getting mapped vcard for &quot; + username);</span>
+<span class="nc" id="L245">        Element vcard = new VCard(template).getVCard(map);</span>
+        // If we have a vcard from ldap, but it doesn't have an avatar filled in, then we
+        // may fill it with a locally stored vcard element.
+<span class="nc bnc" id="L248" title="All 10 branches missed.">        if (dbStorageEnabled &amp;&amp; vcard != null &amp;&amp; (vcard.element(&quot;PHOTO&quot;) == null || vcard.element(&quot;PHOTO&quot;).element(&quot;BINVAL&quot;) == null || vcard.element(&quot;PHOTO&quot;).element(&quot;BINVAL&quot;).getText().matches(&quot;\\s*&quot;))) {</span>
+<span class="nc" id="L249">            Element avatarElement = loadAvatarFromDatabase(username);</span>
+<span class="nc bnc" id="L250" title="All 2 branches missed.">            if (avatarElement != null) {</span>
+<span class="nc" id="L251">                Log.debug(&quot;LdapVCardProvider: Adding avatar element from local storage&quot;);</span>
+<span class="nc" id="L252">                Element currentElement = vcard.element(&quot;PHOTO&quot;);</span>
+<span class="nc bnc" id="L253" title="All 2 branches missed.">                if (currentElement != null) {</span>
+<span class="nc" id="L254">                    vcard.remove(currentElement);</span>
+                }
+<span class="nc" id="L256">                vcard.add(avatarElement);</span>
+            }
+        }
+
+<span class="nc bnc" id="L260" title="All 2 branches missed.">        if ( JiveGlobals.getBooleanProperty( PhotoResizer.PROPERTY_RESIZE_ON_LOAD, PhotoResizer.PROPERTY_RESIZE_ON_LOAD_DEFAULT ) )</span>
+        {
+<span class="nc" id="L262">            PhotoResizer.resizeAvatar( vcard );</span>
+        }
+
+<span class="nc" id="L265">        Log.debug(&quot;LdapVCardProvider: Returning vcard&quot;);</span>
+<span class="nc" id="L266">        return vcard;</span>
+    }
+
+    /**
+     * Returns a merged LDAP vCard combined with a PHOTO element provided in specified vCard.
+     *
+     * @param username User whose vCard this is.
+     * @param mergeVCard vCard element that we are merging PHOTO element from into the LDAP vCard.
+     * @return vCard element after merging in PHOTO element to LDAP data.
+     */
+    private Element getMergedVCard(String username, Element mergeVCard) {
+        // Un-escape username.
+<span class="nc" id="L278">        username = JID.unescapeNode(username);</span>
+<span class="nc" id="L279">        Map&lt;String, String&gt; map = getLdapAttributes(username);</span>
+<span class="nc" id="L280">        Log.debug(&quot;LdapVCardProvider: Retrieving LDAP mapped vcard for &quot; + username);</span>
+<span class="nc bnc" id="L281" title="All 2 branches missed.">        if (map.isEmpty()) {</span>
+<span class="nc" id="L282">            return null;</span>
+        }
+<span class="nc" id="L284">        Element vcard = new VCard(template).getVCard(map);</span>
+<span class="nc bnc" id="L285" title="All 2 branches missed.">        if (mergeVCard == null) {</span>
+            // No vcard passed in?  Hrm.  Fine, return LDAP vcard.
+<span class="nc" id="L287">            return vcard;</span>
+        }
+<span class="nc bnc" id="L289" title="All 2 branches missed.">        if (mergeVCard.element(&quot;PHOTO&quot;) == null) {</span>
+            // Merged vcard has no photo element, return LDAP vcard as is.
+<span class="nc" id="L291">            return vcard;</span>
+        }
+<span class="nc" id="L293">        Element photoElement = mergeVCard.element(&quot;PHOTO&quot;).createCopy();</span>
+<span class="nc bnc" id="L294" title="All 6 branches missed.">        if (photoElement == null || photoElement.element(&quot;BINVAL&quot;) == null || photoElement.element(&quot;BINVAL&quot;).getText().matches(&quot;\\s*&quot;)) {</span>
+            // We were passed something null or empty, so lets just return the LDAP based vcard.
+<span class="nc" id="L296">            return vcard;</span>
+        }
+        // Now we need to check that the LDAP vcard doesn't have a PHOTO element that's filled in.
+<span class="nc bnc" id="L299" title="All 6 branches missed.">        if (!((vcard.element(&quot;PHOTO&quot;) == null || vcard.element(&quot;PHOTO&quot;).element(&quot;BINVAL&quot;) == null || vcard.element(&quot;PHOTO&quot;).element(&quot;BINVAL&quot;).getText().matches(&quot;\\s*&quot;)))) {</span>
+            // Hrm, it does, return the original vcard;
+<span class="nc" id="L301">            return vcard;</span>
+        }
+<span class="nc" id="L303">        Log.debug(&quot;LdapVCardProvider: Merging avatar element from passed vcard&quot;);</span>
+<span class="nc" id="L304">        Element currentElement = vcard.element(&quot;PHOTO&quot;);</span>
+<span class="nc bnc" id="L305" title="All 2 branches missed.">        if (currentElement != null) {</span>
+<span class="nc" id="L306">            vcard.remove(currentElement);</span>
+        }
+<span class="nc" id="L308">        vcard.add(photoElement);</span>
+<span class="nc" id="L309">        return vcard;</span>
+    }
+
+    /**
+     * Loads the avatar element from the user's DB stored vcard.
+     *
+     * @param username User whose vcard/avatar element we are loading.
+     * @return Loaded avatar element or null if not found.
+     */
+    private Element loadAvatarFromDatabase(String username) {
+<span class="nc" id="L319">        Element vcardElement = defaultProvider.loadVCard(username);</span>
+<span class="nc" id="L320">        Element avatarElement = null;</span>
+<span class="nc bnc" id="L321" title="All 4 branches missed.">        if (vcardElement != null &amp;&amp; vcardElement.element(&quot;PHOTO&quot;) != null) {</span>
+<span class="nc" id="L322">            avatarElement = vcardElement.element(&quot;PHOTO&quot;).createCopy();</span>
+        }
+<span class="nc" id="L324">        return avatarElement;</span>
+    }
+
+    /**
+     * Handles when a user creates a new vcard.
+     *
+     * @param username User that created a new vcard.
+     * @param vCardElement vCard element containing the new vcard.
+     * @throws UnsupportedOperationException If an invalid field is changed or we are in readonly mode.
+     */
+    @Override
+    public Element createVCard(String username, Element vCardElement)
+            throws UnsupportedOperationException, AlreadyExistsException {
+<span class="nc" id="L337">        throw new UnsupportedOperationException(&quot;LdapVCardProvider: VCard changes not allowed.&quot;);</span>
+    }
+
+    /**
+     * Handles when a user updates their vcard.
+     *
+     * @param username User that updated their vcard.
+     * @param vCardElement vCard element containing the new vcard.
+     * @throws UnsupportedOperationException If an invalid field is changed or we are in readonly mode.
+     */
+    @Override
+    public Element updateVCard(String username, Element vCardElement) throws UnsupportedOperationException {
+<span class="nc bnc" id="L349" title="All 4 branches missed.">        if (dbStorageEnabled &amp;&amp; defaultProvider != null) {</span>
+<span class="nc bnc" id="L350" title="All 2 branches missed.">            if (isValidVCardChange(username, vCardElement)) {</span>
+<span class="nc" id="L351">                Element mergedVCard = getMergedVCard(username, vCardElement);</span>
+                try {
+<span class="nc" id="L353">                    defaultProvider.updateVCard(username, mergedVCard);</span>
+<span class="nc" id="L354">                } catch (NotFoundException e) {</span>
+                    try {
+<span class="nc" id="L356">                        defaultProvider.createVCard(username, mergedVCard);</span>
+<span class="nc" id="L357">                    } catch (AlreadyExistsException e1) {</span>
+                        // Ignore
+<span class="nc" id="L359">                    }</span>
+<span class="nc" id="L360">                }</span>
+<span class="nc" id="L361">                return mergedVCard;</span>
+            }
+            else {
+<span class="nc" id="L364">                throw new UnsupportedOperationException(&quot;LdapVCardProvider: Invalid vcard changes.&quot;);</span>
+            }
+        }
+        else {
+<span class="nc" id="L368">            throw new UnsupportedOperationException(&quot;LdapVCardProvider: VCard changes not allowed.&quot;);</span>
+        }
+    }
+
+    /**
+     * Handles when a user deletes their vcard.
+     *
+     * @param username User that deketed their vcard.
+     * @throws UnsupportedOperationException If an invalid field is changed or we are in readonly mode.
+     */
+    @Override
+    public void deleteVCard(String username) throws UnsupportedOperationException {
+<span class="nc" id="L380">        throw new UnsupportedOperationException(&quot;LdapVCardProvider: Attempted to delete vcard in read-only mode.&quot;);</span>
+    }
+
+    /**
+     * Returns true or false if the change to the existing vcard is valid (only to PHOTO element)
+     *
+     * @param username User who's LDAP-based vcard we will compare with.
+     * @param newvCard New vCard Element we will compare against.
+     * @return True or false if the changes made were valid (only to PHOTO element)
+     */
+    private Boolean isValidVCardChange(String username, Element newvCard) {
+<span class="nc bnc" id="L391" title="All 2 branches missed.">        if (newvCard == null) {</span>
+            // Well if there's nothing to change, of course it's valid.
+<span class="nc" id="L393">            Log.debug(&quot;LdapVCardProvider: No new vcard provided (no changes), accepting.&quot;);</span>
+<span class="nc" id="L394">            return true;</span>
+        }
+        // Un-escape username.
+<span class="nc" id="L397">        username = JID.unescapeNode(username);</span>
+<span class="nc" id="L398">        Map&lt;String, String&gt; map = getLdapAttributes(username);</span>
+        // Retrieve LDAP created vcard for comparison
+<span class="nc" id="L400">        Element ldapvCard = new VCard(template).getVCard(map);</span>
+<span class="nc bnc" id="L401" title="All 2 branches missed.">        if (ldapvCard == null) {</span>
+            // This person has no vcard at all, may not change it!
+<span class="nc" id="L403">            Log.debug(&quot;LdapVCardProvider: User has no LDAP vcard, nothing they can change, rejecting.&quot;);</span>
+<span class="nc" id="L404">            return false;</span>
+        }
+        // If the LDAP vcard has a non-empty PHOTO element set, then there is literally no way this will be accepted.
+<span class="nc" id="L407">        Element ldapPhotoElem = ldapvCard.element(&quot;PHOTO&quot;);</span>
+<span class="nc bnc" id="L408" title="All 2 branches missed.">        if (ldapPhotoElem != null) {</span>
+<span class="nc" id="L409">            Element ldapBinvalElem = ldapPhotoElem.element(&quot;BINVAL&quot;);</span>
+<span class="nc bnc" id="L410" title="All 4 branches missed.">            if (ldapBinvalElem != null &amp;&amp; !ldapBinvalElem.getTextTrim().matches(&quot;\\s*&quot;)) {</span>
+                // LDAP is providing a valid PHOTO element, byebye!
+<span class="nc" id="L412">                Log.debug(&quot;LdapVCardProvider: LDAP has a PHOTO element set, no way to override, rejecting.&quot;);</span>
+<span class="nc" id="L413">                return false;</span>
+            }
+        }
+        // Retrieve database vcard, if it exists
+<span class="nc" id="L417">        Element dbvCard = defaultProvider.loadVCard(username);</span>
+<span class="nc bnc" id="L418" title="All 2 branches missed.">        if (dbvCard != null) {</span>
+<span class="nc" id="L419">            Element dbPhotoElem = dbvCard.element(&quot;PHOTO&quot;);</span>
+<span class="nc bnc" id="L420" title="All 2 branches missed.">            if (dbPhotoElem == null) {</span>
+                // DB has no photo, lets accept what we got.
+<span class="nc" id="L422">                Log.debug(&quot;LdapVCardProvider: Database has no PHOTO element, accepting update.&quot;);</span>
+<span class="nc" id="L423">                return true;</span>
+            }
+            else {
+<span class="nc" id="L426">                Element newPhotoElem = newvCard.element(&quot;PHOTO&quot;);</span>
+<span class="nc bnc" id="L427" title="All 2 branches missed.">                if (newPhotoElem == null) {</span>
+<span class="nc" id="L428">                    Log.debug(&quot;LdapVCardProvider: Photo element was removed, accepting update.&quot;);</span>
+<span class="nc" id="L429">                    return true;</span>
+                }
+                // Note: NodeComparator never seems to consider these equal, even if they are?
+<span class="nc bnc" id="L432" title="All 2 branches missed.">                if (!dbPhotoElem.asXML().equals(newPhotoElem.asXML())) {</span>
+                    // Photo element was changed.  Ignore all other changes and accept this.
+<span class="nc" id="L434">                    Log.debug(&quot;LdapVCardProvider: PHOTO element changed, accepting update.&quot;);</span>
+<span class="nc" id="L435">                    return true;</span>
+                }
+            }
+<span class="nc" id="L438">        }</span>
+        else {
+            // No vcard exists in database
+<span class="nc" id="L441">            Log.debug(&quot;LdapVCardProvider: Database has no vCard stored, accepting update.&quot;);</span>
+<span class="nc" id="L442">            return true;</span>
+        }
+        // Ok, either something bad changed or nothing changed.  Either way, user either:
+        // 1. should not have tried to change something 'readonly'
+        // 2. shouldn't have bothered submitting no changes
+        // So we'll consider this a bad return.
+<span class="nc" id="L448">        Log.debug(&quot;LdapVCardProvider: PHOTO element didn't change, no reason to accept this, rejecting.&quot;);</span>
+<span class="nc" id="L449">        return false;</span>
+    }
+
+
+    @Override
+    public boolean isReadOnly() {
+<span class="nc bnc" id="L455" title="All 2 branches missed.">        return !dbStorageEnabled;</span>
+    }
+
+    @Override
+    public void propertySet(String property, Map params) {
+<span class="nc bnc" id="L460" title="All 2 branches missed.">        if (&quot;ldap.vcard-mapping&quot;.equals(property)) {</span>
+<span class="nc" id="L461">            initTemplate();</span>
+            // Reset cache of vCards
+<span class="nc" id="L463">            VCardManager.getInstance().reset();</span>
+        }
+<span class="nc" id="L465">    }</span>
+
+    @Override
+    public void propertyDeleted(String property, Map params) {
+        //Ignore
+<span class="nc" id="L470">    }</span>
+
+    @Override
+    public void xmlPropertySet(String property, Map params) {
+        //Ignore
+<span class="nc" id="L475">    }</span>
+
+    @Override
+    public void xmlPropertyDeleted(String property, Map params) {
+        //Ignore
+<span class="nc" id="L480">    }</span>
+
+    /**
+     * Class to hold a &lt;code&gt;Document&lt;/code&gt; representation of a vcard mapping
+     * and unique attribute placeholders. Used by &lt;code&gt;VCard&lt;/code&gt; to apply
+     * a &lt;code&gt;Map&lt;/code&gt; of ldap attributes to ldap values via
+     * &lt;code&gt;MessageFormat&lt;/code&gt;
+     *
+     * @author rkelly
+     */
+    private static class VCardTemplate {
+
+        private Document document;
+
+        private String[] attributes;
+
+<span class="nc" id="L496">        public VCardTemplate(Document document) {</span>
+<span class="nc" id="L497">            Set&lt;String&gt; set = new HashSet&lt;&gt;();</span>
+<span class="nc" id="L498">            this.document = document;</span>
+<span class="nc" id="L499">            treeWalk(this.document.getRootElement(), set);</span>
+<span class="nc" id="L500">            attributes = set.toArray(new String[set.size()]);</span>
+<span class="nc" id="L501">        }</span>
+
+        public String[] getAttributes() {
+<span class="nc" id="L504">            return attributes;</span>
+        }
+
+        public Document getDocument() {
+<span class="nc" id="L508">            return document;</span>
+        }
+
+        private void treeWalk(Element element, Set&lt;String&gt; set) {
+<span class="nc bnc" id="L512" title="All 2 branches missed.">            for (int i = 0, size = element.nodeCount(); i &lt; size; i++) {</span>
+<span class="nc" id="L513">                Node node = element.node(i);</span>
+<span class="nc bnc" id="L514" title="All 2 branches missed.">                if (node instanceof Element) {</span>
+<span class="nc" id="L515">                    Element emement = (Element) node;</span>
+
+<span class="nc" id="L517">                    StringTokenizer st = new StringTokenizer(emement.getTextTrim(), &quot;, //{}&quot;);</span>
+<span class="nc bnc" id="L518" title="All 2 branches missed.">                    while (st.hasMoreTokens()) {</span>
+                        // Remove enclosing {}
+<span class="nc" id="L520">                        String string = st.nextToken().replaceAll(&quot;(\\{)([\\d\\D&amp;&amp;[^}]]+)(})&quot;, &quot;$2&quot;);</span>
+<span class="nc" id="L521">                        Log.debug(&quot;VCardTemplate: found attribute &quot; + string);</span>
+<span class="nc" id="L522">                        set.add(string);</span>
+<span class="nc" id="L523">                    }</span>
+<span class="nc" id="L524">                    treeWalk(emement, set);</span>
+                }
+            }
+<span class="nc" id="L527">        }</span>
+    }
+
+    /**
+     * vCard class that converts vcard data using a template.
+     */
+    private static class VCard {
+
+        private VCardTemplate template;
+
+<span class="nc" id="L537">        public VCard(VCardTemplate template) {</span>
+<span class="nc" id="L538">            this.template = template;</span>
+<span class="nc" id="L539">        }</span>
+
+        public Element getVCard(Map&lt;String, String&gt; map) {
+<span class="nc" id="L542">            Document document = (Document) template.getDocument().clone();</span>
+<span class="nc" id="L543">            Element element = document.getRootElement();</span>
+<span class="nc" id="L544">            return treeWalk(element, map);</span>
+        }
+
+        private Element treeWalk(Element element, Map&lt;String, String&gt; map) {
+<span class="nc bnc" id="L548" title="All 2 branches missed.">            for (int i = 0, size = element.nodeCount(); i &lt; size; i++) {</span>
+<span class="nc" id="L549">                Node node = element.node(i);</span>
+<span class="nc bnc" id="L550" title="All 2 branches missed.">                if (node instanceof Element) {</span>
+<span class="nc" id="L551">                    Element emement = (Element) node;</span>
+
+<span class="nc" id="L553">                    String elementText = emement.getTextTrim();</span>
+<span class="nc bnc" id="L554" title="All 4 branches missed.">                    if (elementText != null &amp;&amp; !&quot;&quot;.equals(elementText)) {</span>
+<span class="nc" id="L555">                        String format = emement.getStringValue();</span>
+
+<span class="nc" id="L557">                        StringTokenizer st = new StringTokenizer(elementText, &quot;, //{}&quot;);</span>
+<span class="nc bnc" id="L558" title="All 2 branches missed.">                        while (st.hasMoreTokens()) {</span>
+                            // Remove enclosing {}
+<span class="nc" id="L560">                            String field = st.nextToken();</span>
+<span class="nc" id="L561">                            String attrib = field.replaceAll(&quot;(\\{)(&quot; + field + &quot;)(})&quot;, &quot;$2&quot;);</span>
+<span class="nc" id="L562">                            String value = map.get(attrib);</span>
+<span class="nc" id="L563">                            format = format.replaceFirst(&quot;(\\{)(&quot; + field + &quot;)(})&quot;, Matcher.quoteReplacement(value));</span>
+<span class="nc" id="L564">                        }</span>
+<span class="nc" id="L565">                        emement.setText(format);</span>
+                    }
+<span class="nc" id="L567">                    treeWalk(emement, map);</span>
+                }
+            }
+<span class="nc" id="L570">            return element;</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

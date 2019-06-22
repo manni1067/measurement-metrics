@@ -1,0 +1,258 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>HybridUserProvider.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.user</a> &gt; <span class="el_source">HybridUserProvider.java</span></div><h1>HybridUserProvider.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2016 IgniteRealtime.org
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.user;
+
+import org.jivesoftware.util.JiveGlobals;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.util.ArrayList;
+import java.util.Date;
+import java.util.List;
+
+/**
+ * Delegate UserProvider operations among up to three configurable provider implementation classes.
+ *
+ * This class related to, but is distinct from {@link MappedUserProvider}. The Hybrid variant of the provider iterates
+ * over providers, operating on the first applicable instance. The Mapped variant, however, maps each user to exactly
+ * one provider.
+ *
+ * @author Marc Seeger
+ * @author Chris Neasbitt
+ * @author Tom Evans
+ * @author Guus der Kinderen
+ */
+public class HybridUserProvider extends UserMultiProvider
+{
+<span class="nc" id="L41">    private static final Logger Log = LoggerFactory.getLogger( HybridUserProvider.class );</span>
+
+<span class="nc" id="L43">    private final List&lt;UserProvider&gt; userProviders = new ArrayList&lt;&gt;();</span>
+
+    public HybridUserProvider()
+<span class="nc" id="L46">    {</span>
+        // Migrate user provider properties
+<span class="nc" id="L48">        JiveGlobals.migrateProperty( &quot;hybridUserProvider.primaryProvider.className&quot; );</span>
+<span class="nc" id="L49">        JiveGlobals.migrateProperty( &quot;hybridUserProvider.secondaryProvider.className&quot; );</span>
+<span class="nc" id="L50">        JiveGlobals.migrateProperty( &quot;hybridUserProvider.tertiaryProvider.className&quot; );</span>
+
+        // Load primary, secondary, and tertiary user providers.
+<span class="nc" id="L53">        final UserProvider primary = instantiate( &quot;hybridUserProvider.primaryProvider.className&quot; );</span>
+<span class="nc bnc" id="L54" title="All 2 branches missed.">        if ( primary != null )</span>
+        {
+<span class="nc" id="L56">            userProviders.add( primary );</span>
+        }
+<span class="nc" id="L58">        final UserProvider secondary = instantiate( &quot;hybridUserProvider.secondaryProvider.className&quot; );</span>
+<span class="nc bnc" id="L59" title="All 2 branches missed.">        if ( secondary != null )</span>
+        {
+<span class="nc" id="L61">            userProviders.add( secondary );</span>
+        }
+<span class="nc" id="L63">        final UserProvider tertiary = instantiate( &quot;hybridUserProvider.tertiaryProvider.className&quot; );</span>
+<span class="nc bnc" id="L64" title="All 2 branches missed.">        if ( tertiary != null )</span>
+        {
+<span class="nc" id="L66">            userProviders.add( tertiary );</span>
+        }
+
+        // Verify that there's at least one provider available.
+<span class="nc bnc" id="L70" title="All 2 branches missed.">        if ( userProviders.isEmpty() )</span>
+        {
+<span class="nc" id="L72">            Log.error( &quot;At least one UserProvider must be specified via openfire.xml or the system properties!&quot; );</span>
+        }
+<span class="nc" id="L74">    }</span>
+
+    @Override
+    protected List&lt;UserProvider&gt; getUserProviders()
+    {
+<span class="nc" id="L79">        return userProviders;</span>
+    }
+
+    /**
+     * Creates a new user in the first non-read-only provider.
+     *
+     * @param username the username.
+     * @param password the plain-text password.
+     * @param name     the user's name, which can be {@code null}, unless isNameRequired is set to true.
+     * @param email    the user's email address, which can be {@code null}, unless isEmailRequired is set to true.
+     * @return The user that was created.
+     * @throws UserAlreadyExistsException if the user already exists
+     */
+    @Override
+    public User createUser( String username, String password, String name, String email ) throws UserAlreadyExistsException
+    {
+        // create the user (first writable provider wins)
+<span class="nc bnc" id="L96" title="All 2 branches missed.">        for ( final UserProvider provider : getUserProviders() )</span>
+        {
+<span class="nc bnc" id="L98" title="All 2 branches missed.">            if ( provider.isReadOnly() )</span>
+            {
+<span class="nc" id="L100">                continue;</span>
+            }
+<span class="nc" id="L102">            return provider.createUser( username, password, name, email );</span>
+        }
+
+        // all providers are read-only
+<span class="nc" id="L106">        throw new UnsupportedOperationException();</span>
+    }
+
+    /**
+     * Removes a user from all non-read-only providers.
+     *
+     * @param username the username to delete.
+     */
+    @Override
+    public void deleteUser( String username )
+    {
+        // all providers are read-only
+<span class="nc bnc" id="L118" title="All 2 branches missed.">        if ( isReadOnly() )</span>
+        {
+<span class="nc" id="L120">            throw new UnsupportedOperationException();</span>
+        }
+
+<span class="nc bnc" id="L123" title="All 2 branches missed.">        for ( final UserProvider provider : getUserProviders() )</span>
+        {
+<span class="nc bnc" id="L125" title="All 2 branches missed.">            if ( provider.isReadOnly() )</span>
+            {
+<span class="nc" id="L127">                continue;</span>
+            }
+<span class="nc" id="L129">            provider.deleteUser( username );</span>
+<span class="nc" id="L130">        }</span>
+<span class="nc" id="L131">    }</span>
+
+    /**
+     * Returns the first provider that contains the user, or the first provider that is not read-only when the user
+     * does not exist in any provider.
+     *
+     * @param username the username (cannot be null or empty).
+     * @return The user provider (never null)
+     */
+    public UserProvider getUserProvider( String username )
+    {
+<span class="nc" id="L142">        UserProvider nonReadOnly = null;</span>
+<span class="nc bnc" id="L143" title="All 2 branches missed.">        for ( final UserProvider provider : getUserProviders() )</span>
+        {
+            try
+            {
+<span class="nc" id="L147">                provider.loadUser( username );</span>
+<span class="nc" id="L148">                return provider;</span>
+            }
+<span class="nc" id="L150">            catch ( UserNotFoundException unfe )</span>
+            {
+<span class="nc bnc" id="L152" title="All 2 branches missed.">                if ( Log.isDebugEnabled() )</span>
+                {
+<span class="nc" id="L154">                    Log.debug( &quot;User {} not found by UserProvider {}&quot;, username, provider.getClass().getName() );</span>
+                }
+
+<span class="nc bnc" id="L157" title="All 4 branches missed.">                if ( nonReadOnly == null &amp;&amp; !provider.isReadOnly() )</span>
+                {
+<span class="nc" id="L159">                    nonReadOnly = provider;</span>
+                }
+            }
+<span class="nc" id="L162">        }</span>
+
+        // User does not exist. Return a provider suitable for creating users.
+<span class="nc bnc" id="L165" title="All 2 branches missed.">        if ( nonReadOnly == null )</span>
+        {
+<span class="nc" id="L167">            throw new UnsupportedOperationException();</span>
+        }
+
+<span class="nc" id="L170">        return nonReadOnly;</span>
+    }
+
+    /**
+     * Loads a user from the first provider that contains the user.
+     *
+     * @param username the username (cannot be null or empty).
+     * @return The user (never null).
+     * @throws UserNotFoundException When none of the providers contains the user.
+     */
+    @Override
+    public User loadUser( String username ) throws UserNotFoundException
+    {
+<span class="nc bnc" id="L183" title="All 2 branches missed.">        for ( UserProvider provider : userProviders )</span>
+        {
+            try
+            {
+<span class="nc" id="L187">                return provider.loadUser( username );</span>
+            }
+<span class="nc" id="L189">            catch ( UserNotFoundException unfe )</span>
+            {
+<span class="nc bnc" id="L191" title="All 2 branches missed.">                if ( Log.isDebugEnabled() )</span>
+                {
+<span class="nc" id="L193">                    Log.debug( &quot;User {} not found by UserProvider {}&quot;, username, provider.getClass().getName() );</span>
+                }
+            }
+<span class="nc" id="L196">        }</span>
+        //if we get this far, no provider was able to load the user
+<span class="nc" id="L198">        throw new UserNotFoundException();</span>
+    }
+
+    /**
+     * Changes the creation date of a user in the first provider that contains the user.
+     *
+     * @param username     the username.
+     * @param creationDate the date the user was created.
+     * @throws UserNotFoundException         when the user was not found in any provider.
+     * @throws UnsupportedOperationException when the provider is read-only.
+     */
+    @Override
+    public void setCreationDate( String username, Date creationDate ) throws UserNotFoundException
+    {
+<span class="nc" id="L212">        getUserProvider( username ).setCreationDate( username, creationDate );</span>
+<span class="nc" id="L213">    }</span>
+
+    /**
+     * Changes the modification date of a user in the first provider that contains the user.
+     *
+     * @param username         the username.
+     * @param modificationDate the date the user was (last) modified.
+     * @throws UserNotFoundException         when the user was not found in any provider.
+     * @throws UnsupportedOperationException when the provider is read-only.
+     */
+    @Override
+    public void setModificationDate( String username, Date modificationDate ) throws UserNotFoundException
+    {
+<span class="nc" id="L226">        getUserProvider( username ).setCreationDate( username, modificationDate );</span>
+<span class="nc" id="L227">    }</span>
+
+    /**
+     * Changes the full name of a user in the first provider that contains the user.
+     *
+     * @param username the username.
+     * @param name     the new full name a user.
+     * @throws UserNotFoundException         when the user was not found in any provider.
+     * @throws UnsupportedOperationException when the provider is read-only.
+     */
+    @Override
+    public void setName( String username, String name ) throws UserNotFoundException
+    {
+<span class="nc" id="L240">        getUserProvider( username ).setEmail( username, name );</span>
+<span class="nc" id="L241">    }</span>
+
+    /**
+     * Changes the email address of a user in the first provider that contains the user.
+     *
+     * @param username the username.
+     * @param email    the new email address of a user.
+     * @throws UserNotFoundException         when the user was not found in any provider.
+     * @throws UnsupportedOperationException when the provider is read-only.
+     */
+    @Override
+    public void setEmail( String username, String email ) throws UserNotFoundException
+    {
+<span class="nc" id="L254">        getUserProvider( username ).setEmail( username, email );</span>
+<span class="nc" id="L255">    }</span>
+}
+
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

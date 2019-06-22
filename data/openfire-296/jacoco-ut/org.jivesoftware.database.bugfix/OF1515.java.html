@@ -1,0 +1,448 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>OF1515.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.database.bugfix</a> &gt; <span class="el_source">OF1515.java</span></div><h1>OF1515.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2018 Ignite Realtime Foundation. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.database.bugfix;
+
+import org.jivesoftware.database.DbConnectionManager;
+import org.jivesoftware.database.SchemaManager;
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.XMPPServerInfo;
+import org.jivesoftware.openfire.pubsub.CollectionNode;
+import org.jivesoftware.openfire.pubsub.Node;
+import org.jivesoftware.openfire.pubsub.NodeAffiliate;
+import org.jivesoftware.openfire.pubsub.models.AccessModel;
+import org.jivesoftware.openfire.pubsub.models.OnlyPublishers;
+import org.jivesoftware.openfire.pubsub.models.PublisherModel;
+import org.jivesoftware.util.JiveGlobals;
+import org.jivesoftware.util.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.net.InetAddress;
+import java.net.UnknownHostException;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.Date;
+import java.util.List;
+
+/**
+ * This class implements a fix for a problem identified as issue OF-1515 in the bugtracker of Openfire.
+ *
+ * The code in this class is intended to be executed only once, under very strict circumstances. The only class
+ * responsible for calling this code should be an instance of {@link SchemaManager}. The database update version
+ * corresponding to this fix is 27.
+ *
+ * @author Guus der Kinderen, guus.der.kinderen@gmail.com
+ * @see &lt;a href=&quot;http://www.igniterealtime.org/issues/browse/OF-1515&quot;&gt;Openfire bugtracker: OF-1515&lt;/a&gt;
+ */
+<span class="nc" id="L54">public class OF1515</span>
+{
+<span class="nc" id="L56">    private static final Logger Log = LoggerFactory.getLogger( OF1515.class );</span>
+
+    public static void executeFix() throws SQLException
+    {
+        try
+        {
+<span class="nc" id="L62">            Log.info( &quot;Migrating data from Private XML Storage to Pubsub.&quot; );</span>
+<span class="nc" id="L63">            final List&lt;PrivateXmlRecord&gt; oldRecords = getPrivateXmlStorageData();</span>
+<span class="nc" id="L64">            final List&lt;PubsubRecordData&gt; newRecords = transform( oldRecords );</span>
+<span class="nc" id="L65">            toPubsubData( newRecords );</span>
+<span class="nc" id="L66">            Log.info( &quot;Finished mgrating data from Private XML Storage to Pubsub. {} records migrated.&quot;, newRecords.size() );</span>
+        }
+<span class="nc" id="L68">        catch ( SQLException e )</span>
+        {
+<span class="nc" id="L70">            Log.error( &quot;An exception occurred while migrating private XML data to PEP!&quot;, e );</span>
+<span class="nc" id="L71">            throw e;</span>
+<span class="nc" id="L72">        }</span>
+<span class="nc" id="L73">    }</span>
+
+    /**
+     * Retrieves all data stored using XEP-0049 Private XML Storage
+     * @return A collection of data (can be empty, cannot be null).
+     */
+    private static List&lt;PrivateXmlRecord&gt; getPrivateXmlStorageData() throws SQLException
+    {
+<span class="nc" id="L81">        Log.info( &quot;Retrieving all data from Private XML Storage.&quot; );</span>
+<span class="nc" id="L82">        Connection con = null;</span>
+<span class="nc" id="L83">        PreparedStatement stmt = null;</span>
+<span class="nc" id="L84">        ResultSet rs = null;</span>
+        try
+        {
+<span class="nc" id="L87">            final List&lt;PrivateXmlRecord&gt; result = new ArrayList&lt;&gt;();</span>
+
+<span class="nc" id="L89">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L90">            stmt = con.prepareStatement( &quot;SELECT privateData, name, username, namespace FROM ofPrivate&quot; );</span>
+<span class="nc" id="L91">            rs = stmt.executeQuery();</span>
+<span class="nc bnc" id="L92" title="All 2 branches missed.">            while ( rs.next() ) {</span>
+<span class="nc" id="L93">                result.add( new PrivateXmlRecord( rs.getString( &quot;privateData&quot; ),</span>
+<span class="nc" id="L94">                                                  rs.getString( &quot;name&quot; ),</span>
+<span class="nc" id="L95">                                                  rs.getString( &quot;username&quot; ),</span>
+<span class="nc" id="L96">                                                  rs.getString( &quot;namespace&quot; ) ) );</span>
+            }
+
+<span class="nc" id="L99">            return result;</span>
+        }
+        finally
+        {
+<span class="nc" id="L103">            DbConnectionManager.closeConnection( rs, stmt, con );</span>
+<span class="nc" id="L104">        }</span>
+    }
+
+    /**
+     * Transforms XML data storage records into Pubsub node records
+     *
+     * @param oldRecords The records to transform (cannot be null)
+     * @return Transformed records (never null, can be empty).
+     */
+    private static List&lt;PubsubRecordData&gt; transform( List&lt;PrivateXmlRecord&gt; oldRecords )
+    {
+<span class="nc" id="L115">        Log.info( &quot;Transforming all data from Private XML Storage into Pubsub entities.&quot; );</span>
+        String domain;
+        try
+        {
+<span class="nc" id="L119">            domain = JiveGlobals.getProperty(XMPPServerInfo.XMPP_DOMAIN.getKey(), JiveGlobals.getXMLProperty( &quot;fqdn&quot;, InetAddress.getLocalHost().getCanonicalHostName() ) ).toLowerCase();</span>
+        }
+<span class="nc" id="L121">        catch ( UnknownHostException e )</span>
+        {
+<span class="nc" id="L123">            domain = &quot;localhost&quot;;</span>
+<span class="nc" id="L124">        }</span>
+<span class="nc" id="L125">        final List&lt;PubsubRecordData&gt; result = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L126" title="All 2 branches missed.">        for ( final PrivateXmlRecord oldRecord : oldRecords )</span>
+        {
+<span class="nc" id="L128">            final PubsubRecordData newRecord = new PubsubRecordData( oldRecord.username + '@' + domain, oldRecord.namespace, oldRecord.privateData );</span>
+<span class="nc" id="L129">            result.add( newRecord );</span>
+<span class="nc" id="L130">        }</span>
+
+<span class="nc" id="L132">        return result;</span>
+    }
+
+    /**
+     * Creates appropriate database entries for each pubsub record
+     * @param newRecords A collection of pubsub representations (can be empty, cannot be null).
+     */
+    private static void toPubsubData( List&lt;PubsubRecordData&gt; newRecords )
+    {
+<span class="nc" id="L141">        Log.info( &quot;Writing Pubsub entities.&quot; );</span>
+<span class="nc" id="L142">        Connection con = null;</span>
+<span class="nc" id="L143">        boolean abortTransaction = false;</span>
+
+        try
+        {
+<span class="nc" id="L147">            con = DbConnectionManager.getTransactionConnection();</span>
+<span class="nc bnc" id="L148" title="All 2 branches missed.">            for ( final PubsubRecordData newRecord : newRecords )</span>
+            {
+<span class="nc bnc" id="L150" title="All 2 branches missed.">                if ( !hasRootNode( con, newRecord.serviceID ) )</span>
+                {
+<span class="nc" id="L152">                    writeRootNode( con, newRecord.serviceID );</span>
+                }
+<span class="nc" id="L154">                writeNode( con, newRecord );</span>
+<span class="nc" id="L155">                writeItem( con, newRecord );</span>
+<span class="nc" id="L156">                writeAffiliation( con, newRecord );</span>
+<span class="nc" id="L157">            }</span>
+        }
+<span class="nc" id="L159">        catch ( SQLException e )</span>
+        {
+<span class="nc" id="L161">            abortTransaction = true;</span>
+        }
+        finally
+        {
+<span class="nc" id="L165">            DbConnectionManager.closeTransactionConnection( con, abortTransaction );</span>
+<span class="nc" id="L166">        }</span>
+<span class="nc" id="L167">    }</span>
+
+    private static boolean hasRootNode( Connection con, String serviceID ) throws SQLException
+    {
+<span class="nc" id="L171">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L172">        ResultSet rs = null;</span>
+        try
+        {
+<span class="nc" id="L175">            pstmt = con.prepareStatement(&quot;SELECT serviceID FROM ofPubsubNode WHERE serviceID = ? AND nodeID = ? AND parent IS NULL&quot; );</span>
+<span class="nc" id="L176">            pstmt.setString(1, serviceID);</span>
+<span class="nc" id="L177">            pstmt.setString(2, serviceID);</span>
+<span class="nc" id="L178">            rs = pstmt.executeQuery();</span>
+<span class="nc" id="L179">            return rs.next();</span>
+        }
+        finally
+        {
+<span class="nc" id="L183">            DbConnectionManager.fastcloseStmt( rs, pstmt );</span>
+<span class="nc" id="L184">        }</span>
+    }
+
+    private static void writeRootNode( Connection con, String serviceID ) throws SQLException
+    {
+<span class="nc" id="L189">        PreparedStatement pstmt = null;</span>
+        try
+        {
+<span class="nc" id="L192">            pstmt = con.prepareStatement( &quot;INSERT INTO ofPubsubNode (serviceID, nodeID, leaf, creationDate, modificationDate, &quot; +</span>
+                                              &quot;parent, deliverPayloads, maxPayloadSize, persistItems, maxItems, &quot; +
+                                              &quot;notifyConfigChanges, notifyDelete, notifyRetract, presenceBased, &quot; +
+                                              &quot;sendItemSubscribe, publisherModel, subscriptionEnabled, configSubscription, &quot; +
+                                              &quot;accessModel, payloadType, bodyXSLT, dataformXSLT, creator, description, &quot; +
+                                              &quot;language, name, replyPolicy, associationPolicy, maxLeafNodes) &quot; +
+                                              &quot;VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)&quot; );
+
+            // ServiceID
+<span class="nc" id="L201">            pstmt.setString( 1, serviceID );</span>
+
+            // NodeID
+<span class="nc" id="L204">            pstmt.setString( 2, serviceID );</span>
+
+            // is Leaf?
+<span class="nc" id="L207">            pstmt.setInt( 3, 0 );</span>
+
+            // creation date
+<span class="nc" id="L210">            pstmt.setString( 4, StringUtils.dateToMillis( new Date() ) );</span>
+
+            // modification date
+<span class="nc" id="L213">            pstmt.setString( 5, StringUtils.dateToMillis( new Date() ) );</span>
+
+            // parent
+<span class="nc" id="L216">            pstmt.setString( 6, null );</span>
+
+            // deliver Payloads
+<span class="nc" id="L219">            pstmt.setInt( 7, 0 );</span>
+
+            // max payload size
+<span class="nc" id="L222">            pstmt.setInt( 8, 0 );</span>
+
+            // persist items
+<span class="nc" id="L225">            pstmt.setInt( 9, 0 );</span>
+
+            // max items
+<span class="nc" id="L228">            pstmt.setInt( 10, 0 );</span>
+
+            // NotifyConfigChanges
+<span class="nc" id="L231">            pstmt.setInt( 11, 1 );</span>
+
+            // Notify delete
+<span class="nc" id="L234">            pstmt.setInt( 12, 1 );</span>
+
+            // notidfy retract
+<span class="nc" id="L237">            pstmt.setInt( 13, 1 );</span>
+
+            // presence based
+<span class="nc" id="L240">            pstmt.setInt( 14, 0 );</span>
+
+            // Send item subscribe
+<span class="nc" id="L243">            pstmt.setInt( 15, 0 );</span>
+
+            // publisher model
+<span class="nc" id="L246">            pstmt.setString( 16, PublisherModel.publishers.getName() );</span>
+
+            // subscritpionEnabled
+<span class="nc" id="L249">            pstmt.setInt( 17, 1 );</span>
+
+            // config subscription
+<span class="nc" id="L252">            pstmt.setInt( 18, 0 );</span>
+
+            // access model
+<span class="nc" id="L255">            pstmt.setString( 19, AccessModel.presence.getName() );</span>
+
+            // payload type
+<span class="nc" id="L258">            pstmt.setString( 20, &quot;&quot; );</span>
+
+            // body xslt
+<span class="nc" id="L261">            pstmt.setString( 21, &quot;&quot; );</span>
+
+            // dataform xslt
+<span class="nc" id="L264">            pstmt.setString( 22, &quot;&quot; );</span>
+
+            // creator
+<span class="nc" id="L267">            pstmt.setString( 23, serviceID );</span>
+
+            // description
+<span class="nc" id="L270">            pstmt.setString( 24, &quot;&quot; );</span>
+
+            // language
+<span class="nc" id="L273">            pstmt.setString( 25, &quot;English&quot; );</span>
+
+            // name
+<span class="nc" id="L276">            pstmt.setString( 26, &quot;&quot; );</span>
+
+            // reply policy
+<span class="nc" id="L279">            pstmt.setString( 27, null );</span>
+
+            // association policy
+<span class="nc" id="L282">            pstmt.setString( 28, CollectionNode.LeafNodeAssociationPolicy.all.name() );</span>
+
+            // max leaf nodes
+<span class="nc" id="L285">            pstmt.setInt( 29, -1 );</span>
+
+<span class="nc" id="L287">            pstmt.executeUpdate();</span>
+        }
+        finally
+        {
+<span class="nc" id="L291">            DbConnectionManager.fastcloseStmt( pstmt );</span>
+<span class="nc" id="L292">        }</span>
+<span class="nc" id="L293">    }</span>
+
+    private static void writeNode( Connection con, PubsubRecordData record ) throws SQLException
+    {
+<span class="nc" id="L297">        PreparedStatement pstmt = null;</span>
+        try
+        {
+<span class="nc" id="L300">            pstmt = con.prepareStatement(&quot;INSERT INTO ofPubsubNode (serviceID, nodeID, leaf, creationDate, modificationDate, &quot; +</span>
+                                             &quot;parent, deliverPayloads, maxPayloadSize, persistItems, maxItems, &quot; +
+                                             &quot;notifyConfigChanges, notifyDelete, notifyRetract, presenceBased, &quot; +
+                                             &quot;sendItemSubscribe, publisherModel, subscriptionEnabled, configSubscription, &quot; +
+                                             &quot;accessModel, payloadType, bodyXSLT, dataformXSLT, creator, description, &quot; +
+                                             &quot;language, name, replyPolicy, associationPolicy, maxLeafNodes) &quot; +
+                                             &quot;VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)&quot; );
+<span class="nc" id="L307">            pstmt.setString(1, record.serviceID);</span>
+<span class="nc" id="L308">            pstmt.setString(2, record.nodeID);</span>
+<span class="nc" id="L309">            pstmt.setInt(3, record.leaf);</span>
+<span class="nc" id="L310">            pstmt.setString(4, record.creationDate);</span>
+<span class="nc" id="L311">            pstmt.setString(5, record.modificationDate);</span>
+<span class="nc" id="L312">            pstmt.setString(6, record.parent);</span>
+<span class="nc" id="L313">            pstmt.setInt(7, record.deliverPayloads);</span>
+<span class="nc" id="L314">            pstmt.setInt(8, record.maxPayloadSize);</span>
+<span class="nc" id="L315">            pstmt.setInt(9, record.persistPublishedItems);</span>
+<span class="nc" id="L316">            pstmt.setInt(10, record.maxPublishedItems);</span>
+<span class="nc" id="L317">            pstmt.setInt(11, record.notifiedOfConfigChanges);</span>
+<span class="nc" id="L318">            pstmt.setInt(12, record.notifiedOfDelete);</span>
+<span class="nc" id="L319">            pstmt.setInt(13, record.notifiedOfRetract);</span>
+<span class="nc" id="L320">            pstmt.setInt(14, record.presenceBasedDelivery);</span>
+<span class="nc" id="L321">            pstmt.setInt(15, record.sendItemsubscribe);</span>
+<span class="nc" id="L322">            pstmt.setString(16, record.publisherModel);</span>
+<span class="nc" id="L323">            pstmt.setInt(17, record.subscriptionEnabled);</span>
+<span class="nc" id="L324">            pstmt.setInt(18, record.subscriptionConfigurationRequired);</span>
+<span class="nc" id="L325">            pstmt.setString(19, record.accessModel);</span>
+<span class="nc" id="L326">            pstmt.setString(20, record.payloadType);</span>
+<span class="nc" id="L327">            pstmt.setString(21, record.bodyXSLT);</span>
+<span class="nc" id="L328">            pstmt.setString(22, record.dataformXSLT);</span>
+<span class="nc" id="L329">            pstmt.setString(23, record.creator);</span>
+<span class="nc" id="L330">            pstmt.setString(24, record.description);</span>
+<span class="nc" id="L331">            pstmt.setString(25, record.language);</span>
+<span class="nc" id="L332">            pstmt.setString(26, record.name);</span>
+<span class="nc" id="L333">            pstmt.setString(27, record.replyPolicy);</span>
+<span class="nc" id="L334">            pstmt.setString(28, record.associationPolicy);</span>
+<span class="nc" id="L335">            pstmt.setInt(29, record.maxLeafNodes);</span>
+<span class="nc" id="L336">            pstmt.executeUpdate();</span>
+        }
+        finally
+        {
+<span class="nc" id="L340">            DbConnectionManager.fastcloseStmt( pstmt );</span>
+<span class="nc" id="L341">        }</span>
+<span class="nc" id="L342">    }</span>
+
+    private static void writeItem( Connection con, PubsubRecordData record ) throws SQLException
+    {
+<span class="nc" id="L346">        PreparedStatement pstmt = null;</span>
+        try
+        {
+<span class="nc" id="L349">            pstmt = con.prepareStatement(&quot;INSERT INTO ofPubsubItem (serviceID,nodeID,id,jid,creationDate,payload) VALUES (?,?,?,?,?,?)&quot;);</span>
+<span class="nc" id="L350">            pstmt.setString(1, record.serviceID);</span>
+<span class="nc" id="L351">            pstmt.setString(2, record.nodeID);</span>
+<span class="nc" id="L352">            pstmt.setString(3, record.itemID);</span>
+<span class="nc" id="L353">            pstmt.setString(4, record.creator);</span>
+<span class="nc" id="L354">            pstmt.setString(5, record.creationDate);</span>
+<span class="nc" id="L355">            pstmt.setString(6, record.payload);</span>
+<span class="nc" id="L356">            pstmt.executeUpdate();</span>
+        }
+        finally
+        {
+<span class="nc" id="L360">            DbConnectionManager.fastcloseStmt( pstmt );</span>
+<span class="nc" id="L361">        }</span>
+<span class="nc" id="L362">    }</span>
+
+    private static void writeAffiliation( Connection con, PubsubRecordData record ) throws SQLException
+    {
+<span class="nc" id="L366">        PreparedStatement pstmt = null;</span>
+        try
+        {
+<span class="nc" id="L369">            pstmt = con.prepareStatement(&quot;INSERT INTO ofPubsubAffiliation (serviceID,nodeID,jid,affiliation) VALUES (?,?,?,?)&quot; );</span>
+<span class="nc" id="L370">            pstmt.setString(1, record.serviceID);</span>
+<span class="nc" id="L371">            pstmt.setString(2, record.nodeID);</span>
+<span class="nc" id="L372">            pstmt.setString(3, record.creator);</span>
+<span class="nc" id="L373">            pstmt.setString( 4, NodeAffiliate.Affiliation.owner.name() );</span>
+<span class="nc" id="L374">            pstmt.executeUpdate();</span>
+        }
+        finally
+        {
+<span class="nc" id="L378">            DbConnectionManager.fastcloseStmt( pstmt );</span>
+<span class="nc" id="L379">        }</span>
+<span class="nc" id="L380">    }</span>
+
+    /**
+     * Representation of a data record stored in the XML private data storage.
+     */
+    private static class PrivateXmlRecord
+    {
+        final String privateData; // which is a string representation of a XML element, but there's no need to deserialize for migration purposes.
+        final String name;
+        final String username;
+        final String namespace;
+
+        private PrivateXmlRecord( String privateData, String name, String username, String namespace )
+<span class="nc" id="L393">        {</span>
+<span class="nc" id="L394">            this.privateData = privateData;</span>
+<span class="nc" id="L395">            this.name = name;</span>
+<span class="nc" id="L396">            this.username = username;</span>
+<span class="nc" id="L397">            this.namespace = namespace;</span>
+<span class="nc" id="L398">        }</span>
+    }
+    /**
+     * Representation of a data record stored as a PEP node.
+     */
+    private static class PubsubRecordData
+    {
+        final String serviceID; // JID
+        final String nodeID; // namespace
+<span class="nc" id="L407">        final int leaf = 1;</span>
+<span class="nc" id="L408">        final String creationDate = StringUtils.dateToMillis( new Date() );</span>
+<span class="nc" id="L409">        final String modificationDate = creationDate;</span>
+        final String parent; // JID
+<span class="nc" id="L411">        final int deliverPayloads = 1;</span>
+<span class="nc" id="L412">        final int maxPayloadSize = 5120;</span>
+<span class="nc" id="L413">        final int persistPublishedItems = 1;</span>
+<span class="nc" id="L414">        final int maxPublishedItems = 1;</span>
+<span class="nc" id="L415">        final int notifiedOfConfigChanges = 1;</span>
+<span class="nc" id="L416">        final int notifiedOfDelete = 1;</span>
+<span class="nc" id="L417">        final int notifiedOfRetract = 1;</span>
+<span class="nc" id="L418">        final int presenceBasedDelivery = 0;</span>
+<span class="nc" id="L419">        final int sendItemsubscribe = 1;</span>
+<span class="nc" id="L420">        final String publisherModel = OnlyPublishers.publishers.getName();</span>
+<span class="nc" id="L421">        final int subscriptionEnabled = 1;</span>
+<span class="nc" id="L422">        final int subscriptionConfigurationRequired = 0;</span>
+<span class="nc" id="L423">        final String accessModel = AccessModel.whitelist.getName();</span>
+<span class="nc" id="L424">        final String payloadType = &quot;&quot;;</span>
+<span class="nc" id="L425">        final String bodyXSLT = &quot;&quot;;</span>
+<span class="nc" id="L426">        final String dataformXSLT = &quot;&quot;;</span>
+        final String creator; // JID
+<span class="nc" id="L428">        final String description = &quot;&quot;;</span>
+<span class="nc" id="L429">        final String language = &quot;English&quot;;</span>
+<span class="nc" id="L430">        final String name = &quot;&quot;;</span>
+<span class="nc" id="L431">        final String replyPolicy = Node.ItemReplyPolicy.owner.name();</span>
+<span class="nc" id="L432">        final String associationPolicy = null;</span>
+<span class="nc" id="L433">        final int maxLeafNodes = 0;</span>
+
+<span class="nc" id="L435">        final String itemID = &quot;current&quot;;</span>
+        final String payload;
+
+        private PubsubRecordData( String jid, String namespace, String payload )
+<span class="nc" id="L439">        {</span>
+<span class="nc" id="L440">            this.serviceID = jid;</span>
+<span class="nc" id="L441">            this.nodeID = namespace;</span>
+<span class="nc" id="L442">            this.parent = jid;</span>
+<span class="nc" id="L443">            this.creator = jid;</span>
+<span class="nc" id="L444">            this.payload = payload;</span>
+<span class="nc" id="L445">        }</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

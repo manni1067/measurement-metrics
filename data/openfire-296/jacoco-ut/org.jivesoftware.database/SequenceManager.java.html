@@ -1,0 +1,267 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>SequenceManager.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.database</a> &gt; <span class="el_source">SequenceManager.java</span></div><h1>SequenceManager.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2004-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.database;
+
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+
+import org.jivesoftware.util.JiveConstants;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Manages sequences of unique ID's that get stored in the database. Database support for sequences
+ * varies widely; some don't use them at all. Instead, we handle unique ID generation with a
+ * combination VM/database solution.
+ * &lt;p&gt;
+ * A special table in the database doles out blocks of unique ID's to each
+ * virtual machine that interacts with Jive. This has the following consequences:&lt;/p&gt;
+ * &lt;ul&gt;
+ * &lt;li&gt;There is no need to go to the database every time we want a new unique id.
+ * &lt;li&gt;Multiple app servers can interact with the same db without id collision.
+ * &lt;li&gt;The order of unique id's may not correspond to the creation date of objects.
+ * &lt;li&gt;There can be gaps in ID's after server restarts since blocks will get &quot;lost&quot; if the block
+ * size is greater than 1.
+ * &lt;/ul&gt;
+ * Each sequence type that this class manages has a different block size value. Objects that aren't
+ * created often have a block size of 1, while frequently created objects such as entries and
+ * comments have larger block sizes.
+ *
+ * @author Matt Tucker
+ * @author Bruce Ritchie
+ */
+public class SequenceManager {
+
+<span class="nc" id="L53">    private static final Logger Log = LoggerFactory.getLogger(SequenceManager.class);</span>
+
+    private static final String CREATE_ID =
+            &quot;INSERT INTO ofID (id, idType) VALUES (1, ?)&quot;;
+
+    private static final String LOAD_ID =
+            &quot;SELECT id FROM ofID WHERE idType=?&quot;;
+
+    private static final String UPDATE_ID =
+            &quot;UPDATE ofID SET id=? WHERE idType=? AND id=?&quot;;
+
+    // Statically startup a sequence manager for each of the sequence counters.
+<span class="nc" id="L65">    private static Map&lt;Integer, SequenceManager&gt; managers = new ConcurrentHashMap&lt;&gt;();</span>
+
+    static {
+<span class="nc" id="L68">        new SequenceManager(JiveConstants.ROSTER, 5);</span>
+<span class="nc" id="L69">        new SequenceManager(JiveConstants.OFFLINE, 5);</span>
+<span class="nc" id="L70">        new SequenceManager(JiveConstants.MUC_ROOM, 5);</span>
+<span class="nc" id="L71">        new SequenceManager(JiveConstants.MUC_MESSAGE_ID, 50);</span>
+<span class="nc" id="L72">    }</span>
+
+    /**
+     * Returns the next ID of the specified type.
+     *
+     * @param type the type of unique ID.
+     * @return the next unique ID of the specified type.
+     */
+    public static long nextID(int type) {
+<span class="nc bnc" id="L81" title="All 2 branches missed.">        if (managers.containsKey(type)) {</span>
+<span class="nc" id="L82">            return managers.get(type).nextUniqueID();</span>
+        }
+        else {
+            // Verify type is valid from the db, if so create an instance for the type
+            // And return the next unique id
+<span class="nc" id="L87">            SequenceManager manager = new SequenceManager(type, 1);</span>
+<span class="nc" id="L88">            return manager.nextUniqueID();</span>
+        }
+    }
+
+    /**
+     * Returns the next id for an object that has defined the annotation {@link JiveID}.
+     * The JiveID annotation value is the synonymous for the type integer.&lt;p&gt;
+     *
+     * The annotation JiveID should contain the id type for the object (the same number you would
+     * use to call nextID(int type)). Example class definition:&lt;/p&gt;
+     * &lt;code&gt;
+     * \@JiveID(10)
+     * public class MyClass {
+     *
+     * }
+     * &lt;/code&gt;
+     *
+     * @param o object that has annotation JiveID.
+     * @return the next unique ID.
+     * @throws IllegalArgumentException If the object passed in does not defined {@link JiveID}
+     */
+    public static long nextID(Object o) {
+<span class="nc" id="L110">        JiveID id = o.getClass().getAnnotation(JiveID.class);</span>
+
+<span class="nc bnc" id="L112" title="All 2 branches missed.">        if (id == null) {</span>
+<span class="nc" id="L113">            Log.error(&quot;Annotation JiveID must be defined in the class &quot; + o.getClass());</span>
+<span class="nc" id="L114">            throw new IllegalArgumentException(</span>
+<span class="nc" id="L115">                    &quot;Annotation JiveID must be defined in the class &quot; + o.getClass());</span>
+        }
+
+<span class="nc" id="L118">        return nextID(id.value());</span>
+    }
+
+    /**
+     * Used to set the blocksize of a given SequenceManager. If no SequenceManager has
+     * been registered for the type, the type is verified as valid and then a new
+     * sequence manager is created.
+     *
+     * @param type the type of unique id.
+     * @param blockSize how many blocks of ids we should.
+     */
+    public static void setBlockSize(int type, int blockSize) {
+<span class="nc bnc" id="L130" title="All 2 branches missed.">        if (managers.containsKey(type)) {</span>
+<span class="nc" id="L131">            managers.get(type).blockSize = blockSize;</span>
+        }
+        else {
+<span class="nc" id="L134">            new SequenceManager(type, blockSize);</span>
+        }
+<span class="nc" id="L136">    }</span>
+
+    private int type;
+    private long currentID;
+    private long maxID;
+    private int blockSize;
+
+    /**
+     * Creates a new DbSequenceManager.
+     *
+     * @param seqType the type of sequence.
+     * @param size the number of id's to &quot;checkout&quot; at a time.
+     */
+<span class="nc" id="L149">    public SequenceManager(int seqType, int size) {</span>
+<span class="nc" id="L150">        managers.put(seqType, this);</span>
+<span class="nc" id="L151">        this.type = seqType;</span>
+<span class="nc" id="L152">        this.blockSize = size;</span>
+<span class="nc" id="L153">        currentID = 0l;</span>
+<span class="nc" id="L154">        maxID = 0l;</span>
+<span class="nc" id="L155">    }</span>
+
+    /**
+     * Returns the next available unique ID. Essentially this provides for the functionality of an
+     * auto-increment database field.
+     * @return the next sequence number
+     */
+    public synchronized long nextUniqueID() {
+<span class="nc bnc" id="L163" title="All 2 branches missed.">        if (!(currentID &lt; maxID)) {</span>
+            // Get next block -- make 5 attempts at maximum.
+<span class="nc" id="L165">            getNextBlock(5);</span>
+        }
+<span class="nc" id="L167">        long id = currentID;</span>
+<span class="nc" id="L168">        currentID++;</span>
+<span class="nc" id="L169">        return id;</span>
+    }
+
+    /**
+     * Performs a lookup to get the next available ID block. The algorithm is as follows:
+     * &lt;ol&gt;
+     * &lt;li&gt; Select currentID from appropriate db row.
+     * &lt;li&gt; Increment id returned from db.
+     * &lt;li&gt; Update db row with new id where id=old_id.
+     * &lt;li&gt; If update fails another process checked out the block first; go back to step 1.
+     * Otherwise, done.
+     * &lt;/ol&gt;
+     */
+    private void getNextBlock(int count) {
+<span class="nc bnc" id="L183" title="All 2 branches missed.">        if (count == 0) {</span>
+<span class="nc" id="L184">            Log.error(&quot;Failed at last attempt to obtain an ID, aborting...&quot;);</span>
+<span class="nc" id="L185">            return;</span>
+        }
+
+<span class="nc" id="L188">        Connection con = null;</span>
+<span class="nc" id="L189">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L190">        ResultSet rs = null;</span>
+<span class="nc" id="L191">        boolean abortTransaction = false;</span>
+<span class="nc" id="L192">        boolean success = false;</span>
+
+        try {
+<span class="nc" id="L195">            con = DbConnectionManager.getTransactionConnection();</span>
+            // Get the current ID from the database.
+<span class="nc" id="L197">            pstmt = con.prepareStatement(LOAD_ID);</span>
+<span class="nc" id="L198">            pstmt.setInt(1, type);</span>
+<span class="nc" id="L199">            rs = pstmt.executeQuery();</span>
+
+<span class="nc" id="L201">            long currentID = 1;</span>
+<span class="nc bnc" id="L202" title="All 2 branches missed.">            if (rs.next()) {</span>
+<span class="nc" id="L203">                currentID = rs.getLong(1);</span>
+            }
+            else {
+<span class="nc" id="L206">                createNewID(con, type);</span>
+            }
+<span class="nc" id="L208">            DbConnectionManager.fastcloseStmt(rs, pstmt);</span>
+
+            // Increment the id to define our block.
+<span class="nc" id="L211">            long newID = currentID + blockSize;</span>
+            // The WHERE clause includes the last value of the id. This ensures
+            // that an update will occur only if nobody else has performed an
+            // update first.
+<span class="nc" id="L215">            pstmt = con.prepareStatement(UPDATE_ID);</span>
+<span class="nc" id="L216">            pstmt.setLong(1, newID);</span>
+<span class="nc" id="L217">            pstmt.setInt(2, type);</span>
+<span class="nc" id="L218">            pstmt.setLong(3, currentID);</span>
+            // Check to see if the row was affected. If not, some other process
+            // already changed the original id that we read. Therefore, this
+            // round failed and we'll have to try again.
+<span class="nc bnc" id="L222" title="All 2 branches missed.">            success = pstmt.executeUpdate() == 1;</span>
+<span class="nc bnc" id="L223" title="All 2 branches missed.">            if (success) {</span>
+<span class="nc" id="L224">                this.currentID = currentID;</span>
+<span class="nc" id="L225">                this.maxID = newID;</span>
+            }
+        }
+<span class="nc" id="L228">        catch (SQLException e) {</span>
+<span class="nc" id="L229">            Log.error(e.getMessage(), e);</span>
+<span class="nc" id="L230">            abortTransaction = true;</span>
+        }
+        finally {
+<span class="nc" id="L233">            DbConnectionManager.closeStatement(rs, pstmt);</span>
+<span class="nc" id="L234">            DbConnectionManager.closeTransactionConnection(con, abortTransaction);</span>
+<span class="nc" id="L235">        }</span>
+
+<span class="nc bnc" id="L237" title="All 2 branches missed.">        if (!success) {</span>
+<span class="nc" id="L238">            Log.warn(&quot;WARNING: failed to obtain next ID block due to &quot; +</span>
+                    &quot;thread contention. Trying again...&quot;);
+            // Call this method again, but sleep briefly to try to avoid thread contention.
+            try {
+<span class="nc" id="L242">                Thread.sleep(75);</span>
+            }
+<span class="nc" id="L244">            catch (InterruptedException ie) {</span>
+                // Ignore.
+<span class="nc" id="L246">            }</span>
+<span class="nc" id="L247">            getNextBlock(count - 1);</span>
+        }
+<span class="nc" id="L249">    }</span>
+
+    private void createNewID(Connection con, int type) throws SQLException {
+<span class="nc" id="L252">        Log.warn(&quot;Autocreating jiveID row for type '&quot; + type + &quot;'&quot;);</span>
+
+        // create new ID row
+<span class="nc" id="L255">        PreparedStatement pstmt = null;</span>
+
+        try {
+<span class="nc" id="L258">            pstmt = con.prepareStatement(CREATE_ID);</span>
+<span class="nc" id="L259">            pstmt.setInt(1, type);</span>
+<span class="nc" id="L260">            pstmt.execute();</span>
+        }
+        finally {
+<span class="nc" id="L263">            DbConnectionManager.closeStatement(pstmt);</span>
+<span class="nc" id="L264">        }</span>
+<span class="nc" id="L265">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

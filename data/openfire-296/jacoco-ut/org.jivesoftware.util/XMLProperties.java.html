@@ -1,0 +1,820 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>XMLProperties.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.util</a> &gt; <span class="el_source">XMLProperties.java</span></div><h1>XMLProperties.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2004-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.util;
+
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.Reader;
+import java.io.StringReader;
+import java.io.Writer;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.StringTokenizer;
+
+import org.apache.commons.text.StringEscapeUtils;
+import org.dom4j.Attribute;
+import org.dom4j.CDATA;
+import org.dom4j.Document;
+import org.dom4j.Element;
+import org.dom4j.Node;
+import org.dom4j.io.OutputFormat;
+import org.dom4j.io.SAXReader;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Provides the the ability to use simple XML property files. Each property is
+ * in the form X.Y.Z, which would map to an XML snippet of:
+ * &lt;pre&gt;
+ * &amp;lt;X&amp;gt;
+ *     &amp;lt;Y&amp;gt;
+ *         &amp;lt;Z&amp;gt;someValue&amp;lt;/Z&amp;gt;
+ *     &amp;lt;/Y&amp;gt;
+ * &amp;lt;/X&amp;gt;
+ * &lt;/pre&gt;
+ * The XML file is passed in to the constructor and must be readable and
+ * writable. Setting property values will automatically persist those value
+ * to disk. The file encoding used is UTF-8.
+ *
+ * @author Derek DeMoro
+ * @author Iain Shigeoka
+ */
+public class XMLProperties {
+
+<span class="fc" id="L71">    private static final Logger Log = LoggerFactory.getLogger(XMLProperties.class);</span>
+    private static final String ENCRYPTED_ATTRIBUTE = &quot;encrypted&quot;;
+
+    private Path file;
+    private Document document;
+
+    /**
+     * Parsing the XML file every time we need a property is slow. Therefore,
+     * we use a Map to cache property values that are accessed more than once.
+     */
+<span class="fc" id="L81">    private Map&lt;String, String&gt; propertyCache = new HashMap&lt;&gt;();</span>
+
+    /**
+     * Creates a new empty XMLPropertiesTest object.
+     *
+     * @throws IOException if an error occurs loading the properties.
+     */
+<span class="fc" id="L88">    public XMLProperties() throws IOException {</span>
+<span class="fc" id="L89">       buildDoc(new StringReader(&quot;&lt;root /&gt;&quot;));</span>
+<span class="fc" id="L90">    }</span>
+
+    /**
+     * Creates a new XMLPropertiesTest object.
+     *
+     * @param fileName the full path the file that properties should be read from
+     *                 and written to.
+     * @throws IOException if an error occurs loading the properties.
+     */
+    public XMLProperties(String fileName) throws IOException {
+<span class="fc" id="L100">        this(Paths.get(fileName));</span>
+<span class="fc" id="L101">    }</span>
+
+    /**
+     * Loads XML properties from a stream.
+     *
+     * @param in the input stream of XML.
+     * @throws IOException if an exception occurs when reading the stream.
+     */
+<span class="fc" id="L109">    public XMLProperties(InputStream in) throws IOException {</span>
+<span class="pc" id="L110">        try (Reader reader = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8))) {</span>
+<span class="fc" id="L111">            buildDoc(reader);</span>
+<span class="pc bpc" id="L112" title="6 of 8 branches missed.">        }</span>
+<span class="fc" id="L113">    }</span>
+
+    /**
+     * Creates a new XMLPropertiesTest object.
+     *
+     * @param file the file that properties should be read from and written to.
+     * @throws IOException if an error occurs loading the properties.
+     */
+    @Deprecated
+    public XMLProperties(File file) throws IOException {
+<span class="nc" id="L123">        this(file.toPath());</span>
+<span class="nc" id="L124">    }</span>
+
+    /**
+     * Creates a new XMLPropertiesTest object.
+     *
+     * @param file the file that properties should be read from and written to.
+     * @throws IOException if an error occurs loading the properties.
+     */
+<span class="fc" id="L132">    public XMLProperties(Path file) throws IOException {</span>
+<span class="fc" id="L133">        this.file = file;</span>
+<span class="fc bfc" id="L134" title="All 2 branches covered.">        if (Files.notExists(file)) {</span>
+            // Attempt to recover from this error case by seeing if the
+            // tmp file exists. It's possible that the rename of the
+            // tmp file failed the last time Jive was running,
+            // but that it exists now.
+            Path tempFile;
+<span class="fc" id="L140">            tempFile = file.getParent().resolve(file.getFileName() + &quot;.tmp&quot;);</span>
+<span class="pc bpc" id="L141" title="1 of 2 branches missed.">            if (Files.exists(tempFile)) {</span>
+<span class="nc" id="L142">                Log.error(&quot;WARNING: &quot; + file.getFileName() + &quot; was not found, but temp file from &quot; +</span>
+                        &quot;previous write operation was. Attempting automatic recovery.&quot; +
+                        &quot; Please check file for data consistency.&quot;);
+<span class="nc" id="L145">                Files.move(tempFile, file, StandardCopyOption.REPLACE_EXISTING);</span>
+            }
+            // There isn't a possible way to recover from the file not
+            // being there, so throw an error.
+            else {
+<span class="fc" id="L150">                throw new NoSuchFileException(&quot;XML properties file does not exist: &quot;</span>
+<span class="fc" id="L151">                        + file.getFileName());</span>
+            }
+        }
+        // Check read and write privs.
+<span class="pc bpc" id="L155" title="1 of 2 branches missed.">        if (!Files.isReadable(file)) {</span>
+<span class="nc" id="L156">            throw new IOException(&quot;XML properties file must be readable: &quot; + file.getFileName());</span>
+        }
+<span class="pc bpc" id="L158" title="1 of 2 branches missed.">        if (!Files.isWritable(file)) {</span>
+<span class="nc" id="L159">            throw new IOException(&quot;XML properties file must be writable: &quot; + file.getFileName());</span>
+        }
+
+<span class="pc" id="L162">        try (Reader reader = Files.newBufferedReader(file, StandardCharsets.UTF_8)) {</span>
+<span class="fc" id="L163">             buildDoc(reader);</span>
+<span class="pc bpc" id="L164" title="6 of 8 branches missed.">        }</span>
+<span class="fc" id="L165">    }</span>
+
+    /**
+     * Returns the value of the specified property.
+     *
+     * @param name the name of the property to get.
+     * @return the value of the specified property.
+     */
+    public synchronized String getProperty(String name) {
+<span class="fc" id="L174">        return getProperty(name, true);</span>
+    }
+
+    /**
+     * Returns the value of the specified property.
+     *
+     * @param name the name of the property to get.
+     * @param ignoreEmpty Ignore empty property values (return null)
+     * @return the value of the specified property.
+     */
+    public synchronized String getProperty(String name, boolean ignoreEmpty) {
+<span class="fc" id="L185">        String value = propertyCache.get(name);</span>
+<span class="fc bfc" id="L186" title="All 2 branches covered.">        if (value != null) {</span>
+<span class="fc" id="L187">            return value;</span>
+        }
+
+<span class="fc" id="L190">        String[] propName = parsePropertyName(name);</span>
+        // Search for this property by traversing down the XML hierarchy.
+<span class="fc" id="L192">        Element element = document.getRootElement();</span>
+<span class="fc bfc" id="L193" title="All 2 branches covered.">        for (String aPropName : propName) {</span>
+<span class="fc" id="L194">            element = element.element(aPropName);</span>
+<span class="fc bfc" id="L195" title="All 2 branches covered.">            if (element == null) {</span>
+                // This node doesn't match this part of the property name which
+                // indicates this property doesn't exist so return null.
+<span class="fc" id="L198">                return null;</span>
+            }
+        }
+        // At this point, we found a matching property, so return its value.
+        // Empty strings are returned as null.
+<span class="fc" id="L203">        value = element.getTextTrim();</span>
+<span class="pc bpc" id="L204" title="1 of 4 branches missed.">        if (ignoreEmpty &amp;&amp; &quot;&quot;.equals(value)) {</span>
+<span class="fc" id="L205">            return null;</span>
+        }
+        else {
+            // check to see if the property is marked as encrypted
+<span class="pc bpc" id="L209" title="1 of 2 branches missed.">            if (JiveGlobals.isXMLPropertyEncrypted(name)) {</span>
+<span class="nc" id="L210">                Attribute encrypted = element.attribute(ENCRYPTED_ATTRIBUTE);</span>
+<span class="nc bnc" id="L211" title="All 2 branches missed.">                if (encrypted != null) {</span>
+<span class="nc" id="L212">                    value = JiveGlobals.getPropertyEncryptor().decrypt(value);</span>
+                } else {
+                    // rewrite property as an encrypted value
+<span class="nc" id="L215">                    Log.info(&quot;Rewriting XML property &quot; + name + &quot; as an encrypted value&quot;);</span>
+<span class="nc" id="L216">                    setProperty(name, value);</span>
+                }
+            }
+            // Add to cache so that getting property next time is fast.
+<span class="fc" id="L220">            propertyCache.put(name, value);</span>
+<span class="fc" id="L221">            return value;</span>
+        }
+    }
+
+    /**
+     * Return all values who's path matches the given property
+     * name as a String array, or an empty array if the if there
+     * are no children. This allows you to retrieve several values
+     * with the same property name. For example, consider the
+     * XML file entry:
+     * &lt;pre&gt;
+     * &amp;lt;foo&amp;gt;
+     *     &amp;lt;bar&amp;gt;
+     *         &amp;lt;prop&amp;gt;some value&amp;lt;/prop&amp;gt;
+     *         &amp;lt;prop&amp;gt;other value&amp;lt;/prop&amp;gt;
+     *         &amp;lt;prop&amp;gt;last value&amp;lt;/prop&amp;gt;
+     *     &amp;lt;/bar&amp;gt;
+     * &amp;lt;/foo&amp;gt;
+     * &lt;/pre&gt;
+     * If you call getProperties(&quot;foo.bar.prop&quot;) will return a string array containing
+     * {&quot;some value&quot;, &quot;other value&quot;, &quot;last value&quot;}.
+     *
+     * @param name the name of the property to retrieve
+     * @param ignored unused parameter
+     * @return all child property values for the given node name.
+     */
+    public List&lt;String&gt; getProperties(String name, boolean ignored) {
+<span class="fc" id="L248">        List&lt;String&gt; result = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L249">        String[] propName = parsePropertyName(name);</span>
+        // Search for this property by traversing down the XML hierarchy,
+        // stopping one short.
+<span class="fc" id="L252">        Element element = document.getRootElement();</span>
+<span class="pc bpc" id="L253" title="1 of 2 branches missed.">        for (int i = 0; i &lt; propName.length - 1; i++) {</span>
+<span class="fc" id="L254">            element = element.element(propName[i]);</span>
+<span class="pc bpc" id="L255" title="1 of 2 branches missed.">            if (element == null) {</span>
+                // This node doesn't match this part of the property name which
+                // indicates this property doesn't exist so return empty array.
+<span class="fc" id="L258">                return result;</span>
+            }
+        }
+        // We found matching property, return names of children.
+<span class="nc" id="L262">        Iterator&lt;Element&gt; iter = element.elementIterator(propName[propName.length - 1]);</span>
+        Element prop;
+        String value;
+<span class="nc" id="L265">        boolean updateEncryption = false;</span>
+<span class="nc bnc" id="L266" title="All 2 branches missed.">        while (iter.hasNext()) {</span>
+<span class="nc" id="L267">            prop = iter.next();</span>
+            // Empty strings are skipped.
+<span class="nc" id="L269">            value = prop.getTextTrim();</span>
+<span class="nc bnc" id="L270" title="All 2 branches missed.">            if (!&quot;&quot;.equals(value)) {</span>
+                // check to see if the property is marked as encrypted
+<span class="nc bnc" id="L272" title="All 2 branches missed.">                if (JiveGlobals.isXMLPropertyEncrypted(name)) {</span>
+<span class="nc" id="L273">                    Attribute encrypted = prop.attribute(ENCRYPTED_ATTRIBUTE);</span>
+<span class="nc bnc" id="L274" title="All 2 branches missed.">                    if (encrypted != null) {</span>
+<span class="nc" id="L275">                        value = JiveGlobals.getPropertyEncryptor().decrypt(value);</span>
+                    } else {
+                        // rewrite property as an encrypted value
+<span class="nc" id="L278">                        prop.addAttribute(ENCRYPTED_ATTRIBUTE, &quot;true&quot;);</span>
+<span class="nc" id="L279">                        updateEncryption = true;</span>
+                    }
+                }
+<span class="nc" id="L282">                result.add(value);</span>
+            }
+        }
+<span class="nc bnc" id="L285" title="All 2 branches missed.">        if (updateEncryption) {</span>
+<span class="nc" id="L286">            Log.info(&quot;Rewriting values for XML property &quot; + name + &quot; using encryption&quot;);</span>
+<span class="nc" id="L287">            saveProperties();</span>
+        }
+<span class="nc" id="L289">        return result;</span>
+    }
+    
+    /**
+     * Return all values who's path matches the given property
+     * name as a String array, or an empty array if the if there
+     * are no children. This allows you to retrieve several values
+     * with the same property name. For example, consider the
+     * XML file entry:
+     * &lt;pre&gt;
+     * &amp;lt;foo&amp;gt;
+     *     &amp;lt;bar&amp;gt;
+     *         &amp;lt;prop&amp;gt;some value&amp;lt;/prop&amp;gt;
+     *         &amp;lt;prop&amp;gt;other value&amp;lt;/prop&amp;gt;
+     *         &amp;lt;prop&amp;gt;last value&amp;lt;/prop&amp;gt;
+     *     &amp;lt;/bar&amp;gt;
+     * &amp;lt;/foo&amp;gt;
+     * &lt;/pre&gt;
+     * If you call getProperties(&quot;foo.bar.prop&quot;) will return a string array containing
+     * {&quot;some value&quot;, &quot;other value&quot;, &quot;last value&quot;}.
+     *
+     * @deprecated Retained for backward compatibility. Prefer getProperties(String, boolean)
+     * @param name the name of the property to retrieve
+     * @return all child property values for the given node name.
+     */
+    public String[] getProperties(String name) {
+<span class="nc" id="L315">        return (String[]) getProperties(name, false).toArray();</span>
+    }
+
+    /**
+     * Return all values who's path matches the given property
+     * name as a String array, or an empty array if the if there
+     * are no children. This allows you to retrieve several values
+     * with the same property name. For example, consider the
+     * XML file entry:
+     * &lt;pre&gt;
+     * &amp;lt;foo&amp;gt;
+     *     &amp;lt;bar&amp;gt;
+     *         &amp;lt;prop&amp;gt;some value&amp;lt;/prop&amp;gt;
+     *         &amp;lt;prop&amp;gt;other value&amp;lt;/prop&amp;gt;
+     *         &amp;lt;prop&amp;gt;last value&amp;lt;/prop&amp;gt;
+     *     &amp;lt;/bar&amp;gt;
+     * &amp;lt;/foo&amp;gt;
+     * &lt;/pre&gt;
+     * If you call getProperties(&quot;foo.bar.prop&quot;) will return a string array containing
+     * {&quot;some value&quot;, &quot;other value&quot;, &quot;last value&quot;}.
+     *
+     * @param name the name of the property to retrieve
+     * @return all child property values for the given node name.
+     */
+    public Iterator getChildProperties(String name) {
+<span class="nc" id="L340">        String[] propName = parsePropertyName(name);</span>
+        // Search for this property by traversing down the XML hierarchy,
+        // stopping one short.
+<span class="nc" id="L343">        Element element = document.getRootElement();</span>
+<span class="nc bnc" id="L344" title="All 2 branches missed.">        for (int i = 0; i &lt; propName.length - 1; i++) {</span>
+<span class="nc" id="L345">            element = element.element(propName[i]);</span>
+<span class="nc bnc" id="L346" title="All 2 branches missed.">            if (element == null) {</span>
+                // This node doesn't match this part of the property name which
+                // indicates this property doesn't exist so return empty array.
+<span class="nc" id="L349">                return Collections.EMPTY_LIST.iterator();</span>
+            }
+        }
+        // We found matching property, return values of the children.
+<span class="nc" id="L353">        Iterator&lt;Element&gt; iter = element.elementIterator(propName[propName.length - 1]);</span>
+<span class="nc" id="L354">        ArrayList&lt;String&gt; props = new ArrayList&lt;&gt;();</span>
+        Element prop;
+        String value;
+<span class="nc bnc" id="L357" title="All 2 branches missed.">        while (iter.hasNext()) {</span>
+<span class="nc" id="L358">            prop = iter.next();</span>
+<span class="nc" id="L359">            value = prop.getText();</span>
+            // check to see if the property is marked as encrypted
+<span class="nc bnc" id="L361" title="All 4 branches missed.">            if (JiveGlobals.isPropertyEncrypted(name) &amp;&amp; Boolean.parseBoolean(prop.attribute(ENCRYPTED_ATTRIBUTE).getText())) {</span>
+<span class="nc" id="L362">                value = JiveGlobals.getPropertyEncryptor().decrypt(value);</span>
+            }
+<span class="nc" id="L364">            props.add(value);</span>
+        }
+<span class="nc" id="L366">        return props.iterator();</span>
+    }
+
+    /**
+     * Returns the value of the attribute of the given property name or {@code null}
+     * if it doesn't exist.
+     *
+     * @param name the property name to lookup - ie, &quot;foo.bar&quot;
+     * @param attribute the name of the attribute, ie &quot;id&quot;
+     * @return the value of the attribute of the given property or {@code null} if
+     *      it doesn't exist.
+     */
+    public String getAttribute(String name, String attribute) {
+<span class="pc bpc" id="L379" title="2 of 4 branches missed.">        if (name == null || attribute == null) {</span>
+<span class="nc" id="L380">            return null;</span>
+        }
+<span class="fc" id="L382">        String[] propName = parsePropertyName(name);</span>
+        // Search for this property by traversing down the XML hierarchy.
+<span class="fc" id="L384">        Element element = document.getRootElement();</span>
+<span class="fc bfc" id="L385" title="All 2 branches covered.">        for (String child : propName) {</span>
+<span class="fc" id="L386">            element = element.element(child);</span>
+<span class="pc bpc" id="L387" title="1 of 2 branches missed.">            if (element == null) {</span>
+                // This node doesn't match this part of the property name which
+                // indicates this property doesn't exist so return empty array.
+<span class="nc" id="L390">                break;</span>
+            }
+        }
+<span class="pc bpc" id="L393" title="1 of 2 branches missed.">        if (element != null) {</span>
+            // Get its attribute values
+<span class="fc" id="L395">            return element.attributeValue(attribute);</span>
+        }
+<span class="nc" id="L397">        return null;</span>
+    }
+
+    /**
+     * Removes the given attribute from the XML document.
+     *
+     * @param name the property name to lookup - ie, &quot;foo.bar&quot;
+     * @param attribute the name of the attribute, ie &quot;id&quot;
+     * @return the value of the attribute of the given property or {@code null} if
+     *      it did not exist.
+     */
+    public String removeAttribute(String name, String attribute) {
+<span class="nc bnc" id="L409" title="All 4 branches missed.">        if (name == null || attribute == null) {</span>
+<span class="nc" id="L410">            return null;</span>
+        }
+<span class="nc" id="L412">        String[] propName = parsePropertyName(name);</span>
+        // Search for this property by traversing down the XML hierarchy.
+<span class="nc" id="L414">        Element element = document.getRootElement();</span>
+<span class="nc bnc" id="L415" title="All 2 branches missed.">        for (String child : propName) {</span>
+<span class="nc" id="L416">            element = element.element(child);</span>
+<span class="nc bnc" id="L417" title="All 2 branches missed.">            if (element == null) {</span>
+                // This node doesn't match this part of the property name which
+                // indicates this property doesn't exist so return empty array.
+<span class="nc" id="L420">                break;</span>
+            }
+        }
+<span class="nc" id="L423">        String result = null;</span>
+<span class="nc bnc" id="L424" title="All 2 branches missed.">        if (element != null) {</span>
+            // Get the attribute value and then remove the attribute
+<span class="nc" id="L426">            Attribute attr = element.attribute(attribute);</span>
+<span class="nc" id="L427">            result = attr.getValue();</span>
+<span class="nc" id="L428">            element.remove(attr);</span>
+        }
+<span class="nc" id="L430">        return result;</span>
+    }
+
+    /**
+     * Sets a property to an array of values. Multiple values matching the same property
+     * is mapped to an XML file as multiple elements containing each value.
+     * For example, using the name &quot;foo.bar.prop&quot;, and the value string array containing
+     * {&quot;some value&quot;, &quot;other value&quot;, &quot;last value&quot;} would produce the following XML:
+     * &lt;pre&gt;
+     * &amp;lt;foo&amp;gt;
+     *     &amp;lt;bar&amp;gt;
+     *         &amp;lt;prop&amp;gt;some value&amp;lt;/prop&amp;gt;
+     *         &amp;lt;prop&amp;gt;other value&amp;lt;/prop&amp;gt;
+     *         &amp;lt;prop&amp;gt;last value&amp;lt;/prop&amp;gt;
+     *     &amp;lt;/bar&amp;gt;
+     * &amp;lt;/foo&amp;gt;
+     * &lt;/pre&gt;
+     *
+     * @param name the name of the property.
+     * @param values the values for the property (can be empty but not null).
+     */
+    public void setProperties(String name, List&lt;String&gt; values) {
+<span class="nc" id="L452">        String[] propName = parsePropertyName(name);</span>
+        // Search for this property by traversing down the XML hierarchy,
+        // stopping one short.
+<span class="nc" id="L455">        Element element = document.getRootElement();</span>
+<span class="nc bnc" id="L456" title="All 2 branches missed.">        for (int i = 0; i &lt; propName.length - 1; i++) {</span>
+            // If we don't find this part of the property in the XML hierarchy
+            // we add it as a new node
+<span class="nc bnc" id="L459" title="All 2 branches missed.">            if (element.element(propName[i]) == null) {</span>
+<span class="nc" id="L460">                element.addElement(propName[i]);</span>
+            }
+<span class="nc" id="L462">            element = element.element(propName[i]);</span>
+        }
+<span class="nc" id="L464">        String childName = propName[propName.length - 1];</span>
+        // We found matching property, clear all children.
+<span class="nc" id="L466">        List&lt;Element&gt; toRemove = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L467">        Iterator&lt;Element&gt; iter = element.elementIterator(childName);</span>
+<span class="nc bnc" id="L468" title="All 2 branches missed.">        while (iter.hasNext()) {</span>
+<span class="nc" id="L469">            toRemove.add(iter.next());</span>
+        }
+<span class="nc bnc" id="L471" title="All 2 branches missed.">        for (iter = toRemove.iterator(); iter.hasNext();) {</span>
+<span class="nc" id="L472">            element.remove(iter.next());</span>
+        }
+        // Add the new children.
+<span class="nc bnc" id="L475" title="All 2 branches missed.">        for (String value : values) {</span>
+<span class="nc" id="L476">            Element childElement = element.addElement(childName);</span>
+<span class="nc bnc" id="L477" title="All 2 branches missed.">            if (value.startsWith(&quot;&lt;![CDATA[&quot;)) {</span>
+<span class="nc" id="L478">                Iterator&lt;Node&gt; it = childElement.nodeIterator();</span>
+<span class="nc bnc" id="L479" title="All 2 branches missed.">                while (it.hasNext()) {</span>
+<span class="nc" id="L480">                    Node node = it.next();</span>
+<span class="nc bnc" id="L481" title="All 2 branches missed.">                    if (node instanceof CDATA) {</span>
+<span class="nc" id="L482">                        childElement.remove(node);</span>
+<span class="nc" id="L483">                        break;</span>
+                    }
+<span class="nc" id="L485">                }</span>
+<span class="nc" id="L486">                childElement.addCDATA(value.substring(9, value.length()-3));</span>
+<span class="nc" id="L487">            }</span>
+            else {
+<span class="nc" id="L489">                String propValue = value;</span>
+                // check to see if the property is marked as encrypted
+<span class="nc bnc" id="L491" title="All 2 branches missed.">                if (JiveGlobals.isPropertyEncrypted(name)) {</span>
+<span class="nc" id="L492">                    propValue = JiveGlobals.getPropertyEncryptor().encrypt(value);</span>
+<span class="nc" id="L493">                    childElement.addAttribute(ENCRYPTED_ATTRIBUTE, &quot;true&quot;);</span>
+                }
+<span class="nc" id="L495">                childElement.setText(propValue);</span>
+            }
+<span class="nc" id="L497">        }</span>
+<span class="nc" id="L498">        saveProperties();</span>
+
+        // Generate event.
+<span class="nc" id="L501">        Map&lt;String, Object&gt; params = new HashMap&lt;&gt;();</span>
+<span class="nc" id="L502">        params.put(&quot;value&quot;, values);</span>
+<span class="nc" id="L503">        PropertyEventDispatcher.dispatchEvent(name,</span>
+                PropertyEventDispatcher.EventType.xml_property_set, params);
+<span class="nc" id="L505">    }</span>
+    
+    /**
+     * Adds the given value to the list of values represented by the property name.
+     * The property is created if it did not already exist.
+     * 
+     * @param propertyName The name of the property list to change
+     * @param value The value to be added to the list
+     * @return True if the value was added to the list; false if the value was already present
+     */
+    public boolean addToList(String propertyName, String value) {
+        
+<span class="nc" id="L517">        List&lt;String&gt; properties = getProperties(propertyName, true);</span>
+<span class="nc" id="L518">        boolean propertyWasAdded = properties.add(value);</span>
+<span class="nc bnc" id="L519" title="All 2 branches missed.">        if (propertyWasAdded) {</span>
+<span class="nc" id="L520">            setProperties(propertyName, properties);</span>
+        }
+<span class="nc" id="L522">        return propertyWasAdded;</span>
+    }
+    
+    /**
+     * Removes the given value from the list of values represented by the property name.
+     * The property is deleted if it no longer contains any values.
+     * 
+     * @param propertyName The name of the property list to change
+     * @param value The value to be removed from the list
+     * @return True if the value was removed from the list; false if the value was not found
+     */
+    public boolean removeFromList(String propertyName, String value) {
+        
+<span class="nc" id="L535">        List&lt;String&gt; properties = getProperties(propertyName, true);</span>
+<span class="nc" id="L536">        boolean propertyWasRemoved = properties.remove(value);</span>
+<span class="nc bnc" id="L537" title="All 2 branches missed.">        if (propertyWasRemoved) {</span>
+<span class="nc" id="L538">            setProperties(propertyName, properties);</span>
+        }
+<span class="nc" id="L540">        return propertyWasRemoved;</span>
+    }
+
+    /**
+     * Returns a list of names for all properties found in the XML file.
+     *
+     * @return Names for all properties in the file
+     */
+    public List&lt;String&gt; getAllPropertyNames() {
+<span class="fc" id="L549">        List&lt;String&gt; result = new ArrayList&lt;&gt;();</span>
+<span class="fc bfc" id="L550" title="All 2 branches covered.">        for (String propertyName : getChildPropertyNamesFor(document.getRootElement(), &quot;&quot;)) {</span>
+<span class="fc bfc" id="L551" title="All 2 branches covered.">            if (getProperty(propertyName) != null) {</span>
+<span class="fc" id="L552">                result.add(propertyName);</span>
+            }
+<span class="fc" id="L554">        }</span>
+<span class="fc" id="L555">        return result;</span>
+    }
+    
+    private List&lt;String&gt; getChildPropertyNamesFor(Element parent, String parentName) {
+<span class="fc" id="L559">        List&lt;String&gt; result = new ArrayList&lt;&gt;();</span>
+<span class="fc bfc" id="L560" title="All 2 branches covered.">        for (Element child : parent.elements()) {</span>
+<span class="fc bfc" id="L561" title="All 2 branches covered.">            String childName = parentName + (parentName.isEmpty() ? &quot;&quot; : &quot;.&quot;) + child.getName();</span>
+<span class="pc bpc" id="L562" title="1 of 2 branches missed.">            if (!result.contains(childName)) {</span>
+<span class="fc" id="L563">                result.add(childName);</span>
+<span class="fc" id="L564">                result.addAll(getChildPropertyNamesFor(child, childName));</span>
+            }
+<span class="fc" id="L566">        }</span>
+<span class="fc" id="L567">        return result;</span>
+    }
+
+    /**
+     * Return all children property names of a parent property as a String array,
+     * or an empty array if the if there are no children. For example, given
+     * the properties {@code X.Y.A}, {@code X.Y.B}, and {@code X.Y.C}, then
+     * the child properties of {@code X.Y} are {@code A}, {@code B}, and
+     * {@code C}.
+     *
+     * @param parent the name of the parent property.
+     * @return all child property values for the given parent.
+     */
+    public String[] getChildrenProperties(String parent) {
+<span class="fc" id="L581">        String[] propName = parsePropertyName(parent);</span>
+        // Search for this property by traversing down the XML hierarchy.
+<span class="fc" id="L583">        Element element = document.getRootElement();</span>
+<span class="fc bfc" id="L584" title="All 2 branches covered.">        for (String aPropName : propName) {</span>
+<span class="fc" id="L585">            element = element.element(aPropName);</span>
+<span class="pc bpc" id="L586" title="1 of 2 branches missed.">            if (element == null) {</span>
+                // This node doesn't match this part of the property name which
+                // indicates this property doesn't exist so return empty array.
+<span class="nc" id="L589">                return new String[]{};</span>
+            }
+        }
+        // We found matching property, return names of children.
+<span class="fc" id="L593">        List children = element.elements();</span>
+<span class="fc" id="L594">        int childCount = children.size();</span>
+<span class="fc" id="L595">        String[] childrenNames = new String[childCount];</span>
+<span class="fc bfc" id="L596" title="All 2 branches covered.">        for (int i = 0; i &lt; childCount; i++) {</span>
+<span class="fc" id="L597">            childrenNames[i] = ((Element)children.get(i)).getName();</span>
+        }
+<span class="fc" id="L599">        return childrenNames;</span>
+    }
+
+    /**
+     * Sets the value of the specified property. If the property doesn't
+     * currently exist, it will be automatically created.
+     *
+     * @param name  the name of the property to set.
+     * @param value the new value for the property.
+     * @return {@code true} if the property was correctly saved to file, otherwise {@code false}
+     */
+    public synchronized boolean setProperty(String name, String value) {
+<span class="pc bpc" id="L611" title="1 of 2 branches missed.">        if (name == null) {</span>
+<span class="nc" id="L612">            return false;</span>
+        }
+<span class="pc bpc" id="L614" title="1 of 2 branches missed.">        if (!StringEscapeUtils.escapeXml10(name).equals(name)) {</span>
+<span class="nc" id="L615">            throw new IllegalArgumentException(&quot;Property name cannot contain XML entities.&quot;);</span>
+        }
+<span class="pc bpc" id="L617" title="1 of 2 branches missed.">        if (value == null) {</span>
+<span class="nc" id="L618">            value = &quot;&quot;;</span>
+        }
+
+        // Set cache correctly with prop name and value.
+<span class="fc" id="L622">        propertyCache.put(name, value);</span>
+
+<span class="fc" id="L624">        String[] propName = parsePropertyName(name);</span>
+        // Search for this property by traversing down the XML hierarchy.
+<span class="fc" id="L626">        Element element = document.getRootElement();</span>
+<span class="fc bfc" id="L627" title="All 2 branches covered.">        for (String aPropName : propName) {</span>
+            // If we don't find this part of the property in the XML hierarchy
+            // we add it as a new node
+<span class="fc bfc" id="L630" title="All 2 branches covered.">            if (element.element(aPropName) == null) {</span>
+<span class="fc" id="L631">                element.addElement(aPropName);</span>
+            }
+<span class="fc" id="L633">            element = element.element(aPropName);</span>
+        }
+        // Set the value of the property in this node.
+<span class="pc bpc" id="L636" title="1 of 2 branches missed.">        if (value.startsWith(&quot;&lt;![CDATA[&quot;)) {</span>
+<span class="nc" id="L637">            Iterator it = element.nodeIterator();</span>
+<span class="nc bnc" id="L638" title="All 2 branches missed.">            while (it.hasNext()) {</span>
+<span class="nc" id="L639">                Node node = (Node) it.next();</span>
+<span class="nc bnc" id="L640" title="All 2 branches missed.">                if (node instanceof CDATA) {</span>
+<span class="nc" id="L641">                    element.remove(node);</span>
+<span class="nc" id="L642">                    break;</span>
+                }
+<span class="nc" id="L644">            }</span>
+<span class="nc" id="L645">            element.addCDATA(value.substring(9, value.length() - 3));</span>
+<span class="nc" id="L646">        } else {</span>
+<span class="fc" id="L647">            String propValue = value;</span>
+            // check to see if the property is marked as encrypted
+<span class="pc bpc" id="L649" title="1 of 2 branches missed.">            if (JiveGlobals.isXMLPropertyEncrypted(name)) {</span>
+<span class="nc" id="L650">                propValue = JiveGlobals.getPropertyEncryptor(true).encrypt(value);</span>
+<span class="nc" id="L651">                element.addAttribute(ENCRYPTED_ATTRIBUTE, &quot;true&quot;);</span>
+            }
+<span class="fc" id="L653">            element.setText(propValue);</span>
+        }
+        // Write the XML properties to disk
+<span class="fc" id="L656">        final boolean saved = saveProperties();</span>
+
+        // Generate event.
+<span class="fc" id="L659">        Map&lt;String, Object&gt; params = new HashMap&lt;&gt;();</span>
+<span class="fc" id="L660">        params.put(&quot;value&quot;, value);</span>
+<span class="fc" id="L661">        PropertyEventDispatcher.dispatchEvent(name, PropertyEventDispatcher.EventType.xml_property_set, params);</span>
+<span class="fc" id="L662">        return saved;</span>
+    }
+
+    /**
+     * Deletes the specified property.
+     *
+     * @param name the property to delete.
+     */
+    public synchronized void deleteProperty(String name) {
+        // Remove property from cache.
+<span class="fc" id="L672">        propertyCache.remove(name);</span>
+
+<span class="fc" id="L674">        String[] propName = parsePropertyName(name);</span>
+        // Search for this property by traversing down the XML hierarchy.
+<span class="fc" id="L676">        Element element = document.getRootElement();</span>
+<span class="pc bpc" id="L677" title="1 of 2 branches missed.">        for (int i = 0; i &lt; propName.length - 1; i++) {</span>
+<span class="nc" id="L678">            element = element.element(propName[i]);</span>
+            // Can't find the property so return.
+<span class="nc bnc" id="L680" title="All 2 branches missed.">            if (element == null) {</span>
+<span class="nc" id="L681">                return;</span>
+            }
+        }
+        // Found the correct element to remove, so remove it...
+<span class="fc" id="L685">        element.remove(element.element(propName[propName.length - 1]));</span>
+<span class="pc bpc" id="L686" title="1 of 2 branches missed.">        if (element.elements().size() == 0) {</span>
+<span class="nc" id="L687">            element.getParent().remove(element);</span>
+        }
+        // .. then write to disk.
+<span class="fc" id="L690">        saveProperties();</span>
+
+<span class="fc" id="L692">        JiveGlobals.setPropertyEncrypted(name, false);</span>
+        // Generate event.
+<span class="fc" id="L694">        Map&lt;String, Object&gt; params = Collections.emptyMap();</span>
+<span class="fc" id="L695">        PropertyEventDispatcher.dispatchEvent(name, PropertyEventDispatcher.EventType.xml_property_deleted, params);</span>
+<span class="fc" id="L696">    }</span>
+
+    /**
+     * Convenience routine to migrate an XML property into the database
+     * storage method.  Will check for the XML property being null before
+     * migrating.
+     *
+     * @param name the name of the property to migrate.
+     */
+    public void migrateProperty(String name) {
+<span class="fc" id="L706">        final String xmlPropertyValue = getProperty(name);</span>
+<span class="pc bpc" id="L707" title="1 of 2 branches missed.">        if (xmlPropertyValue != null) {</span>
+<span class="nc" id="L708">            final String databasePropertyValue = JiveGlobals.getProperty(name);</span>
+<span class="nc bnc" id="L709" title="All 2 branches missed.">            if (databasePropertyValue == null) {</span>
+<span class="nc" id="L710">                Log.debug(&quot;JiveGlobals: Migrating XML property '&quot; + name + &quot;' into database.&quot;);</span>
+<span class="nc" id="L711">                JiveGlobals.setProperty(name, xmlPropertyValue);</span>
+<span class="nc bnc" id="L712" title="All 2 branches missed.">                if (JiveGlobals.isXMLPropertyEncrypted(name)) {</span>
+<span class="nc" id="L713">                    JiveGlobals.setPropertyEncrypted(name, true);</span>
+                }
+<span class="nc" id="L715">                deleteProperty(name);</span>
+<span class="nc bnc" id="L716" title="All 2 branches missed.">            } else if (databasePropertyValue.equals(xmlPropertyValue)) {</span>
+<span class="nc" id="L717">                Log.debug(&quot;JiveGlobals: Deleting duplicate XML property '&quot; + name + &quot;' that is already in database.&quot;);</span>
+<span class="nc bnc" id="L718" title="All 2 branches missed.">                if (JiveGlobals.isXMLPropertyEncrypted(name)) {</span>
+<span class="nc" id="L719">                    JiveGlobals.setPropertyEncrypted(name, true);</span>
+                }
+<span class="nc" id="L721">                deleteProperty(name);</span>
+<span class="nc bnc" id="L722" title="All 2 branches missed.">            } else if (!databasePropertyValue.equals(xmlPropertyValue)) {</span>
+<span class="nc" id="L723">                Log.warn(&quot;XML Property '&quot; + name + &quot;' differs from what is stored in the database.  Please make property changes in the database instead of the configuration file.&quot;);</span>
+            }
+        }
+<span class="fc" id="L726">    }</span>
+
+    /**
+     * Builds the document XML model up based the given reader of XML data.
+     * @param in the input stream used to build the xml document
+     * @throws java.io.IOException thrown when an error occurs reading the input stream.
+     */
+    private void buildDoc(Reader in) throws IOException {
+        try {
+<span class="fc" id="L735">            SAXReader xmlReader = new SAXReader();</span>
+<span class="fc" id="L736">            xmlReader.setEncoding(&quot;UTF-8&quot;);</span>
+<span class="fc" id="L737">            document = xmlReader.read(in);</span>
+        }
+<span class="nc" id="L739">        catch (Exception e) {</span>
+<span class="nc" id="L740">            Log.error(&quot;Error reading XML properties&quot;, e);</span>
+<span class="nc" id="L741">            throw new IOException(e.getMessage());</span>
+<span class="fc" id="L742">        }</span>
+<span class="fc" id="L743">    }</span>
+
+    /**
+     * Saves the properties to disk as an XML document. A temporary file is
+     * used during the writing process for maximum safety.
+     *
+     * @return false if the file could not be saved, otherwise true
+     */
+    private synchronized boolean saveProperties() {
+<span class="pc bpc" id="L752" title="1 of 2 branches missed.">        if (file == null) {</span>
+<span class="nc" id="L753">            Log.error(&quot;Unable to save XML properties; no file specified&quot;);</span>
+<span class="nc" id="L754">            return false;</span>
+        }
+
+        // Write data out to a temporary file first.
+<span class="fc" id="L758">        final Path tempFile = file.getParent().resolve(file.getFileName() + &quot;.tmp&quot;);</span>
+<span class="pc" id="L759">        try (final Writer writer = Files.newBufferedWriter(tempFile, StandardCharsets.UTF_8)) {</span>
+<span class="fc" id="L760">            OutputFormat prettyPrinter = OutputFormat.createPrettyPrint();</span>
+<span class="fc" id="L761">            XMLWriter xmlWriter = new XMLWriter(writer, prettyPrinter);</span>
+<span class="fc" id="L762">            xmlWriter.write(document);</span>
+<span class="pc bpc" id="L763" title="6 of 8 branches missed.">        } catch (final Exception e) {</span>
+<span class="nc" id="L764">            Log.error(&quot;Unable to write properties to tmpFile {}&quot;, tempFile, e);</span>
+            // There were errors so abort replacing the old property file.
+<span class="nc" id="L766">            return false;</span>
+<span class="fc" id="L767">        }</span>
+
+        // No errors occurred, so delete the main file.
+        // Delete the old file so we can replace it.
+        try {
+<span class="fc" id="L772">            Files.deleteIfExists(file);</span>
+<span class="nc" id="L773">        } catch (final IOException e) {</span>
+<span class="nc" id="L774">            Log.error(&quot;Error deleting existing property file {}: &quot;, tempFile, e);</span>
+<span class="nc" id="L775">            return false;</span>
+<span class="fc" id="L776">        }</span>
+        // Copy new contents to the file.
+        try {
+<span class="fc" id="L779">            Files.copy(tempFile, file, StandardCopyOption.REPLACE_EXISTING);</span>
+<span class="nc" id="L780">        } catch (final Exception e) {</span>
+<span class="nc" id="L781">            Log.error(&quot;Error copying new property file from {} to {}:&quot;, tempFile, file, e);</span>
+            // There were errors so abort replacing the old property file.
+<span class="nc" id="L783">            return false;</span>
+<span class="fc" id="L784">        }</span>
+
+        // If no errors, delete the temp file.
+        try {
+<span class="fc" id="L788">            Files.deleteIfExists(tempFile);</span>
+<span class="nc" id="L789">        } catch (IOException e) {</span>
+<span class="nc" id="L790">            Log.error(&quot;Error deleting temp file {}&quot;, tempFile, e);</span>
+<span class="fc" id="L791">        }</span>
+<span class="fc" id="L792">        return true;</span>
+    }
+
+    /**
+     * Returns an array representation of the given Jive property. Jive
+     * properties are always in the format &quot;prop.name.is.this&quot; which would be
+     * represented as an array of four Strings.
+     *
+     * @param name the name of the Jive property.
+     * @return an array representation of the given Jive property.
+     */
+    private String[] parsePropertyName(String name) {
+<span class="fc" id="L804">        List&lt;String&gt; propName = new ArrayList&lt;&gt;(5);</span>
+        // Use a StringTokenizer to tokenize the property name.
+<span class="fc" id="L806">        StringTokenizer tokenizer = new StringTokenizer(name, &quot;.&quot;);</span>
+<span class="fc bfc" id="L807" title="All 2 branches covered.">        while (tokenizer.hasMoreTokens()) {</span>
+<span class="fc" id="L808">            propName.add(tokenizer.nextToken());</span>
+        }
+<span class="fc" id="L810">        return propName.toArray(new String[0]);</span>
+    }
+
+    public void setProperties(Map&lt;String, String&gt; propertyMap) {
+<span class="nc bnc" id="L814" title="All 2 branches missed.">        for (String propertyName : propertyMap.keySet()) {</span>
+<span class="nc" id="L815">            String propertyValue = propertyMap.get(propertyName);</span>
+<span class="nc" id="L816">            setProperty(propertyName, propertyValue);</span>
+<span class="nc" id="L817">        }</span>
+<span class="nc" id="L818">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

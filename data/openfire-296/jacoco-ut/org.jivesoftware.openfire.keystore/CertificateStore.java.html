@@ -1,0 +1,217 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>CertificateStore.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.keystore</a> &gt; <span class="el_source">CertificateStore.java</span></div><h1>CertificateStore.java</h1><pre class="source lang-java linenums">package org.jivesoftware.openfire.keystore;
+
+import org.bouncycastle.jce.provider.BouncyCastleProvider;
+import org.jivesoftware.util.CertificateManager;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.security.*;
+import java.security.cert.Certificate;
+import java.security.cert.CertificateException;
+import java.security.cert.X509Certificate;
+import java.util.*;
+
+/**
+ * A wrapper class for a Java store of certificates, its metadata (password, location) and related functionality.
+ *
+ * A subclass of this class exists for each of the two distinct types of key store.
+ * &lt;ul&gt;
+ *     &lt;li&gt;one that is used to provide credentials, an &lt;em&gt;identity store&lt;/em&gt;, in {@link IdentityStore}&lt;/li&gt;
+ *     &lt;li&gt;one that is used to verify credentials, a &lt;em&gt;trust store&lt;/em&gt;, in {@link TrustStore}&lt;/li&gt;
+ * &lt;/ul&gt;
+ *
+ * Note that in Java terminology, an identity store is commonly referred to as a 'key store', while the same name is
+ * also used to identify the generic certificate store. To have clear distinction between common denominator and each of
+ * the specific types, this implementation uses the terms &quot;certificate store&quot;, &quot;identity store&quot; and &quot;trust store&quot;.
+ *
+ * @author Guus der Kinderen, guus.der.kinderen@gmail.com
+ */
+public abstract class CertificateStore
+{
+<span class="nc" id="L38">    private static final Logger Log = LoggerFactory.getLogger( CertificateStore.class );</span>
+
+<span class="nc" id="L40">    protected static final Provider PROVIDER = new BouncyCastleProvider();</span>
+
+    static
+    {
+        // Add the BC provider to the list of security providers
+<span class="nc" id="L45">        Security.addProvider( PROVIDER );</span>
+<span class="nc" id="L46">    }</span>
+
+    protected final KeyStore store;
+    protected final CertificateStoreConfiguration configuration;
+
+    public CertificateStore( CertificateStoreConfiguration configuration, boolean createIfAbsent ) throws CertificateStoreConfigException
+<span class="nc" id="L52">    {</span>
+<span class="nc bnc" id="L53" title="All 2 branches missed.">        if (configuration == null)</span>
+        {
+<span class="nc" id="L55">            throw new IllegalArgumentException( &quot;Argument 'configuration' cannot be null.&quot; );</span>
+        }
+
+<span class="nc" id="L58">        this.configuration = configuration;</span>
+        try
+        {
+<span class="nc" id="L61">            final File file = configuration.getFile();</span>
+
+<span class="nc bnc" id="L63" title="All 4 branches missed.">            if ( createIfAbsent &amp;&amp; !file.exists() )</span>
+            {
+<span class="nc" id="L65">                try ( final FileOutputStream os = new FileOutputStream( file.getPath() ) )</span>
+                {
+<span class="nc" id="L67">                    store = KeyStore.getInstance( configuration.getType() );</span>
+<span class="nc" id="L68">                    store.load( null, configuration.getPassword() );</span>
+<span class="nc" id="L69">                    store.store( os, configuration.getPassword() );</span>
+<span class="nc bnc" id="L70" title="All 8 branches missed.">                }</span>
+            }
+            else
+            {
+<span class="nc" id="L74">                try ( final FileInputStream is = new FileInputStream( file ) )</span>
+                {
+<span class="nc" id="L76">                    store = KeyStore.getInstance( configuration.getType() );</span>
+<span class="nc" id="L77">                    store.load( is, configuration.getPassword() );</span>
+<span class="nc bnc" id="L78" title="All 8 branches missed.">                }</span>
+            }
+        }
+<span class="nc" id="L81">        catch ( IOException | KeyStoreException | NoSuchAlgorithmException | CertificateException ex )</span>
+        {
+<span class="nc" id="L83">            throw new CertificateStoreConfigException( &quot;Unable to load store of type '&quot; + configuration.getType() + &quot;' from file '&quot; + configuration.getFile() + &quot;'&quot;, ex );</span>
+<span class="nc" id="L84">        }</span>
+<span class="nc" id="L85">    }</span>
+
+    /**
+     * Reloads the content of the store from disk. Useful when the store content has been modified outside of the
+     * Openfire process, or when changes that have not been persisted need to be undone.
+     * @throws CertificateStoreConfigException if the store could not be reloaded
+     */
+    public void reload() throws CertificateStoreConfigException
+    {
+<span class="nc" id="L94">        try ( final FileInputStream is = new FileInputStream( configuration.getFile() ) )</span>
+        {
+<span class="nc" id="L96">            store.load( is, configuration.getPassword() );</span>
+<span class="nc" id="L97">            CertificateManager.fireCertificateStoreChanged( this );</span>
+<span class="nc bnc" id="L98" title="All 8 branches missed.">        }</span>
+<span class="nc" id="L99">        catch ( IOException | NoSuchAlgorithmException | CertificateException ex )</span>
+        {
+<span class="nc" id="L101">            throw new CertificateStoreConfigException( &quot;Unable to reload store in '&quot; + configuration.getFile() + &quot;'&quot;, ex );</span>
+<span class="nc" id="L102">        }</span>
+<span class="nc" id="L103">    }</span>
+
+    /**
+     * Saves the current state of the store to disk. Useful when certificates have been added or removed from the
+     * store.
+     * @throws CertificateStoreConfigException of the configuration could not be persisted
+     */
+    public void persist() throws CertificateStoreConfigException
+    {
+<span class="nc" id="L112">        try ( final FileOutputStream os = new FileOutputStream( configuration.getFile() ) )</span>
+        {
+<span class="nc" id="L114">            store.store( os, configuration.getPassword() );</span>
+<span class="nc bnc" id="L115" title="All 8 branches missed.">        }</span>
+<span class="nc" id="L116">        catch ( NoSuchAlgorithmException | KeyStoreException | CertificateException | IOException ex )</span>
+        {
+<span class="nc" id="L118">            throw new CertificateStoreConfigException( &quot;Unable to save changes to store in '&quot; + configuration.getFile() + &quot;'&quot;, ex );</span>
+<span class="nc" id="L119">        }</span>
+<span class="nc" id="L120">    }</span>
+
+    /**
+     * Copies the file that is the persistent storage for this store to a new file in the backup location.
+     *
+     * @return The path in which the backup was created, or null if the creation of the backup failed.
+     */
+    public Path backup()
+    {
+<span class="nc" id="L129">        final String postfix = &quot;.&quot; + new Date().getTime();</span>
+<span class="nc" id="L130">        final Path original = configuration.getFile().toPath();</span>
+<span class="nc" id="L131">        final Path backup = configuration.getBackupDirectory().toPath().resolve( original.getFileName() + postfix );</span>
+
+<span class="nc" id="L133">        Log.info( &quot;Creating a backup of {} in {}.&quot;, original, backup );</span>
+        try
+        {
+<span class="nc" id="L136">            Files.copy( original, backup );</span>
+<span class="nc" id="L137">            return backup;</span>
+        }
+<span class="nc" id="L139">        catch ( IOException e )</span>
+        {
+<span class="nc" id="L141">            Log.error( &quot;An error occurred creating a backup of {} in {}!&quot;, original, backup, e );</span>
+        }
+<span class="nc" id="L143">        return null;</span>
+    }
+
+    /**
+     * Returns a collection of all x.509 certificates in this store. Certificates returned by this method can be of any
+     * state (eg: invalid, on a revocation list, etc).
+     *
+     * @return A collection (possibly empty, never null) of all certificates in this store, mapped by their alias.
+     * @throws KeyStoreException if a keystore has not been initialized
+     */
+    public Map&lt;String, X509Certificate&gt; getAllCertificates() throws KeyStoreException
+    {
+<span class="nc" id="L155">        final Map&lt;String, X509Certificate&gt; results = new HashMap&lt;&gt;();</span>
+
+<span class="nc bnc" id="L157" title="All 2 branches missed.">        for ( final String alias : Collections.list( store.aliases() ) )</span>
+        {
+<span class="nc" id="L159">            final Certificate certificate = store.getCertificate( alias );</span>
+<span class="nc bnc" id="L160" title="All 2 branches missed.">            if ( !( certificate instanceof X509Certificate ) )</span>
+            {
+<span class="nc" id="L162">                continue;</span>
+            }
+
+<span class="nc" id="L165">            results.put( alias, (X509Certificate) certificate );</span>
+<span class="nc" id="L166">        }</span>
+
+<span class="nc" id="L168">        return results;</span>
+    }
+
+    /**
+     * Deletes an entry (by entry) in this store. All information related to this entry will be removed, including
+     * certificates and keys.
+     *
+     * When the store does not contain an entry that matches the provided alias, this method does nothing.
+     *
+     * @param alias The alias for which to delete an entry (cannot be null or empty).
+     * @throws CertificateStoreConfigException if the entry could not be deleted
+     */
+    public void delete( String alias ) throws CertificateStoreConfigException
+    {
+        // Input validation
+<span class="nc bnc" id="L183" title="All 4 branches missed.">        if ( alias == null || alias.trim().isEmpty() )</span>
+        {
+<span class="nc" id="L185">            throw new IllegalArgumentException( &quot;Argument 'alias' cannot be null or an empty String.&quot; );</span>
+        }
+
+        try
+        {
+<span class="nc bnc" id="L190" title="All 2 branches missed.">            if ( !store.containsAlias( alias ) )</span>
+            {
+<span class="nc" id="L192">                Log.info( &quot;Unable to delete certificate for alias '&quot; + alias + &quot;' from store, as the store does not contain a certificate for that alias.&quot; );</span>
+<span class="nc" id="L193">                return;</span>
+            }
+
+<span class="nc" id="L196">            store.deleteEntry( alias );</span>
+<span class="nc" id="L197">            persist();</span>
+        }
+<span class="nc" id="L199">        catch ( CertificateStoreConfigException | KeyStoreException e )</span>
+        {
+<span class="nc" id="L201">            reload(); // reset state of the store.</span>
+<span class="nc" id="L202">            throw new CertificateStoreConfigException( &quot;Unable to delete the certificate from the identity store.&quot;, e );</span>
+
+<span class="nc" id="L204">        }</span>
+<span class="nc" id="L205">    }</span>
+
+    public KeyStore getStore()
+    {
+<span class="nc" id="L209">        return store;</span>
+    }
+
+    public CertificateStoreConfiguration getConfiguration()
+    {
+<span class="nc" id="L214">        return configuration;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

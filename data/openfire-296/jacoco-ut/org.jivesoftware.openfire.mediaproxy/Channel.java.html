@@ -1,0 +1,192 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>Channel.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.mediaproxy</a> &gt; <span class="el_source">Channel.java</span></div><h1>Channel.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.mediaproxy;
+
+import java.io.IOException;
+import java.net.DatagramPacket;
+import java.net.DatagramSocket;
+import java.net.InetAddress;
+import java.net.SocketException;
+import java.net.UnknownHostException;
+import java.util.ArrayList;
+import java.util.List;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Listen packets from defined dataSocket and send packets to the defined host.
+ *
+ * @author Thiago Camargo
+ */
+abstract class Channel implements Runnable {
+    
+<span class="nc" id="L38">    private static final Logger Log = LoggerFactory.getLogger(Channel.class);</span>
+
+<span class="nc" id="L40">    protected byte[] buf = new byte[5000];</span>
+    protected DatagramSocket dataSocket;
+    protected DatagramPacket packet;
+<span class="nc" id="L43">    protected boolean enabled = true;</span>
+
+<span class="nc" id="L45">    List&lt;DatagramListener&gt; listeners = new ArrayList&lt;&gt;();</span>
+
+    protected InetAddress host;
+    protected int port;
+
+    /**
+     * Creates a Channel according to the parameters.
+     *
+     * @param dataSocket
+     * @param host
+     * @param port
+     */
+<span class="nc" id="L57">    public Channel(DatagramSocket dataSocket, InetAddress host, int port) {</span>
+<span class="nc" id="L58">        this.dataSocket = dataSocket;</span>
+<span class="nc" id="L59">        this.host = host;</span>
+<span class="nc" id="L60">        this.port = port;</span>
+<span class="nc" id="L61">    }</span>
+
+    /**
+     * Get the host that the packet will be sent to.
+     *
+     * @return remote host address
+     */
+    public InetAddress getHost() {
+<span class="nc" id="L69">        return host;</span>
+    }
+
+    /**
+     * Set the host that the packet will be sent to.
+     * @param host the host to send the packet to
+     */
+    protected void setHost(InetAddress host) {
+<span class="nc" id="L77">        this.host = host;</span>
+<span class="nc" id="L78">    }</span>
+
+    /**
+     * Get the port that the packet will be sent to.
+     *
+     * @return The remote port number
+     */
+    public int getPort() {
+<span class="nc" id="L86">        return port;</span>
+    }
+
+    /**
+     * Set the port that the packet will be sent to.
+     *
+     * @param port the port to send the packet to
+     */
+    protected void setPort(int port) {
+<span class="nc" id="L95">        this.port = port;</span>
+<span class="nc" id="L96">    }</span>
+
+    /**
+     * Adds a DatagramListener to the Channel
+     *
+     * @param datagramListener the listener to add
+     */
+    public void addListener(DatagramListener datagramListener) {
+<span class="nc" id="L104">        listeners.add(datagramListener);</span>
+<span class="nc" id="L105">    }</span>
+
+    /**
+     * Remove a DatagramListener from the Channel
+     *
+     * @param datagramListener the listener to remove
+     */
+    public void removeListener(DatagramListener datagramListener) {
+<span class="nc" id="L113">        listeners.remove(datagramListener);</span>
+<span class="nc" id="L114">    }</span>
+
+    /**
+     * Remove every Listeners
+     */
+    public void removeListeners() {
+<span class="nc" id="L120">        listeners.removeAll(listeners);</span>
+<span class="nc" id="L121">    }</span>
+
+    public void cancel() {
+<span class="nc" id="L124">        this.enabled = false;</span>
+<span class="nc bnc" id="L125" title="All 2 branches missed.">        if (dataSocket != null){</span>
+<span class="nc" id="L126">            dataSocket.close();</span>
+        }
+<span class="nc" id="L128">    }</span>
+
+    /**
+     * Thread override method
+     */
+    @Override
+    public void run() {
+        try {
+<span class="nc bnc" id="L136" title="All 2 branches missed.">            while (enabled) {</span>
+                // Block until a datagram appears:
+<span class="nc" id="L138">                packet = new DatagramPacket(buf, buf.length);</span>
+<span class="nc" id="L139">                dataSocket.receive(packet);</span>
+
+<span class="nc bnc" id="L141" title="All 2 branches missed.">                if (handle(packet)) {</span>
+<span class="nc" id="L142">                    boolean resend = true;</span>
+
+<span class="nc bnc" id="L144" title="All 2 branches missed.">                    for (DatagramListener dl : listeners) {</span>
+<span class="nc" id="L145">                        boolean send = dl.datagramReceived(packet);</span>
+<span class="nc bnc" id="L146" title="All 4 branches missed.">                        if (resend &amp;&amp; !send) {</span>
+<span class="nc" id="L147">                            resend = false;</span>
+                        }
+<span class="nc" id="L149">                    }</span>
+
+<span class="nc bnc" id="L151" title="All 2 branches missed.">                    if (resend) {</span>
+<span class="nc" id="L152">                        relayPacket(packet);</span>
+                    }
+<span class="nc" id="L154">                }</span>
+            }
+        }
+<span class="nc" id="L157">        catch (UnknownHostException uhe) {</span>
+<span class="nc bnc" id="L158" title="All 2 branches missed.">            if (enabled) {</span>
+<span class="nc" id="L159">                Log.error(&quot;Unknown Host&quot;, uhe);</span>
+            }
+        }
+<span class="nc" id="L162">        catch (SocketException se) {</span>
+<span class="nc bnc" id="L163" title="All 2 branches missed.">            if (enabled) {</span>
+<span class="nc" id="L164">                Log.error(&quot;Socket closed&quot;, se);</span>
+            }
+        }
+<span class="nc" id="L167">        catch (IOException ioe) {</span>
+<span class="nc bnc" id="L168" title="All 2 branches missed.">            if (enabled) {</span>
+<span class="nc" id="L169">                Log.error(&quot;Communication error&quot;, ioe);</span>
+            }
+<span class="nc" id="L171">        }</span>
+<span class="nc" id="L172">    }</span>
+
+    public void relayPacket(DatagramPacket packet) {
+        try {
+<span class="nc" id="L176">            DatagramPacket echo = new DatagramPacket(packet.getData(), packet.getLength(), host, port);</span>
+<span class="nc" id="L177">            dataSocket.send(echo);</span>
+        }
+<span class="nc" id="L179">        catch (IOException e) {</span>
+<span class="nc" id="L180">            Log.error(e.getMessage(), e);</span>
+<span class="nc" id="L181">        }</span>
+<span class="nc" id="L182">    }</span>
+
+    /**
+     * Handles received packet and returns true if the packet should be processed by the channel.
+     *
+     * @param packet received datagram packet
+     * @return true if listeners will be alerted that a new packet was received.
+     */
+    abstract boolean handle(DatagramPacket packet);
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

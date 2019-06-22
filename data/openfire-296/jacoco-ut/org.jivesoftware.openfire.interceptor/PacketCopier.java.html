@@ -1,0 +1,346 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>PacketCopier.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.interceptor</a> &gt; <span class="el_source">PacketCopier.java</span></div><h1>PacketCopier.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.interceptor;
+
+import java.util.ArrayList;
+import java.util.Date;
+import java.util.List;
+import java.util.Map;
+import java.util.TimerTask;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.LinkedBlockingQueue;
+
+import org.dom4j.Element;
+import org.jivesoftware.openfire.RoutingTable;
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.component.ComponentEventListener;
+import org.jivesoftware.openfire.component.InternalComponentManager;
+import org.jivesoftware.openfire.session.Session;
+import org.jivesoftware.util.LocaleUtils;
+import org.jivesoftware.util.TaskEngine;
+import org.jivesoftware.util.XMPPDateTimeFormat;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmpp.packet.IQ;
+import org.xmpp.packet.JID;
+import org.xmpp.packet.Message;
+import org.xmpp.packet.Packet;
+import org.xmpp.packet.Presence;
+
+/**
+ * Packet interceptor that notifies of packets activity to components that previously
+ * subscribed to the notificator. Notifications to components will be made using
+ * a Message sent to the component itself. The Message will include an extension that will
+ * contain the intercepted packet as well as extra information such us {@code incoming}
+ * and {@code processed}.
+ *
+ * @author Gaston Dombiak
+ */
+public class PacketCopier implements PacketInterceptor, ComponentEventListener {
+
+<span class="nc" id="L56">    private static final Logger Log = LoggerFactory.getLogger(PacketCopier.class);</span>
+
+<span class="nc" id="L58">    private final static PacketCopier instance = new PacketCopier();</span>
+
+
+<span class="nc" id="L61">    private Map&lt;String, Subscription&gt; subscribers = new ConcurrentHashMap&lt;&gt;();</span>
+    private String serverName;
+    private RoutingTable routingTable;
+
+    /**
+     * Timer to save queued logs to the XML file.
+     */
+    private ProcessPacketsTask packetsTask;
+
+    /**
+     * Queue that holds the audited packets that will be later saved to an XML file.
+     */
+<span class="nc" id="L73">    private BlockingQueue&lt;InterceptedPacket&gt; packetQueue = new LinkedBlockingQueue&lt;&gt;(10000);</span>
+
+    /**
+     * Returns unique instance of this class.
+     *
+     * @return unique instance of this class.
+     */
+    public static PacketCopier getInstance() {
+<span class="nc" id="L81">        return instance;</span>
+    }
+
+
+<span class="nc" id="L85">    private PacketCopier() {</span>
+        // Add the new instance as a listener of component events. We need to react when
+        // a component is no longer valid
+<span class="nc" id="L88">        InternalComponentManager.getInstance().addListener(this);</span>
+<span class="nc" id="L89">        XMPPServer server = XMPPServer.getInstance();</span>
+<span class="nc" id="L90">        serverName = server.getServerInfo().getXMPPDomain();</span>
+<span class="nc" id="L91">        routingTable = server.getRoutingTable();</span>
+
+        // Add new instance to the PacketInterceptors list
+<span class="nc" id="L94">        InterceptorManager.getInstance().addInterceptor(this);</span>
+
+        // Create a new task and schedule it with the new timeout
+<span class="nc" id="L97">        packetsTask = new ProcessPacketsTask();</span>
+<span class="nc" id="L98">        TaskEngine.getInstance().schedule(packetsTask, 5000, 5000);</span>
+<span class="nc" id="L99">    }</span>
+
+    /**
+     * Creates new subscription for the specified component with the specified settings.
+     *
+     * @param componentJID the address of the component connected to the server.
+     * @param iqEnabled true if interested in IQ packets of any type.
+     * @param messageEnabled true if interested in Message packets.
+     * @param presenceEnabled true if interested in Presence packets.
+     * @param incoming true if interested in incoming traffic. false means outgoing.
+     * @param processed true if want to be notified after packets were processed.
+     */
+    public void addSubscriber(JID componentJID, boolean iqEnabled, boolean messageEnabled, boolean presenceEnabled,
+                              boolean incoming, boolean processed) {
+<span class="nc" id="L113">        subscribers.put(componentJID.toString(),</span>
+                new Subscription(iqEnabled, messageEnabled, presenceEnabled, incoming, processed));
+<span class="nc" id="L115">    }</span>
+
+    /**
+     * Removes the subscription of the specified component.
+     *
+     * @param componentJID the address of the component connected to the server.
+     */
+    public void removeSubscriber(JID componentJID) {
+<span class="nc" id="L123">        subscribers.remove(componentJID.toString());</span>
+<span class="nc" id="L124">    }</span>
+
+    @Override
+    public void interceptPacket(Packet packet, Session session, boolean incoming, boolean processed)
+            throws PacketRejectedException {
+        // Queue intercepted packet only if there are subscribers interested
+<span class="nc bnc" id="L130" title="All 2 branches missed.">        if (!subscribers.isEmpty()) {</span>
+<span class="nc" id="L131">            boolean queue = false;</span>
+<span class="nc" id="L132">            Class packetClass = packet.getClass();</span>
+<span class="nc bnc" id="L133" title="All 2 branches missed.">            for (Subscription subscription : subscribers.values()) {</span>
+<span class="nc bnc" id="L134" title="All 4 branches missed.">                if (subscription.isPresenceEnabled() &amp;&amp; packetClass == Presence.class) {</span>
+<span class="nc" id="L135">                    queue = true;</span>
+                }
+<span class="nc bnc" id="L137" title="All 4 branches missed.">                else if (subscription.isMessageEnabled() &amp;&amp; packetClass == Message.class) {</span>
+<span class="nc" id="L138">                    queue = true;</span>
+                }
+<span class="nc bnc" id="L140" title="All 4 branches missed.">                else if (subscription.isIQEnabled() &amp;&amp; packetClass == IQ.class) {</span>
+<span class="nc" id="L141">                    queue = true;</span>
+                }
+<span class="nc" id="L143">            }</span>
+<span class="nc bnc" id="L144" title="All 2 branches missed.">            if (queue) {</span>
+                // Queue packet with extra information and let the background thread process it
+<span class="nc" id="L146">                packetQueue.add(new InterceptedPacket(packet, incoming, processed));</span>
+            }
+        }
+<span class="nc" id="L149">    }</span>
+
+    @Override
+    public void componentInfoReceived(IQ iq) {
+        //Ignore
+<span class="nc" id="L154">    }</span>
+
+    @Override
+    public void componentRegistered(JID componentJID) {
+        //Ignore
+<span class="nc" id="L159">    }</span>
+
+    @Override
+    public void componentUnregistered(JID componentJID) {
+        //Remove component from the list of subscribers (if subscribed)
+<span class="nc" id="L164">        removeSubscriber(componentJID);</span>
+<span class="nc" id="L165">    }</span>
+
+    private void processPackets() {
+<span class="nc" id="L168">        List&lt;InterceptedPacket&gt; packets = new ArrayList&lt;&gt;(packetQueue.size());</span>
+<span class="nc" id="L169">        packetQueue.drainTo(packets);</span>
+<span class="nc bnc" id="L170" title="All 2 branches missed.">        for (InterceptedPacket interceptedPacket : packets) {</span>
+<span class="nc bnc" id="L171" title="All 2 branches missed.">            for (Map.Entry&lt;String, Subscription&gt; entry : subscribers.entrySet()) {</span>
+<span class="nc" id="L172">                boolean notify = false;</span>
+<span class="nc" id="L173">                String componentJID = entry.getKey();</span>
+<span class="nc" id="L174">                Subscription subscription = entry.getValue();</span>
+
+<span class="nc bnc" id="L176" title="All 2 branches missed.">                if (subscription.isIncoming() == interceptedPacket.isIncoming() &amp;&amp;</span>
+<span class="nc bnc" id="L177" title="All 2 branches missed.">                        subscription.isProcessed() == interceptedPacket.isProcessed()) {</span>
+<span class="nc" id="L178">                    Class packetClass = interceptedPacket.getPacketClass();</span>
+<span class="nc bnc" id="L179" title="All 4 branches missed.">                    if (subscription.isPresenceEnabled() &amp;&amp; packetClass == Presence.class) {</span>
+<span class="nc" id="L180">                        notify = true;</span>
+                    }
+<span class="nc bnc" id="L182" title="All 4 branches missed.">                    else if (subscription.isMessageEnabled() &amp;&amp; packetClass == Message.class) {</span>
+<span class="nc" id="L183">                        notify = true;</span>
+                    }
+<span class="nc bnc" id="L185" title="All 4 branches missed.">                    else if (subscription.isIQEnabled() &amp;&amp; packetClass == IQ.class) {</span>
+<span class="nc" id="L186">                        notify = true;</span>
+                    }
+                }
+
+<span class="nc bnc" id="L190" title="All 2 branches missed.">                if (notify) {</span>
+                    try {
+<span class="nc" id="L192">                        Message message = new Message();</span>
+<span class="nc" id="L193">                        message.setFrom(serverName);</span>
+<span class="nc" id="L194">                        message.setTo(componentJID);</span>
+<span class="nc" id="L195">                        Element childElement = message.addChildElement(&quot;copy&quot;,</span>
+                                &quot;http://jabber.org/protocol/packet#event&quot;);
+<span class="nc bnc" id="L197" title="All 2 branches missed.">                        childElement.addAttribute(&quot;incoming&quot;, subscription.isIncoming() ? &quot;true&quot; : &quot;false&quot;);</span>
+<span class="nc bnc" id="L198" title="All 2 branches missed.">                        childElement.addAttribute(&quot;processed&quot;, subscription.isProcessed() ? &quot;true&quot; : &quot;false&quot;);</span>
+<span class="nc" id="L199">                        childElement.addAttribute(&quot;date&quot;, XMPPDateTimeFormat.format(interceptedPacket.getCreationDate()));</span>
+<span class="nc" id="L200">                        childElement.add(interceptedPacket.getElement().createCopy());</span>
+                        // Send message notification to subscribed component
+<span class="nc" id="L202">                        routingTable.routePacket(message.getTo(), message, true);</span>
+                    }
+<span class="nc" id="L204">                    catch (Exception e) {</span>
+<span class="nc" id="L205">                        Log.error(LocaleUtils.getLocalizedString(&quot;admin.error&quot;), e);</span>
+<span class="nc" id="L206">                    }</span>
+                }
+<span class="nc" id="L208">            }</span>
+<span class="nc" id="L209">        }</span>
+<span class="nc" id="L210">    }</span>
+
+<span class="nc" id="L212">    private class ProcessPacketsTask extends TimerTask {</span>
+        @Override
+        public void run() {
+            try {
+                // Notify components of intercepted packets
+<span class="nc" id="L217">                processPackets();</span>
+            }
+<span class="nc" id="L219">            catch (Throwable e) {</span>
+<span class="nc" id="L220">                Log.error(LocaleUtils.getLocalizedString(&quot;admin.error&quot;), e);</span>
+<span class="nc" id="L221">            }</span>
+<span class="nc" id="L222">        }</span>
+    }
+
+    private static class Subscription {
+        private boolean presenceEnabled;
+        private boolean messageEnabled;
+        private boolean iqEnabled;
+        private boolean incoming;
+        private boolean processed;
+
+        /**
+         * Creates a new subscription for the specified Component with the
+         * specified configuration.
+         *
+         * @param iqEnabled true if interested in IQ packets of any type.
+         * @param messageEnabled true if interested in Message packets.
+         * @param presenceEnabled true if interested in Presence packets.
+         * @param incoming true if interested in incoming traffic. false means outgoing.
+         * @param processed true if want to be notified after packets were processed.
+         */
+        public Subscription(boolean iqEnabled, boolean messageEnabled,
+<span class="nc" id="L243">                boolean presenceEnabled, boolean incoming, boolean processed) {</span>
+<span class="nc" id="L244">            this.incoming = incoming;</span>
+<span class="nc" id="L245">            this.iqEnabled = iqEnabled;</span>
+<span class="nc" id="L246">            this.messageEnabled = messageEnabled;</span>
+<span class="nc" id="L247">            this.presenceEnabled = presenceEnabled;</span>
+<span class="nc" id="L248">            this.processed = processed;</span>
+<span class="nc" id="L249">        }</span>
+
+        /**
+         * Returns true if the component is interested in receiving notifications
+         * of intercepted IQ packets.
+         *
+         * @return true if the component is interested in receiving notifications
+         * of intercepted IQ packets.
+         */
+        public boolean isIQEnabled() {
+<span class="nc" id="L259">            return iqEnabled;</span>
+        }
+
+        /**
+         * Returns true if the component is interested in receiving notifications
+         * of intercepted Message packets.
+         *
+         * @return true if the component is interested in receiving notifications
+         * of intercepted Message packets.
+         */
+        public boolean isMessageEnabled() {
+<span class="nc" id="L270">            return messageEnabled;</span>
+        }
+
+        /**
+         * Returns true if the component is interested in receiving notifications
+         * of intercepted Presence packets.
+         *
+         * @return true if the component is interested in receiving notifications
+         * of intercepted Presence packets.
+         */
+        public boolean isPresenceEnabled() {
+<span class="nc" id="L281">            return presenceEnabled;</span>
+        }
+
+        /**
+         * Returns true if the component wants to be notified of incoming traffic. A false
+         * value means that the component is interested in outgoing traffic.
+         *
+         * @return true if interested in incoming traffic. false means outgoing.
+         */
+        public boolean isIncoming() {
+<span class="nc" id="L291">            return incoming;</span>
+        }
+
+        /**
+         * Returns true if the component wants to be notified of after packets were
+         * processed. Processed has different meaning depending if the packet is incoming
+         * or outgoing. An incoming packet that was processed means that the server
+         * routed the packet to the recipient and nothing else should be done with the packet.
+         * However, an outgoing packet that was processed means that the packet was already
+         * sent to the target entity. 
+         *
+         * @return true if interested in incoming traffic. false means outgoing.
+         */
+        public boolean isProcessed() {
+<span class="nc" id="L305">            return processed;</span>
+        }
+    }
+
+    private static class InterceptedPacket {
+        private Element element;
+        private Class packetClass;
+        private Date creationDate;
+        private boolean incoming;
+        private boolean processed;
+
+<span class="nc" id="L316">        public InterceptedPacket(Packet packet, boolean incoming, boolean processed) {</span>
+<span class="nc" id="L317">            packetClass = packet.getClass();</span>
+<span class="nc" id="L318">            this.element = packet.getElement();</span>
+<span class="nc" id="L319">            this.incoming = incoming;</span>
+<span class="nc" id="L320">            this.processed = processed;</span>
+<span class="nc" id="L321">            creationDate = new Date();</span>
+<span class="nc" id="L322">        }</span>
+
+
+        public Class getPacketClass() {
+<span class="nc" id="L326">            return packetClass;</span>
+        }
+
+        public Date getCreationDate() {
+<span class="nc" id="L330">            return creationDate;</span>
+        }
+
+        public Element getElement() {
+<span class="nc" id="L334">            return element;</span>
+        }
+
+        public boolean isIncoming() {
+<span class="nc" id="L338">            return incoming;</span>
+        }
+
+        public boolean isProcessed() {
+<span class="nc" id="L342">            return processed;</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

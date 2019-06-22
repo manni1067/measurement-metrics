@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>SocketUtil.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.net</a> &gt; <span class="el_source">SocketUtil.java</span></div><h1>SocketUtil.java</h1><pre class="source lang-java linenums">package org.jivesoftware.openfire.net;
+
+import org.jivesoftware.openfire.server.RemoteServerManager;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.io.IOException;
+import java.net.InetSocketAddress;
+import java.net.Socket;
+import java.util.AbstractMap;
+import java.util.List;
+import java.util.Map;
+
+/**
+ * Utility class to generate Socket instances.
+ *
+ * @author Guus der Kinderen, guus.der.kinderen@gmail.com
+ */
+<span class="nc" id="L19">public class SocketUtil</span>
+{
+<span class="nc" id="L21">    private final static Logger Log = LoggerFactory.getLogger( SocketUtil.class );</span>
+
+    /**
+     * Creates a socket connection to an XMPP domain.
+     *
+     * This implementation uses DNS SRV records to find a list of remote hosts for the XMPP domain (as implemented by
+     * {@link DNSUtil#resolveXMPPDomain(String, int)}. It then iteratively tries to create a socket connection to each
+     * of them, until one socket connection succeeds.
+     *
+     * Either the connected Socket instance is returned, or null if no connection could be established.
+     *
+     * Note that this method blocks while performing network IO. The timeout as defined by
+     * {@link RemoteServerManager#getSocketTimeout()} is observed.
+     *
+     * @param xmppDomain The XMPP domain to connect to.
+     * @param port The port to connect to when DNS resolution fails.
+     * @return a Socket instance that is connected, or null.
+     * @see DNSUtil#resolveXMPPDomain(String, int)
+     */
+    public static Map.Entry&lt;Socket, Boolean&gt; createSocketToXmppDomain( String xmppDomain, int port )
+    {
+<span class="nc" id="L42">        Log.debug( &quot;Creating a socket connection to XMPP domain '{}' ...&quot;, xmppDomain );</span>
+
+<span class="nc" id="L44">        Log.debug( &quot;Use DNS to resolve remote hosts for the provided XMPP domain '{}' (default port: {}) ...&quot;, xmppDomain, port );</span>
+<span class="nc" id="L45">        final List&lt;DNSUtil.HostAddress&gt; remoteHosts = DNSUtil.resolveXMPPDomain( xmppDomain, port );</span>
+<span class="nc" id="L46">        Log.debug( &quot;Found {} host(s) for XMPP domain '{}'.&quot;, remoteHosts.size(), xmppDomain );</span>
+
+<span class="nc" id="L48">        Socket socket = null;</span>
+<span class="nc" id="L49">        final int socketTimeout = RemoteServerManager.getSocketTimeout();</span>
+<span class="nc bnc" id="L50" title="All 2 branches missed.">        for ( DNSUtil.HostAddress remoteHost : remoteHosts )</span>
+        {
+<span class="nc" id="L52">            final String realHostname = remoteHost.getHost();</span>
+<span class="nc" id="L53">            final int realPort = remoteHost.getPort();</span>
+<span class="nc" id="L54">            final boolean directTLS = remoteHost.isDirectTLS();</span>
+
+            try
+            {
+                // (re)initialize the socket.
+<span class="nc" id="L59">                socket = new Socket();</span>
+
+<span class="nc" id="L61">                Log.debug( &quot;Trying to create socket connection to XMPP domain '{}' using remote host: {}:{} (blocks up to {} ms) ...&quot;, xmppDomain, realHostname, realPort, socketTimeout );</span>
+<span class="nc" id="L62">                socket.connect( new InetSocketAddress( realHostname, realPort ), socketTimeout );</span>
+<span class="nc" id="L63">                Log.debug( &quot;Successfully created socket connection to XMPP domain '{}' using remote host: {}:{}!&quot;, xmppDomain, realHostname, realPort );</span>
+<span class="nc" id="L64">                return new AbstractMap.SimpleEntry&lt;&gt;(socket, directTLS);</span>
+            }
+<span class="nc" id="L66">            catch ( Exception e )</span>
+            {
+<span class="nc" id="L68">                Log.debug( &quot;An exception occurred while trying to create a socket connection to XMPP domain '{}' using remote host {}:{}&quot;, xmppDomain, realHostname, realPort, e );</span>
+<span class="nc" id="L69">                Log.warn( &quot;Unable to create a socket connection to XMPP domain '{}' using remote host: {}:{}. Cause: {} (a full stacktrace is logged on debug level)&quot;, xmppDomain, realHostname, realPort, e.getMessage() );</span>
+                try
+                {
+<span class="nc bnc" id="L72" title="All 2 branches missed.">                    if ( socket != null )</span>
+                    {
+<span class="nc" id="L74">                        socket.close();</span>
+<span class="nc" id="L75">                        socket = null;</span>
+                    }
+                }
+<span class="nc" id="L78">                catch ( IOException ex )</span>
+                {
+<span class="nc" id="L80">                    Log.debug( &quot;An additional exception occurred while trying to close a socket when creating a connection to {}:{} failed.&quot;, realHostname, realPort, ex );</span>
+<span class="nc" id="L81">                }</span>
+            }
+<span class="nc" id="L83">        }</span>
+
+<span class="nc" id="L85">        Log.warn( &quot;Unable to create a socket connection to XMPP domain '{}': Unable to connect to any of its remote hosts.&quot;, xmppDomain );</span>
+<span class="nc" id="L86">        return null;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

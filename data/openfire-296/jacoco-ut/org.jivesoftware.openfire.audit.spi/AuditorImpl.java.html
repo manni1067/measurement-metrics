@@ -1,0 +1,481 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>AuditorImpl.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.audit.spi</a> &gt; <span class="el_source">AuditorImpl.java</span></div><h1>AuditorImpl.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.audit.spi;
+
+import java.io.BufferedWriter;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.FilenameFilter;
+import java.io.IOException;
+import java.io.OutputStreamWriter;
+import java.io.Writer;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Calendar;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.Date;
+import java.util.List;
+import java.util.TimeZone;
+import java.util.TimerTask;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.LinkedBlockingQueue;
+
+import org.dom4j.DocumentFactory;
+import org.dom4j.Element;
+import org.jivesoftware.openfire.audit.AuditManager;
+import org.jivesoftware.openfire.audit.Auditor;
+import org.jivesoftware.openfire.session.Session;
+import org.jivesoftware.util.FastDateFormat;
+import org.jivesoftware.util.JiveGlobals;
+import org.jivesoftware.util.LocaleUtils;
+import org.jivesoftware.util.StringUtils;
+import org.jivesoftware.util.TaskEngine;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmpp.packet.IQ;
+import org.xmpp.packet.Message;
+import org.xmpp.packet.Packet;
+import org.xmpp.packet.Presence;
+
+public class AuditorImpl implements Auditor {
+
+<span class="nc" id="L58">    private static final Logger Log = LoggerFactory.getLogger(AuditorImpl.class);</span>
+
+    private AuditManager auditManager;
+    private File currentAuditFile;
+    private Writer writer;
+    private org.jivesoftware.util.XMLWriter xmlWriter;
+    /**
+     * Limit date used to detect when we need to rollover files. This date will be
+     * configured as the last second of the day.
+     */
+    private Date currentDateLimit;
+    /**
+     * Max size in bytes that all audit log files may have. When the limit is reached
+     * oldest audit log files will be removed until total size is under the limit.
+     */
+    private long maxTotalSize;
+    /**
+     * Max size in bytes that each audit log file may have. Once the limit has been
+     * reached a new audit file will be created.
+     */
+    private long maxFileSize;
+    /**
+     * Max number of days to keep audit information. Once the limit has been reached
+     * audit files that contain information that exceed the limit will be deleted.
+     */
+    private int maxDays;
+    /**
+     * Flag that indicates if packets can still be accepted to be saved to the audit log.
+     */
+<span class="nc" id="L87">    private boolean closed = false;</span>
+    /**
+     * Directoty (absolute path) where the audit files will be saved.
+     */
+    private String logDir;
+    /**
+     * File (or better say directory) of the folder that contains the audit logs.
+     */
+    private File baseFolder;
+
+    /**
+     * Queue that holds the audited packets that will be later saved to an XML file.
+     */
+<span class="nc" id="L100">    private BlockingQueue&lt;AuditPacket&gt; logQueue = new LinkedBlockingQueue&lt;&gt;();</span>
+
+    /**
+     * Allow only a limited number of files for each day, max. three digits (000-999)
+     */
+<span class="nc" id="L105">    private final int maxTotalFilesDay = 1000;</span>
+    /**
+     * Track the current index number `...-nnn.log´
+     */
+<span class="nc" id="L109">    private int filesIndex = 0;</span>
+    /**
+     * Timer to save queued logs to the XML file.
+     */
+    private SaveQueuedPacketsTask saveQueuedPacketsTask;
+    private FastDateFormat dateFormat;
+    private static FastDateFormat auditFormat;
+
+<span class="nc" id="L117">    public AuditorImpl(AuditManager manager) {</span>
+<span class="nc" id="L118">        auditManager = manager;</span>
+<span class="nc" id="L119">        dateFormat = FastDateFormat.getInstance(&quot;yyyyMMdd&quot;, TimeZone.getTimeZone(&quot;UTC&quot;));</span>
+<span class="nc" id="L120">        auditFormat = FastDateFormat.getInstance(&quot;MMM dd, yyyy hh:mm:ss:SSS a&quot;, JiveGlobals.getLocale());</span>
+<span class="nc" id="L121">    }</span>
+
+    protected void setMaxValues(int totalSize, int fileSize, int days) {
+<span class="nc" id="L124">        maxTotalSize = (long) totalSize * 1024l * 1024l;</span>
+<span class="nc" id="L125">        maxFileSize = (long) fileSize * 1024l * 1024l;</span>
+<span class="nc" id="L126">        maxDays = days;</span>
+<span class="nc" id="L127">    }</span>
+
+    public void setLogTimeout(int logTimeout) {
+        // Cancel any existing task because the timeout has changed
+<span class="nc bnc" id="L131" title="All 2 branches missed.">        if (saveQueuedPacketsTask != null) {</span>
+<span class="nc" id="L132">            saveQueuedPacketsTask.cancel();</span>
+        }
+        // Create a new task and schedule it with the new timeout
+<span class="nc" id="L135">        saveQueuedPacketsTask = new SaveQueuedPacketsTask();</span>
+<span class="nc" id="L136">        TaskEngine.getInstance().schedule(saveQueuedPacketsTask, logTimeout, logTimeout);</span>
+
+<span class="nc" id="L138">    }</span>
+
+    public void setLogDir(String logDir) {
+<span class="nc" id="L141">        this.logDir = logDir;</span>
+        // Create and catch file of the base folder that will contain audit files
+<span class="nc" id="L143">        baseFolder = new File(logDir);</span>
+        // Create the folder if it does not exist
+<span class="nc bnc" id="L145" title="All 2 branches missed.">        if (!baseFolder.exists()) {</span>
+<span class="nc bnc" id="L146" title="All 2 branches missed.">            if ( !baseFolder.mkdir() ) {</span>
+<span class="nc" id="L147">                Log.error( &quot;Unable to create log directory: {}&quot;, baseFolder );</span>
+            }
+        }
+<span class="nc" id="L150">    }</span>
+
+    @Override
+    public int getQueuedPacketsNumber() {
+<span class="nc" id="L154">        return logQueue.size();</span>
+    }
+
+    @Override
+    public void audit(Packet packet, Session session) {
+<span class="nc bnc" id="L159" title="All 2 branches missed.">        if (auditManager.isEnabled()) {</span>
+<span class="nc bnc" id="L160" title="All 2 branches missed.">            if (packet instanceof Message) {</span>
+<span class="nc bnc" id="L161" title="All 2 branches missed.">                if (auditManager.isAuditMessage()) {</span>
+<span class="nc" id="L162">                    writePacket(packet, session);</span>
+                }
+            }
+<span class="nc bnc" id="L165" title="All 2 branches missed.">            else if (packet instanceof Presence) {</span>
+<span class="nc bnc" id="L166" title="All 2 branches missed.">                if (auditManager.isAuditPresence()) {</span>
+<span class="nc" id="L167">                    writePacket(packet, session);</span>
+                }
+            }
+<span class="nc bnc" id="L170" title="All 2 branches missed.">            else if (packet instanceof IQ) {</span>
+<span class="nc bnc" id="L171" title="All 2 branches missed.">                if (auditManager.isAuditIQ()) {</span>
+<span class="nc" id="L172">                    writePacket(packet, session);</span>
+                }
+            }
+        }
+<span class="nc" id="L176">    }</span>
+
+    private void writePacket(Packet packet, Session session) {
+<span class="nc bnc" id="L179" title="All 2 branches missed.">        if (!closed) {</span>
+            // Add to the logging queue this new entry that will be saved later
+<span class="nc" id="L181">            logQueue.add(new AuditPacket(packet.createCopy(), session));</span>
+        }
+<span class="nc" id="L183">    }</span>
+
+    @Override
+    public void stop() {
+        // Stop queuing packets since we are being stopped
+<span class="nc" id="L188">        closed = true;</span>
+        // Save all remaining queued packets to the XML file
+<span class="nc" id="L190">        saveQueuedPackets();</span>
+<span class="nc" id="L191">        close();</span>
+<span class="nc" id="L192">    }</span>
+
+    private void close() {
+<span class="nc bnc" id="L195" title="All 2 branches missed.">        if (xmlWriter != null) {</span>
+            try {
+<span class="nc" id="L197">                xmlWriter.flush();</span>
+<span class="nc" id="L198">                writer.write(&quot;&lt;/jive&gt;&quot;);</span>
+<span class="nc" id="L199">                xmlWriter.close();</span>
+<span class="nc" id="L200">                writer = null;</span>
+<span class="nc" id="L201">                xmlWriter = null;</span>
+            }
+<span class="nc" id="L203">            catch (Exception e) {</span>
+<span class="nc" id="L204">                Log.error(LocaleUtils.getLocalizedString(&quot;admin.error&quot;), e);</span>
+<span class="nc" id="L205">            }</span>
+        }
+<span class="nc" id="L207">    }</span>
+
+    private void prepareAuditFile(Date auditDate) throws IOException {
+<span class="nc" id="L210">        ensureMaxTotalSize();</span>
+
+        // Rotate file if: we just started, current file size exceeded limit or date has changed
+<span class="nc bnc" id="L213" title="All 8 branches missed.">        if (currentAuditFile == null || currentAuditFile.length() &gt; maxFileSize ||</span>
+<span class="nc bnc" id="L214" title="All 2 branches missed.">                xmlWriter == null || currentDateLimit == null || auditDate.after(currentDateLimit))</span>
+        {
+<span class="nc" id="L216">            createAuditFile(auditDate);</span>
+        }
+<span class="nc" id="L218">    }</span>
+
+    /**
+     * Ensures that max total size limit is not exceeded. If total size of audit files
+     * exceed the limit then oldest audit files will be removed until total size does
+     * not exceed limit.
+     */
+    private void ensureMaxTotalSize() {
+        // Get list of existing audit files
+<span class="nc" id="L227">        FilenameFilter filter = new FilenameFilter() {</span>
+            @Override
+            public boolean accept(File dir, String name) {
+<span class="nc bnc" id="L230" title="All 4 branches missed.">                return name.startsWith(&quot;jive.audit-&quot;) &amp;&amp; name.endsWith(&quot;.log&quot;);</span>
+            }
+        };
+<span class="nc" id="L233">        File[] files = baseFolder.listFiles(filter);</span>
+<span class="nc bnc" id="L234" title="All 2 branches missed.">        if (files == null) {</span>
+<span class="nc" id="L235">            Log.debug( &quot;Path '{}' does not denote a directory, or an IO exception occured while trying to list its content.&quot;, baseFolder );</span>
+<span class="nc" id="L236">            return;</span>
+        }
+<span class="nc" id="L238">        long totalLength = 0;</span>
+<span class="nc bnc" id="L239" title="All 2 branches missed.">        for (File file : files) {</span>
+<span class="nc" id="L240">            totalLength = totalLength + file.length();</span>
+        }
+        // Check if total size has been exceeded
+<span class="nc bnc" id="L243" title="All 2 branches missed.">        if (totalLength &gt; maxTotalSize) {</span>
+            // Sort files by name (chronological order)
+<span class="nc" id="L245">            List&lt;File&gt; sortedFiles = new ArrayList&lt;&gt;(Arrays.asList(files));</span>
+<span class="nc" id="L246">            Collections.sort(sortedFiles, new Comparator&lt;File&gt;() {</span>
+                @Override
+                public int compare(File o1, File o2) {
+<span class="nc" id="L249">                    return o1.getName().compareTo(o2.getName());</span>
+                }
+            });
+            // Delete as many old files as required to be under the limit
+<span class="nc bnc" id="L253" title="All 4 branches missed.">            while (totalLength &gt; maxTotalSize &amp;&amp; !sortedFiles.isEmpty()) {</span>
+<span class="nc" id="L254">                File fileToDelete = sortedFiles.remove(0);</span>
+<span class="nc" id="L255">                totalLength = totalLength - fileToDelete.length();</span>
+<span class="nc bnc" id="L256" title="All 2 branches missed.">                if (fileToDelete.equals(currentAuditFile)) {</span>
+                    // Close current file
+<span class="nc" id="L258">                    close();</span>
+                }
+                // Delete oldest file
+<span class="nc bnc" id="L261" title="All 2 branches missed.">                if ( !fileToDelete.delete() )</span>
+                {
+<span class="nc" id="L263">                    Log.warn( &quot;Unable to delete file '{}' as part of regular log rotation based on size of files (Openfire failed to clean up after itself)!&quot;, fileToDelete );</span>
+                }
+<span class="nc" id="L265">            }</span>
+        }
+<span class="nc" id="L267">    }</span>
+
+    /**
+     * Deletes old audit files that exceeded the max number of days limit.
+     */
+    private void ensureMaxDays() {
+<span class="nc bnc" id="L273" title="All 2 branches missed.">        if (maxDays == -1) {</span>
+            // Do nothing since we don't have any limit
+<span class="nc" id="L275">            return;</span>
+        }
+
+        // Set limit date after which we need to delete old audit files
+<span class="nc" id="L279">        Calendar calendar = Calendar.getInstance();</span>
+<span class="nc" id="L280">        calendar.add(Calendar.DATE, maxDays * -1);</span>
+
+<span class="nc" id="L282">        final String oldestFile =</span>
+<span class="nc" id="L283">                &quot;jive.audit-&quot; + dateFormat.format(calendar.getTime()) + &quot;-000.log&quot;;</span>
+
+        // Get list of audit files to delete
+<span class="nc" id="L286">        FilenameFilter filter = new FilenameFilter() {</span>
+            @Override
+            public boolean accept(File dir, String name) {
+<span class="nc bnc" id="L289" title="All 4 branches missed.">                return name.startsWith(&quot;jive.audit-&quot;) &amp;&amp; name.endsWith(&quot;.log&quot;) &amp;&amp;</span>
+<span class="nc bnc" id="L290" title="All 2 branches missed.">                        name.compareTo(oldestFile) &lt; 0;</span>
+            }
+        };
+<span class="nc" id="L293">        File[] files = baseFolder.listFiles(filter);</span>
+        // Delete old audit files
+<span class="nc bnc" id="L295" title="All 2 branches missed.">        for (File fileToDelete : files) {</span>
+<span class="nc bnc" id="L296" title="All 2 branches missed.">            if (fileToDelete.equals(currentAuditFile)) {</span>
+                // Close current file
+<span class="nc" id="L298">                close();</span>
+            }
+<span class="nc bnc" id="L300" title="All 2 branches missed.">            if ( !fileToDelete.delete() )</span>
+            {
+<span class="nc" id="L302">                Log.warn( &quot;Unable to delete file '{}' as part of regular log rotation based on age of file. (Openfire failed to clean up after itself)!&quot;, fileToDelete );</span>
+            }
+        }
+<span class="nc" id="L305">    }</span>
+
+    /* if this new logic still causes problems one may want to 
+    * use log4j or change the file format from YYYYmmdd-nnn to YYYYmmdd-HHMM */
+    /**
+    * Sets &lt;b&gt;xmlWriter&lt;/b&gt; so this class can use it to write audit logs&lt;br&gt;
+    * The audit filename &lt;b&gt;currentAuditFile&lt;/b&gt; will be `jive.audit-YYYYmmdd-nnn.log´&lt;br&gt;
+    * `nnn´ will be reset to `000´ when a new log file is created the next day &lt;br&gt;
+    * `nnn´ will be increased for log files which belong to the same day&lt;br&gt;
+    * &lt;b&gt;WARNING:&lt;/b&gt; If log files of the current day are deleted and the server is restarted then
+    * the value of `nnn´ may be random (it's calculated by `Math.max(files.length, filesIndex);´
+    * with `filesIndex=0´ and  `files.length=nr(existing jive.audit-YYYYmmdd-???.log files)´ - 
+    * if there are 10 audit files (033-043) then nnn will be 10 instead of 44).&lt;br&gt;
+    * If  `nnn=999´ then all audit data will be written to this file till the next day.&lt;br&gt;
+    * @param auditDate
+    * @throws IOException
+    */
+    private void createAuditFile(Date auditDate) throws IOException {
+<span class="nc" id="L323">        final String filePrefix = &quot;jive.audit-&quot; + dateFormat.format(auditDate) + &quot;-&quot;;</span>
+<span class="nc bnc" id="L324" title="All 4 branches missed.">        if (currentDateLimit == null || auditDate.after(currentDateLimit)) {</span>
+        // Set limit date after which we need to rollover the audit file (based on the date)
+<span class="nc" id="L326">        Calendar calendar = Calendar.getInstance();</span>
+<span class="nc" id="L327">        calendar.setTime(auditDate);</span>
+<span class="nc" id="L328">        calendar.set(Calendar.HOUR_OF_DAY, 23);</span>
+<span class="nc" id="L329">        calendar.set(Calendar.MINUTE, 59);</span>
+<span class="nc" id="L330">        calendar.set(Calendar.SECOND, 59);</span>
+<span class="nc" id="L331">        calendar.set(Calendar.MILLISECOND, 999);</span>
+<span class="nc" id="L332">        currentDateLimit = calendar.getTime();</span>
+<span class="nc" id="L333">        filesIndex = 0;</span>
+    }
+    // Get list of existing audit files
+<span class="nc" id="L336">    FilenameFilter filter = new FilenameFilter() {</span>
+        @Override
+        public boolean accept(File dir, String name) {
+<span class="nc bnc" id="L339" title="All 4 branches missed.">            return name.startsWith(filePrefix) &amp;&amp; name.endsWith(&quot;.log&quot;);</span>
+        }
+    };
+<span class="nc" id="L342">    File[] files = baseFolder.listFiles(filter);</span>
+    // if some daily files were already deleted then files.length will be smaller than filesIndex
+    // see also WARNING above
+<span class="nc" id="L345">    filesIndex = Math.max(files.length, filesIndex);</span>
+<span class="nc bnc" id="L346" title="All 2 branches missed.">        if (filesIndex &gt;= maxTotalFilesDay)</span>
+        {
+            // don't close this file, continue auditing to it
+<span class="nc" id="L349">            return;</span>
+        }
+<span class="nc" id="L351">        File tmpAuditFile = new File(logDir, filePrefix + StringUtils.zeroPadString(Integer.toString(filesIndex), 3) + &quot;.log&quot;);</span>
+<span class="nc bnc" id="L352" title="All 4 branches missed.">        if ( (filesIndex == maxTotalFilesDay-1) &amp;&amp; !tmpAuditFile.exists() ) </span>
+        {
+<span class="nc" id="L354">            Log.warn(&quot;Creating last audit file for this date: &quot; + dateFormat.format(auditDate));</span>
+        }
+<span class="nc bnc" id="L356" title="All 4 branches missed.">        while ( (filesIndex&lt;(maxTotalFilesDay-1)) &amp;&amp; (tmpAuditFile.exists()) )</span>
+        {
+<span class="nc" id="L358">            Log.debug(&quot;Audit file '&quot;+ tmpAuditFile.getName() +&quot;' does already exist.&quot;);</span>
+<span class="nc" id="L359">            filesIndex++;</span>
+<span class="nc" id="L360">            tmpAuditFile = new File(logDir, filePrefix + StringUtils.zeroPadString(Integer.toString(filesIndex), 3) + &quot;.log&quot;);</span>
+        }
+<span class="nc" id="L362">        currentAuditFile = tmpAuditFile;</span>
+<span class="nc" id="L363">        close();</span>
+        // always append to an existing file (after restart)
+<span class="nc" id="L365">        writer = new BufferedWriter(new OutputStreamWriter(new FileOutputStream(currentAuditFile, true), StandardCharsets.UTF_8));</span>
+<span class="nc" id="L366">        writer.write(&quot;&lt;jive xmlns=\&quot;http://www.jivesoftware.org\&quot;&gt;&quot;);</span>
+<span class="nc" id="L367">        xmlWriter = new org.jivesoftware.util.XMLWriter(writer);</span>
+<span class="nc" id="L368">    }</span>
+
+    /**
+     * Saves the queued entries to an XML file and checks that very old files are deleted.
+     */
+<span class="nc" id="L373">    private class SaveQueuedPacketsTask extends TimerTask {</span>
+        @Override
+        public void run() {
+            try {
+                // Ensure that saved audit logs are not too old
+<span class="nc" id="L378">                ensureMaxDays();</span>
+                // Save queued packets to the audit logs
+<span class="nc" id="L380">                saveQueuedPackets();</span>
+            }
+<span class="nc" id="L382">            catch (Throwable e) {</span>
+<span class="nc" id="L383">                Log.error(LocaleUtils.getLocalizedString(&quot;admin.error&quot;), e);</span>
+<span class="nc" id="L384">            }</span>
+<span class="nc" id="L385">        }</span>
+    }
+
+    private void saveQueuedPackets() {
+<span class="nc" id="L389">        List&lt;AuditPacket&gt; packets = new ArrayList&lt;&gt;(logQueue.size());</span>
+<span class="nc" id="L390">        logQueue.drainTo(packets);</span>
+<span class="nc bnc" id="L391" title="All 2 branches missed.">        for (AuditPacket auditPacket : packets) {</span>
+            try {
+<span class="nc" id="L393">                prepareAuditFile(auditPacket.getCreationDate());</span>
+<span class="nc" id="L394">                Element element = auditPacket.getElement();</span>
+                // Protect against null elements.
+<span class="nc bnc" id="L396" title="All 2 branches missed.">                if (element != null) {</span>
+<span class="nc" id="L397">                    xmlWriter.write(element);</span>
+                }
+            }
+<span class="nc" id="L400">            catch (IOException e) {</span>
+<span class="nc" id="L401">                Log.error(LocaleUtils.getLocalizedString(&quot;admin.error&quot;), e);</span>
+                // Add again the entry to the queue to save it later
+<span class="nc bnc" id="L403" title="All 2 branches missed.">                if (xmlWriter != null) {</span>
+<span class="nc" id="L404">                    logQueue.add(auditPacket);</span>
+                }
+<span class="nc" id="L406">            }</span>
+<span class="nc" id="L407">        }</span>
+        try {
+<span class="nc bnc" id="L409" title="All 2 branches missed.">            if (xmlWriter != null) {</span>
+<span class="nc" id="L410">                xmlWriter.flush();</span>
+            }
+        }
+<span class="nc" id="L413">        catch (IOException ioe) {</span>
+<span class="nc" id="L414">            Log.error(ioe.getMessage(), ioe);</span>
+<span class="nc" id="L415">        }</span>
+<span class="nc" id="L416">    }</span>
+
+    /**
+     * Wrapper on a Packet with information about the packet's status at the moment
+     * when the message was queued.&lt;p&gt;
+     *
+     * The idea is to wrap every packet that is needed to be audited and then add the
+     * wrapper to a queue that will be later processed (i.e. saved to the XML file).
+     */
+    private static class AuditPacket {
+
+<span class="nc" id="L427">        private static DocumentFactory docFactory = DocumentFactory.getInstance();</span>
+
+        private Element element;
+        private Date creationDate;
+
+<span class="nc" id="L432">        public AuditPacket(Packet packet, Session session) {</span>
+<span class="nc" id="L433">            element = docFactory.createElement(&quot;packet&quot;, &quot;http://www.jivesoftware.org&quot;);</span>
+<span class="nc" id="L434">            creationDate = new Date();</span>
+<span class="nc bnc" id="L435" title="All 4 branches missed.">            if (session != null &amp;&amp; session.getStreamID() != null) {</span>
+<span class="nc" id="L436">                element.addAttribute(&quot;streamID&quot;, session.getStreamID().toString());</span>
+            }
+<span class="nc bnc" id="L438" title="All 6 branches missed.">            switch (session == null ? 0 : session.getStatus()) {</span>
+                case Session.STATUS_AUTHENTICATED:
+<span class="nc" id="L440">                    element.addAttribute(&quot;status&quot;, &quot;auth&quot;);</span>
+<span class="nc" id="L441">                    break;</span>
+                case Session.STATUS_CLOSED:
+<span class="nc" id="L443">                    element.addAttribute(&quot;status&quot;, &quot;closed&quot;);</span>
+<span class="nc" id="L444">                    break;</span>
+                case Session.STATUS_CONNECTED:
+<span class="nc" id="L446">                    element.addAttribute(&quot;status&quot;, &quot;connected&quot;);</span>
+                    // This is a workaround. Since we don't want to have an incorrect FROM attribute
+                    // value we need to clean up the FROM attribute. The FROM attribute will contain
+                    // an incorrect value since we are setting a fake JID until the user actually
+                    // authenticates with the server.
+<span class="nc" id="L451">                    packet.setFrom((String) null);</span>
+<span class="nc" id="L452">                    break;</span>
+                default:
+<span class="nc" id="L454">                    element.addAttribute(&quot;status&quot;, &quot;unknown&quot;);</span>
+                    break;
+            }
+<span class="nc" id="L457">            element.addAttribute(&quot;timestamp&quot;, auditFormat.format(creationDate));</span>
+<span class="nc" id="L458">            element.add(packet.getElement());</span>
+<span class="nc" id="L459">        }</span>
+
+        /**
+         * Returns the Element associated with this audit packet.
+         *
+         * @return the Element.
+         */
+        public Element getElement() {
+<span class="nc" id="L467">            return element;</span>
+        }
+
+        /**
+         * Returns the date when the packet was audited. This is the time when the
+         * packet was queued to be saved.
+         *
+         * @return the date when the packet was audited.
+         */
+        public Date getCreationDate() {
+<span class="nc" id="L477">            return creationDate;</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

@@ -1,0 +1,492 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>MediaProxyService.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.mediaproxy</a> &gt; <span class="el_source">MediaProxyService.java</span></div><h1>MediaProxyService.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.mediaproxy;
+
+import java.net.SocketException;
+import java.net.UnknownHostException;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Iterator;
+import java.util.List;
+
+import org.dom4j.Attribute;
+import org.dom4j.DocumentHelper;
+import org.dom4j.Element;
+import org.jivesoftware.openfire.PacketException;
+import org.jivesoftware.openfire.PacketRouter;
+import org.jivesoftware.openfire.RoutableChannelHandler;
+import org.jivesoftware.openfire.RoutingTable;
+import org.jivesoftware.openfire.SessionManager;
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.auth.UnauthorizedException;
+import org.jivesoftware.openfire.container.BasicModule;
+import org.jivesoftware.openfire.disco.DiscoInfoProvider;
+import org.jivesoftware.openfire.disco.DiscoItem;
+import org.jivesoftware.openfire.disco.DiscoItemsProvider;
+import org.jivesoftware.openfire.disco.DiscoServerItem;
+import org.jivesoftware.openfire.disco.ServerItemsProvider;
+import org.jivesoftware.util.JiveGlobals;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmpp.forms.DataForm;
+import org.xmpp.packet.IQ;
+import org.xmpp.packet.JID;
+import org.xmpp.packet.Packet;
+import org.xmpp.packet.PacketError;
+
+/**
+ * A proxy service for UDP traffic such as RTP. It provides Jingle transport candidates
+ * to be used for media transmission. The media proxy is especially useful for users
+ * behind NAT devices or firewalls that prevent peer to peer communication..
+ *
+ * @author Thiago Camargo
+ */
+public class MediaProxyService extends BasicModule
+        implements ServerItemsProvider, RoutableChannelHandler, DiscoInfoProvider, DiscoItemsProvider {
+
+<span class="nc" id="L62">    private static final Logger Log = LoggerFactory.getLogger(MediaProxyService.class);</span>
+
+    private String serviceName;
+    private RoutingTable routingTable;
+    private PacketRouter router;
+<span class="nc" id="L67">    private Echo echo = null;</span>
+<span class="nc" id="L68">    private int echoPort = 10020;</span>
+<span class="nc" id="L69">    private SessionManager sessionManager = null;</span>
+
+<span class="nc" id="L71">    private MediaProxy mediaProxy = null;</span>
+<span class="nc" id="L72">    private boolean enabled = true;</span>
+
+    public static final String NAMESPACE = &quot;http://www.jivesoftware.com/protocol/rtpbridge&quot;;
+
+    /**
+     * Constructs a new MediaProxyService.
+     */
+    public MediaProxyService() {
+<span class="nc" id="L80">        super(&quot;Media Proxy Service&quot;);</span>
+<span class="nc" id="L81">    }</span>
+
+    @Override
+    public void initialize(XMPPServer server) {
+<span class="nc" id="L85">        super.initialize(server);</span>
+
+<span class="nc" id="L87">        sessionManager = server.getSessionManager();</span>
+        // In some cases, the domain name of the server may not be the actual address of the machine
+        // (ie, when using DNS SRV records). In that case, the &quot;mediaproxy.externalip&quot; property should be
+        // set to the IP address of the actual server where the media proxy is listening.
+<span class="nc" id="L91">        String ipAddress = JiveGlobals.getProperty(&quot;mediaproxy.externalip&quot;, server.getServerInfo().getXMPPDomain());</span>
+<span class="nc" id="L92">        mediaProxy = new MediaProxy(ipAddress);</span>
+
+<span class="nc" id="L94">        String defaultName = &quot;rtpbridge&quot;;</span>
+<span class="nc" id="L95">        serviceName = JiveGlobals.getProperty(&quot;mediaproxy.serviceName&quot;, defaultName);</span>
+<span class="nc bnc" id="L96" title="All 2 branches missed.">        serviceName = serviceName.equals(&quot;&quot;) ? defaultName : serviceName;</span>
+
+<span class="nc" id="L98">        echoPort = JiveGlobals.getIntProperty(&quot;mediaproxy.echoPort&quot;, echoPort);</span>
+
+<span class="nc" id="L100">        routingTable = server.getRoutingTable();</span>
+<span class="nc" id="L101">        router = server.getPacketRouter();</span>
+
+<span class="nc" id="L103">        initMediaProxy();</span>
+<span class="nc" id="L104">    }</span>
+
+    @Override
+    public void start() {
+<span class="nc bnc" id="L108" title="All 2 branches missed.">        if (isEnabled()) {</span>
+
+            try {
+<span class="nc" id="L111">                echo = new Echo(echoPort);</span>
+<span class="nc" id="L112">                Thread t = new Thread(echo);</span>
+<span class="nc" id="L113">                t.start();</span>
+<span class="nc" id="L114">            } catch (UnknownHostException | SocketException e) {</span>
+                // Ignore
+<span class="nc" id="L116">            }</span>
+
+<span class="nc" id="L118">            routingTable.addComponentRoute(getAddress(), this);</span>
+<span class="nc" id="L119">            XMPPServer.getInstance().getIQDiscoItemsHandler().addServerItemsProvider(this);</span>
+        } else {
+<span class="nc bnc" id="L121" title="All 2 branches missed.">            if (echo != null) echo.cancel();</span>
+<span class="nc" id="L122">            XMPPServer.getInstance().getIQDiscoItemsHandler().removeComponentItem(getAddress().toString());</span>
+        }
+<span class="nc" id="L124">    }</span>
+
+    @Override
+    public void stop() {
+<span class="nc" id="L128">        super.stop();</span>
+<span class="nc" id="L129">        mediaProxy.stopProxy();</span>
+<span class="nc" id="L130">        XMPPServer.getInstance().getIQDiscoItemsHandler().removeComponentItem(getAddress().toString());</span>
+<span class="nc" id="L131">        routingTable.removeComponentRoute(getAddress());</span>
+<span class="nc bnc" id="L132" title="All 2 branches missed.">        if (echo != null) echo.cancel();</span>
+<span class="nc" id="L133">    }</span>
+
+    // Component Interface
+
+    @Override
+    public String getName() {
+        // Get the name from the plugin.xml file.
+<span class="nc" id="L140">        return serviceName;</span>
+    }
+
+    @Override
+    public Iterator&lt;DiscoItem&gt; getItems(String name, String node, JID senderJID) {
+        // A proxy server has no items
+<span class="nc" id="L146">        return new ArrayList&lt;DiscoItem&gt;().iterator();</span>
+    }
+
+    @Override
+    public void process(Packet packet) throws UnauthorizedException, PacketException {
+        // Check if user is allowed to send packet to this service
+<span class="nc bnc" id="L152" title="All 2 branches missed.">        if (packet instanceof IQ) {</span>
+            // Handle disco packets
+<span class="nc" id="L154">            IQ iq = (IQ) packet;</span>
+            // Ignore IQs of type ERROR or RESULT
+<span class="nc bnc" id="L156" title="All 4 branches missed.">            if (IQ.Type.error == iq.getType() || IQ.Type.result == iq.getType()) {</span>
+<span class="nc" id="L157">                return;</span>
+            }
+<span class="nc" id="L159">            processIQ(iq);</span>
+        }
+<span class="nc" id="L161">    }</span>
+
+    private void processIQ(IQ iq) {
+<span class="nc" id="L164">        IQ reply = IQ.createResultIQ(iq);</span>
+<span class="nc" id="L165">        Element childElement = iq.getChildElement();</span>
+<span class="nc" id="L166">        String namespace = childElement.getNamespaceURI();</span>
+<span class="nc" id="L167">        Element childElementCopy = iq.getChildElement().createCopy();</span>
+<span class="nc" id="L168">        reply.setChildElement(childElementCopy);</span>
+
+<span class="nc bnc" id="L170" title="All 2 branches missed.">        if (&quot;http://jabber.org/protocol/disco#info&quot;.equals(namespace)) {</span>
+<span class="nc" id="L171">            reply = XMPPServer.getInstance().getIQDiscoInfoHandler().handleIQ(iq);</span>
+<span class="nc" id="L172">            router.route(reply);</span>
+<span class="nc" id="L173">            return;</span>
+<span class="nc bnc" id="L174" title="All 2 branches missed.">        } else if (&quot;http://jabber.org/protocol/disco#items&quot;.equals(namespace)) {</span>
+            // a component
+<span class="nc" id="L176">            reply = XMPPServer.getInstance().getIQDiscoItemsHandler().handleIQ(iq);</span>
+<span class="nc" id="L177">            router.route(reply);</span>
+<span class="nc" id="L178">            return;</span>
+<span class="nc bnc" id="L179" title="All 4 branches missed.">        } else if (NAMESPACE.equals(namespace) &amp;&amp; enabled) {</span>
+
+<span class="nc" id="L181">            Element candidateElement = childElementCopy.element(&quot;candidate&quot;);</span>
+<span class="nc" id="L182">            String sid = childElementCopy.attribute(&quot;sid&quot;).getValue() + &quot;-&quot; + iq.getFrom();</span>
+
+<span class="nc bnc" id="L184" title="All 2 branches missed.">            if (candidateElement != null) {</span>
+<span class="nc" id="L185">                childElementCopy.remove(candidateElement);</span>
+<span class="nc" id="L186">                Element candidate = childElementCopy.addElement(&quot;candidate &quot;);</span>
+<span class="nc" id="L187">                ProxyCandidate proxyCandidate = mediaProxy.addRelayAgent(sid, iq.getFrom().toString());</span>
+<span class="nc" id="L188">                Log.debug(&quot;MediaProxyService: &quot;+sid);</span>
+<span class="nc" id="L189">                proxyCandidate.start();</span>
+<span class="nc" id="L190">                candidate.addAttribute(&quot;name&quot;, &quot;voicechannel&quot;);</span>
+<span class="nc" id="L191">                candidate.addAttribute(&quot;ip&quot;, mediaProxy.getPublicIP());</span>
+<span class="nc" id="L192">                candidate.addAttribute(&quot;porta&quot;, String.valueOf(proxyCandidate.getLocalPortA()));</span>
+<span class="nc" id="L193">                candidate.addAttribute(&quot;portb&quot;, String.valueOf(proxyCandidate.getLocalPortB()));</span>
+<span class="nc" id="L194">                candidate.addAttribute(&quot;pass&quot;, proxyCandidate.getPass());</span>
+
+<span class="nc" id="L196">            } else {</span>
+<span class="nc" id="L197">                candidateElement = childElementCopy.element(&quot;relay&quot;);</span>
+<span class="nc bnc" id="L198" title="All 2 branches missed.">                if (candidateElement != null) {</span>
+<span class="nc" id="L199">                    MediaProxySession session = mediaProxy.getSession(sid);</span>
+<span class="nc" id="L200">                    Log.debug(&quot;MediaProxyService: &quot;+sid);</span>
+<span class="nc bnc" id="L201" title="All 2 branches missed.">                    if (session != null) {</span>
+<span class="nc" id="L202">                        Attribute pass = candidateElement.attribute(&quot;pass&quot;);</span>
+
+<span class="nc bnc" id="L204" title="All 4 branches missed.">                        if (pass != null &amp;&amp; pass.getValue().trim().equals(session.getPass().trim())) {</span>
+<span class="nc" id="L205">                            Attribute portA = candidateElement.attribute(&quot;porta&quot;);</span>
+<span class="nc" id="L206">                            Attribute portB = candidateElement.attribute(&quot;portb&quot;);</span>
+<span class="nc" id="L207">                            Attribute hostA = candidateElement.attribute(&quot;hosta&quot;);</span>
+<span class="nc" id="L208">                            Attribute hostB = candidateElement.attribute(&quot;hostb&quot;);</span>
+
+                            try {
+<span class="nc bnc" id="L211" title="All 4 branches missed.">                                if (hostA != null &amp;&amp; portA != null) {</span>
+<span class="nc bnc" id="L212" title="All 2 branches missed.">                                    for (int i = 0; i &lt; 2; i++) {</span>
+<span class="nc" id="L213">                                        session.sendFromPortA(hostB.getValue(), Integer.parseInt(portB.getValue()));</span>
+                                    }
+                                }
+                            }
+<span class="nc" id="L217">                            catch (Exception e) {</span>
+<span class="nc" id="L218">                                Log.error(e.getMessage(), e);</span>
+<span class="nc" id="L219">                            }</span>
+
+<span class="nc" id="L221">                        } else {</span>
+<span class="nc" id="L222">                            reply.setError(PacketError.Condition.forbidden);</span>
+                        }
+                    }
+<span class="nc" id="L225">                    childElementCopy.remove(candidateElement);</span>
+<span class="nc" id="L226">                } else {</span>
+<span class="nc" id="L227">                    candidateElement = childElementCopy.element(&quot;publicip&quot;);</span>
+<span class="nc bnc" id="L228" title="All 2 branches missed.">                    if (candidateElement != null) {</span>
+<span class="nc" id="L229">                        childElementCopy.remove(candidateElement);</span>
+<span class="nc" id="L230">                        Element publicIp = childElementCopy.addElement(&quot;publicip&quot;);</span>
+                        try {
+<span class="nc" id="L232">                            String ip = sessionManager.getSession(iq.getFrom()).getHostAddress();</span>
+<span class="nc bnc" id="L233" title="All 2 branches missed.">                            if (ip != null) {</span>
+<span class="nc" id="L234">                                publicIp.addAttribute(&quot;ip&quot;, ip);</span>
+                            }
+<span class="nc" id="L236">                        } catch (UnknownHostException e) {</span>
+<span class="nc" id="L237">                            Log.error(e.getMessage(), e);</span>
+<span class="nc" id="L238">                        }</span>
+
+<span class="nc" id="L240">                    } else {</span>
+<span class="nc" id="L241">                        childElementCopy.remove(candidateElement);</span>
+<span class="nc" id="L242">                        reply.setError(PacketError.Condition.forbidden);</span>
+                    }
+
+                }
+            }
+<span class="nc" id="L247">        } else {</span>
+            // Answer an error since the server can't handle the requested namespace
+<span class="nc" id="L249">            reply.setError(PacketError.Condition.service_unavailable);</span>
+        }
+
+        try {
+<span class="nc bnc" id="L253" title="All 2 branches missed.">            if (Log.isDebugEnabled()) {</span>
+<span class="nc" id="L254">                Log.debug(&quot;MediaProxyService: RETURNED:&quot; + reply.toXML());</span>
+            }
+<span class="nc" id="L256">            router.route(reply);</span>
+        }
+<span class="nc" id="L258">        catch (Exception e) {</span>
+<span class="nc" id="L259">            Log.error(e.getMessage(), e);</span>
+<span class="nc" id="L260">        }</span>
+<span class="nc" id="L261">    }</span>
+
+    /**
+     * Load config using JiveGlobals
+     */
+    private void initMediaProxy() {
+        try {
+<span class="nc" id="L268">            long idleTime =</span>
+<span class="nc" id="L269">                    Long.valueOf(JiveGlobals.getProperty(&quot;mediaproxy.idleTimeout&quot;));</span>
+<span class="nc" id="L270">            mediaProxy.setIdleTime(idleTime);</span>
+        }
+<span class="nc" id="L272">        catch (NumberFormatException e) {</span>
+            // Do nothing let the default values to be used.
+<span class="nc" id="L274">        }</span>
+        try {
+<span class="nc" id="L276">            long lifetime =</span>
+<span class="nc" id="L277">                    Long.valueOf(JiveGlobals.getProperty(&quot;mediaproxy.lifetime&quot;));</span>
+<span class="nc" id="L278">            mediaProxy.setLifetime(lifetime);</span>
+        }
+<span class="nc" id="L280">        catch (NumberFormatException e) {</span>
+            // Do nothing let the default values to be used.
+<span class="nc" id="L282">        }</span>
+        try {
+<span class="nc" id="L284">            int minPort = Integer.valueOf(JiveGlobals.getProperty(&quot;mediaproxy.portMin&quot;));</span>
+<span class="nc" id="L285">            mediaProxy.setMinPort(minPort);</span>
+        }
+<span class="nc" id="L287">        catch (NumberFormatException e) {</span>
+            // Do nothing let the default values to be used.
+<span class="nc" id="L289">        }</span>
+        try {
+<span class="nc" id="L291">            int maxPort = JiveGlobals.getIntProperty(&quot;mediaproxy.portMax&quot;, mediaProxy.getMaxPort());</span>
+<span class="nc" id="L292">            mediaProxy.setMaxPort(maxPort);</span>
+        }
+<span class="nc" id="L294">        catch (NumberFormatException e) {</span>
+            // Do nothing let the default values to be used.
+<span class="nc" id="L296">        }</span>
+<span class="nc" id="L297">        this.enabled = JiveGlobals.getBooleanProperty(&quot;mediaproxy.enabled&quot;);</span>
+<span class="nc" id="L298">    }</span>
+
+    /**
+     * Returns the fully-qualifed domain name of this chat service.
+     * The domain is composed by the service name and the
+     * name of the XMPP server where the service is running.
+     *
+     * @return the file transfer server domain (service name + host name).
+     */
+    public String getServiceDomain() {
+<span class="nc" id="L308">        return serviceName + &quot;.&quot; + XMPPServer.getInstance().getServerInfo().getXMPPDomain();</span>
+    }
+
+    @Override
+    public JID getAddress() {
+<span class="nc" id="L313">        return new JID(null, getServiceDomain(), null);</span>
+    }
+
+    @Override
+    public Iterator&lt;DiscoServerItem&gt; getItems()
+    {
+<span class="nc" id="L319">        List&lt;DiscoServerItem&gt; items = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L320" title="All 2 branches missed.">        if (!isEnabled())</span>
+        {
+<span class="nc" id="L322">            return items.iterator();</span>
+        }
+
+<span class="nc" id="L325">        final DiscoServerItem item = new DiscoServerItem(new JID(</span>
+<span class="nc" id="L326">            getServiceDomain()), &quot;Media Proxy Service&quot;, null, null, this, this);</span>
+<span class="nc" id="L327">        items.add(item);</span>
+<span class="nc" id="L328">        return items.iterator();</span>
+    }
+
+    @Override
+    public Iterator&lt;Element&gt; getIdentities(String name, String node, JID senderJID) {
+<span class="nc" id="L333">        List&lt;Element&gt; identities = new ArrayList&lt;&gt;();</span>
+        // Answer the identity of the proxy
+<span class="nc" id="L335">        Element identity = DocumentHelper.createElement(&quot;identity&quot;);</span>
+<span class="nc" id="L336">        identity.addAttribute(&quot;category&quot;, &quot;proxy&quot;);</span>
+<span class="nc" id="L337">        identity.addAttribute(&quot;name&quot;, &quot;Media Proxy Service&quot;);</span>
+<span class="nc" id="L338">        identity.addAttribute(&quot;type&quot;, &quot;rtpbridge&quot;);</span>
+
+<span class="nc" id="L340">        identities.add(identity);</span>
+
+<span class="nc" id="L342">        return identities.iterator();</span>
+    }
+
+    @Override
+    public Iterator&lt;String&gt; getFeatures(String name, String node, JID senderJID) {
+<span class="nc" id="L347">        return Arrays.asList(NAMESPACE,</span>
+<span class="nc" id="L348">                &quot;http://jabber.org/protocol/disco#info&quot;).iterator();</span>
+    }
+
+    @Override
+    public DataForm getExtendedInfo(String name, String node, JID senderJID) {
+<span class="nc" id="L353">        return null;</span>
+    }
+
+    @Override
+    public boolean hasInfo(String name, String node, JID senderJID) {
+<span class="nc" id="L358">        return true;</span>
+    }
+
+    /**
+     * Return the list of active Agents
+     *
+     * @return list of active agents
+     */
+    public Collection&lt;MediaProxySession&gt; getAgents() {
+<span class="nc" id="L367">        return mediaProxy.getSessions();</span>
+    }
+
+    /**
+     * Set the keep alive delay of the mediaproxy agents.
+     * When an agent stay more then this delay, the agent is destroyed.
+     *
+     * @param delay time in millis
+     */
+    public void setKeepAliveDelay(long delay) {
+<span class="nc" id="L377">        mediaProxy.setIdleTime(delay);</span>
+<span class="nc" id="L378">    }</span>
+
+    /**
+     * Returns the maximum amount of time (in milleseconds) that a session can
+     * be idle before it's closed.
+     *
+     * @return the max idle time in millis.
+     */
+    public long getIdleTime() {
+<span class="nc" id="L387">        return mediaProxy.getIdleTime();</span>
+    }
+
+    /**
+     * Set Minimal port value to listen for incoming packets.
+     *
+     * @param minPort port value to listen for incoming packets
+     */
+    public void setMinPort(int minPort) {
+<span class="nc" id="L396">        mediaProxy.setMinPort(minPort);</span>
+<span class="nc" id="L397">    }</span>
+
+    /**
+     * Set Maximum port value to listen for incoming packets.
+     *
+     * @param maxPort port value to listen for incoming packets
+     */
+    public void setMaxPort(int maxPort) {
+<span class="nc" id="L405">        mediaProxy.setMaxPort(maxPort);</span>
+<span class="nc" id="L406">    }</span>
+
+    /**
+     * Get Minimal port value to listen from incoming packets.
+     *
+     * @return minPort
+     */
+    public int getMinPort() {
+<span class="nc" id="L414">        return mediaProxy.getMinPort();</span>
+    }
+
+    /**
+     * Get Maximum port value to listen from incoming packets.
+     *
+     * @return maxPort
+     */
+    public int getMaxPort() {
+<span class="nc" id="L423">        return mediaProxy.getMaxPort();</span>
+    }
+
+    /**
+     * Get if the service is enabled.
+     *
+     * @return enabled
+     */
+    public boolean isEnabled() {
+<span class="nc" id="L432">        return enabled;</span>
+    }
+
+    /**
+     * Set the service enable status.
+     *
+     * @param enabled boolean value setting enabled or disabled
+     */
+    public void setEnabled(boolean enabled) {
+<span class="nc" id="L441">        this.enabled = enabled;</span>
+<span class="nc bnc" id="L442" title="All 2 branches missed.">        if (isEnabled()) {</span>
+<span class="nc" id="L443">            start();</span>
+        } else {
+<span class="nc" id="L445">            stop();</span>
+        }
+<span class="nc" id="L447">    }</span>
+
+    /**
+     * Stops every running agents
+     */
+    public void stopAgents() {
+<span class="nc" id="L453">        mediaProxy.stopProxy();</span>
+<span class="nc" id="L454">    }</span>
+
+    /**
+     * Get the Life Time of Sessions
+     *
+     * @return lifetime in seconds
+     */
+    public long getLifetime() {
+<span class="nc" id="L462">        return mediaProxy.getLifetime();</span>
+    }
+
+    /**
+     * Set the Life time of Sessions
+     *
+     * @param lifetime lifetime in seconds
+     */
+    public void setLifetime(long lifetime) {
+<span class="nc" id="L471">        mediaProxy.setLifetime(lifetime);</span>
+<span class="nc" id="L472">    }</span>
+
+    /**
+     * Get the Port used to the UDP Echo Test
+     *
+     * @return port number
+     */
+    public int getEchoPort() {
+<span class="nc" id="L480">        return echoPort;</span>
+    }
+
+    /**
+     * Set the Port used to the UDP Echo Test
+     *
+     * @param echoPort port number
+     */
+    public void setEchoPort(int echoPort) {
+<span class="nc" id="L489">        this.echoPort = echoPort;</span>
+<span class="nc" id="L490">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

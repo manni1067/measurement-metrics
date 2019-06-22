@@ -1,0 +1,673 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>PluginMonitor.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.container</a> &gt; <span class="el_source">PluginMonitor.java</span></div><h1>PluginMonitor.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2016 IgniteRealtime.org
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.container;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.file.DirectoryStream;
+import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Comparator;
+import java.util.Deque;
+import java.util.Enumeration;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.SortedSet;
+import java.util.StringTokenizer;
+import java.util.TreeSet;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.jar.JarEntry;
+import java.util.jar.JarFile;
+import java.util.zip.ZipFile;
+
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.util.JiveGlobals;
+import org.jivesoftware.util.PropertyEventDispatcher;
+import org.jivesoftware.util.PropertyEventListener;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * A service that monitors the plugin directory for plugins. It periodically checks for new plugin JAR files and
+ * extracts them if they haven't already been extracted. Then, any new plugin directories are loaded, using the
+ * PluginManager.
+ *
+ * @author Guus der Kinderen, guus.der.kinderen@gmail.com
+ */
+public class PluginMonitor implements PropertyEventListener
+{
+<span class="nc" id="L70">    private static final Logger Log = LoggerFactory.getLogger( PluginMonitor.class );</span>
+
+    private final PluginManager pluginManager;
+
+    private ScheduledExecutorService executor;
+    private ScheduledFuture&lt;?&gt; monitorTaskScheduledFuture;
+
+<span class="nc" id="L77">    private boolean isTaskRunning = false;</span>
+
+    public PluginMonitor( final PluginManager pluginManager )
+<span class="nc" id="L80">    {</span>
+<span class="nc" id="L81">        this.pluginManager = pluginManager;</span>
+<span class="nc" id="L82">    }</span>
+
+    /**
+     * Initialize the monitor.
+     */
+    public void start()
+    {
+<span class="nc bnc" id="L89" title="All 2 branches missed.">        if ( executor != null )</span>
+        {
+<span class="nc" id="L91">            executor.shutdown();</span>
+        }
+
+<span class="nc" id="L94">        executor = new ScheduledThreadPoolExecutor( 1 );</span>
+
+<span class="nc bnc" id="L96" title="All 2 branches missed.">        if ( JiveGlobals.getBooleanProperty( &quot;plugins.loading.monitor.enabled&quot;, true ) )</span>
+        {
+<span class="nc" id="L98">            startMonitoring();</span>
+        }
+        else
+        {
+            // Upon start, the monitor should execute at least once - otherwise, plugins will not load at all.
+<span class="nc" id="L103">            runNow( false );</span>
+        }
+
+<span class="nc" id="L106">        PropertyEventDispatcher.addListener( this );</span>
+<span class="nc" id="L107">    }</span>
+
+    /**
+     * Start periodically checking the plugin directory.
+     */
+    public void startMonitoring()
+    {
+        // See if we're in development mode. If so, check for new plugins once every 5 seconds Otherwise, default to every 20 seconds.
+<span class="nc bnc" id="L115" title="All 2 branches missed.">        if ( Boolean.getBoolean( &quot;developmentMode&quot; ) )</span>
+        {
+<span class="nc" id="L117">            monitorTaskScheduledFuture = executor.scheduleWithFixedDelay( new MonitorTask(), 0, 5, TimeUnit.SECONDS );</span>
+        }
+        else
+        {
+<span class="nc" id="L121">            monitorTaskScheduledFuture = executor.scheduleWithFixedDelay( new MonitorTask(), 0, JiveGlobals.getIntProperty( &quot;plugins.loading.monitor.interval&quot;, 20 ), TimeUnit.SECONDS );</span>
+        }
+<span class="nc" id="L123">    }</span>
+
+    /**
+     * Shutdown the monitor.
+     */
+    public void stop()
+    {
+<span class="nc" id="L130">        PropertyEventDispatcher.removeListener( this );</span>
+
+<span class="nc" id="L132">        stopMonitoring();</span>
+
+<span class="nc bnc" id="L134" title="All 2 branches missed.">        if ( executor != null )</span>
+        {
+<span class="nc" id="L136">            executor.shutdown();</span>
+        }
+<span class="nc" id="L138">    }</span>
+
+    /**
+     * Stop periodically checking the plugin directory.
+     */
+    public void stopMonitoring()
+    {
+<span class="nc bnc" id="L145" title="All 4 branches missed.">        if ( monitorTaskScheduledFuture != null &amp;&amp; !monitorTaskScheduledFuture.isDone() )</span>
+        {
+            // Cancel, with an interrupt if this task has been cancelled before.
+<span class="nc" id="L148">            monitorTaskScheduledFuture.cancel( monitorTaskScheduledFuture.isCancelled() );</span>
+        }
+<span class="nc" id="L150">    }</span>
+
+    public boolean isTaskRunning()
+    {
+<span class="nc" id="L154">        return isTaskRunning;</span>
+    }
+
+    /**
+     * Immediately run a check of the plugin directory.
+     * @param blockUntilDone {code true} to wait until the check is complete, otherwise {@code false}
+     */
+    public void runNow( boolean blockUntilDone )
+    {
+<span class="nc" id="L163">        final Future&lt;?&gt; future = executor.submit( new MonitorTask() );</span>
+<span class="nc bnc" id="L164" title="All 2 branches missed.">        if ( blockUntilDone )</span>
+        {
+            try
+            {
+<span class="nc" id="L168">                future.get();</span>
+            }
+<span class="nc" id="L170">            catch ( Exception e )</span>
+            {
+<span class="nc" id="L172">                Log.warn( &quot;An exception occurred while waiting for a check of the plugin directory to complete.&quot;, e );</span>
+<span class="nc" id="L173">            }</span>
+        }
+<span class="nc" id="L175">    }</span>
+
+    @Override
+    public void propertySet( final String property, final Map&lt;String, Object&gt; params )
+    {
+<span class="nc bnc" id="L180" title="All 10 branches missed.">        switch ( property )</span>
+        {
+            case &quot;plugins.loading.monitor.enabled&quot;:
+<span class="nc bnc" id="L183" title="All 2 branches missed.">                if ( JiveGlobals.getBooleanProperty( &quot;plugins.loading.monitor.enabled&quot;, true ) ) {</span>
+<span class="nc" id="L184">                    startMonitoring();</span>
+                } else {
+<span class="nc" id="L186">                    stopMonitoring();</span>
+                }
+<span class="nc" id="L188">                break;</span>
+
+            case &quot;plugins.loading.monitor.interval&quot;:
+                // When monitoring, restart the monitor, which will re-read the interval.
+<span class="nc bnc" id="L192" title="All 4 branches missed.">                if ( monitorTaskScheduledFuture != null &amp;&amp; !monitorTaskScheduledFuture.isDone() ) {</span>
+<span class="nc" id="L193">                    stopMonitoring();</span>
+<span class="nc" id="L194">                    startMonitoring();</span>
+                }
+                break;
+        }
+<span class="nc" id="L198">    }</span>
+
+    @Override
+    public void propertyDeleted( final String property, final Map&lt;String, Object&gt; params )
+    {
+<span class="nc" id="L203">        propertySet( property, params );</span>
+<span class="nc" id="L204">    }</span>
+
+    @Override
+    public void xmlPropertySet( final String property, final Map&lt;String, Object&gt; params )
+    {
+<span class="nc" id="L209">        propertySet( property, params );</span>
+<span class="nc" id="L210">    }</span>
+
+    @Override
+    public void xmlPropertyDeleted( final String property, final Map&lt;String, Object&gt; params )
+    {
+<span class="nc" id="L215">        propertySet( property, params );</span>
+<span class="nc" id="L216">    }</span>
+
+<span class="nc" id="L218">    private class MonitorTask implements Runnable</span>
+    {
+        @Override
+        public void run()
+        {
+            // Prevent two tasks from running in parallel by using the plugin monitor itself as a mutex.
+<span class="nc" id="L224">            synchronized ( PluginMonitor.this )</span>
+            {
+<span class="nc" id="L226">                isTaskRunning = true;</span>
+                try
+                {
+                    // The directory that contains all plugins.
+<span class="nc" id="L230">                    final Path pluginsDirectory = pluginManager.getPluginsDirectory();</span>
+<span class="nc bnc" id="L231" title="All 4 branches missed.">                    if ( !Files.isDirectory( pluginsDirectory ) || !Files.isReadable( pluginsDirectory ) )</span>
+                    {
+<span class="nc" id="L233">                        Log.error( &quot;Unable to process plugins. The plugins directory does not exist (or is no directory): {}&quot;, pluginsDirectory );</span>
+<span class="nc" id="L234">                        return;</span>
+                    }
+
+                    // Turn the list of JAR/WAR files into a set so that we can do lookups.
+<span class="nc" id="L238">                    final Set&lt;String&gt; jarSet = new HashSet&lt;&gt;();</span>
+
+                    // Explode all plugin files that have not yet been exploded (or need to be re-exploded).
+<span class="nc" id="L241">                    try ( final DirectoryStream&lt;Path&gt; ds = Files.newDirectoryStream( pluginsDirectory, new DirectoryStream.Filter&lt;Path&gt;()</span>
+<span class="nc" id="L242">                    {</span>
+                        @Override
+                        public boolean accept( final Path path ) throws IOException
+                        {
+<span class="nc bnc" id="L246" title="All 2 branches missed.">                            if ( Files.isDirectory( path ) )</span>
+                            {
+<span class="nc" id="L248">                                return false;</span>
+                            }
+
+<span class="nc" id="L251">                            final String fileName = path.getFileName().toString().toLowerCase();</span>
+<span class="nc bnc" id="L252" title="All 4 branches missed.">                            return ( fileName.endsWith( &quot;.jar&quot; ) || fileName.endsWith( &quot;.war&quot; ) );</span>
+                        }
+                    } ) )
+                    {
+<span class="nc bnc" id="L256" title="All 2 branches missed.">                        for ( final Path jarFile : ds )</span>
+                        {
+<span class="nc" id="L258">                            final String fileName = jarFile.getFileName().toString();</span>
+<span class="nc" id="L259">                            final String canonicalPluginName = fileName.substring( 0, fileName.length() - 4 ).toLowerCase(); // strip extension.</span>
+
+<span class="nc" id="L261">                            jarSet.add( canonicalPluginName );</span>
+
+                            // See if the JAR has already been exploded.
+<span class="nc" id="L264">                            final Path dir = pluginsDirectory.resolve( canonicalPluginName );</span>
+
+                            // See if the JAR is newer than the directory. If so, the plugin needs to be unloaded and then reloaded.
+<span class="nc bnc" id="L267" title="All 4 branches missed.">                            if ( Files.exists( dir ) &amp;&amp; Files.getLastModifiedTime( jarFile ).toMillis() &gt; Files.getLastModifiedTime( dir ).toMillis() )</span>
+                            {
+                                // If this is the first time that the monitor process is running, then plugins won't be loaded yet. Therefore, just delete the directory.
+<span class="nc bnc" id="L270" title="All 2 branches missed.">                                if ( !pluginManager.isExecuted() )</span>
+                                {
+<span class="nc" id="L272">                                    int count = 0;</span>
+                                    // Attempt to delete the folder for up to 5 seconds.
+<span class="nc bnc" id="L274" title="All 4 branches missed.">                                    while ( !PluginManager.deleteDir( dir ) &amp;&amp; count++ &lt; 5 )</span>
+                                    {
+<span class="nc" id="L276">                                        Thread.sleep( 1000 );</span>
+                                    }
+<span class="nc" id="L278">                                }</span>
+                                else
+                                {
+                                    // Not the first time? Properly unload the plugin.
+<span class="nc" id="L282">                                    pluginManager.unloadPlugin( canonicalPluginName );</span>
+                                }
+                            }
+
+                            // If the JAR needs to be exploded, do so.
+<span class="nc bnc" id="L287" title="All 2 branches missed.">                            if ( Files.notExists( dir ) )</span>
+                            {
+<span class="nc" id="L289">                                unzipPlugin( canonicalPluginName, jarFile, dir );</span>
+                            }
+<span class="nc" id="L291">                        }</span>
+<span class="nc bnc" id="L292" title="All 8 branches missed.">                    }</span>
+
+                    // See if any currently running plugins need to be unloaded due to the JAR file being deleted. Note
+                    // that unloading a parent plugin might cause more than one plugin to disappear. Don't reuse the
+                    // directory stream afterwards!
+<span class="nc" id="L297">                    try ( final DirectoryStream&lt;Path&gt; ds = Files.newDirectoryStream( pluginsDirectory, new DirectoryStream.Filter&lt;Path&gt;()</span>
+<span class="nc" id="L298">                    {</span>
+                        @Override
+                        public boolean accept( final Path path ) throws IOException
+                        {
+<span class="nc bnc" id="L302" title="All 2 branches missed.">                            if ( !Files.isDirectory( path ) )</span>
+                            {
+<span class="nc" id="L304">                                return false;</span>
+                            }
+
+<span class="nc" id="L307">                            final String pluginName = PluginMetadataHelper.getCanonicalName( path );</span>
+<span class="nc bnc" id="L308" title="All 4 branches missed.">                            return !pluginName.equals( &quot;admin&quot; ) &amp;&amp; !jarSet.contains( pluginName );</span>
+                        }
+                    } ) )
+                    {
+<span class="nc bnc" id="L312" title="All 2 branches missed.">                        for ( final Path path : ds )</span>
+                        {
+<span class="nc" id="L314">                            final String pluginName = PluginMetadataHelper.getCanonicalName( path );</span>
+<span class="nc" id="L315">                            Log.info( &quot;Plugin '{}' was removed from the file system.&quot;, pluginName );</span>
+<span class="nc" id="L316">                            pluginManager.unloadPlugin( pluginName );</span>
+<span class="nc" id="L317">                        }</span>
+<span class="nc bnc" id="L318" title="All 8 branches missed.">                    }</span>
+
+                    // Load all plugins that need to be loaded. Make sure that the admin plugin is loaded first (as that
+                    // should be available as soon as possible), followed by all other plugins. Ensure that parent plugins
+                    // are loaded before their children.
+<span class="nc" id="L323">                    try ( final DirectoryStream&lt;Path&gt; ds = Files.newDirectoryStream( pluginsDirectory, new DirectoryStream.Filter&lt;Path&gt;()</span>
+<span class="nc" id="L324">                    {</span>
+                        @Override
+                        public boolean accept( final Path path ) throws IOException
+                        {
+<span class="nc" id="L328">                            return Files.isDirectory( path );</span>
+                        }
+                    } ) )
+                    {
+                        // Look for extra plugin directories specified as a system property.
+<span class="nc" id="L333">                        final Set&lt;Path&gt; devPlugins = new HashSet&lt;&gt;();</span>
+<span class="nc" id="L334">                        final String devPluginDirs = System.getProperty( &quot;pluginDirs&quot; );</span>
+<span class="nc bnc" id="L335" title="All 2 branches missed.">                        if ( devPluginDirs != null )</span>
+                        {
+<span class="nc" id="L337">                            final StringTokenizer st = new StringTokenizer( devPluginDirs, &quot;,&quot; );</span>
+<span class="nc bnc" id="L338" title="All 2 branches missed.">                            while ( st.hasMoreTokens() )</span>
+                            {
+                                try
+                                {
+<span class="nc" id="L342">                                    final String devPluginDir = st.nextToken().trim();</span>
+<span class="nc" id="L343">                                    final Path devPluginPath = Paths.get( devPluginDir );</span>
+<span class="nc bnc" id="L344" title="All 4 branches missed.">                                    if ( Files.exists( devPluginPath ) &amp;&amp; Files.isDirectory( devPluginPath ) )</span>
+                                    {
+<span class="nc" id="L346">                                        devPlugins.add( devPluginPath );</span>
+                                    }
+                                    else
+                                    {
+<span class="nc" id="L350">                                        Log.error( &quot;Unable to load a dev plugin as its path (as supplied in the 'pluginDirs' system property) does not exist, or is not a directory. Offending path: [{}] (parsed from raw value [{}])&quot;, devPluginPath, devPluginDir );</span>
+                                    }
+                                }
+<span class="nc" id="L353">                                catch ( InvalidPathException ex )</span>
+                                {
+<span class="nc" id="L355">                                    Log.error( &quot;Unable to load a dev plugin as an invalid path was added to the 'pluginDirs' system property.&quot;, ex );</span>
+<span class="nc" id="L356">                                }</span>
+                            }
+                        }
+
+                        // Sort the list of directories so that the &quot;admin&quot; plugin is always first in the list, and 'parent'
+                        // plugins always precede their children.
+<span class="nc" id="L362">                        final Deque&lt;List&lt;Path&gt;&gt; dirs = sortPluginDirs( ds, devPlugins );</span>
+
+                        // Hierarchy processing could be parallel.
+<span class="nc" id="L365">                        final Collection&lt;Callable&lt;Integer&gt;&gt; parallelProcesses = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L366" title="All 2 branches missed.">                        for ( final List&lt;Path&gt; hierarchy : dirs )</span>
+                        {
+<span class="nc" id="L368">                            parallelProcesses.add( new Callable&lt;Integer&gt;()</span>
+<span class="nc" id="L369">                            {</span>
+
+                                @Override
+                                public Integer call() throws Exception
+                                {
+<span class="nc" id="L374">                                    int loaded = 0;</span>
+<span class="nc bnc" id="L375" title="All 2 branches missed.">                                    for ( final Path path : hierarchy )</span>
+                                    {
+                                        // If the plugin hasn't already been started, start it.
+<span class="nc" id="L378">                                        final String canonicalName = PluginMetadataHelper.getCanonicalName( path );</span>
+<span class="nc bnc" id="L379" title="All 2 branches missed.">                                        if ( pluginManager.getPlugin( canonicalName ) == null )</span>
+                                        {
+<span class="nc bnc" id="L381" title="All 2 branches missed.">                                            if ( pluginManager.loadPlugin( canonicalName, path ) )</span>
+                                            {
+<span class="nc" id="L383">                                                loaded++;</span>
+                                            }
+                                        }
+<span class="nc" id="L386">                                    }</span>
+
+<span class="nc" id="L388">                                    return loaded;</span>
+                                }
+                            } );
+<span class="nc" id="L391">                        }</span>
+
+                        // Before running any plugin, make sure that the admin plugin is loaded. It is a dependency
+                        // of all plugins that attempt to modify the admin panel.
+<span class="nc bnc" id="L395" title="All 2 branches missed.">                        if ( pluginManager.getPlugin( &quot;admin&quot; ) == null )</span>
+                        {
+<span class="nc" id="L397">                            pluginManager.loadPlugin( &quot;admin&quot;, dirs.getFirst().get( 0 ) );</span>
+                        }
+
+                        // Hierarchies could be processed in parallel. This is likely to be beneficial during the first
+                        // execution of this monitor, as during later executions, most plugins will likely already be loaded.
+<span class="nc" id="L402">                        final int parallelProcessMax = JiveGlobals.getIntProperty( &quot;plugins.loading.max-parallel&quot;, 4 );</span>
+<span class="nc bnc" id="L403" title="All 2 branches missed.">                        final int parallelProcessCount = ( pluginManager.isExecuted() ? 1 : parallelProcessMax );</span>
+
+<span class="nc" id="L405">                        final ExecutorService executorService = Executors.newFixedThreadPool( parallelProcessCount );</span>
+                        try
+                        {
+                            // Blocks until ready
+<span class="nc" id="L409">                            final List&lt;Future&lt;Integer&gt;&gt; futures = executorService.invokeAll( parallelProcesses );</span>
+
+                            // Unless nothing happened, report that we're done loading plugins.
+<span class="nc" id="L412">                            int pluginsLoaded = 0;</span>
+<span class="nc bnc" id="L413" title="All 2 branches missed.">                            for ( Future&lt;Integer&gt; future : futures )</span>
+                            {
+<span class="nc" id="L415">                                pluginsLoaded += future.get();</span>
+<span class="nc" id="L416">                            }</span>
+<span class="nc bnc" id="L417" title="All 4 branches missed.">                            if ( pluginsLoaded &gt; 0 &amp;&amp; !XMPPServer.getInstance().isSetupMode() )</span>
+                            {
+<span class="nc" id="L419">                                Log.info( &quot;Finished processing all plugins.&quot; );</span>
+                            }
+                        }
+                        finally
+                        {
+<span class="nc" id="L424">                            executorService.shutdown();</span>
+<span class="nc" id="L425">                        }</span>
+
+                        // Trigger event that plugins have been monitored
+<span class="nc" id="L428">                        pluginManager.firePluginsMonitored();</span>
+<span class="nc bnc" id="L429" title="All 8 branches missed.">                    }</span>
+                }
+<span class="nc" id="L431">                catch ( Throwable e )</span>
+                {
+<span class="nc" id="L433">                    Log.error( &quot;An unexpected exception occurred:&quot;, e );</span>
+                }
+                finally
+                {
+<span class="nc" id="L437">                    isTaskRunning = false;</span>
+<span class="nc" id="L438">                }</span>
+<span class="nc" id="L439">            }</span>
+<span class="nc" id="L440">        }</span>
+
+        /**
+         * Unzips a plugin from a JAR file into a directory. If the JAR file
+         * isn't a plugin, this method will do nothing.
+         *
+         * @param pluginName the name of the plugin.
+         * @param file       the JAR file
+         * @param dir        the directory to extract the plugin to.
+         */
+        private void unzipPlugin( String pluginName, Path file, Path dir )
+        {
+<span class="nc" id="L452">            try ( ZipFile zipFile = new JarFile( file.toFile() ) )</span>
+            {
+                // Ensure that this JAR is a plugin.
+<span class="nc bnc" id="L455" title="All 2 branches missed.">                if ( zipFile.getEntry( &quot;plugin.xml&quot; ) == null )</span>
+                {
+<span class="nc" id="L457">                    return;</span>
+                }
+<span class="nc" id="L459">                Files.createDirectory( dir );</span>
+                // Set the date of the JAR file to the newly created folder
+<span class="nc" id="L461">                Files.setLastModifiedTime( dir, Files.getLastModifiedTime( file ) );</span>
+<span class="nc" id="L462">                Log.debug( &quot;Extracting plugin '{}'...&quot;, pluginName );</span>
+<span class="nc bnc" id="L463" title="All 2 branches missed.">                for ( Enumeration e = zipFile.entries(); e.hasMoreElements(); )</span>
+                {
+<span class="nc" id="L465">                    JarEntry entry = (JarEntry) e.nextElement();</span>
+<span class="nc" id="L466">                    Path entryFile = dir.resolve( entry.getName() );</span>
+                    // Ignore any manifest.mf entries.
+<span class="nc bnc" id="L468" title="All 2 branches missed.">                    if ( entry.getName().toLowerCase().endsWith( &quot;manifest.mf&quot; ) )</span>
+                    {
+<span class="nc" id="L470">                        continue;</span>
+                    }
+<span class="nc bnc" id="L472" title="All 2 branches missed.">                    if ( !entry.isDirectory() )</span>
+                    {
+<span class="nc" id="L474">                        Files.createDirectories( entryFile.getParent() );</span>
+<span class="nc" id="L475">                        try ( InputStream zin = zipFile.getInputStream( entry ) )</span>
+                        {
+<span class="nc" id="L477">                            Files.copy( zin, entryFile, StandardCopyOption.REPLACE_EXISTING );</span>
+<span class="nc bnc" id="L478" title="All 8 branches missed.">                        }</span>
+                    }
+<span class="nc" id="L480">                }</span>
+<span class="nc" id="L481">                Log.debug( &quot;Successfully extracted plugin '{}'.&quot;, pluginName );</span>
+<span class="nc bnc" id="L482" title="All 12 branches missed.">            }</span>
+<span class="nc" id="L483">            catch ( Exception e )</span>
+            {
+<span class="nc" id="L485">                Log.error( &quot;An exception occurred while trying to extract plugin '{}':&quot;, pluginName, e );</span>
+<span class="nc" id="L486">            }</span>
+<span class="nc" id="L487">        }</span>
+
+        /**
+         * Returns all plugin directories, in a deque of lists with these characteristics:
+         * &lt;ol&gt;
+         * &lt;li&gt;Every list is a hierarchy of parent/child plugins (or is a list of one element).&lt;/li&gt;
+         * &lt;li&gt;Every list is ordered to ensure that all parent plugins have a lower index than their children.&lt;/li&gt;
+         * &lt;li&gt;The first element of every list will be a plugin that has no 'parent' plugin.&lt;/li&gt;
+         * &lt;li&gt;the first element of the first list will be the 'admin' plugin.&lt;/li&gt;
+         * &lt;/ol&gt;
+         *
+         * Plugins within the provided argument that refer to non-existing parent plugins will not be part of the returned
+         * collection.
+         *
+         * @param dirs Collections of paths that refer every plugin directory (but not the corresponding .jar/.war files).
+         * @return An ordered collection of paths.
+         */
+        @SafeVarargs
+        private final Deque&lt;List&lt;Path&gt;&gt; sortPluginDirs( Iterable&lt;Path&gt;... dirs )
+        {
+            // Map all plugins to they parent plugin (lower-cased), using a null key for parent-less plugins;
+<span class="nc" id="L508">            final Map&lt;String, Set&lt;Path&gt;&gt; byParent = new HashMap&lt;&gt;();</span>
+<span class="nc bnc" id="L509" title="All 2 branches missed.">            for ( final Iterable&lt;Path&gt; iterable : dirs )</span>
+            {
+<span class="nc bnc" id="L511" title="All 2 branches missed.">                for ( final Path dir : iterable )</span>
+                {
+<span class="nc" id="L513">                    final String parent = PluginMetadataHelper.getParentPlugin( dir );</span>
+<span class="nc bnc" id="L514" title="All 2 branches missed.">                    if ( !byParent.containsKey( parent ) )</span>
+                    {
+<span class="nc" id="L516">                        byParent.put( parent, new HashSet&lt;Path&gt;() );</span>
+                    }
+<span class="nc" id="L518">                    byParent.get( parent ).add( dir );</span>
+<span class="nc" id="L519">                }</span>
+            }
+
+            // Transform the map into a tree structure (where the root node is a placeholder without data).
+<span class="nc" id="L523">            final Node root = new Node();</span>
+<span class="nc" id="L524">            populateTree( root, byParent );</span>
+
+            // byParent should be consumed. Remaining entries are depending on a non-existing parent.
+<span class="nc bnc" id="L527" title="All 2 branches missed.">            for ( Map.Entry&lt;String, Set&lt;Path&gt;&gt; entry : byParent.entrySet() )</span>
+            {
+<span class="nc bnc" id="L529" title="All 2 branches missed.">                if ( !entry.getValue().isEmpty() )</span>
+                {
+<span class="nc bnc" id="L531" title="All 2 branches missed.">                    for ( final Path path : entry.getValue() )</span>
+                    {
+<span class="nc" id="L533">                        final String name = PluginMetadataHelper.getCanonicalName( path );</span>
+<span class="nc" id="L534">                        Log.warn( &quot;Unable to load plugin '{}' as its defined parent plugin '{}' is not installed.&quot;, name, entry.getKey() );</span>
+<span class="nc" id="L535">                    }</span>
+                }
+<span class="nc" id="L537">            }</span>
+
+            // Return a deque of lists, where each list is parent-child chain of plugins (the parents preceding its children).
+<span class="nc" id="L540">            final Set&lt;PluginToLoad&gt; pluginsToLoad = new HashSet&lt;&gt;();</span>
+<span class="nc" id="L541">            final Deque&lt;List&lt;Path&gt;&gt; result = new ArrayDeque&lt;&gt;();</span>
+<span class="nc bnc" id="L542" title="All 2 branches missed.">            for ( final Node noParentPlugin : root.children )</span>
+            {
+<span class="nc" id="L544">                final List&lt;Path&gt; hierarchy = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L545">                walkTree( noParentPlugin, hierarchy );</span>
+                // Strip out duplicates
+<span class="nc" id="L547">                final Iterator&lt;Path&gt; iterator = hierarchy.iterator();</span>
+<span class="nc bnc" id="L548" title="All 2 branches missed.">                while (iterator.hasNext()) {</span>
+<span class="nc" id="L549">                    final PluginToLoad pluginToLoad = new PluginToLoad(iterator.next());</span>
+<span class="nc bnc" id="L550" title="All 2 branches missed.">                    if (!pluginsToLoad.add(pluginToLoad)) {</span>
+<span class="nc" id="L551">                        Log.warn(&quot;Unable to load plugin at '{}' as a different plugin with the same name is present&quot;, pluginToLoad.path);</span>
+<span class="nc" id="L552">                        iterator.remove();</span>
+                    }
+<span class="nc" id="L554">                }</span>
+
+                // The admin plugin should go first
+<span class="nc bnc" id="L557" title="All 2 branches missed.">                if ( noParentPlugin.getName().equals( &quot;admin&quot; ) )</span>
+                {
+<span class="nc" id="L559">                    result.addFirst( hierarchy );</span>
+                }
+                else
+                {
+<span class="nc" id="L563">                    result.addLast( hierarchy );</span>
+                }
+<span class="nc" id="L565">            }</span>
+
+<span class="nc" id="L567">            return result;</span>
+        }
+
+        private void populateTree( final Node parent, Map&lt;String, Set&lt;Path&gt;&gt; byParent )
+        {
+<span class="nc bnc" id="L572" title="All 2 branches missed.">            final String parentName = parent.path == null ? null : PluginMetadataHelper.getCanonicalName( parent.path );</span>
+<span class="nc" id="L573">            final Set&lt;Path&gt; children = byParent.remove( parentName );</span>
+<span class="nc bnc" id="L574" title="All 2 branches missed.">            if ( children != null )</span>
+            {
+<span class="nc bnc" id="L576" title="All 2 branches missed.">                for ( final Path child : children )</span>
+                {
+<span class="nc" id="L578">                    final Node node = new Node();</span>
+<span class="nc" id="L579">                    node.path = child;</span>
+<span class="nc bnc" id="L580" title="All 2 branches missed.">                    if ( !parent.children.add( node ) )</span>
+                    {
+<span class="nc" id="L582">                        Log.warn( &quot;Detected plugin duplicates for name: '{}'. Only one plugin will be loaded.&quot;, node.getName() );</span>
+                    }
+
+                    // recurse to find further children.
+<span class="nc" id="L586">                    populateTree( node, byParent );</span>
+<span class="nc" id="L587">                }</span>
+            }
+<span class="nc" id="L589">        }</span>
+
+        private void walkTree( final Node node, List&lt;Path&gt; result )
+        {
+<span class="nc" id="L593">            result.add( node.path );</span>
+<span class="nc bnc" id="L594" title="All 2 branches missed.">            if ( node.children != null )</span>
+            {
+<span class="nc bnc" id="L596" title="All 2 branches missed.">                for ( Node child : node.children )</span>
+                {
+<span class="nc" id="L598">                    walkTree( child, result );</span>
+<span class="nc" id="L599">                }</span>
+            }
+<span class="nc" id="L601">        }</span>
+
+<span class="nc" id="L603">        class Node</span>
+        {
+            Path path;
+<span class="nc" id="L606">            SortedSet&lt;Node&gt; children = new TreeSet&lt;&gt;( new Comparator&lt;Node&gt;()</span>
+<span class="nc" id="L607">            {</span>
+                @Override
+                public int compare( Node o1, Node o2 )
+                {
+<span class="nc" id="L611">                    return o1.getName().compareToIgnoreCase( o2.getName() );</span>
+                }
+            } );
+
+            String getName()
+            {
+<span class="nc" id="L617">                return PluginMetadataHelper.getCanonicalName( path );</span>
+            }
+        }
+    }
+
+    /**
+     * Two plugins are considered &quot;equal&quot; if they share the same canonical name, &lt;strong&gt;or&lt;/strong&gt; the same
+     * name from the plugin.xml file. This class represents a plugin that could be loaded to encapsulate this concept
+     * &lt;p&gt;
+     *     Note: this class has a natural ordering that is inconsistent with equals.
+     * &lt;/p&gt;
+     */
+    private static final class PluginToLoad implements Comparable&lt;PluginToLoad&gt; {
+        private final Path path;
+        private final String canonicalName;
+        private final String pluginName;
+
+<span class="nc" id="L634">        private PluginToLoad(final Path path) {</span>
+<span class="nc" id="L635">            this.path = path;</span>
+<span class="nc" id="L636">            this.canonicalName = PluginMetadataHelper.getCanonicalName( path );</span>
+<span class="nc" id="L637">            this.pluginName = PluginMetadataHelper.getName( path );</span>
+<span class="nc" id="L638">        }</span>
+
+        @Override
+        public boolean equals(final Object o) {
+<span class="nc bnc" id="L642" title="All 2 branches missed.">            if (this == o) {</span>
+<span class="nc" id="L643">                return true;</span>
+            }
+
+<span class="nc bnc" id="L646" title="All 2 branches missed.">            if (!(o instanceof PluginToLoad)) {</span>
+<span class="nc" id="L647">                return false;</span>
+            }
+
+<span class="nc" id="L650">            final PluginToLoad that = (PluginToLoad) o;</span>
+<span class="nc bnc" id="L651" title="All 2 branches missed.">            return this.canonicalName.equalsIgnoreCase(that.canonicalName)</span>
+<span class="nc bnc" id="L652" title="All 2 branches missed.">                || this.pluginName.equalsIgnoreCase(that.pluginName);</span>
+        }
+
+        @Override
+        public int hashCode() {
+            // Note this is sub-optimal, but not an issue for the relatively low number of plugins Openfire will have
+            // installed. It is necessary because of the Java equals/hashCode contract - two equals objects must have
+            // the same hash code - but we don't know if the objects are equal because the share the same canonical name
+            // or the same plugin name.
+<span class="nc" id="L661">            return 0;</span>
+        }
+
+        @Override
+        public int compareTo(final PluginToLoad that) {
+            // NB. This violates the Comparable recommendation. Quote:
+            // &lt;p&gt;It is strongly recommended, but &lt;i&gt;not&lt;/i&gt; strictly required that
+            // {@code (x.compareTo(y)==0) == (x.equals(y))}.
+<span class="nc" id="L669">            return this.pluginName.compareTo(that.pluginName);</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

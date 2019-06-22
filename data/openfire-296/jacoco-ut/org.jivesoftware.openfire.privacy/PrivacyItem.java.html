@@ -1,0 +1,296 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>PrivacyItem.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.privacy</a> &gt; <span class="el_source">PrivacyItem.java</span></div><h1>PrivacyItem.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.privacy;
+
+import org.dom4j.Element;
+import org.jivesoftware.util.cache.CacheSizes;
+import org.jivesoftware.util.cache.Cacheable;
+import org.jivesoftware.openfire.roster.Roster;
+import org.jivesoftware.openfire.roster.RosterItem;
+import org.jivesoftware.openfire.user.UserNotFoundException;
+import org.xmpp.packet.*;
+
+import java.util.Collection;
+import java.util.Collections;
+
+/**
+ * A privacy item acts a rule that when matched defines if a packet should be blocked or not. 
+ *
+ * @author Gaston Dombiak
+ */
+class PrivacyItem implements Cacheable, Comparable {
+
+    private int order;
+    private boolean allow;
+    private Type type;
+    private JID jidValue;
+    private RosterItem.SubType subscriptionValue;
+    private String groupValue;
+    private boolean filterEverything;
+    private boolean filterIQ;
+    private boolean filterMessage;
+    private boolean filterPresence_in;
+    private boolean filterPresence_out;
+    /**
+     * Copy of the element that defined this item.
+     */
+    private Element itemElement;
+
+<span class="nc" id="L53">    PrivacyItem(Element itemElement) {</span>
+<span class="nc" id="L54">        this.allow = &quot;allow&quot;.equals(itemElement.attributeValue(&quot;action&quot;));</span>
+<span class="nc" id="L55">        this.order = Integer.parseInt(itemElement.attributeValue(&quot;order&quot;));</span>
+<span class="nc" id="L56">        String typeAttribute = itemElement.attributeValue(&quot;type&quot;);</span>
+<span class="nc bnc" id="L57" title="All 2 branches missed.">        if (typeAttribute != null) {</span>
+<span class="nc" id="L58">            this.type = Type.valueOf(typeAttribute);</span>
+            // Decode the proper value based on the rule type
+<span class="nc" id="L60">            String value = itemElement.attributeValue(&quot;value&quot;);</span>
+<span class="nc bnc" id="L61" title="All 2 branches missed.">            if (type == Type.jid) {</span>
+                // Decode the specified JID
+<span class="nc" id="L63">                this.jidValue = new JID(value);</span>
+            }
+<span class="nc bnc" id="L65" title="All 2 branches missed.">            else if (type == Type.subscription) {</span>
+                // Decode the specified subscription type
+<span class="nc bnc" id="L67" title="All 2 branches missed.">                if (&quot;both&quot;.equals(value)) {</span>
+<span class="nc" id="L68">                    this.subscriptionValue = RosterItem.SUB_BOTH;</span>
+                }
+<span class="nc bnc" id="L70" title="All 2 branches missed.">                else if (&quot;to&quot;.equals(value)) {</span>
+<span class="nc" id="L71">                    this.subscriptionValue = RosterItem.SUB_TO;</span>
+                }
+<span class="nc bnc" id="L73" title="All 2 branches missed.">                else if (&quot;from&quot;.equals(value)) {</span>
+<span class="nc" id="L74">                    this.subscriptionValue = RosterItem.SUB_FROM;</span>
+                }
+                else {
+<span class="nc" id="L77">                    this.subscriptionValue = RosterItem.SUB_NONE;</span>
+                }
+            }
+            else {
+                // Decode the specified group name
+<span class="nc" id="L82">                this.groupValue = value;</span>
+            }
+        }
+        // Set what type of stanzas should be filters (i.e. blocked or allowed)
+<span class="nc bnc" id="L86" title="All 2 branches missed.">        this.filterIQ = itemElement.element(&quot;iq&quot;) != null;</span>
+<span class="nc bnc" id="L87" title="All 2 branches missed.">        this.filterMessage = itemElement.element(&quot;message&quot;) != null;</span>
+<span class="nc bnc" id="L88" title="All 2 branches missed.">        this.filterPresence_in = itemElement.element(&quot;presence-in&quot;) != null;</span>
+<span class="nc bnc" id="L89" title="All 2 branches missed.">        this.filterPresence_out = itemElement.element(&quot;presence-out&quot;) != null;</span>
+<span class="nc bnc" id="L90" title="All 8 branches missed.">        if (!filterIQ &amp;&amp; !filterMessage &amp;&amp; !filterPresence_in &amp;&amp; !filterPresence_out) {</span>
+            // If none was defined then block all stanzas
+<span class="nc" id="L92">            filterEverything = true;</span>
+        }
+        // Keep a copy of the item element that defines this item
+<span class="nc" id="L95">        this.itemElement = itemElement.createCopy();</span>
+<span class="nc" id="L96">    }</span>
+
+    Element asElement() {
+<span class="nc" id="L99">        return itemElement.createCopy();</span>
+    }
+
+    /**
+     * Returns true if this privacy item needs the user roster to figure out
+     * if a packet must be blocked.
+     *
+     * @return true if this privacy item needs the user roster to figure out
+     *         if a packet must be blocked.
+     */
+    boolean isRosterRequired() {
+<span class="nc bnc" id="L110" title="All 4 branches missed.">        return type == Type.group || type == Type.subscription;</span>
+    }
+
+    @Override
+    public int compareTo(Object object) {
+<span class="nc bnc" id="L115" title="All 2 branches missed.">        if (object instanceof PrivacyItem) {</span>
+<span class="nc" id="L116">            return this.order - ((PrivacyItem) object).order;</span>
+        }
+<span class="nc" id="L118">        return getClass().getName().compareTo(object.getClass().getName());</span>
+    }
+
+    /**
+     * Returns true if the packet to analyze matches the condition defined by this rule.
+     * Variables involved in the analysis are: type (e.g. jid, group, etc.), value (based
+     * on the type) and granular control that defines which type of packets should be
+     * considered.
+     *
+     * @param packet the packet to analyze if matches the rule's condition.
+     * @param roster the roster of the owner of the privacy list.
+     * @param userJID the JID of the owner of the privacy list.
+     * @return true if the packet to analyze matches the condition defined by this rule.
+     */
+    boolean matchesCondition(Packet packet, Roster roster, JID userJID) {
+<span class="nc bnc" id="L133" title="All 2 branches missed.">        return matchesPacketSenderCondition(packet, roster, userJID) &amp;&amp;</span>
+<span class="nc bnc" id="L134" title="All 2 branches missed.">                matchesPacketTypeCondition(packet, userJID);</span>
+    }
+
+    boolean isAllow() {
+<span class="nc" id="L138">        return allow;</span>
+    }
+
+    boolean isType( Type type )
+    {
+<span class="nc bnc" id="L143" title="All 2 branches missed.">        return this.type == type;</span>
+    }
+
+    JID getJID()
+    {
+<span class="nc" id="L148">        return this.jidValue;</span>
+    }
+
+    private boolean matchesPacketSenderCondition(Packet packet, Roster roster, JID userJID) {
+<span class="nc bnc" id="L152" title="All 2 branches missed.">        if (type == null) {</span>
+            // This is the &quot;fall-through&quot; case
+<span class="nc" id="L154">            return true;</span>
+        }
+<span class="nc" id="L156">        boolean isPresence = packet.getClass().equals(Presence.class);</span>
+<span class="nc" id="L157">        boolean incoming = true;</span>
+<span class="nc bnc" id="L158" title="All 2 branches missed.">        if (packet.getFrom() != null) {</span>
+<span class="nc bnc" id="L159" title="All 2 branches missed.">            incoming = !userJID.toBareJID().equals(packet.getFrom().toBareJID());</span>
+        }
+<span class="nc" id="L161">        boolean matches = false;</span>
+<span class="nc bnc" id="L162" title="All 8 branches missed.">        if (isPresence &amp;&amp; !incoming &amp;&amp; (filterEverything || filterPresence_out)) {</span>
+            // If this is an outgoing presence and we are filtering by outgoing presence
+            // notification then use the receipient of the packet in the analysis
+<span class="nc" id="L165">            matches = verifyJID(packet.getTo(), roster);</span>
+        }
+<span class="nc bnc" id="L167" title="All 12 branches missed.">        if (!matches &amp;&amp; incoming &amp;&amp;</span>
+                (filterEverything || filterPresence_in || filterIQ || filterMessage)) {
+<span class="nc" id="L169">            matches = verifyJID(packet.getFrom(), roster);</span>
+        }
+<span class="nc" id="L171">        return matches;</span>
+    }
+
+    private boolean verifyJID(JID jid, Roster roster) {
+<span class="nc bnc" id="L175" title="All 2 branches missed.">        if (jid == null) {</span>
+<span class="nc" id="L176">            return false;</span>
+        }
+<span class="nc bnc" id="L178" title="All 2 branches missed.">        if (type == Type.jid) {</span>
+<span class="nc bnc" id="L179" title="All 2 branches missed.">            if (jidValue.getResource() != null) {</span>
+                // Rule is filtering by exact resource match
+                // (e.g. &lt;user@domain/resource&gt; or &lt;domain/resource&gt;)
+<span class="nc" id="L182">                return jid.equals(jidValue);</span>
+            }
+<span class="nc bnc" id="L184" title="All 2 branches missed.">            else if (jidValue.getNode() != null) {</span>
+                // Rule is filtering by any resource matches (e.g. &lt;user@domain&gt;)
+<span class="nc" id="L186">                return jid.toBareJID().equals(jidValue.toBareJID());</span>
+            }
+            else {
+                // Rule is filtering by domain (e.g. &lt;domain&gt;)
+<span class="nc" id="L190">                return jid.getDomain().equals(jidValue.getDomain());</span>
+            }
+        }
+<span class="nc bnc" id="L193" title="All 2 branches missed.">        else if (type == Type.group) {</span>
+            Collection&lt;String&gt; contactGroups;
+            try {
+                // Get the groups where the contact belongs
+<span class="nc" id="L197">                RosterItem item = roster.getRosterItem(jid);</span>
+<span class="nc" id="L198">                contactGroups = item.getGroups();</span>
+            }
+<span class="nc" id="L200">            catch (UserNotFoundException e) {</span>
+                // Sender is not in the user's roster
+<span class="nc" id="L202">                contactGroups = Collections.emptyList();</span>
+<span class="nc" id="L203">            }</span>
+            // Check if the contact belongs to the specified group
+<span class="nc" id="L205">            return contactGroups.contains(groupValue);</span>
+        }
+        else {
+<span class="nc" id="L208">            RosterItem.SubType contactSubscription = RosterItem.SUB_NONE;</span>
+            try {
+                // Get the groups where the contact belongs
+<span class="nc" id="L211">                RosterItem item = roster.getRosterItem(jid);</span>
+<span class="nc" id="L212">                contactSubscription = item.getSubStatus();</span>
+            }
+<span class="nc" id="L214">            catch (UserNotFoundException e) {</span>
+                // Sender is not in the user's roster
+<span class="nc" id="L216">            }</span>
+            // Check if the contact has the specified subscription status
+<span class="nc bnc" id="L218" title="All 2 branches missed.">            return contactSubscription == subscriptionValue;</span>
+        }
+    }
+
+    private boolean matchesPacketTypeCondition(Packet packet, JID userJID) {
+<span class="nc bnc" id="L223" title="All 2 branches missed.">        if (filterEverything) {</span>
+            // This includes all type of packets (including subscription-related presences)
+<span class="nc" id="L225">            return true;</span>
+        }
+<span class="nc" id="L227">        Class packetClass = packet.getClass();</span>
+<span class="nc bnc" id="L228" title="All 2 branches missed.">        if (Message.class.equals(packetClass)) {</span>
+<span class="nc" id="L229">            return filterMessage;</span>
+        }
+<span class="nc bnc" id="L231" title="All 2 branches missed.">        else if (Presence.class.equals(packetClass)) {</span>
+<span class="nc" id="L232">            Presence.Type presenceType = ((Presence) packet).getType();</span>
+            // Only filter presences of type available or unavailable
+            // (ignore subscription-related presences)
+<span class="nc bnc" id="L235" title="All 4 branches missed.">            if (presenceType == null || presenceType == Presence.Type.unavailable) {</span>
+                // Calculate if packet is being received by the user
+<span class="nc" id="L237">                JID to = packet.getTo();</span>
+<span class="nc bnc" id="L238" title="All 4 branches missed.">                boolean incoming = to != null &amp;&amp; to.toBareJID().equals(userJID.toBareJID());</span>
+<span class="nc bnc" id="L239" title="All 2 branches missed.">                if (incoming) {</span>
+<span class="nc" id="L240">                    return filterPresence_in;</span>
+                }
+                else {
+<span class="nc" id="L243">                    return filterPresence_out;</span>
+                }
+            }
+<span class="nc" id="L246">        }</span>
+<span class="nc bnc" id="L247" title="All 2 branches missed.">        else if (IQ.class.equals(packetClass)) {</span>
+<span class="nc" id="L248">            return filterIQ;</span>
+        }
+<span class="nc" id="L250">        return false;</span>
+    }
+
+    @Override
+    public int getCachedSize() {
+        // Approximate the size of the object in bytes by calculating the size
+        // of each field.
+<span class="nc" id="L257">        int size = 0;</span>
+<span class="nc" id="L258">        size += CacheSizes.sizeOfObject();                      // overhead of object</span>
+<span class="nc" id="L259">        size += CacheSizes.sizeOfInt();                         // order</span>
+<span class="nc" id="L260">        size += CacheSizes.sizeOfBoolean();                     // allow</span>
+        //size += CacheSizes.sizeOfString(jidValue.toString());   // type
+<span class="nc bnc" id="L262" title="All 2 branches missed.">        if (jidValue != null ) {</span>
+<span class="nc" id="L263">            size += CacheSizes.sizeOfString(jidValue.toString()); // jidValue</span>
+        }
+        //size += CacheSizes.sizeOfString(name);                  // subscriptionValue
+<span class="nc bnc" id="L266" title="All 2 branches missed.">        if (groupValue != null) {</span>
+<span class="nc" id="L267">            size += CacheSizes.sizeOfString(groupValue);        // groupValue</span>
+        }
+<span class="nc" id="L269">        size += CacheSizes.sizeOfBoolean();                     // filterEverything</span>
+<span class="nc" id="L270">        size += CacheSizes.sizeOfBoolean();                     // filterIQ</span>
+<span class="nc" id="L271">        size += CacheSizes.sizeOfBoolean();                     // filterMessage</span>
+<span class="nc" id="L272">        size += CacheSizes.sizeOfBoolean();                     // filterPresence_in</span>
+<span class="nc" id="L273">        size += CacheSizes.sizeOfBoolean();                     // filterPresence_out</span>
+<span class="nc" id="L274">        return size;</span>
+    }
+
+    /**
+     * Type defines if the rule is based on JIDs, roster groups or presence subscription types.
+     */
+<span class="nc" id="L280">    enum Type {</span>
+        /**
+         * JID being analyzed should belong to a roster group of the list's owner.
+         */
+<span class="nc" id="L284">        group,</span>
+        /**
+         * JID being analyzed should have a resource match, domain match or bare JID match.
+         */
+<span class="nc" id="L288">        jid,</span>
+        /**
+         * JID being analyzed should belong to a contact present in the owner's roster with
+         * the specified subscription status.
+         */
+<span class="nc" id="L293">        subscription</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

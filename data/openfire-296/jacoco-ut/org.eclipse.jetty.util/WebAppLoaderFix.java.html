@@ -1,0 +1,233 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>WebAppLoaderFix.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.eclipse.jetty.util</a> &gt; <span class="el_source">WebAppLoaderFix.java</span></div><h1>WebAppLoaderFix.java</h1><pre class="source lang-java linenums">//
+//  ========================================================================
+//  Copyright (c) 1995-2017 Mort Bay Consulting Pty. Ltd.
+//  ------------------------------------------------------------------------
+//  All rights reserved. This program and the accompanying materials
+//  are made available under the terms of the Eclipse Public License v1.0
+//  and Apache License v2.0 which accompanies this distribution.
+//
+//      The Eclipse Public License is available at
+//      http://www.eclipse.org/legal/epl-v10.html
+//
+//      The Apache License v2.0 is available at
+//      http://www.opensource.org/licenses/apache2.0.php
+//
+//  You may elect to redistribute this code under either of these licenses.
+//  ========================================================================
+//
+
+package org.eclipse.jetty.util;
+
+import java.io.IOException;
+import java.lang.reflect.Field;
+import java.net.URLClassLoader;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.jar.JarFile;
+
+<span class="nc" id="L30">public class WebAppLoaderFix</span>
+{
+    public static void checkAndClose(ClassLoader classLoader)
+    {
+<span class="nc bnc" id="L34" title="All 4 branches missed.">        if (!isWindows() || !(classLoader instanceof URLClassLoader))</span>
+        {
+<span class="nc" id="L36">           return;</span>
+        }
+<span class="nc" id="L38">        HashSet&lt;String&gt; leakedJarNames = preClose((URLClassLoader)classLoader);</span>
+<span class="nc" id="L39">        cleanupJarFileFactory(leakedJarNames);</span>
+<span class="nc" id="L40">    }</span>
+
+    private static boolean isWindows()
+    {
+<span class="nc" id="L44">       String osProp = System.getProperty(&quot;os.name&quot;).toLowerCase();</span>
+<span class="nc bnc" id="L45" title="All 2 branches missed.">       return osProp.indexOf(&quot;win&quot;) &gt;= 0;</span>
+    }
+
+    private static HashSet&lt;String&gt; preClose(URLClassLoader loader)
+    {
+<span class="nc" id="L50">        HashSet&lt;String&gt; leakedJarNames = new HashSet&lt;&gt;();</span>
+<span class="nc" id="L51">        Field f = getClassField(URLClassLoader.class, &quot;ucp&quot;);</span>
+<span class="nc bnc" id="L52" title="All 2 branches missed.">        if (f != null)</span>
+        {
+<span class="nc" id="L54">            Object obj = null;</span>
+            try
+            {
+<span class="nc" id="L57">                obj = f.get(loader);</span>
+<span class="nc" id="L58">                final Object ucp = obj;</span>
+<span class="nc" id="L59">                f = getClassField(ucp.getClass(), &quot;loaders&quot;);</span>
+<span class="nc bnc" id="L60" title="All 2 branches missed.">                if (f != null)</span>
+                {
+<span class="nc" id="L62">                    ArrayList loaders = null;</span>
+                    try
+                    {
+<span class="nc" id="L65">                        loaders = (ArrayList) f.get(ucp);</span>
+                    }
+<span class="nc" id="L67">                    catch (IllegalAccessException ex)</span>
+                    {
+<span class="nc" id="L69">                    }</span>
+<span class="nc bnc" id="L70" title="All 4 branches missed.">                    for (int i = 0; loaders != null &amp;&amp; i &lt; loaders.size(); i++)</span>
+                    {
+<span class="nc" id="L72">                        obj = loaders.get(i);</span>
+<span class="nc" id="L73">                        f = getClassField(obj.getClass(), &quot;jar&quot;);</span>
+<span class="nc bnc" id="L74" title="All 2 branches missed.">                        if (f != null)</span>
+                        {
+                            try
+                            {
+<span class="nc" id="L78">                                obj = f.get(obj);</span>
+<span class="nc" id="L79">                            } catch (IllegalAccessException ex)</span>
+                            {
+<span class="nc" id="L81">                            }</span>
+<span class="nc bnc" id="L82" title="All 2 branches missed.">                            if (obj instanceof JarFile)</span>
+                            {
+<span class="nc" id="L84">                                final JarFile jarFile = (JarFile) obj;</span>
+<span class="nc" id="L85">                                leakedJarNames.add(jarFile.getName());</span>
+                            }
+                        }
+                    }
+                }
+            }
+<span class="nc" id="L91">            catch (IllegalAccessException ex)</span>
+            {
+<span class="nc" id="L93">            }</span>
+        }
+<span class="nc" id="L95">        return leakedJarNames;</span>
+    }
+
+    private static Field getClassField(Class clz, String fieldName)
+    {
+<span class="nc" id="L100">        Field field = null;</span>
+        try
+        {
+<span class="nc" id="L103">            field = clz.getDeclaredField(fieldName);</span>
+<span class="nc" id="L104">            field.setAccessible(true);</span>
+        }
+<span class="nc" id="L106">        catch (Exception e)</span>
+        {
+<span class="nc" id="L108">        }</span>
+<span class="nc" id="L109">        return field;</span>
+    }
+
+    private static void cleanupJarFileFactory(HashSet&lt;String&gt; leakedJarNames) {
+
+<span class="nc" id="L114">        Class classJarURLConnection = null;</span>
+        try
+        {
+<span class="nc" id="L117">            classJarURLConnection = Class.forName(&quot;sun.net.www.protocol.jar.JarURLConnection&quot;);</span>
+        }
+<span class="nc" id="L119">        catch (ClassNotFoundException ex)</span>
+        {
+<span class="nc" id="L121">            return;</span>
+<span class="nc" id="L122">        }</span>
+
+<span class="nc" id="L124">        Field f = getClassField(classJarURLConnection, &quot;factory&quot;);</span>
+
+<span class="nc bnc" id="L126" title="All 2 branches missed.">        if (f == null)</span>
+        {
+<span class="nc" id="L128">            return;</span>
+        }
+<span class="nc" id="L130">        Object obj = null;</span>
+        try
+        {
+<span class="nc" id="L133">            obj = f.get(null);</span>
+<span class="nc" id="L134">        } catch (IllegalAccessException ex)</span>
+        {
+<span class="nc" id="L136">            return;</span>
+<span class="nc" id="L137">        }</span>
+
+<span class="nc" id="L139">        Class classJarFileFactory = obj.getClass();</span>
+<span class="nc" id="L140">        HashMap fileCache = null;</span>
+<span class="nc" id="L141">        f = getClassField(classJarFileFactory, &quot;fileCache&quot;);</span>
+<span class="nc bnc" id="L142" title="All 2 branches missed.">        if (f == null)</span>
+        {
+<span class="nc" id="L144">            return;</span>
+        }
+        try
+        {
+<span class="nc" id="L148">            obj = f.get(null);</span>
+<span class="nc bnc" id="L149" title="All 2 branches missed.">            if (obj instanceof HashMap)</span>
+            {
+<span class="nc" id="L151">                fileCache = (HashMap) obj;</span>
+            }
+        }
+<span class="nc" id="L154">        catch (IllegalAccessException ex)</span>
+        {
+<span class="nc" id="L156">        }</span>
+<span class="nc" id="L157">        HashMap urlCache = null;</span>
+<span class="nc" id="L158">        f = getClassField(classJarFileFactory, &quot;urlCache&quot;);</span>
+<span class="nc bnc" id="L159" title="All 2 branches missed.">        if (f == null)</span>
+        {
+<span class="nc" id="L161">            return;</span>
+        }
+        try
+        {
+<span class="nc" id="L165">            obj = f.get(null);</span>
+<span class="nc bnc" id="L166" title="All 2 branches missed.">            if (obj instanceof HashMap)</span>
+            {
+<span class="nc" id="L168">                urlCache = (HashMap) obj;</span>
+            }
+        }
+<span class="nc" id="L171">        catch (IllegalAccessException ex)</span>
+        {
+<span class="nc" id="L173">        }</span>
+
+<span class="nc bnc" id="L175" title="All 2 branches missed.">        if (urlCache != null)</span>
+        {
+<span class="nc" id="L177">            HashMap urlCacheTmp = (HashMap) urlCache.clone();</span>
+<span class="nc" id="L178">            Iterator it = urlCacheTmp.keySet().iterator();</span>
+<span class="nc bnc" id="L179" title="All 2 branches missed.">            while (it.hasNext())</span>
+            {
+<span class="nc" id="L181">                obj = it.next();</span>
+<span class="nc bnc" id="L182" title="All 2 branches missed.">                if (!(obj instanceof JarFile))</span>
+                {
+<span class="nc" id="L184">                    continue;</span>
+                }
+<span class="nc" id="L186">                JarFile jarFile = (JarFile) obj;</span>
+<span class="nc bnc" id="L187" title="All 2 branches missed.">                if (leakedJarNames.contains(jarFile.getName()))</span>
+                {
+                    try
+                    {
+<span class="nc" id="L191">                        jarFile.close();</span>
+                    }
+<span class="nc" id="L193">                    catch (IOException ex)</span>
+                    {
+<span class="nc" id="L195">                    }</span>
+<span class="nc bnc" id="L196" title="All 2 branches missed.">                    if (fileCache != null)</span>
+                    {
+<span class="nc" id="L198">                        fileCache.remove(urlCache.get(jarFile));</span>
+                    }
+<span class="nc" id="L200">                    urlCache.remove(jarFile);</span>
+                }
+<span class="nc" id="L202">            }</span>
+<span class="nc" id="L203">        }</span>
+<span class="nc bnc" id="L204" title="All 2 branches missed.">        else if (fileCache != null)</span>
+        {
+<span class="nc" id="L206">            HashMap fileCacheTmp = (HashMap) fileCache.clone();</span>
+<span class="nc" id="L207">            Iterator it = fileCacheTmp.keySet().iterator();</span>
+<span class="nc bnc" id="L208" title="All 2 branches missed.">            while (it.hasNext())</span>
+            {
+<span class="nc" id="L210">                Object key = it.next();</span>
+<span class="nc" id="L211">                obj = fileCache.get(key);</span>
+<span class="nc bnc" id="L212" title="All 2 branches missed.">                if (!(obj instanceof JarFile))</span>
+                {
+<span class="nc" id="L214">                    continue;</span>
+                }
+<span class="nc" id="L216">                JarFile jarFile = (JarFile) obj;</span>
+<span class="nc bnc" id="L217" title="All 2 branches missed.">                if (leakedJarNames.contains(jarFile.getName()))</span>
+                {
+                    try
+                    {
+<span class="nc" id="L221">                        jarFile.close();</span>
+                    }
+<span class="nc" id="L223">                    catch (IOException ex)</span>
+                    {
+<span class="nc" id="L225">                    }</span>
+<span class="nc" id="L226">                    fileCache.remove(key);</span>
+                }
+<span class="nc" id="L228">            }</span>
+        }
+<span class="nc" id="L230">        leakedJarNames.clear();</span>
+<span class="nc" id="L231">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

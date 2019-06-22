@@ -1,0 +1,296 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>OpenfireX509TrustManager.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.keystore</a> &gt; <span class="el_source">OpenfireX509TrustManager.java</span></div><h1>OpenfireX509TrustManager.java</h1><pre class="source lang-java linenums">package org.jivesoftware.openfire.keystore;
+
+import org.bouncycastle.jce.provider.BouncyCastleProvider;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import javax.net.ssl.*;
+import java.security.*;
+import java.security.cert.*;
+import java.security.cert.Certificate;
+import java.util.*;
+
+/**
+ * A Trust Manager implementation that adds Openfire-proprietary functionality.
+ * 
+ * @author Guus der Kinderen, guus.der.kinderen@gmail.com
+ */
+// TODO re-enable optional OCSP checking.
+// TODO re-enable CRL checking.
+public class OpenfireX509TrustManager implements X509TrustManager
+{
+<span class="fc" id="L22">    private static final Logger Log = LoggerFactory.getLogger( OpenfireX509TrustManager.class );</span>
+
+<span class="fc" id="L24">    private static final Provider PROVIDER = new BouncyCastleProvider();</span>
+
+    static
+    {
+        // Add the BC provider to the list of security providers
+<span class="fc" id="L29">        Security.addProvider( PROVIDER );</span>
+<span class="fc" id="L30">    }</span>
+
+    /**
+     * A boolean that indicates if this trust manager will allow self-signed certificates to be trusted.
+     */
+    protected final boolean acceptSelfSigned;
+
+    /**
+     * A boolean that indicates if this trust manager will check if all certificates in the chain (including the root
+     * certificates) are currently valid (notBefore/notAfter check).
+     */
+    private final boolean checkValidity;
+
+    /**
+     * The set of trusted issuers from the trust store. Note that these certificates are not validated. It is assumed
+     * that this set can be long-lived. Time-based validation should occur close to the actual usage / invocation.
+     */
+    protected final Set&lt;X509Certificate&gt; trustedIssuers;
+
+    public OpenfireX509TrustManager( KeyStore trustStore, boolean acceptSelfSigned, boolean checkValidity ) throws NoSuchAlgorithmException, KeyStoreException
+<span class="fc" id="L50">    {</span>
+<span class="fc" id="L51">        this.acceptSelfSigned = acceptSelfSigned;</span>
+<span class="fc" id="L52">        this.checkValidity = checkValidity;</span>
+
+        // Retrieve all trusted certificates from the store, but don't validate them just yet!
+<span class="fc" id="L55">        final Set&lt;X509Certificate&gt; trusted = new HashSet&lt;&gt;();</span>
+
+<span class="fc" id="L57">        final Enumeration&lt;String&gt; aliases = trustStore.aliases();</span>
+<span class="fc bfc" id="L58" title="All 2 branches covered.">        while ( aliases.hasMoreElements() )</span>
+        {
+<span class="fc" id="L60">            final String alias = aliases.nextElement();</span>
+<span class="pc bpc" id="L61" title="1 of 2 branches missed.">            if ( trustStore.isCertificateEntry( alias ) )</span>
+            {
+<span class="fc" id="L63">                final Certificate certificate = trustStore.getCertificate( alias );</span>
+<span class="pc bpc" id="L64" title="1 of 2 branches missed.">                if ( certificate instanceof X509Certificate )</span>
+                {
+<span class="fc" id="L66">                    trusted.add( (X509Certificate) certificate );</span>
+                }
+            }
+<span class="fc" id="L69">        }</span>
+
+<span class="fc" id="L71">        trustedIssuers = Collections.unmodifiableSet( trusted );</span>
+
+<span class="fc" id="L73">        Log.debug( &quot;Constructed trust manager. Number of trusted issuers: {}, accepts self-signed: {}, checks validity: {}&quot;, trustedIssuers.size(), acceptSelfSigned, checkValidity );</span>
+<span class="fc" id="L74">    }</span>
+
+    @Override
+    public void checkClientTrusted( X509Certificate[] chain, String authType ) throws CertificateException
+    {
+        // Find and use the end entity as the selector for verification.
+<span class="fc" id="L80">        final X509Certificate endEntityCert = CertificateUtils.identifyEndEntityCertificate( Arrays.asList( chain ) );</span>
+<span class="fc" id="L81">        final X509CertSelector selector = new X509CertSelector();</span>
+<span class="fc" id="L82">        selector.setCertificate( endEntityCert );</span>
+
+        try
+        {
+<span class="fc" id="L86">            checkChainTrusted( selector, chain );</span>
+        }
+<span class="fc" id="L88">        catch ( InvalidAlgorithmParameterException | NoSuchAlgorithmException | CertPathBuilderException ex )</span>
+        {
+<span class="fc" id="L90">            throw new CertificateException( ex );</span>
+<span class="fc" id="L91">        }</span>
+<span class="fc" id="L92">    }</span>
+
+    @Override
+    public void checkServerTrusted( X509Certificate[] chain, String authType ) throws CertificateException
+    {
+        // Find and use the end entity as the selector for verification.
+<span class="nc" id="L98">        final X509Certificate endEntityCert = CertificateUtils.identifyEndEntityCertificate( Arrays.asList( chain ) );</span>
+<span class="nc" id="L99">        final X509CertSelector selector = new X509CertSelector();</span>
+<span class="nc" id="L100">        selector.setCertificate( endEntityCert );</span>
+
+        try
+        {
+<span class="nc" id="L104">            checkChainTrusted( selector, chain );</span>
+        }
+<span class="nc" id="L106">        catch ( InvalidAlgorithmParameterException | NoSuchAlgorithmException | CertPathBuilderException ex )</span>
+        {
+<span class="nc" id="L108">            throw new CertificateException( ex );</span>
+<span class="nc" id="L109">        }</span>
+<span class="nc" id="L110">    }</span>
+
+    @Override
+    public X509Certificate[] getAcceptedIssuers()
+    {
+        final Set&lt;X509Certificate&gt; result;
+<span class="pc bpc" id="L116" title="1 of 2 branches missed.">        if ( checkValidity )</span>
+        {
+            // Filter the set of issuers to see what certificates are currently valid. Note that this might result in a
+            // different result as compared with the last verification.
+<span class="fc" id="L120">            result = CertificateUtils.filterValid( this.trustedIssuers );</span>
+        }
+        else
+        {
+<span class="nc" id="L124">            result = this.trustedIssuers;</span>
+        }
+<span class="fc" id="L126">        return result.toArray( new X509Certificate[ result.size() ] );</span>
+    }
+
+    /**
+     * Determine if the given partial or complete certificate chain can be trusted to represent the entity that is
+     * defined by the criteria specified by the 'selector' argument.
+     *
+     * A (valid) partial chain is a chain that, combined with certificates from the trust store in this manager, can be
+     * completed to a full chain.
+     *
+     * Chains provided to this method do not need to be in any particular order.
+     *
+     * This implementation uses the trust anchors as represented by {@link #getAcceptedIssuers()} to verify that the
+     * chain that is provided either includes a certificate from an accepted issuer, or is directly issued by one.
+     *
+     * Depending on the configuration of this class, other verification is done:
+     * &lt;ul&gt;
+     *     &lt;li&gt;{@link #acceptSelfSigned}: when {@code true}, any chain that has a length of one and is self-signed is
+     *                                    considered as a 'trust anchor' (but is still subject to other checks, such as
+     *                                    expiration checks).&lt;/li&gt;
+     * &lt;/ul&gt;
+     *
+     * This method will either return a value, which indicates that the chain is trusted, or will throw an exception.
+     *
+     * @param selector Characteristics of the entity to be represented by the chain (cannot be null).
+     * @param chain The certificate chain that is to be verified (cannot be null or empty).
+     * @return A trusted certificate path (never null).
+     *
+     * @throws InvalidAlgorithmParameterException if the algorithm is invalid
+     * @throws NoSuchAlgorithmException if the algorithm could not be found
+     * @throws CertPathBuilderException if there was a problem with the certificate path
+     */
+    protected CertPath checkChainTrusted( CertSelector selector, X509Certificate... chain ) throws InvalidAlgorithmParameterException, NoSuchAlgorithmException, CertPathBuilderException
+    {
+<span class="fc bfc" id="L160" title="All 2 branches covered.">        if ( selector == null )</span>
+        {
+<span class="fc" id="L162">            throw new IllegalArgumentException( &quot;Argument 'selector' cannot be null&quot;);</span>
+        }
+
+<span class="fc bfc" id="L165" title="All 4 branches covered.">        if ( chain == null || chain.length == 0 )</span>
+        {
+<span class="fc" id="L167">            throw new IllegalArgumentException( &quot;Argument 'chain' cannot be null or an empty array.&quot;);</span>
+        }
+
+<span class="fc" id="L170">        Log.debug( &quot;Attempting to verify a chain of {} certificates.&quot;, chain.length );</span>
+
+        // The set of trusted issuers (for this invocation), based on the issuers from the truststore.
+<span class="fc" id="L173">        final Set&lt;X509Certificate&gt; trustedIssuers = new HashSet&lt;&gt;();</span>
+<span class="fc" id="L174">        trustedIssuers.addAll( this.trustedIssuers );</span>
+
+        // When accepting self-signed certificates, and the chain is a self-signed certificate, add it to the collection
+        // of trusted issuers. Blindly accepting this issuer is undesirable, as that would circumvent other checks, such
+        // as expiration checking.
+<span class="fc bfc" id="L179" title="All 4 branches covered.">        if ( acceptSelfSigned &amp;&amp; chain.length == 1 )</span>
+        {
+<span class="fc" id="L181">            Log.debug( &quot;Attempting to accept the self-signed certificate of this chain of length one, as instructed by configuration.&quot; );</span>
+
+<span class="fc" id="L183">            final X509Certificate cert = chain[0];</span>
+<span class="pc bpc" id="L184" title="1 of 2 branches missed.">            if ( cert.getSubjectDN().equals( cert.getIssuerDN() ) )</span>
+            {
+<span class="fc" id="L186">                Log.debug( &quot;Chain of one appears to be self-signed. Adding it to the set of trusted issuers.&quot; );</span>
+<span class="fc" id="L187">                trustedIssuers.add( cert );</span>
+            }
+            else
+            {
+<span class="nc" id="L191">                Log.debug( &quot;Chain of one is not self-signed. Not adding it to the set of trusted issuers.&quot; );</span>
+            }
+        }
+
+        // Turn trusted into accepted issuers.
+        final Set&lt;X509Certificate&gt; acceptedIssuers;
+<span class="fc bfc" id="L197" title="All 2 branches covered.">        if ( checkValidity )</span>
+        {
+            // See what certificates are currently valid.
+<span class="fc" id="L200">            acceptedIssuers = CertificateUtils.filterValid( trustedIssuers );</span>
+        }
+        else
+        {
+<span class="fc" id="L204">            acceptedIssuers = trustedIssuers;</span>
+        }
+
+        // Transform all accepted issuers into a set of unique trustAnchors.
+<span class="fc" id="L208">        final Set&lt;TrustAnchor&gt; trustAnchors = CertificateUtils.toTrustAnchors( acceptedIssuers );</span>
+
+        // All certificates that are part of the (possibly incomplete) chain.
+<span class="fc" id="L211">        final CertStore certificates = CertStore.getInstance( &quot;Collection&quot;, new CollectionCertStoreParameters( Arrays.asList( chain ) ) );</span>
+
+        // Build the configuration for the path builder. It is based on the collection of accepted issuers / trust anchors
+<span class="fc" id="L214">        final PKIXBuilderParameters parameters = new PKIXBuilderParameters( trustAnchors, selector );</span>
+
+        // Validity checks are enabled by default in the CertPathBuilder implementation.
+<span class="fc bfc" id="L217" title="All 2 branches covered.">        if ( !checkValidity )</span>
+        {
+<span class="fc" id="L219">            Log.debug( &quot;Attempting to ignore any validity (expiry) issues, as instructed by configuration.&quot; );</span>
+
+            // There is no way to configure the pathBuilder to ignore date validity. When validity checks are to be
+            // ignored, try to find a point in time where all certificates in the chain are valid.
+<span class="fc" id="L223">            final Date validPointInTime = CertificateUtils.findValidPointInTime( chain );</span>
+
+            // This strategy to 'disable' validity checks won't work if there's no overlap of validity periods of all
+            // certificates. TODO improve the implementation.
+<span class="pc bpc" id="L227" title="1 of 2 branches missed.">            if ( validPointInTime == null )</span>
+            {
+<span class="nc" id="L229">                Log.warn( &quot;The existing implementation is unable to fully ignore certificate validity periods for this chain, even though it is configured to do so. Certificate checks might fail because of expiration for end entity: &quot; + chain[0] );</span>
+            }
+            else
+            {
+<span class="fc" id="L233">                parameters.setDate( validPointInTime );</span>
+            }
+        }
+
+        // Add all certificates that are part of the chain to the configuration. Together with the trust anchors, the
+        // entire chain should now be in the store.
+<span class="fc" id="L239">        parameters.addCertStore( certificates );</span>
+
+        // When true, validation will fail if no CRLs are provided!
+<span class="fc" id="L242">        parameters.setRevocationEnabled( false );</span>
+
+<span class="fc" id="L244">        Log.debug( &quot;Validating chain with {} certificates, using {} trust anchors.&quot;, chain.length, trustAnchors.size() );</span>
+
+        // Try to use BouncyCastle - if that doesn't work, pick one.
+        CertPathBuilder pathBuilder;
+        try
+        {
+<span class="fc" id="L250">            pathBuilder = CertPathBuilder.getInstance( &quot;PKIX&quot;, &quot;BC&quot; );</span>
+        }
+<span class="nc" id="L252">        catch ( NoSuchProviderException e )</span>
+        {
+<span class="nc" id="L254">            Log.warn( &quot;Unable to use the BC provider! Trying to use a fallback provider.&quot;, e );</span>
+<span class="nc" id="L255">            pathBuilder = CertPathBuilder.getInstance( &quot;PKIX&quot; );</span>
+<span class="fc" id="L256">        }</span>
+
+        try
+        {
+            // Finally, construct (and implicitly validate) the certificate path.
+<span class="fc" id="L261">            final CertPathBuilderResult result = pathBuilder.build( parameters );</span>
+<span class="fc" id="L262">            return result.getCertPath();</span>
+        }
+<span class="fc" id="L264">        catch ( CertPathBuilderException ex )</span>
+        {
+            // This exception generally isn't very helpful. This block attempts to print more debug information.
+            try
+            {
+<span class="fc" id="L269">                Log.debug( &quot;** Accepted Issuers (trust anchors, \&quot;root CA's\&quot;):&quot; );</span>
+<span class="fc bfc" id="L270" title="All 2 branches covered.">                for ( X509Certificate acceptedIssuer : acceptedIssuers) {</span>
+<span class="fc" id="L271">                    Log.debug( &quot;   - &quot; + acceptedIssuer.getSubjectDN() + &quot;/&quot; + acceptedIssuer.getIssuerDN() );</span>
+<span class="fc" id="L272">                }</span>
+<span class="fc" id="L273">                Log.debug( &quot;** Chain to be validated:&quot; );</span>
+<span class="fc" id="L274">                Log.debug( &quot;   length: &quot; + chain.length );</span>
+<span class="fc bfc" id="L275" title="All 2 branches covered.">                for (int i=0; i&lt;chain.length; i++) {</span>
+<span class="fc" id="L276">                    Log.debug( &quot; Certificate[{}] (valid from {} to {}):&quot;, i, chain[ i ].getNotBefore(), chain[ i ].getNotAfter() );</span>
+<span class="fc" id="L277">                    Log.debug( &quot;   subjectDN: &quot; + chain[ i ].getSubjectDN() );</span>
+<span class="fc" id="L278">                    Log.debug( &quot;   issuerDN: &quot; + chain[ i ].getIssuerDN() );</span>
+
+<span class="fc bfc" id="L280" title="All 2 branches covered.">                    for ( X509Certificate acceptedIssuer : acceptedIssuers) {</span>
+<span class="fc bfc" id="L281" title="All 2 branches covered.">                        if ( acceptedIssuer.getIssuerDN().equals( chain[i].getIssuerDN() ) ) {</span>
+<span class="fc" id="L282">                            Log.debug( &quot;Found accepted issuer with same DN: &quot; + acceptedIssuer.getIssuerDN() );</span>
+                        }
+<span class="fc" id="L284">                    }</span>
+                }
+            }
+            finally
+            {
+                // rethrow the original exception.
+<span class="pc" id="L290">                throw ex;</span>
+            }
+        }
+
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

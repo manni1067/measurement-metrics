@@ -1,0 +1,528 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>MediaProxySession.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.mediaproxy</a> &gt; <span class="el_source">MediaProxySession.java</span></div><h1>MediaProxySession.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2004-2009 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.mediaproxy;
+
+import java.io.IOException;
+import java.net.DatagramPacket;
+import java.net.DatagramSocket;
+import java.net.InetAddress;
+import java.net.ServerSocket;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Random;
+import java.util.Timer;
+import java.util.TimerTask;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * A media proxy session enables two clients to exchange UDP traffic. Each client connects to
+ * a UDP port and then the proxy is responsible for exchanging traffic. Each session uses
+ * a total of four ports: two for traffic exchange, and two control ports.
+ *
+ * @author Thiago Camargo
+ */
+public abstract class MediaProxySession extends Thread implements ProxyCandidate, DatagramListener {
+
+<span class="nc" id="L42">    private static final Logger Log = LoggerFactory.getLogger(MediaProxySession.class);</span>
+
+<span class="nc" id="L44">    private List&lt;SessionListener&gt; sessionListeners = new ArrayList&lt;&gt;();</span>
+
+    private String id;
+    private String pass;
+<span class="nc" id="L48">    private String creator = &quot;&quot;;</span>
+<span class="nc" id="L49">    private long timestamp = 0;</span>
+
+    protected InetAddress localAddress;
+    protected InetAddress hostA;
+    protected InetAddress hostB;
+
+    protected int portA;
+    protected int portB;
+
+    protected int localPortA;
+    protected int localPortB;
+
+    protected DatagramSocket socketA;
+    protected DatagramSocket socketAControl;
+    protected DatagramSocket socketB;
+    protected DatagramSocket socketBControl;
+
+    protected Channel channelAtoB;
+    protected Channel channelAtoBControl;
+    protected Channel channelBtoA;
+    protected Channel channelBtoAControl;
+
+    protected Thread threadAtoB;
+    protected Thread threadAtoBControl;
+    protected Thread threadBtoA;
+    protected Thread threadBtoAControl;
+
+<span class="nc" id="L76">    private Timer idleTimer = null;</span>
+<span class="nc" id="L77">    private Timer lifeTimer = null;</span>
+
+<span class="nc" id="L79">    private int minPort = 10000;</span>
+<span class="nc" id="L80">    private int maxPort = 20000;</span>
+
+    /**
+     * Creates a new static UDP channel between Host A and Host B.
+     *
+     * @param id           of the Session (Could be a Jingle session ID)
+     * @param creator      the session creator name or description
+     * @param localAddress the localhost IP that will listen for UDP packets
+     * @param hostA        the hostname or IP of the point A of the Channel
+     * @param portA        the port number point A of the Channel
+     * @param hostB        the hostname or IP of the point B of the Channel
+     * @param portB        the port number point B of the Channel
+     * @param minPort      the minimal port value to be used by the server
+     * @param maxPort      the maximun port value to be used by the server
+     */
+    public MediaProxySession(String id, String creator, String localAddress, String hostA, int portA, String hostB,
+<span class="nc" id="L96">                             int portB, int minPort, int maxPort) {</span>
+<span class="nc" id="L97">        this.id = id;</span>
+<span class="nc" id="L98">        this.creator = creator;</span>
+<span class="nc" id="L99">        this.minPort = minPort;</span>
+<span class="nc" id="L100">        this.maxPort = maxPort;</span>
+<span class="nc" id="L101">        this.pass = String.valueOf(Math.abs(new Random().nextLong()));</span>
+        try {
+<span class="nc" id="L103">            this.hostA = InetAddress.getByName(hostA);</span>
+<span class="nc" id="L104">            this.hostB = InetAddress.getByName(hostB);</span>
+
+<span class="nc" id="L106">            this.portA = portA;</span>
+<span class="nc" id="L107">            this.portB = portB;</span>
+
+<span class="nc" id="L109">            this.localAddress = InetAddress.getByName(localAddress);</span>
+<span class="nc" id="L110">            this.localPortA = getFreePort();</span>
+<span class="nc" id="L111">            this.socketA = new DatagramSocket(localPortA, this.localAddress);</span>
+<span class="nc" id="L112">            this.socketAControl = new DatagramSocket(localPortA + 1, this.localAddress);</span>
+<span class="nc" id="L113">            this.localPortB = getFreePort();</span>
+<span class="nc" id="L114">            this.socketB = new DatagramSocket(localPortB, this.localAddress);</span>
+<span class="nc" id="L115">            this.socketBControl = new DatagramSocket(localPortB + 1, this.localAddress);</span>
+<span class="nc bnc" id="L116" title="All 2 branches missed.">            if (Log.isDebugEnabled()) {</span>
+<span class="nc" id="L117">                Log.debug(&quot;MediaProxySession: Session Created at: A &quot; + localPortA + &quot; : B &quot; + localPortB);</span>
+            }
+        }
+<span class="nc" id="L120">        catch (Exception e) {</span>
+<span class="nc" id="L121">            Log.error(e.getMessage(), e);</span>
+<span class="nc" id="L122">        }</span>
+<span class="nc" id="L123">    }</span>
+
+    /**
+     * Obtain a free port with a nested control port we can use.
+     *
+     * @return A free port number.
+     */
+    protected int getFreePort() {
+        ServerSocket ss;
+<span class="nc" id="L132">        int freePort = 0;</span>
+        int controlPort;
+
+<span class="nc bnc" id="L135" title="All 2 branches missed.">        for (int i = 0; i &lt; 10; i++) {</span>
+<span class="nc" id="L136">            freePort = (int) (minPort + Math.round(Math.random() * (maxPort - minPort)));</span>
+<span class="nc bnc" id="L137" title="All 2 branches missed.">            freePort = freePort % 2 == 0 ? freePort : freePort + 1;</span>
+            try {
+<span class="nc" id="L139">                ss = new ServerSocket(freePort);</span>
+<span class="nc" id="L140">                freePort = ss.getLocalPort();</span>
+<span class="nc" id="L141">                ss.close();</span>
+<span class="nc" id="L142">                ss = new ServerSocket(freePort + 1);</span>
+<span class="nc" id="L143">                controlPort = ss.getLocalPort();</span>
+<span class="nc" id="L144">                ss.close();</span>
+<span class="nc bnc" id="L145" title="All 2 branches missed.">                if (controlPort == (freePort + 1))</span>
+<span class="nc" id="L146">                    return freePort;</span>
+            }
+<span class="nc" id="L148">            catch (IOException e) {</span>
+<span class="nc" id="L149">                Log.error(e.getMessage(), e);</span>
+<span class="nc" id="L150">            }</span>
+        }
+        try {
+<span class="nc" id="L153">            ss = new ServerSocket(0);</span>
+<span class="nc" id="L154">            freePort = ss.getLocalPort();</span>
+<span class="nc" id="L155">            ss.close();</span>
+        }
+<span class="nc" id="L157">        catch (IOException e) {</span>
+<span class="nc" id="L158">            Log.error(e.getMessage(), e);</span>
+        } finally {
+<span class="nc" id="L160">            ss = null;</span>
+<span class="nc" id="L161">        }</span>
+<span class="nc" id="L162">        return freePort;</span>
+    }
+
+    /**
+     * Get the ID of the Session
+     *
+     * @return the ID of the session
+     */
+    @Override
+    public String getSID() {
+<span class="nc" id="L172">        return id;</span>
+    }
+
+    /**
+     * Get the pass of this Session
+     * A pass can be used to authorize an Session modification
+     */
+    @Override
+    public String getPass() {
+<span class="nc" id="L181">        return pass;</span>
+    }
+
+    /**
+     * Get the agent creator.
+     * This field is open to MediaProxy users and just can be set in constructor.
+     *
+     * @return the session creator name or description
+     */
+    public String getCreator() {
+<span class="nc" id="L191">        return creator;</span>
+    }
+
+    /**
+     * Get last packet arrived timestamp
+     *
+     * @return TimeStamp in Millis
+     */
+    public long getTimestamp() {
+<span class="nc" id="L200">        return timestamp;</span>
+    }
+
+    /**
+     * Thread override method
+     */
+    @Override
+    public void run() {
+        // Create channels for parties
+<span class="nc" id="L209">        createChannels();</span>
+
+        // Start a thread for each channel
+<span class="nc" id="L212">        threadAtoB = new Thread(channelAtoB);</span>
+<span class="nc" id="L213">        threadAtoBControl = new Thread(channelAtoBControl);</span>
+<span class="nc" id="L214">        threadBtoA = new Thread(channelBtoA);</span>
+<span class="nc" id="L215">        threadBtoAControl = new Thread(channelBtoAControl);</span>
+
+<span class="nc" id="L217">        threadAtoB.start();</span>
+<span class="nc" id="L218">        threadAtoBControl.start();</span>
+<span class="nc" id="L219">        threadBtoA.start();</span>
+<span class="nc" id="L220">        threadBtoAControl.start();</span>
+
+        // Listen to channel events
+<span class="nc" id="L223">        addChannelListeners();</span>
+<span class="nc" id="L224">    }</span>
+
+    /**
+     * Creates 4 new channels for the two entities. We will create a channel between A and B and vice versa
+     * and also a control channel betwwen A and B and vice versa.
+     */
+    abstract void createChannels();
+
+    /**
+     * Adds listener to channel events like receiving data.
+     */
+    void addChannelListeners() {
+<span class="nc" id="L236">        channelAtoB.addListener(this);</span>
+<span class="nc" id="L237">        channelAtoBControl.addListener(this);</span>
+<span class="nc" id="L238">        channelBtoA.addListener(this);</span>
+<span class="nc" id="L239">        channelBtoAControl.addListener(this);</span>
+<span class="nc" id="L240">    }</span>
+
+    /**
+     * Stop the Session
+     */
+    @Override
+    public void stopAgent() {
+
+        try {
+<span class="nc bnc" id="L249" title="All 2 branches missed.">            if (idleTimer != null) {</span>
+<span class="nc" id="L250">                idleTimer.cancel();</span>
+<span class="nc" id="L251">                idleTimer.purge();</span>
+<span class="nc" id="L252">                idleTimer = null;</span>
+            }
+<span class="nc" id="L254">        } catch (Exception e) {</span>
+<span class="nc" id="L255">            Log.error(e.getMessage(), e);</span>
+<span class="nc" id="L256">        }</span>
+
+        try {
+<span class="nc bnc" id="L259" title="All 2 branches missed.">            if (lifeTimer != null) {</span>
+<span class="nc" id="L260">                lifeTimer.cancel();</span>
+<span class="nc" id="L261">                lifeTimer.purge();</span>
+<span class="nc" id="L262">                lifeTimer = null;</span>
+            }
+<span class="nc" id="L264">        } catch (Exception e) {</span>
+<span class="nc" id="L265">            Log.error(e.getMessage(), e);</span>
+<span class="nc" id="L266">        }</span>
+
+<span class="nc" id="L268">        channelAtoB.removeListeners();</span>
+<span class="nc" id="L269">        channelAtoBControl.removeListeners();</span>
+<span class="nc" id="L270">        channelBtoA.removeListeners();</span>
+<span class="nc" id="L271">        channelBtoAControl.removeListeners();</span>
+
+        try {
+<span class="nc" id="L274">            channelAtoB.cancel();</span>
+<span class="nc" id="L275">            channelAtoBControl.cancel();</span>
+<span class="nc" id="L276">            channelBtoA.cancel();</span>
+<span class="nc" id="L277">            channelBtoAControl.cancel();</span>
+<span class="nc" id="L278">        } catch (Exception e) {</span>
+<span class="nc" id="L279">            Log.error(e.getMessage(), e);</span>
+<span class="nc" id="L280">        }</span>
+
+<span class="nc" id="L282">        socketA.close();</span>
+<span class="nc" id="L283">        socketAControl.close();</span>
+<span class="nc" id="L284">        socketB.close();</span>
+<span class="nc" id="L285">        socketBControl.close();</span>
+
+<span class="nc" id="L287">        dispatchAgentStopped();</span>
+
+<span class="nc" id="L289">        Log.debug(&quot;MediaProxySession: Session Stopped&quot;);</span>
+<span class="nc" id="L290">    }</span>
+
+    /**
+     * Get localhost of the Session
+     *
+     * @return the localhost of the session
+     */
+    @Override
+    public InetAddress getLocalhost() {
+<span class="nc" id="L299">        return localAddress;</span>
+    }
+
+    /**
+     * Get the Host A IP
+     *
+     * @return the host A ip
+     */
+    @Override
+    public InetAddress getHostA() {
+<span class="nc" id="L309">        return hostA;</span>
+    }
+
+    /**
+     * Get the Host B IP
+     *
+     * @return the host B ip
+     */
+    @Override
+    public InetAddress getHostB() {
+<span class="nc" id="L319">        return hostB;</span>
+    }
+
+    /**
+     * Set port A value
+     *
+     * @param portA the port number for A
+     */
+    @Override
+    public void setPortA(int portA) {
+<span class="nc bnc" id="L329" title="All 2 branches missed.">        if (Log.isDebugEnabled()) {</span>
+<span class="nc" id="L330">            Log.debug(&quot;MediaProxySession: PORT CHANGED(A):&quot; + portA);</span>
+        }
+<span class="nc" id="L332">        this.portA = portA;</span>
+<span class="nc" id="L333">    }</span>
+
+    /**
+     * Set port B value
+     *
+     * @param portB the port number for B
+     */
+    @Override
+    public void setPortB(int portB) {
+<span class="nc bnc" id="L342" title="All 2 branches missed.">        if (Log.isDebugEnabled()) {</span>
+<span class="nc" id="L343">            Log.debug(&quot;MediaProxySession: PORT CHANGED(B):&quot; + portB);</span>
+        }
+<span class="nc" id="L345">        this.portB = portB;</span>
+<span class="nc" id="L346">    }</span>
+
+    /**
+     * Set the Host A IP
+     *
+     * @param hostA the host for A
+     */
+    @Override
+    public void setHostA(InetAddress hostA) {
+<span class="nc" id="L355">        this.hostA = hostA;</span>
+<span class="nc" id="L356">    }</span>
+
+    /**
+     * Set the Host B IP
+     *
+     * @param hostB the host for B
+     */
+    @Override
+    public void setHostB(InetAddress hostB) {
+<span class="nc" id="L365">        this.hostB = hostB;</span>
+<span class="nc" id="L366">    }</span>
+
+    /**
+     * Get the Port A IP
+     *
+     * @return the port for A
+     */
+    @Override
+    public int getPortA() {
+<span class="nc" id="L375">        return portA;</span>
+    }
+
+    /**
+     * Get the Port B IP
+     *
+     * @return the port for B
+     */
+    @Override
+    public int getPortB() {
+<span class="nc" id="L385">        return portB;</span>
+    }
+
+    /**
+     * Get the localport that listen for Host A Packets
+     *
+     * @return the local port for A
+     */
+    @Override
+    public int getLocalPortA() {
+<span class="nc" id="L395">        return localPortA;</span>
+    }
+
+    /**
+     * Get the localport that listen for Host B Packets
+     *
+     * @return the local port for B
+     */
+    @Override
+    public int getLocalPortB() {
+<span class="nc" id="L405">        return localPortB;</span>
+    }
+
+    @Override
+    public void sendFromPortA(String host, int port) {
+        try {
+<span class="nc" id="L411">            InetAddress address = InetAddress.getByName(host);</span>
+<span class="nc" id="L412">            channelAtoB.setHost(address);</span>
+<span class="nc" id="L413">            channelAtoB.setPort(port);</span>
+<span class="nc" id="L414">            channelAtoBControl.setHost(address);</span>
+<span class="nc" id="L415">            channelAtoBControl.setPort(port + 1);</span>
+        }
+<span class="nc" id="L417">        catch (Exception e) {</span>
+<span class="nc" id="L418">            Log.error(e.getMessage(), e);</span>
+<span class="nc" id="L419">        }</span>
+<span class="nc" id="L420">    }</span>
+
+    @Override
+    public void sendFromPortB(String host, int port) {
+        try {
+<span class="nc" id="L425">            InetAddress address = InetAddress.getByName(host);</span>
+<span class="nc" id="L426">            channelBtoA.setHost(address);</span>
+<span class="nc" id="L427">            channelBtoA.setPort(port);</span>
+<span class="nc" id="L428">            channelBtoAControl.setHost(address);</span>
+<span class="nc" id="L429">            channelBtoAControl.setPort(port + 1);</span>
+        }
+<span class="nc" id="L431">        catch (Exception e) {</span>
+<span class="nc" id="L432">            Log.error(e.getMessage(), e);</span>
+<span class="nc" id="L433">        }</span>
+<span class="nc" id="L434">    }</span>
+
+    /**
+     * Implement DatagramListener to timestamp last packet arrived
+     *
+     * @param datagramPacket the datagram packet
+     */
+    @Override
+    public boolean datagramReceived(DatagramPacket datagramPacket) {
+<span class="nc" id="L443">        timestamp = System.currentTimeMillis();</span>
+<span class="nc" id="L444">        return true;</span>
+    }
+
+    /**
+     * Add a keep alive detector.
+     * If the packet still more than the keep alive delay without receiving any packets. The Session is
+     * stoped and remove from agents List.
+     *
+     * @param delay delay time in millis to check if the channel is inactive
+     */
+    void addKeepAlive(long delay) {
+<span class="nc bnc" id="L455" title="All 2 branches missed.">        if (idleTimer != null) return;</span>
+<span class="nc" id="L456">        idleTimer = new Timer();</span>
+<span class="nc" id="L457">        idleTimer.scheduleAtFixedRate(new TimerTask() {</span>
+<span class="nc" id="L458">            long lastTimeStamp = getTimestamp();</span>
+
+            @Override
+            public void run() {
+<span class="nc bnc" id="L462" title="All 2 branches missed.">                if (lastTimeStamp == getTimestamp()) {</span>
+<span class="nc" id="L463">                    stopAgent();</span>
+<span class="nc" id="L464">                    return;</span>
+                }
+<span class="nc" id="L466">                lastTimeStamp = getTimestamp();</span>
+<span class="nc" id="L467">            }</span>
+        }, delay, delay);
+<span class="nc" id="L469">    }</span>
+
+    /**
+     * Add a limited life time to the Session.
+     * The Session is stoped and remove from agents List after a certain time.
+     * Prevents that network cycles, refreshes a Session forever.
+     *
+     * @param lifetime time in Seconds to kill the Session
+     */
+    void addLifeTime(long lifetime) {
+<span class="nc" id="L479">        lifetime *= 1000;</span>
+<span class="nc bnc" id="L480" title="All 2 branches missed.">        if (lifeTimer != null) return;</span>
+<span class="nc" id="L481">        lifeTimer = new Timer();</span>
+<span class="nc" id="L482">        lifeTimer.scheduleAtFixedRate(new TimerTask() {</span>
+            @Override
+            public void run() {
+<span class="nc" id="L485">                stopAgent();</span>
+<span class="nc" id="L486">            }</span>
+        }, lifetime, lifetime);
+<span class="nc" id="L488">    }</span>
+
+    /**
+     * Adds a listener for Session events
+     *
+     * @param sessionListener the sessionj listener to add
+     */
+    public void addAgentListener(SessionListener sessionListener) {
+<span class="nc" id="L496">        sessionListeners.add(sessionListener);</span>
+<span class="nc" id="L497">    }</span>
+
+    /**
+     * Removes an Session events listener
+     *
+     * @param sessionListener the session listener to remove
+     */
+    public void removeAgentListener(SessionListener sessionListener) {
+<span class="nc" id="L505">        sessionListeners.remove(sessionListener);</span>
+<span class="nc" id="L506">    }</span>
+
+    /**
+     * Removes every Session events listeners
+     */
+    public void clearAgentListeners() {
+<span class="nc" id="L512">        sessionListeners.clear();</span>
+<span class="nc" id="L513">    }</span>
+
+    /**
+     * Dispatch Stop Event
+     */
+    public void dispatchAgentStopped() {
+<span class="nc bnc" id="L519" title="All 2 branches missed.">        for (SessionListener sessionListener : sessionListeners) {</span>
+            try {
+<span class="nc" id="L521">                sessionListener.sessionClosed(this);</span>
+<span class="nc" id="L522">            } catch (Exception e) {</span>
+<span class="nc" id="L523">                Log.error(e.getMessage(), e);</span>
+<span class="nc" id="L524">            }</span>
+<span class="nc" id="L525">        }</span>
+<span class="nc" id="L526">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

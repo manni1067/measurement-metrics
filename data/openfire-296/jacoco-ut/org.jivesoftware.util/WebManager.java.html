@@ -1,0 +1,430 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>WebManager.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.util</a> &gt; <span class="el_source">WebManager.java</span></div><h1>WebManager.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2004-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.util;
+
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.URL;
+import java.util.Arrays;
+import java.util.Comparator;
+import java.util.Date;
+import java.util.StringTokenizer;
+
+import org.jivesoftware.openfire.PresenceManager;
+import org.jivesoftware.openfire.PrivateStorage;
+import org.jivesoftware.openfire.SessionManager;
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.XMPPServerInfo;
+import org.jivesoftware.openfire.auth.AuthToken;
+import org.jivesoftware.openfire.group.GroupManager;
+import org.jivesoftware.openfire.lockout.LockOutManager;
+import org.jivesoftware.openfire.muc.MultiUserChatManager;
+import org.jivesoftware.openfire.pubsub.PubSubInfo;
+import org.jivesoftware.openfire.pubsub.PubSubServiceInfo;
+import org.jivesoftware.openfire.roster.RosterManager;
+import org.jivesoftware.openfire.security.SecurityAuditManager;
+import org.jivesoftware.openfire.user.User;
+import org.jivesoftware.openfire.user.UserManager;
+import org.jivesoftware.util.cache.Cache;
+import org.jivesoftware.util.cache.CacheFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import javax.servlet.http.HttpSession;
+
+/**
+ * A utility bean for Openfire admin console pages.
+ */
+public class WebManager extends WebBean {
+
+<span class="fc" id="L57">    private static final Logger Log = LoggerFactory.getLogger(WebManager.class);</span>
+
+<span class="fc" id="L59">    private int start = 0;</span>
+<span class="fc" id="L60">    private int range = 15;</span>
+
+<span class="fc" id="L62">    public WebManager() {</span>
+<span class="fc" id="L63">    }</span>
+
+    /**
+     * Invalidates and recreates session (do this on login/logout).
+     * @return the new HTTP session
+     */
+    public HttpSession invalidateSession() {
+<span class="nc" id="L70">        session.invalidate();</span>
+<span class="nc" id="L71">        session = request.getSession(true);</span>
+<span class="nc" id="L72">        return session;</span>
+    }
+
+    /**
+     * @return the auth token; redirect to the login page if an auth token is not found.
+     */
+    public AuthToken getAuthToken() {
+<span class="fc" id="L79">        return (AuthToken)session.getAttribute(&quot;jive.admin.authToken&quot;);</span>
+    }
+
+    /**
+     * @return {@code true} if the Openfire container is in setup mode, {@code false} otherwise.
+     */
+    public boolean isSetupMode() {
+<span class="nc" id="L86">        return getXMPPServer().isSetupMode();</span>
+    }
+
+    /**
+     * @return the XMPP server object -- can get many config items from here.
+     */
+    public XMPPServer getXMPPServer() {
+<span class="nc" id="L93">        final XMPPServer xmppServer = XMPPServer.getInstance();</span>
+<span class="nc bnc" id="L94" title="All 2 branches missed.">        if (xmppServer == null) {</span>
+            // Show that the server is down
+<span class="nc" id="L96">            showServerDown();</span>
+<span class="nc" id="L97">            return null;</span>
+        }
+<span class="nc" id="L99">        return xmppServer;</span>
+    }
+
+    public UserManager getUserManager() {
+<span class="nc" id="L103">        return getXMPPServer().getUserManager();</span>
+    }
+
+    public GroupManager getGroupManager() {
+<span class="nc" id="L107">        return GroupManager.getInstance();</span>
+    }
+
+    public LockOutManager getLockOutManager() {
+<span class="nc" id="L111">        return LockOutManager.getInstance();</span>
+    }
+
+    public SecurityAuditManager getSecurityAuditManager() {
+<span class="nc" id="L115">        return SecurityAuditManager.getInstance();</span>
+    }
+
+    public RosterManager getRosterManager() {
+<span class="nc" id="L119">        return getXMPPServer().getRosterManager();</span>
+    }
+
+    public PrivateStorage getPrivateStore() {
+<span class="nc" id="L123">        return getXMPPServer().getPrivateStorage();</span>
+    }
+
+    public PresenceManager getPresenceManager() {
+<span class="nc" id="L127">        return getXMPPServer().getPresenceManager();</span>
+    }
+
+    public SessionManager getSessionManager() {
+<span class="nc" id="L131">        return getXMPPServer().getSessionManager();</span>
+    }
+
+    public MultiUserChatManager getMultiUserChatManager() {
+<span class="nc" id="L135">        return getXMPPServer().getMultiUserChatManager();</span>
+    }
+
+    public XMPPServerInfo getServerInfo() {
+<span class="nc" id="L139">        return getXMPPServer().getServerInfo();</span>
+    }
+
+    public PubSubServiceInfo getPubSubInfo() {
+<span class="nc" id="L143">        return new PubSubInfo();</span>
+    }
+
+    /**
+     * Logs a security event as the currently logged in user.  (convenience routine for SecurityAuditManager)
+     *
+     * @param summary Summary of event.
+     * @param details Details of event, can be null if no details available.
+     */
+    public void logEvent(String summary, String details) {
+<span class="nc" id="L153">        SecurityAuditManager.getInstance().logEvent(getUser().getUsername(), summary, details);</span>
+<span class="nc" id="L154">    }</span>
+
+    /**
+     * @return the page user or {@code null} if one is not found.
+     */
+    public User getUser() {
+<span class="fc" id="L160">        User pageUser = null;</span>
+        try {
+<span class="fc" id="L162">            final AuthToken authToken = getAuthToken();</span>
+<span class="pc bpc" id="L163" title="1 of 2 branches missed.">            if (authToken == null )</span>
+            {
+<span class="fc" id="L165">                Log.debug( &quot;Unable to get user: no auth token on session.&quot; );</span>
+<span class="fc" id="L166">                return null;</span>
+            }
+<span class="nc bnc" id="L168" title="All 2 branches missed.">            if (authToken instanceof AuthToken.OneTimeAuthToken) {</span>
+<span class="nc" id="L169">                return new User(authToken.getUsername(), &quot;Recovery via One Time Auth Token&quot;, null, new Date(), new Date());</span>
+            }
+<span class="nc" id="L171">            final String username = authToken.getUsername();</span>
+<span class="nc bnc" id="L172" title="All 4 branches missed.">            if (username == null || username.isEmpty())</span>
+            {
+<span class="nc" id="L174">                Log.debug( &quot;Unable to get user: no username in auth token on session.&quot; );</span>
+<span class="nc" id="L175">                return null;</span>
+            }
+<span class="nc" id="L177">            pageUser = getUserManager().getUser(username);</span>
+        }
+<span class="nc" id="L179">        catch (Exception ex) {</span>
+<span class="nc" id="L180">            Log.debug(&quot;Unexpected exception (which is ignored) while trying to obtain user.&quot;, ex);</span>
+<span class="nc" id="L181">        }</span>
+<span class="nc" id="L182">        return pageUser;</span>
+    }
+
+    /**
+     * @return {@code true} if the server is in embedded mode, {@code false} otherwise.
+     */
+    public boolean isEmbedded() {
+        try {
+<span class="nc" id="L190">            ClassUtils.forName(&quot;org.jivesoftware.openfire.starter.ServerStarter&quot;);</span>
+<span class="nc" id="L191">            return true;</span>
+        }
+<span class="nc" id="L193">        catch (Exception ignored) {</span>
+<span class="nc" id="L194">            return false;</span>
+        }
+    }
+
+    /**
+     * Restarts the server then sleeps for 3 seconds.
+     */
+    public void restart() {
+        try {
+<span class="nc" id="L203">            getXMPPServer().restart();</span>
+        }
+<span class="nc" id="L205">        catch (Exception e) {</span>
+<span class="nc" id="L206">            Log.error(e.getMessage(), e);</span>
+<span class="nc" id="L207">        }</span>
+<span class="nc" id="L208">        sleep();</span>
+<span class="nc" id="L209">    }</span>
+
+    /**
+     * Stops the server then sleeps for 3 seconds.
+     */
+    public void stop() {
+        try {
+<span class="nc" id="L216">            getXMPPServer().stop();</span>
+        }
+<span class="nc" id="L218">        catch (Exception e) {</span>
+<span class="nc" id="L219">            Log.error(e.getMessage(), e);</span>
+<span class="nc" id="L220">        }</span>
+<span class="nc" id="L221">        sleep();</span>
+<span class="nc" id="L222">    }</span>
+
+    public WebManager getManager() {
+<span class="nc" id="L225">        return this;</span>
+    }
+
+    public void validateService() {
+<span class="nc bnc" id="L229" title="All 2 branches missed.">        if (getPresenceManager() == null ||</span>
+<span class="nc bnc" id="L230" title="All 2 branches missed.">                getXMPPServer() == null) {</span>
+<span class="nc" id="L231">            showServerDown();</span>
+        }
+<span class="nc" id="L233">    }</span>
+
+    public boolean isServerRunning() {
+<span class="nc bnc" id="L236" title="All 4 branches missed.">        return !(getPresenceManager() == null || getXMPPServer() == null);</span>
+    }
+
+    public void setStart(int start) {
+<span class="nc" id="L240">        this.start = start;</span>
+<span class="nc" id="L241">    }</span>
+
+    public int getStart() {
+<span class="nc" id="L244">        return start;</span>
+    }
+
+    public void setRange(int range) {
+<span class="nc" id="L248">        this.range = range;</span>
+<span class="nc" id="L249">    }</span>
+
+    public int getRange() {
+<span class="nc" id="L252">        return range;</span>
+    }
+
+    public int getCurrentPage() {
+<span class="nc" id="L256">        return (start / range) + 1;</span>
+    }
+
+    private void sleep() {
+        // Sleep for a minute:
+        try {
+<span class="nc" id="L262">            Thread.sleep(3000L);</span>
+        }
+<span class="nc" id="L264">        catch (Exception ignored) {</span>
+            // Ignore.
+<span class="nc" id="L266">        }</span>
+<span class="nc" id="L267">    }</span>
+
+    protected void showServerDown() {
+        try {
+<span class="nc" id="L271">            response.sendRedirect(&quot;error-serverdown.jsp&quot;);</span>
+        }
+<span class="nc" id="L273">        catch (Exception ex) {</span>
+<span class="nc" id="L274">            ex.printStackTrace();</span>
+<span class="nc" id="L275">        }</span>
+<span class="nc" id="L276">    }</span>
+
+    /**
+     * Copies the contents at &lt;CODE&gt;src&lt;/CODE&gt; to &lt;CODE&gt;dst&lt;/CODE&gt;.
+     * @param src the source location
+     * @param dst the target location
+     * @throws IOException if the copy failed
+     */
+    public static void copy(URL src, File dst) throws IOException {
+
+<span class="nc" id="L286">        try (InputStream in = src.openStream()) {</span>
+<span class="nc" id="L287">            try (OutputStream out = new FileOutputStream(dst)) {</span>
+<span class="nc" id="L288">                dst.mkdirs();</span>
+<span class="nc" id="L289">                copy(in, out);</span>
+<span class="nc bnc" id="L290" title="All 8 branches missed.">            }</span>
+<span class="nc bnc" id="L291" title="All 8 branches missed.">        }</span>
+<span class="nc" id="L292">    }</span>
+
+    /**
+     * Common code for copy routines.  By convention, the streams are
+     * closed in the same method in which they were opened.  Thus,
+     * this method does not close the streams when the copying is done.
+     * @param in the input stream
+     * @param out the output stream
+     * @throws IOException if the copy failed
+     */
+    private static void copy(InputStream in, OutputStream out) throws IOException {
+<span class="nc" id="L303">        byte[] buffer = new byte[4096];</span>
+        while (true) {
+<span class="nc" id="L305">            int bytesRead = in.read(buffer);</span>
+<span class="nc bnc" id="L306" title="All 2 branches missed.">            if (bytesRead &lt; 0) {</span>
+<span class="nc" id="L307">                break;</span>
+            }
+<span class="nc" id="L309">            out.write(buffer, 0, bytesRead);</span>
+<span class="nc" id="L310">        }</span>
+<span class="nc" id="L311">    }</span>
+
+    /**
+     * Returns the number of rows per page for the specified page for the current logged user.
+     * The rows per page value is stored as a user property. The same property is being used for
+     * different pages. The encoding format is the following &quot;pageName1=value,pageName2=value&quot;.
+     *
+     * @param pageName     the name of the page to look up its stored value.
+     * @param defaultValue the default value to return if no user value was found.
+     * @return the number of rows per page for the specified page for the current logged user.
+     */
+    public int getRowsPerPage(String pageName, int defaultValue) {
+<span class="fc" id="L323">        return getPageProperty(pageName, &quot;console.rows_per_page&quot;, defaultValue);</span>
+    }
+
+    /**
+     * Sets the new number of rows per page for the specified page for the current logged user.
+     * The rows per page value is stored as a user property. The same property is being used for
+     * different pages. The encoding format is the following &quot;pageName1=value,pageName2=value&quot;.
+     *
+     * @param pageName the name of the page to stored its new value.
+     * @param newValue the new rows per page value.
+     */
+    public void setRowsPerPage(String pageName, int newValue) {
+<span class="fc" id="L335">        setPageProperty(pageName, &quot;console.rows_per_page&quot;, newValue);</span>
+<span class="fc" id="L336">    }</span>
+
+    /**
+     * Returns the number of seconds between each page refresh for the specified page for the
+     * current logged user. The value is stored as a user property. The same property is being
+     * used for different pages. The encoding format is the following
+     * &quot;pageName1=value,pageName2=value&quot;.
+     *
+     * @param pageName     the name of the page to look up its stored value.
+     * @param defaultValue the default value to return if no user value was found.
+     * @return the number of seconds between each page refresh for the specified page for
+     *         the current logged user.
+     */
+    public int getRefreshValue(String pageName, int defaultValue) {
+<span class="nc" id="L350">        return getPageProperty(pageName, &quot;console.refresh&quot;, defaultValue);</span>
+    }
+
+    /**
+     * Sets the number of seconds between each page refresh for the specified page for the
+     * current logged user. The value is stored as a user property. The same property is being
+     * used for different pages. The encoding format is the following
+     * &quot;pageName1=value,pageName2=value&quot;.
+     *
+     * @param pageName the name of the page to stored its new value.
+     * @param newValue the new number of seconds between each page refresh.
+     */
+    public void setRefreshValue(String pageName, int newValue) {
+<span class="nc" id="L363">        setPageProperty(pageName, &quot;console.refresh&quot;, newValue);</span>
+<span class="nc" id="L364">    }</span>
+
+    public int getPageProperty(String pageName, String property, int defaultValue) {
+<span class="fc" id="L367">        User user = getUser();</span>
+<span class="pc bpc" id="L368" title="1 of 2 branches missed.">        if (user != null) {</span>
+<span class="nc" id="L369">            String values = user.getProperties().get(property);</span>
+<span class="nc bnc" id="L370" title="All 2 branches missed.">            if (values != null) {</span>
+<span class="nc" id="L371">                StringTokenizer tokens = new StringTokenizer(values, &quot;,=&quot;);</span>
+<span class="nc bnc" id="L372" title="All 2 branches missed.">                while (tokens.hasMoreTokens()) {</span>
+<span class="nc" id="L373">                    String page = tokens.nextToken().trim();</span>
+<span class="nc" id="L374">                    String rows = tokens.nextToken().trim();</span>
+<span class="nc bnc" id="L375" title="All 2 branches missed.">                    if  (pageName.equals(page)) {</span>
+                        try {
+<span class="nc" id="L377">                            return Integer.parseInt(rows);</span>
+                        }
+<span class="nc" id="L379">                        catch (NumberFormatException e) {</span>
+<span class="nc" id="L380">                            return defaultValue;</span>
+                        }
+                    }
+<span class="nc" id="L383">                }</span>
+            }
+        }
+<span class="fc" id="L386">        return defaultValue;</span>
+    }
+
+    public void setPageProperty(String pageName, String property, int newValue) {
+<span class="fc" id="L390">        String toStore = pageName + &quot;=&quot; + newValue;</span>
+<span class="fc" id="L391">        User user = getUser();</span>
+<span class="pc bpc" id="L392" title="1 of 2 branches missed.">        if (user != null) {</span>
+<span class="nc" id="L393">            String values = user.getProperties().get(property);</span>
+<span class="nc bnc" id="L394" title="All 2 branches missed.">            if (values != null) {</span>
+<span class="nc bnc" id="L395" title="All 2 branches missed.">                if (values.contains(toStore)) {</span>
+                    // The new value for the page was already stored so do nothing
+<span class="nc" id="L397">                    return;</span>
+                }
+                else {
+<span class="nc bnc" id="L400" title="All 2 branches missed.">                    if (values.contains(pageName)) {</span>
+                        // Replace an old value for the page with the new value
+<span class="nc" id="L402">                        int oldValue = getPageProperty(pageName, property, -1);</span>
+<span class="nc" id="L403">                        String toRemove = pageName + &quot;=&quot; + oldValue;</span>
+<span class="nc" id="L404">                        user.getProperties().put(property, values.replace(toRemove, toStore));</span>
+<span class="nc" id="L405">                    }</span>
+                    else {
+                        // Append the new page-value
+<span class="nc" id="L408">                        user.getProperties().put(property, values + &quot;,&quot; + toStore);</span>
+                    }
+                }
+            }
+            else {
+                // Store the new page-value as a new user property
+<span class="nc" id="L414">                user.getProperties().put(property, toStore);</span>
+            }
+        }
+<span class="fc" id="L417">    }</span>
+
+    public Cache[] getCaches() {
+<span class="nc" id="L420">        Cache[] caches =CacheFactory.getAllCaches();</span>
+<span class="nc" id="L421">        Arrays.sort(caches, new Comparator&lt;Cache&gt;() {</span>
+            @Override
+            public int compare(Cache cache1, Cache cache2) {
+<span class="nc" id="L424">                return cache1.getName().toLowerCase().compareTo(cache2.getName().toLowerCase());</span>
+            }
+        });
+<span class="nc" id="L427">        return caches;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

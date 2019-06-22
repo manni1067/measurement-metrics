@@ -1,0 +1,541 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>CertificateStoreManager.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.keystore</a> &gt; <span class="el_source">CertificateStoreManager.java</span></div><h1>CertificateStoreManager.java</h1><pre class="source lang-java linenums">package org.jivesoftware.openfire.keystore;
+
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.container.BasicModule;
+import org.jivesoftware.openfire.spi.ConnectionListener;
+import org.jivesoftware.openfire.spi.ConnectionManagerImpl;
+import org.jivesoftware.openfire.spi.ConnectionType;
+import org.jivesoftware.util.CollectionUtils;
+import org.jivesoftware.util.JiveGlobals;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.io.File;
+import java.io.IOException;
+import java.nio.file.Path;
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.function.Function;
+import java.util.function.Predicate;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
+import static org.jivesoftware.openfire.spi.ConnectionType.SOCKET_C2S;
+
+/**
+ * A manager of certificate stores.
+ *
+ */
+// TODO Code duplication should be reduced.
+// TODO Allow changing the store type.
+public class CertificateStoreManager extends BasicModule
+{
+<span class="nc" id="L34">    private final static Logger Log = LoggerFactory.getLogger( CertificateStoreManager.class );</span>
+
+<span class="nc" id="L36">    private final ConcurrentMap&lt;ConnectionType, CertificateStoreConfiguration&gt; typeToTrustStore    = new ConcurrentHashMap&lt;&gt;();</span>
+<span class="nc" id="L37">    private final ConcurrentMap&lt;ConnectionType, CertificateStoreConfiguration&gt; typeToIdentityStore = new ConcurrentHashMap&lt;&gt;();</span>
+<span class="nc" id="L38">    private final ConcurrentMap&lt;CertificateStoreConfiguration, IdentityStore&gt;  identityStores      = new ConcurrentHashMap&lt;&gt;();</span>
+<span class="nc" id="L39">    private final ConcurrentMap&lt;CertificateStoreConfiguration, TrustStore&gt;     trustStores         = new ConcurrentHashMap&lt;&gt;();</span>
+
+    private CertificateStoreWatcher storeWatcher;
+
+    public CertificateStoreManager( )
+    {
+<span class="nc" id="L45">        super( &quot;Certificate Store Manager&quot; );</span>
+<span class="nc" id="L46">    }</span>
+
+    @Override
+    public synchronized void initialize( XMPPServer server )
+    {
+<span class="nc" id="L51">        super.initialize( server );</span>
+
+<span class="nc" id="L53">        storeWatcher = new CertificateStoreWatcher();</span>
+
+<span class="nc bnc" id="L55" title="All 2 branches missed.">        for ( final ConnectionType type : ConnectionType.values() )</span>
+        {
+            try
+            {
+<span class="nc" id="L59">                Log.debug( &quot;(identity store for connection type '{}') Initializing store...&quot;, type );</span>
+<span class="nc" id="L60">                final CertificateStoreConfiguration identityStoreConfiguration = getIdentityStoreConfiguration( type );</span>
+<span class="nc bnc" id="L61" title="All 2 branches missed.">                if ( !identityStores.containsKey( identityStoreConfiguration ) )</span>
+                {
+<span class="nc" id="L63">                    final IdentityStore store = new IdentityStore( identityStoreConfiguration, false );</span>
+<span class="nc" id="L64">                    identityStores.put( identityStoreConfiguration, store );</span>
+<span class="nc" id="L65">                    storeWatcher.watch( store );</span>
+                }
+<span class="nc" id="L67">                typeToIdentityStore.put( type, identityStoreConfiguration );</span>
+            }
+<span class="nc" id="L69">            catch ( CertificateStoreConfigException | IOException e )</span>
+            {
+<span class="nc" id="L71">                Log.warn( &quot;(identity store for connection type '{}') Unable to instantiate store &quot;, type, e );</span>
+<span class="nc" id="L72">            }</span>
+
+            try
+            {
+<span class="nc" id="L76">                Log.debug( &quot;(trust store for connection type '{}') Initializing store...&quot;, type );</span>
+<span class="nc" id="L77">                final CertificateStoreConfiguration trustStoreConfiguration = getTrustStoreConfiguration( type );</span>
+<span class="nc bnc" id="L78" title="All 2 branches missed.">                if ( !trustStores.containsKey( trustStoreConfiguration ) )</span>
+                {
+<span class="nc" id="L80">                    final TrustStore store = new TrustStore( trustStoreConfiguration, false );</span>
+<span class="nc" id="L81">                    trustStores.put( trustStoreConfiguration, store );</span>
+<span class="nc" id="L82">                    storeWatcher.watch( store );</span>
+                }
+<span class="nc" id="L84">                typeToTrustStore.put( type, trustStoreConfiguration );</span>
+            }
+<span class="nc" id="L86">            catch ( CertificateStoreConfigException | IOException e )</span>
+            {
+<span class="nc" id="L88">                Log.warn( &quot;(trust store for connection type '{}') Unable to instantiate store &quot;, type, e );</span>
+<span class="nc" id="L89">            }</span>
+        }
+<span class="nc" id="L91">    }</span>
+
+    @Override
+    public synchronized void destroy()
+    {
+<span class="nc" id="L96">        storeWatcher.destroy();</span>
+<span class="nc" id="L97">        typeToIdentityStore.clear();</span>
+<span class="nc" id="L98">        typeToTrustStore.clear();</span>
+<span class="nc" id="L99">        identityStores.clear();</span>
+<span class="nc" id="L100">        trustStores.clear();</span>
+<span class="nc" id="L101">        super.destroy();</span>
+<span class="nc" id="L102">    }</span>
+
+    public IdentityStore getIdentityStore( ConnectionType type )
+    {
+<span class="nc" id="L106">        final CertificateStoreConfiguration configuration = typeToIdentityStore.get( type );</span>
+<span class="nc bnc" id="L107" title="All 2 branches missed.">        if (configuration == null) {</span>
+<span class="nc" id="L108">            return null;</span>
+        }
+<span class="nc" id="L110">        return identityStores.get( configuration );</span>
+    }
+
+    public TrustStore getTrustStore( ConnectionType type )
+    {
+<span class="nc" id="L115">        final CertificateStoreConfiguration configuration = typeToTrustStore.get( type );</span>
+<span class="nc bnc" id="L116" title="All 2 branches missed.">        if (configuration == null) {</span>
+<span class="nc" id="L117">            return null;</span>
+        }
+<span class="nc" id="L119">        return trustStores.get( configuration );</span>
+    }
+
+    public void replaceIdentityStore( ConnectionType type, CertificateStoreConfiguration configuration, boolean createIfAbsent ) throws CertificateStoreConfigException
+    {
+<span class="nc bnc" id="L124" title="All 2 branches missed.">        if ( type == null)</span>
+        {
+<span class="nc" id="L126">            throw new IllegalArgumentException( &quot;Argument 'type' cannot be null.&quot; );</span>
+        }
+<span class="nc bnc" id="L128" title="All 2 branches missed.">        if ( configuration == null)</span>
+        {
+<span class="nc" id="L130">            throw new IllegalArgumentException( &quot;Argument 'configuration' cannot be null.&quot; );</span>
+        }
+
+<span class="nc" id="L133">        final CertificateStoreConfiguration oldConfig = typeToIdentityStore.get( type ); // can be null if persisted properties are invalid</span>
+
+<span class="nc bnc" id="L135" title="All 4 branches missed.">        if ( oldConfig == null || !oldConfig.equals( configuration ) )</span>
+        {
+            // If the new store is not already being used by any other type, it'll need to be registered.
+<span class="nc bnc" id="L138" title="All 2 branches missed.">            if ( !identityStores.containsKey( configuration ) )</span>
+            {
+                // This constructor can throw an exception. If it does, the state of the manager should not have already changed.
+<span class="nc" id="L141">                final IdentityStore store = new IdentityStore( configuration, createIfAbsent );</span>
+<span class="nc" id="L142">                identityStores.put( configuration, store );</span>
+<span class="nc" id="L143">                storeWatcher.watch( store );</span>
+            }
+
+<span class="nc" id="L146">            typeToIdentityStore.put( type, configuration );</span>
+
+
+            // If the old store is not used by any other type, it can be shut down.
+<span class="nc bnc" id="L150" title="All 4 branches missed.">            if ( oldConfig != null &amp;&amp; !typeToIdentityStore.containsValue( oldConfig ) )</span>
+            {
+<span class="nc" id="L152">                final IdentityStore store = identityStores.remove( oldConfig );</span>
+<span class="nc bnc" id="L153" title="All 2 branches missed.">                if ( store != null )</span>
+                {
+<span class="nc" id="L155">                    storeWatcher.unwatch( store );</span>
+                }
+            }
+
+            // Update all connection listeners that were using the old configuration.
+<span class="nc" id="L160">            final ConnectionManagerImpl connectionManager = ((ConnectionManagerImpl) XMPPServer.getInstance().getConnectionManager());</span>
+<span class="nc bnc" id="L161" title="All 2 branches missed.">            for ( ConnectionListener connectionListener : connectionManager.getListeners( type ) ) {</span>
+                try {
+<span class="nc" id="L163">                    connectionListener.setIdentityStoreConfiguration( configuration );</span>
+<span class="nc" id="L164">                } catch ( RuntimeException e ) {</span>
+<span class="nc" id="L165">                    Log.warn( &quot;An exception occurred while trying to update the identity store configuration for connection type '&quot; + type + &quot;'&quot;, e );</span>
+<span class="nc" id="L166">                }</span>
+<span class="nc" id="L167">            }</span>
+        }
+
+        // Always store the new configuration in properties, to make sure that we override a potential fallback.
+<span class="nc" id="L171">        JiveGlobals.setProperty( type.getPrefix() + &quot;keystore&quot;, configuration.getFile().getPath() ); // FIXME ensure that this is relative to Openfire home!</span>
+<span class="nc" id="L172">        JiveGlobals.setProperty( type.getPrefix() + &quot;keypass&quot;, new String( configuration.getPassword() ) );</span>
+<span class="nc" id="L173">    }</span>
+
+    public void replaceTrustStore( ConnectionType type, CertificateStoreConfiguration configuration, boolean createIfAbsent ) throws CertificateStoreConfigException
+    {
+<span class="nc bnc" id="L177" title="All 2 branches missed.">        if ( type == null)</span>
+        {
+<span class="nc" id="L179">            throw new IllegalArgumentException( &quot;Argument 'type' cannot be null.&quot; );</span>
+        }
+<span class="nc bnc" id="L181" title="All 2 branches missed.">        if ( configuration == null)</span>
+        {
+<span class="nc" id="L183">            throw new IllegalArgumentException( &quot;Argument 'configuration' cannot be null.&quot; );</span>
+        }
+
+<span class="nc" id="L186">        final CertificateStoreConfiguration oldConfig = typeToTrustStore.get( type ); // can be null if persisted properties are invalid</span>
+
+<span class="nc bnc" id="L188" title="All 4 branches missed.">        if ( oldConfig == null || !oldConfig.equals( configuration ) )</span>
+        {
+            // If the new store is not already being used by any other type, it'll need to be registered.
+<span class="nc bnc" id="L191" title="All 2 branches missed.">            if ( !trustStores.containsKey( configuration ) )</span>
+            {
+                // This constructor can throw an exception. If it does, the state of the manager should not have already changed.
+<span class="nc" id="L194">                final TrustStore store = new TrustStore( configuration, createIfAbsent );</span>
+<span class="nc" id="L195">                trustStores.put( configuration, store );</span>
+<span class="nc" id="L196">                storeWatcher.watch( store );</span>
+            }
+
+<span class="nc" id="L199">            typeToTrustStore.put( type, configuration );</span>
+
+
+            // If the old store is not used by any other type, it can be shut down.
+<span class="nc bnc" id="L203" title="All 4 branches missed.">            if ( oldConfig != null &amp;&amp; !typeToTrustStore.containsValue( oldConfig ) )</span>
+            {
+<span class="nc" id="L205">                final TrustStore store = trustStores.remove( oldConfig );</span>
+<span class="nc bnc" id="L206" title="All 2 branches missed.">                if ( store != null )</span>
+                {
+<span class="nc" id="L208">                    storeWatcher.unwatch( store );</span>
+                }
+            }
+
+            // Update all connection listeners that were using the old configuration.
+<span class="nc" id="L213">            final ConnectionManagerImpl connectionManager = ((ConnectionManagerImpl) XMPPServer.getInstance().getConnectionManager());</span>
+<span class="nc bnc" id="L214" title="All 2 branches missed.">            for ( ConnectionListener connectionListener : connectionManager.getListeners( type ) ) {</span>
+                try {
+<span class="nc" id="L216">                    connectionListener.setTrustStoreConfiguration( configuration );</span>
+<span class="nc" id="L217">                } catch ( RuntimeException e ) {</span>
+<span class="nc" id="L218">                    Log.warn( &quot;An exception occurred while trying to update the trust store configuration for connection type '&quot; + type + &quot;'&quot;, e );</span>
+<span class="nc" id="L219">                }</span>
+<span class="nc" id="L220">            }</span>
+
+        }
+
+        // Always store the new configuration in properties, to make sure that we override a potential fallback.
+<span class="nc" id="L225">        JiveGlobals.setProperty( type.getPrefix() + &quot;truststore&quot;, configuration.getFile().getPath() ); // FIXME ensure that this is relative to Openfire home!</span>
+<span class="nc" id="L226">        JiveGlobals.setProperty( type.getPrefix() + &quot;trustpass&quot;, new String( configuration.getPassword() )  );</span>
+<span class="nc" id="L227">    }</span>
+
+    public CertificateStoreConfiguration getIdentityStoreConfiguration( ConnectionType type ) throws IOException
+    {
+        // Getting individual properties might use fallbacks. It is assumed (but not asserted) that each property value
+        // is obtained from the same connectionType (which is either the argument to this method, or one of its
+        // fallbacks.
+<span class="nc" id="L234">        final String keyStoreType = getKeyStoreType( type );</span>
+<span class="nc" id="L235">        final String password = getIdentityStorePassword( type );</span>
+<span class="nc" id="L236">        final String location = getIdentityStoreLocation( type );</span>
+<span class="nc" id="L237">        final String backupDirectory = getIdentityStoreBackupDirectory( type );</span>
+<span class="nc" id="L238">        final File file = canonicalize( location );</span>
+<span class="nc" id="L239">        final File dir = canonicalize( backupDirectory );</span>
+
+<span class="nc" id="L241">        return new CertificateStoreConfiguration( keyStoreType, file, password.toCharArray(), dir );</span>
+    }
+
+    public CertificateStoreConfiguration getTrustStoreConfiguration( ConnectionType type ) throws IOException
+    {
+        // Getting individual properties might use fallbacks. It is assumed (but not asserted) that each property value
+        // is obtained from the same connectionType (which is either the argument to this method, or one of its
+        // fallbacks.
+<span class="nc" id="L249">        final String keyStoreType = getKeyStoreType( type );</span>
+<span class="nc" id="L250">        final String password = getTrustStorePassword( type );</span>
+<span class="nc" id="L251">        final String location = getTrustStoreLocation( type );</span>
+<span class="nc" id="L252">        final String backupDirectory = getTrustStoreBackupDirectory( type );</span>
+<span class="nc" id="L253">        final File file = canonicalize( location );</span>
+<span class="nc" id="L254">        final File dir = canonicalize( backupDirectory );</span>
+
+<span class="nc" id="L256">        return new CertificateStoreConfiguration( keyStoreType, file, password.toCharArray(), dir );</span>
+    }
+
+    /**
+     * Creates a backup of all files that back any of the certificate stores.
+     *
+     * Each certificate store can be configured to use a distinct file, as well as use a distinct backup location.
+     * In practise, there will be a lot of overlap. This implementation creates a backup (by copying the file) for
+     * each unique file/backup-location combination in the collection of all certificate stores.
+     * @return the paths the store was backed up to
+     * @throws IOException if the store could not be backed up
+     */
+    public Collection&lt;Path&gt; backup() throws IOException
+    {
+        // Create a collection that holds all of the certificate stores.
+<span class="nc" id="L271">        final Collection&lt;CertificateStore&gt; allStores = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L272">        allStores.addAll( identityStores.values() );</span>
+<span class="nc" id="L273">        allStores.addAll( trustStores.values() );</span>
+
+        // Extract the set of unique file/backup-directory combinations. This prevents Openfire from creating duplicate backup files.
+<span class="nc" id="L276">        final Set&lt;CertificateStore&gt; unique = allStores.stream().filter(</span>
+<span class="nc" id="L277">            CollectionUtils.distinctByKey(</span>
+<span class="nc" id="L278">                store -&gt; store.getConfiguration().getFile().getAbsolutePath() + &quot;|&quot; + store.configuration.backupDirectory.getAbsolutePath() ) )</span>
+<span class="nc" id="L279">            .collect( Collectors.toSet() );</span>
+
+        // Trigger a backup for each of the unique combinations, and record the unique backup locations
+<span class="nc" id="L282">        final Collection&lt;Path&gt; backups = unique.stream()</span>
+<span class="nc" id="L283">            .map( CertificateStore::backup )</span>
+<span class="nc" id="L284">            .filter( Objects::nonNull )</span>
+<span class="nc" id="L285">            .distinct()</span>
+<span class="nc" id="L286">            .sorted()</span>
+<span class="nc" id="L287">            .collect( Collectors.toList() );</span>
+
+        // If the number of backups is smaller than the number of unique file/backup-directory combinations, something went wrong!
+<span class="nc bnc" id="L290" title="All 2 branches missed.">        if ( unique.size() != backups.size() ) {</span>
+<span class="nc" id="L291">            throw new IOException( &quot;Unable to create (all) backups!&quot; );</span>
+        }
+
+<span class="nc" id="L294">        return backups;</span>
+    }
+
+    /**
+     * The KeyStore type (jks, jceks, pkcs12, etc) for the identity and trust store for connections created by this
+     * listener.
+     *
+     * @param type the connection type
+     * @return a store type (never null).
+     * @see &lt;a href=&quot;https://docs.oracle.com/javase/7/docs/technotes/guides/security/StandardNames.html#KeyStore&quot;&gt;Java Cryptography Architecture Standard Algorithm Name Documentation&lt;/a&gt;
+     */
+    public static String getKeyStoreType( ConnectionType type )
+    {
+<span class="nc" id="L307">        final String propertyName = type.getPrefix() + &quot;storeType&quot;;</span>
+<span class="nc" id="L308">        final String defaultValue = &quot;jks&quot;;</span>
+
+<span class="nc bnc" id="L310" title="All 2 branches missed.">        if ( type.getFallback() == null )</span>
+        {
+<span class="nc" id="L312">            return JiveGlobals.getProperty( propertyName, defaultValue ).trim();</span>
+        }
+        else
+        {
+<span class="nc" id="L316">            return JiveGlobals.getProperty( propertyName, getKeyStoreType( type.getFallback() ) ).trim();</span>
+        }
+    }
+
+    static void setKeyStoreType( ConnectionType type, String keyStoreType )
+    {
+        // Always set the property explicitly even if it appears the equal to the old value (the old value might be a fallback value).
+<span class="nc" id="L323">        JiveGlobals.setProperty( type.getPrefix() + &quot;storeType&quot;, keyStoreType );</span>
+
+<span class="nc" id="L325">        final String oldKeyStoreType = getKeyStoreType( type );</span>
+<span class="nc bnc" id="L326" title="All 2 branches missed.">        if ( oldKeyStoreType.equals( keyStoreType ) )</span>
+        {
+<span class="nc" id="L328">            Log.debug( &quot;Ignoring KeyStore type change request (to '{}'): listener already in this state.&quot;, keyStoreType );</span>
+<span class="nc" id="L329">            return;</span>
+        }
+
+<span class="nc" id="L332">        Log.debug( &quot;Changing KeyStore type from '{}' to '{}'.&quot;, oldKeyStoreType, keyStoreType );</span>
+<span class="nc" id="L333">    }</span>
+
+    /**
+     * The password of the identity store for connection created by this listener.
+     *
+     * @return a password (never null).
+     */
+    static String getIdentityStorePassword( ConnectionType type )
+    {
+<span class="nc" id="L342">        final String propertyName = type.getPrefix() + &quot;keypass&quot;;</span>
+<span class="nc" id="L343">        final String defaultValue = &quot;changeit&quot;;</span>
+
+<span class="nc bnc" id="L345" title="All 2 branches missed.">        if ( type.getFallback() == null )</span>
+        {
+<span class="nc" id="L347">            return JiveGlobals.getProperty( propertyName, defaultValue ).trim();</span>
+        }
+        else
+        {
+<span class="nc" id="L351">            return JiveGlobals.getProperty( propertyName, getIdentityStorePassword( type.getFallback() ) ).trim();</span>
+        }
+    }
+
+    /**
+     * The password of the trust store for connections created by this listener.
+     *
+     * @return a password (never null).
+     */
+    static String getTrustStorePassword( ConnectionType type )
+    {
+<span class="nc" id="L362">        final String propertyName = type.getPrefix() + &quot;trustpass&quot;;</span>
+<span class="nc" id="L363">        final String defaultValue = &quot;changeit&quot;;</span>
+
+<span class="nc bnc" id="L365" title="All 2 branches missed.">        if ( type.getFallback() == null )</span>
+        {
+<span class="nc" id="L367">            return JiveGlobals.getProperty( propertyName, defaultValue ).trim();</span>
+        }
+        else
+        {
+<span class="nc" id="L371">            return JiveGlobals.getProperty( propertyName, getTrustStorePassword( type.getFallback() ) ).trim();</span>
+        }
+    }
+
+    /**
+     * The location (relative to OPENFIRE_HOME) of the identity store for connections created by this listener.
+     *
+     * @return a path (never null).
+     */
+    static String getIdentityStoreLocation( ConnectionType type )
+    {
+<span class="nc" id="L382">        final String propertyName = type.getPrefix()  + &quot;keystore&quot;;</span>
+<span class="nc" id="L383">        final String defaultValue = &quot;resources&quot; + File.separator + &quot;security&quot; + File.separator + &quot;keystore&quot;;</span>
+
+<span class="nc bnc" id="L385" title="All 2 branches missed.">        if ( type.getFallback() == null )</span>
+        {
+<span class="nc" id="L387">            return JiveGlobals.getProperty( propertyName, defaultValue ).trim();</span>
+        }
+        else
+        {
+<span class="nc" id="L391">            return JiveGlobals.getProperty( propertyName, getIdentityStoreLocation( type.getFallback() ) ).trim();</span>
+        }
+    }
+
+    /**
+     * The location (relative to OPENFIRE_HOME) of the trust store for connections created by this listener.
+     *
+     * @return a path (never null).
+     */
+    static String getTrustStoreLocation( ConnectionType type )
+    {
+<span class="nc" id="L402">        final String propertyName = type.getPrefix()  + &quot;truststore&quot;;</span>
+        final String defaultValue;
+
+        // OF-1191: For client-oriented connection types, Openfire traditionally uses a different truststore.
+<span class="nc bnc" id="L406" title="All 2 branches missed.">        if ( Arrays.asList( SOCKET_C2S, ConnectionType.BOSH_C2S, ConnectionType.WEBADMIN ).contains( type ) )</span>
+        {
+<span class="nc" id="L408">            defaultValue = &quot;resources&quot; + File.separator + &quot;security&quot; + File.separator + &quot;client.truststore&quot;;</span>
+        }
+        else
+        {
+<span class="nc" id="L412">            defaultValue = &quot;resources&quot; + File.separator + &quot;security&quot; + File.separator + &quot;truststore&quot;;</span>
+        }
+
+<span class="nc bnc" id="L415" title="All 2 branches missed.">        if ( type.getFallback() == null )</span>
+        {
+<span class="nc" id="L417">            return JiveGlobals.getProperty( propertyName, defaultValue ).trim();</span>
+        }
+        else
+        {
+<span class="nc" id="L421">            return JiveGlobals.getProperty( propertyName, getTrustStoreLocation( type.getFallback() ) ).trim();</span>
+        }
+    }
+
+    /**
+     * The location (relative to OPENFIRE_HOME) of the directory that holds backups for identity stores.
+     *
+     * @param type the connection type
+     * @return a path (never null).
+     */
+    public static String getIdentityStoreBackupDirectory( ConnectionType type )
+    {
+<span class="nc" id="L433">        final String propertyName = type.getPrefix()  + &quot;backup.keystore.location&quot;;</span>
+<span class="nc" id="L434">        final String defaultValue = &quot;resources&quot; + File.separator + &quot;security&quot; + File.separator + &quot;archive&quot; + File.separator;</span>
+
+<span class="nc bnc" id="L436" title="All 2 branches missed.">        if ( type.getFallback() == null )</span>
+        {
+<span class="nc" id="L438">            return JiveGlobals.getProperty( propertyName, defaultValue ).trim();</span>
+        }
+        else
+        {
+<span class="nc" id="L442">            return JiveGlobals.getProperty( propertyName, getIdentityStoreBackupDirectory( type.getFallback() ) ).trim();</span>
+        }
+    }
+
+    /**
+     * The location (relative to OPENFIRE_HOME) of the directory that holds backups for trust stores.
+     *
+     * @param type the connection type
+     * @return a path (never null).
+     */
+    public static String getTrustStoreBackupDirectory( ConnectionType type )
+    {
+<span class="nc" id="L454">        final String propertyName = type.getPrefix()  + &quot;backup.truststore.location&quot;;</span>
+<span class="nc" id="L455">        final String defaultValue = &quot;resources&quot; + File.separator + &quot;security&quot; + File.separator + &quot;archive&quot; + File.separator;</span>
+
+<span class="nc bnc" id="L457" title="All 2 branches missed.">        if ( type.getFallback() == null )</span>
+        {
+<span class="nc" id="L459">            return JiveGlobals.getProperty( propertyName, defaultValue ).trim();</span>
+        }
+        else
+        {
+<span class="nc" id="L463">            return JiveGlobals.getProperty( propertyName, getTrustStoreBackupDirectory( type.getFallback() ) ).trim();</span>
+        }
+    }
+
+    /**
+     * Canonicalizes a path. When the provided path is a relative path, it is interpreted as to be relative to the home
+     * directory of Openfire.
+     *
+     * @param path A path (cannot be null)
+     * @return A canonical representation of the path.
+     */
+    static File canonicalize( String path ) throws IOException
+    {
+<span class="nc" id="L476">        File file = new File( path );</span>
+<span class="nc bnc" id="L477" title="All 2 branches missed.">        if (!file.isAbsolute()) {</span>
+<span class="nc" id="L478">            file = new File( JiveGlobals.getHomeDirectory() + File.separator + path );</span>
+        }
+
+<span class="nc" id="L481">        return file;</span>
+    }
+
+    /**
+     * Checks if Openfire is configured to use the same set of three keystore files for all connection types (one
+     * identity store, and two trust stores - one for client-based connections, and one for server/component-based
+     * connections).
+     *
+     * This method will return 'false' when running Openfire without changes to its default keystore configuration. If
+     * changes are made to use different keystores for at least one connection type, this method returns 'true'.
+     *
+     * @return true if Openfire is using different keystores based on the type of connection, false when running with the default store configuration.
+     * @throws IOException if there was an IO error
+     */
+    public boolean usesDistinctConfigurationForEachType() throws IOException
+    {
+<span class="nc" id="L497">        CertificateStoreConfiguration identityStoreConfiguration = null;</span>
+<span class="nc" id="L498">        CertificateStoreConfiguration c2sTrustStoreConfiguration = null;</span>
+<span class="nc" id="L499">        CertificateStoreConfiguration s2sTrustStoreConfiguration = null;</span>
+<span class="nc bnc" id="L500" title="All 2 branches missed.">        for ( ConnectionType connectionType : ConnectionType.values() )</span>
+        {
+            // Identity stores
+<span class="nc bnc" id="L503" title="All 2 branches missed.">            if ( identityStoreConfiguration == null )</span>
+            {
+<span class="nc" id="L505">                identityStoreConfiguration = getIdentityStoreConfiguration( connectionType );</span>
+            }
+<span class="nc bnc" id="L507" title="All 2 branches missed.">            if ( !identityStoreConfiguration.equals( getIdentityStoreConfiguration( connectionType ) ) )</span>
+            {
+<span class="nc" id="L509">                return true;</span>
+            }
+
+            // Client-to-Server trust stores
+<span class="nc bnc" id="L513" title="All 6 branches missed.">            if ( connectionType == SOCKET_C2S || (connectionType.getFallback() != null &amp;&amp; connectionType.getFallback() == SOCKET_C2S) )</span>
+            {
+<span class="nc bnc" id="L515" title="All 2 branches missed.">                if ( c2sTrustStoreConfiguration == null )</span>
+                {
+<span class="nc" id="L517">                    c2sTrustStoreConfiguration = getTrustStoreConfiguration( connectionType );</span>
+                }
+<span class="nc bnc" id="L519" title="All 2 branches missed.">                if ( !c2sTrustStoreConfiguration.equals( getTrustStoreConfiguration( connectionType ) ) )</span>
+                {
+<span class="nc" id="L521">                    return true;</span>
+                }
+            }
+            else
+            // Server-to-Server trust stores (includes component connections)
+            {
+<span class="nc bnc" id="L527" title="All 2 branches missed.">                if ( s2sTrustStoreConfiguration == null )</span>
+                {
+<span class="nc" id="L529">                    s2sTrustStoreConfiguration = getTrustStoreConfiguration( connectionType );</span>
+                }
+<span class="nc bnc" id="L531" title="All 2 branches missed.">                if ( !s2sTrustStoreConfiguration.equals( getTrustStoreConfiguration( connectionType ) ) )</span>
+                {
+<span class="nc" id="L533">                    return true;</span>
+                }
+            }
+        }
+
+<span class="nc" id="L538">        return false;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

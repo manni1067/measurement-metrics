@@ -1,0 +1,139 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>LdapAuthorizationPolicy.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.ldap</a> &gt; <span class="el_source">LdapAuthorizationPolicy.java</span></div><h1>LdapAuthorizationPolicy.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2004-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.ldap;
+
+import org.jivesoftware.openfire.auth.AuthorizationPolicy;
+import org.jivesoftware.util.JiveGlobals;
+import org.xmpp.packet.JID;
+
+import javax.naming.directory.Attribute;
+import javax.naming.directory.Attributes;
+import javax.naming.directory.DirContext;
+
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Enumeration;
+
+/**
+ * Provider for authorization using LDAP. Checks if the authenticated
+ * principal is in the user's LDAP object using the authorizeField
+ * from the system properties. An entry in that file would
+ * look like the following:
+ *
+ * &lt;ul&gt;
+ * &lt;li&gt;{@code ldap.authorizeField = k5login}&lt;/li&gt;
+ * &lt;/ul&gt;
+ *
+ * This implementation requires that LDAP be configured, obviously.
+ *
+ * @author Jay Kline
+ */
+public class LdapAuthorizationPolicy implements AuthorizationPolicy {
+
+    private LdapManager manager;
+    private String usernameField;
+    private String authorizeField;
+
+<span class="nc" id="L51">    public LdapAuthorizationPolicy() {</span>
+        // Convert XML based provider setup to Database based
+<span class="nc" id="L53">        JiveGlobals.migrateProperty(&quot;ldap.authorizeField&quot;);</span>
+
+<span class="nc" id="L55">        manager = LdapManager.getInstance();</span>
+<span class="nc" id="L56">        usernameField = manager.getUsernameField();</span>
+<span class="nc" id="L57">        authorizeField = JiveGlobals.getProperty(&quot;ldap.authorizeField&quot;, &quot;k5login&quot;);</span>
+<span class="nc" id="L58">    }</span>
+
+    /**
+     * Returns if the principal is explicitly authorized to the JID, throws
+     * an UnauthorizedException otherwise
+     *
+     * @param username  The username requested.import org.jivesoftware.openfire.ldap.*;
+     * @param principal The principal requesting the username.
+     */
+    @Override
+    public boolean authorize(String username, String principal) {
+<span class="nc" id="L69">        return getAuthorized(username).contains(principal);</span>
+    }
+
+    /**
+     * Returns a String Collection of principals that are authorized to use
+     * the named user.
+     *
+     * @param username the username.
+     * @return A String Collection of principals that are authorized.
+     */
+    private Collection&lt;String&gt; getAuthorized(String username) {
+        // Un-escape Node
+<span class="nc" id="L81">        username = JID.unescapeNode(username);</span>
+
+<span class="nc" id="L83">        Collection&lt;String&gt; authorized = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L84">        DirContext ctx = null;</span>
+        try {
+<span class="nc" id="L86">            String userDN = manager.findUserDN(username);</span>
+            // Load record.
+<span class="nc" id="L88">            String[] attributes = new String[]{</span>
+                    usernameField,
+                    authorizeField
+            };
+<span class="nc" id="L92">            ctx = manager.getContext();</span>
+<span class="nc" id="L93">            Attributes attrs = ctx.getAttributes(userDN, attributes);</span>
+<span class="nc" id="L94">            Attribute authorizeField_a = attrs.get(authorizeField);</span>
+<span class="nc bnc" id="L95" title="All 2 branches missed.">            if (authorizeField_a != null) {</span>
+<span class="nc bnc" id="L96" title="All 2 branches missed.">                for (Enumeration e = authorizeField_a.getAll(); e.hasMoreElements();) {</span>
+<span class="nc" id="L97">                    authorized.add((String)e.nextElement());</span>
+                }
+            }
+
+<span class="nc" id="L101">            return authorized;</span>
+        }
+<span class="nc" id="L103">        catch (Exception e) {</span>
+            // Ignore.
+        }
+        finally {
+<span class="nc" id="L107">            try {</span>
+<span class="nc bnc" id="L108" title="All 6 branches missed.">                if (ctx != null) {</span>
+<span class="nc" id="L109">                    ctx.close();</span>
+                }
+            }
+<span class="nc" id="L112">            catch (Exception ignored) {</span>
+                // Ignore.
+<span class="nc" id="L114">            }</span>
+<span class="nc" id="L115">        }</span>
+<span class="nc" id="L116">        return authorized;</span>
+    }
+
+    /**
+     * Returns the short name of the Policy
+     *
+     * @return The short name of the Policy
+     */
+    @Override
+    public String name() {
+<span class="nc" id="L126">        return &quot;LDAP Authorization Policy&quot;;</span>
+    }
+
+    /**
+     * Returns a description of the Policy
+     *
+     * @return The description of the Policy.
+     */
+    @Override
+    public String description() {
+<span class="nc" id="L136">        return &quot;Provider for authorization using LDAP. Checks if the authenticated principal is in the user's LDAP object using the authorizeField property.&quot;;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

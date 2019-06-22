@@ -1,0 +1,416 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>XmppWebSocket.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.websocket</a> &gt; <span class="el_source">XmppWebSocket.java</span></div><h1>XmppWebSocket.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2015 Tom Evans. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.jivesoftware.openfire.websocket;
+
+import java.io.IOException;
+import java.io.StringReader;
+import java.util.Locale;
+import java.util.TimerTask;
+
+import org.apache.commons.pool2.impl.GenericObjectPool;
+import org.dom4j.Document;
+import org.dom4j.Element;
+import org.dom4j.QName;
+import org.dom4j.io.XMPPPacketReader;
+import org.eclipse.jetty.websocket.api.RemoteEndpoint;
+import org.eclipse.jetty.websocket.api.Session;
+import org.eclipse.jetty.websocket.api.annotations.OnWebSocketClose;
+import org.eclipse.jetty.websocket.api.annotations.OnWebSocketConnect;
+import org.eclipse.jetty.websocket.api.annotations.OnWebSocketError;
+import org.eclipse.jetty.websocket.api.annotations.OnWebSocketMessage;
+import org.eclipse.jetty.websocket.api.annotations.WebSocket;
+import org.jivesoftware.openfire.Connection;
+import org.jivesoftware.openfire.SessionManager;
+import org.jivesoftware.openfire.SessionPacketRouter;
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.entitycaps.EntityCapabilitiesManager;
+import org.jivesoftware.openfire.multiplex.UnknownStanzaException;
+import org.jivesoftware.openfire.net.SASLAuthentication;
+import org.jivesoftware.openfire.net.SASLAuthentication.Status;
+import org.jivesoftware.openfire.session.ConnectionSettings;
+import org.jivesoftware.openfire.session.LocalClientSession;
+import org.jivesoftware.openfire.streammanagement.StreamManager;
+import org.jivesoftware.util.JiveConstants;
+import org.jivesoftware.util.JiveGlobals;
+import org.jivesoftware.util.TaskEngine;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmpp.packet.PacketError;
+import org.xmpp.packet.StreamError;
+
+import javax.xml.XMLConstants;
+
+/**
+ * This class handles all WebSocket events for the corresponding connection with a remote peer.
+ * Specifically the XMPP session is managed concurrently with the WebSocket session, including all
+ * framing and authentication requirements. Packets received from the remote peer are forwarded as
+ * needed via a {@link SessionPacketRouter}, and packets destined for the remote peer are forwarded
+ * via the corresponding {@link RemoteEndpoint}.
+ */
+
+@WebSocket
+public class XmppWebSocket {
+
+    private static final String STREAM_HEADER = &quot;open&quot;;
+    private static final String STREAM_FOOTER = &quot;close&quot;;
+    private static final String FRAMING_NAMESPACE = &quot;urn:ietf:params:xml:ns:xmpp-framing&quot;;
+
+<span class="nc" id="L71">    private static Logger Log = LoggerFactory.getLogger( XmppWebSocket.class );</span>
+    private static GenericObjectPool&lt;XMPPPacketReader&gt; readerPool;
+
+    private SessionPacketRouter router;
+    private Session wsSession;
+    private WebSocketConnection wsConnection;
+    private LocalClientSession xmppSession;
+<span class="nc" id="L78">    private boolean startedSASL = false;</span>
+    private Status saslStatus;
+    private TimerTask pingTask;
+
+<span class="nc" id="L82">    public XmppWebSocket() {</span>
+<span class="nc bnc" id="L83" title="All 2 branches missed.">        if (readerPool == null) {</span>
+<span class="nc" id="L84">            initializePool();</span>
+        }
+<span class="nc" id="L86">    }</span>
+
+    // WebSocket event handlers
+
+    @OnWebSocketConnect
+    public void onConnect(Session session)
+    {
+<span class="nc" id="L93">        wsSession = session;</span>
+<span class="nc" id="L94">        wsConnection = new WebSocketConnection(this, session.getRemoteAddress());</span>
+<span class="nc" id="L95">        pingTask = new PingTask();</span>
+<span class="nc" id="L96">        TaskEngine.getInstance().schedule(pingTask, JiveConstants.MINUTE, JiveConstants.MINUTE);</span>
+<span class="nc" id="L97">    }</span>
+
+    @OnWebSocketClose
+    public void onClose(int statusCode, String reason)
+    {
+<span class="nc" id="L102">        closeSession();</span>
+<span class="nc" id="L103">    }</span>
+
+    @OnWebSocketMessage
+    public void onTextMethod(String stanza)
+    {
+<span class="nc" id="L108">        XMPPPacketReader reader = null;</span>
+        try {
+<span class="nc" id="L110">            reader = readerPool.borrowObject();</span>
+<span class="nc" id="L111">            Document doc = reader.read(new StringReader(stanza));</span>
+
+<span class="nc bnc" id="L113" title="All 2 branches missed.">            if (xmppSession == null) {</span>
+<span class="nc" id="L114">                initiateSession(doc.getRootElement());</span>
+            } else {
+<span class="nc" id="L116">                processStanza(doc.getRootElement());</span>
+            }
+<span class="nc" id="L118">        } catch (Exception ex) {</span>
+<span class="nc" id="L119">            Log.error(&quot;Failed to process XMPP stanza&quot;, ex);</span>
+        } finally {
+<span class="nc bnc" id="L121" title="All 6 branches missed.">            if (reader != null) {</span>
+<span class="nc" id="L122">                readerPool.returnObject(reader);</span>
+            }
+<span class="nc" id="L124">        }</span>
+<span class="nc" id="L125">    }</span>
+
+    @OnWebSocketError
+    public void onError(Throwable error)
+    {
+<span class="nc" id="L130">        Log.error(&quot;Error detected; session: &quot; + wsSession, error);</span>
+<span class="nc" id="L131">        closeStream(new StreamError(StreamError.Condition.internal_server_error));</span>
+        try {
+<span class="nc bnc" id="L133" title="All 2 branches missed.">            if (wsSession != null) {</span>
+<span class="nc" id="L134">                wsSession.disconnect();</span>
+            }
+<span class="nc" id="L136">        } catch ( Exception e ) {</span>
+<span class="nc" id="L137">            Log.error(&quot;Error disconnecting websocket&quot;, e);</span>
+<span class="nc" id="L138">        }</span>
+<span class="nc" id="L139">    }</span>
+
+    // local (package) visibility
+
+    boolean isWebSocketOpen() {
+<span class="nc bnc" id="L144" title="All 4 branches missed.">        return wsSession != null &amp;&amp; wsSession.isOpen();</span>
+    }
+
+    boolean isWebSocketSecure() {
+<span class="nc bnc" id="L148" title="All 4 branches missed.">        return wsSession != null &amp;&amp; wsSession.isSecure();</span>
+    }
+
+    void closeWebSocket()
+    {
+<span class="nc bnc" id="L153" title="All 2 branches missed.">        if (isWebSocketOpen())</span>
+        {
+<span class="nc" id="L155">            wsSession.close();</span>
+        }
+<span class="nc" id="L157">        wsSession = null;</span>
+<span class="nc" id="L158">    }</span>
+
+    void closeSession() {
+<span class="nc bnc" id="L161" title="All 2 branches missed.">        if (isWebSocketOpen()) {</span>
+<span class="nc" id="L162">            closeStream(null);</span>
+        }
+<span class="nc bnc" id="L164" title="All 2 branches missed.">        if (xmppSession != null) {</span>
+<span class="nc bnc" id="L165" title="All 2 branches missed.">            if (!xmppSession.getStreamManager().getResume()) {</span>
+<span class="nc" id="L166">                Log.debug( &quot;Closing session {}&quot;, xmppSession );</span>
+<span class="nc" id="L167">                xmppSession.close();</span>
+<span class="nc" id="L168">                SessionManager.getInstance().removeSession(xmppSession);</span>
+            }
+<span class="nc" id="L170">            xmppSession = null;</span>
+        }
+<span class="nc" id="L172">    }</span>
+
+    public void setXmppSession(LocalClientSession session) {
+<span class="nc" id="L175">        this.xmppSession = session;</span>
+<span class="nc" id="L176">    }</span>
+
+    /**
+     * Send an XML packet to the remote peer
+     *
+     * @param packet XML to be sent to client
+     */
+    void deliver(String packet)
+    {
+<span class="nc bnc" id="L185" title="All 2 branches missed.">        if (isWebSocketOpen())</span>
+        {
+            try {
+<span class="nc" id="L188">                xmppSession.incrementServerPacketCount();</span>
+<span class="nc" id="L189">                wsSession.getRemote().sendStringByFuture(packet);</span>
+<span class="nc" id="L190">            } catch (Exception e) {</span>
+<span class="nc" id="L191">                Log.error(&quot;Packet delivery failed; session: &quot; + wsSession, e);</span>
+<span class="nc" id="L192">                Log.warn(&quot;Failed to deliver packet:\n&quot; + packet );</span>
+<span class="nc" id="L193">            }</span>
+        } else {
+<span class="nc" id="L195">            Log.warn(&quot;Failed to deliver packet; socket is closed:\n&quot; + packet);</span>
+        }
+<span class="nc" id="L197">    }</span>
+
+
+    static boolean isCompressionEnabled() {
+<span class="nc" id="L201">        return JiveGlobals.getProperty(</span>
+<span class="nc" id="L202">                ConnectionSettings.Client.COMPRESSION_SETTINGS, Connection.CompressionPolicy.optional.toString())</span>
+<span class="nc" id="L203">                .equalsIgnoreCase(Connection.CompressionPolicy.optional.toString());</span>
+    }
+
+    // helper/utility methods
+
+    /*
+     * Process stream headers/footers and authentication stanzas locally;
+     * otherwise delegate stanza handling to the session packet router.
+     */
+    private void processStanza(Element stanza) {
+
+        try {
+<span class="nc" id="L215">            String tag = stanza.getName();</span>
+<span class="nc bnc" id="L216" title="All 2 branches missed.">            if (STREAM_FOOTER.equals(tag)) {</span>
+<span class="nc" id="L217">                xmppSession.getStreamManager().formalClose();</span>
+<span class="nc" id="L218">                closeStream(null);</span>
+<span class="nc bnc" id="L219" title="All 2 branches missed.">            } else if (&quot;auth&quot;.equals(tag)) {</span>
+                // User is trying to authenticate using SASL
+<span class="nc" id="L221">                startedSASL = true;</span>
+                // Process authentication stanza
+<span class="nc" id="L223">                xmppSession.incrementClientPacketCount();</span>
+<span class="nc" id="L224">                saslStatus = SASLAuthentication.handle(xmppSession, stanza);</span>
+<span class="nc bnc" id="L225" title="All 6 branches missed.">            } else if (startedSASL &amp;&amp; &quot;response&quot;.equals(tag) || &quot;abort&quot;.equals(tag)) {</span>
+                // User is responding to SASL challenge. Process response
+<span class="nc" id="L227">                xmppSession.incrementClientPacketCount();</span>
+<span class="nc" id="L228">                saslStatus = SASLAuthentication.handle(xmppSession, stanza);</span>
+<span class="nc bnc" id="L229" title="All 2 branches missed.">            } else if (STREAM_HEADER.equals(tag)) {</span>
+                // restart the stream
+<span class="nc" id="L231">                openStream(stanza.attributeValue(QName.get(&quot;lang&quot;, XMLConstants.XML_NS_URI), &quot;en&quot;), stanza.attributeValue(&quot;from&quot;));</span>
+<span class="nc" id="L232">                configureStream();</span>
+<span class="nc bnc" id="L233" title="All 2 branches missed.">            } else if (Status.authenticated.equals(saslStatus)) {</span>
+<span class="nc bnc" id="L234" title="All 2 branches missed.">                if (router == null) {</span>
+<span class="nc bnc" id="L235" title="All 2 branches missed.">                    if (StreamManager.isStreamManagementActive()) {</span>
+<span class="nc" id="L236">                        router = new StreamManagementPacketRouter(xmppSession);</span>
+                    } else {
+                        // fall back for older Openfire installations
+<span class="nc" id="L239">                        router = new SessionPacketRouter(xmppSession);</span>
+                    }
+                }
+<span class="nc" id="L242">                router.route(stanza);</span>
+            } else {
+                // require authentication
+<span class="nc" id="L245">                Log.warn(&quot;Not authorized: &quot; + stanza.asXML());</span>
+<span class="nc" id="L246">                sendPacketError(stanza, PacketError.Condition.not_authorized);</span>
+            }
+<span class="nc" id="L248">        } catch (UnknownStanzaException use) {</span>
+<span class="nc" id="L249">            Log.warn(&quot;Received invalid stanza: &quot; + stanza.asXML());</span>
+<span class="nc" id="L250">            sendPacketError(stanza, PacketError.Condition.bad_request);</span>
+<span class="nc" id="L251">        } catch (Exception ex) {</span>
+<span class="nc" id="L252">            Log.error(&quot;Failed to process incoming stanza: &quot; + stanza.asXML(), ex);</span>
+<span class="nc" id="L253">            closeStream(new StreamError(StreamError.Condition.internal_server_error));</span>
+<span class="nc" id="L254">        }</span>
+<span class="nc" id="L255">    }</span>
+
+    /*
+     * Initiate the stream and corresponding XMPP session.
+     */
+    private void initiateSession(Element stanza) {
+        
+<span class="nc" id="L262">        String host = stanza.attributeValue(&quot;to&quot;);</span>
+<span class="nc" id="L263">        StreamError streamError = null;</span>
+<span class="nc" id="L264">        Locale language = Locale.forLanguageTag(stanza.attributeValue(QName.get(&quot;lang&quot;, XMLConstants.XML_NS_URI), &quot;en&quot;));</span>
+<span class="nc bnc" id="L265" title="All 2 branches missed.">        if (STREAM_FOOTER.equals(stanza.getName())) {</span>
+            // an error occurred while setting up the session
+<span class="nc" id="L267">            Log.warn(&quot;Client closed stream before session was established&quot;);</span>
+<span class="nc bnc" id="L268" title="All 2 branches missed.">        } else if (!STREAM_HEADER.equals(stanza.getName())) {</span>
+<span class="nc" id="L269">            streamError = new StreamError(StreamError.Condition.unsupported_stanza_type);</span>
+<span class="nc" id="L270">            Log.warn(&quot;Closing session due to incorrect stream header. Tag: &quot; + stanza.getName());</span>
+<span class="nc bnc" id="L271" title="All 2 branches missed.">        } else if (!FRAMING_NAMESPACE.equals(stanza.getNamespace().getURI())) {</span>
+            // Validate the stream namespace (https://tools.ietf.org/html/rfc7395#section-3.3.2)
+<span class="nc" id="L273">            streamError = new StreamError(StreamError.Condition.invalid_namespace);</span>
+<span class="nc" id="L274">            Log.warn(&quot;Closing session due to invalid namespace in stream header. Namespace: &quot; + stanza.getNamespace().getURI());</span>
+<span class="nc bnc" id="L275" title="All 2 branches missed.">        } else if (!validateHost(host)) {</span>
+<span class="nc" id="L276">            streamError = new StreamError(StreamError.Condition.host_unknown);</span>
+<span class="nc" id="L277">            Log.warn(&quot;Closing session due to incorrect hostname in stream header. Host: &quot; + host);</span>
+        } else {
+            // valid stream; initiate session
+<span class="nc" id="L280">            xmppSession = SessionManager.getInstance().createClientSession(wsConnection, language);</span>
+<span class="nc" id="L281">            xmppSession.setSessionData(&quot;ws&quot;, Boolean.TRUE);</span>
+        }
+
+<span class="nc bnc" id="L284" title="All 2 branches missed.">        if (xmppSession == null) {</span>
+<span class="nc" id="L285">            closeStream(streamError);</span>
+        } else {
+<span class="nc" id="L287">            openStream(language.toLanguageTag(), stanza.attributeValue(&quot;from&quot;));</span>
+<span class="nc" id="L288">            configureStream();</span>
+        }
+<span class="nc" id="L290">    }</span>
+
+    private boolean validateHost(String host) {
+<span class="nc" id="L293">        boolean result = true;</span>
+<span class="nc bnc" id="L294" title="All 2 branches missed.">        if (JiveGlobals.getBooleanProperty(&quot;xmpp.client.validate.host&quot;, false)) {</span>
+<span class="nc" id="L295">            result = XMPPServer.getInstance().getServerInfo().getXMPPDomain().equals(host);</span>
+        }
+<span class="nc" id="L297">        return result; </span>
+    }
+
+    /*
+     * Prepare response for stream initiation (sasl) or stream restart (features).
+     */
+    private void configureStream() {
+
+<span class="nc" id="L305">        StringBuilder sb = new StringBuilder(250);</span>
+<span class="nc" id="L306">        sb.append(&quot;&lt;stream:features xmlns:stream='http://etherx.jabber.org/streams'&gt;&quot;);</span>
+<span class="nc bnc" id="L307" title="All 2 branches missed.">        if (saslStatus == null) {</span>
+            // Include available SASL Mechanisms
+<span class="nc" id="L309">            sb.append(SASLAuthentication.getSASLMechanisms(xmppSession));</span>
+<span class="nc bnc" id="L310" title="All 2 branches missed.">            if (XMPPServer.getInstance().getIQRouter().supports(&quot;jabber:iq:auth&quot;)) {</span>
+<span class="nc" id="L311">                sb.append(&quot;&lt;auth xmlns='http://jabber.org/features/iq-auth'/&gt;&quot;);</span>
+            }
+<span class="nc bnc" id="L313" title="All 2 branches missed.">        } else if (saslStatus.equals(Status.authenticated)) {</span>
+            // Include Stream features
+<span class="nc" id="L315">            sb.append(String.format(&quot;&lt;bind xmlns='%s'/&gt;&quot;, &quot;urn:ietf:params:xml:ns:xmpp-bind&quot;));</span>
+<span class="nc" id="L316">            sb.append(String.format(&quot;&lt;session xmlns='%s'&gt;&lt;optional/&gt;&lt;/session&gt;&quot;, &quot;urn:ietf:params:xml:ns:xmpp-session&quot;));</span>
+
+<span class="nc bnc" id="L318" title="All 2 branches missed.">            if (StreamManager.isStreamManagementActive()) {</span>
+<span class="nc" id="L319">                sb.append(String.format(&quot;&lt;sm xmlns='%s'/&gt;&quot;, StreamManager.NAMESPACE_V3));</span>
+            }
+        }
+
+        // Add XEP-0115 entity capabilities for the server, so that peer can skip service discovery.
+<span class="nc" id="L324">        final String ver = EntityCapabilitiesManager.getLocalDomainVerHash();</span>
+<span class="nc bnc" id="L325" title="All 2 branches missed.">        if ( ver != null ) {</span>
+<span class="nc" id="L326">            sb.append( String.format( &quot;&lt;c xmlns=\&quot;http://jabber.org/protocol/caps\&quot; hash=\&quot;sha-1\&quot; node=\&quot;%s\&quot; ver=\&quot;%s\&quot;/&gt;&quot;, EntityCapabilitiesManager.OPENFIRE_IDENTIFIER_NODE, ver ) );</span>
+        }
+
+<span class="nc" id="L329">        sb.append(&quot;&lt;/stream:features&gt;&quot;);</span>
+<span class="nc" id="L330">        deliver(sb.toString());</span>
+<span class="nc" id="L331">    }</span>
+
+    private void openStream(String lang, String jid) {
+
+<span class="nc" id="L335">        xmppSession.incrementClientPacketCount();</span>
+<span class="nc" id="L336">        StringBuilder sb = new StringBuilder(250);</span>
+<span class="nc" id="L337">        sb.append(&quot;&lt;open &quot;);</span>
+<span class="nc bnc" id="L338" title="All 2 branches missed.">        if (jid != null) {</span>
+<span class="nc" id="L339">            sb.append(&quot;to='&quot;).append(jid).append(&quot;' &quot;);</span>
+        }
+<span class="nc" id="L341">        sb.append(&quot;from='&quot;).append(XMPPServer.getInstance().getServerInfo().getXMPPDomain()).append(&quot;' &quot;);</span>
+<span class="nc" id="L342">        sb.append(&quot;id='&quot;).append(xmppSession.getStreamID().toString()).append(&quot;' &quot;);</span>
+<span class="nc" id="L343">        sb.append(&quot;xmlns='&quot;).append(FRAMING_NAMESPACE).append(&quot;' &quot;);</span>
+<span class="nc" id="L344">        sb.append(&quot;xml:lang='&quot;).append(lang).append(&quot;' &quot;);</span>
+<span class="nc" id="L345">        sb.append(&quot;version='1.0'/&gt;&quot;);</span>
+<span class="nc" id="L346">        deliver(sb.toString());</span>
+<span class="nc" id="L347">    }</span>
+
+    private void closeStream(StreamError streamError)
+    {
+<span class="nc bnc" id="L351" title="All 2 branches missed.">        if (isWebSocketOpen()) {</span>
+
+<span class="nc bnc" id="L353" title="All 2 branches missed.">            if (streamError != null) {</span>
+<span class="nc" id="L354">                deliver(streamError.toXML());</span>
+            }
+
+<span class="nc" id="L357">            StringBuilder sb = new StringBuilder(250);</span>
+<span class="nc" id="L358">            sb.append(&quot;&lt;close &quot;);</span>
+<span class="nc" id="L359">            sb.append(&quot;xmlns='&quot;).append(FRAMING_NAMESPACE).append(&quot;'&quot;);</span>
+<span class="nc" id="L360">            sb.append(&quot;/&gt;&quot;);</span>
+<span class="nc" id="L361">            deliver(sb.toString());</span>
+<span class="nc" id="L362">            closeWebSocket();</span>
+        }
+<span class="nc" id="L364">    }</span>
+
+    private void sendPacketError(Element stanza, PacketError.Condition condition) {
+<span class="nc" id="L367">        Element reply = stanza.createCopy();</span>
+<span class="nc" id="L368">        reply.addAttribute(&quot;type&quot;, &quot;error&quot;);</span>
+<span class="nc" id="L369">        reply.addAttribute(&quot;to&quot;, stanza.attributeValue(&quot;from&quot;));</span>
+<span class="nc" id="L370">        reply.addAttribute(&quot;from&quot;, stanza.attributeValue(&quot;to&quot;));</span>
+<span class="nc" id="L371">        reply.add(new PacketError(condition).getElement());</span>
+<span class="nc" id="L372">        deliver(reply.asXML());</span>
+<span class="nc" id="L373">    }</span>
+
+    private synchronized void initializePool() {
+<span class="nc bnc" id="L376" title="All 2 branches missed.">        if (readerPool == null) {</span>
+<span class="nc" id="L377">            readerPool = new GenericObjectPool&lt;XMPPPacketReader&gt;(new XMPPPPacketReaderFactory());</span>
+<span class="nc" id="L378">            readerPool.setMaxTotal(-1);</span>
+<span class="nc" id="L379">            readerPool.setBlockWhenExhausted(false);</span>
+<span class="nc" id="L380">            readerPool.setTestOnReturn(true);</span>
+<span class="nc" id="L381">            readerPool.setTimeBetweenEvictionRunsMillis(JiveConstants.MINUTE);</span>
+        }
+<span class="nc" id="L383">    }</span>
+
+    //-- Keep-alive ping for idle peers
+
+<span class="nc" id="L387">    private final class PingTask extends TimerTask {</span>
+<span class="nc" id="L388">        private boolean lastPingFailed = false;</span>
+
+        @Override
+        public void run() {
+<span class="nc bnc" id="L392" title="All 2 branches missed.">            if (!isWebSocketOpen()) {</span>
+<span class="nc" id="L393">                TaskEngine.getInstance().cancelScheduledTask(pingTask);</span>
+            } else {
+<span class="nc" id="L395">                long idleTime = System.currentTimeMillis() - JiveConstants.MINUTE;</span>
+<span class="nc bnc" id="L396" title="All 2 branches missed.">                if (xmppSession.getLastActiveDate().getTime() &gt;= idleTime) {</span>
+<span class="nc" id="L397">                    return;</span>
+                }
+                try {
+                    // see https://tools.ietf.org/html/rfc6455#section-5.5.2
+<span class="nc" id="L401">                    wsSession.getRemote().sendPing(null);</span>
+<span class="nc" id="L402">                    lastPingFailed = false;</span>
+<span class="nc" id="L403">                } catch (IOException ioe) {</span>
+<span class="nc" id="L404">                    Log.error(&quot;Failed to ping remote peer: &quot; + wsSession, ioe);</span>
+<span class="nc bnc" id="L405" title="All 2 branches missed.">                    if (lastPingFailed) {</span>
+<span class="nc" id="L406">                        closeSession();</span>
+<span class="nc" id="L407">                        TaskEngine.getInstance().cancelScheduledTask(pingTask);</span>
+                    } else {
+<span class="nc" id="L409">                        lastPingFailed = true;</span>
+                    }
+<span class="nc" id="L411">                }</span>
+            }
+<span class="nc" id="L413">        }</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

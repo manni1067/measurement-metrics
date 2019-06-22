@@ -1,0 +1,609 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>ClusterManager.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.cluster</a> &gt; <span class="el_source">ClusterManager.java</span></div><h1>ClusterManager.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.cluster;
+
+import java.nio.charset.StandardCharsets;
+import java.util.Collection;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Queue;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.Semaphore;
+
+import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.container.Plugin;
+import org.jivesoftware.util.JiveGlobals;
+import org.jivesoftware.util.JiveProperties;
+import org.jivesoftware.util.PropertyEventDispatcher;
+import org.jivesoftware.util.PropertyEventListener;
+import org.jivesoftware.util.TaskEngine;
+import org.jivesoftware.util.cache.CacheFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * A cluster manager is responsible for triggering events related to clustering.
+ * A future version will also provide statistics about the cluster.
+ *
+ * @author Gaston Dombiak
+ */
+<span class="nc" id="L46">public class ClusterManager {</span>
+    
+<span class="fc" id="L48">    private static final Logger Log = LoggerFactory.getLogger(ClusterManager.class);</span>
+
+<span class="fc" id="L50">    public static String CLUSTER_PROPERTY_NAME = &quot;clustering.enabled&quot;;</span>
+<span class="fc" id="L51">    private static Queue&lt;ClusterEventListener&gt; listeners = new ConcurrentLinkedQueue&lt;&gt;();</span>
+<span class="fc" id="L52">    private static BlockingQueue&lt;Event&gt; events = new LinkedBlockingQueue&lt;&gt;(10000);</span>
+    private static Thread dispatcher;
+
+    static {
+        // Listen for clustering property changes (e.g. enabled/disabled)
+<span class="fc" id="L57">        PropertyEventDispatcher.addListener(new PropertyEventListener() {</span>
+            @Override
+<span class="fc" id="L59">            public void propertySet(String property, Map&lt;String, Object&gt; params) { /* ignore */ }</span>
+            @Override
+<span class="fc" id="L61">            public void propertyDeleted(String property, Map&lt;String, Object&gt; params) { /* ignore */ }</span>
+            @Override
+<span class="fc" id="L63">            public void xmlPropertyDeleted(String property, Map&lt;String, Object&gt; params) { /* ignore */ }</span>
+            @Override
+            public void xmlPropertySet(final String property, final Map&lt;String, Object&gt; params) {
+<span class="pc bpc" id="L66" title="1 of 2 branches missed.">                if (ClusterManager.CLUSTER_PROPERTY_NAME.equals(property)) {</span>
+<span class="nc" id="L67">                    TaskEngine.getInstance().submit(new Runnable() {</span>
+                        @Override
+                        public void run() {
+<span class="nc bnc" id="L70" title="All 2 branches missed.">                            if (Boolean.parseBoolean((String) params.get(&quot;value&quot;))) {</span>
+                                // Reload/sync all Jive properties
+<span class="nc" id="L72">                                JiveProperties.getInstance().init();</span>
+<span class="nc" id="L73">                                ClusterManager.startup();</span>
+                            } else {
+<span class="nc" id="L75">                                ClusterManager.shutdown();</span>
+                            }
+<span class="nc" id="L77">                        }</span>
+                    });
+                }
+<span class="fc" id="L80">            }</span>
+        });
+<span class="fc" id="L82">    }</span>
+    
+    /**
+     * Instantiate and start the cluster event dispatcher thread
+     */
+    private static void initEventDispatcher() {
+<span class="nc bnc" id="L88" title="All 4 branches missed.">        if (dispatcher == null || !dispatcher.isAlive()) {</span>
+<span class="nc" id="L89">            dispatcher = new Thread(&quot;ClusterManager events dispatcher&quot;) {</span>
+                @Override
+                public void run() {
+                    // exit thread if/when clustering is disabled
+<span class="nc bnc" id="L93" title="All 2 branches missed.">                    while (ClusterManager.isClusteringEnabled()) {</span>
+                        try {
+<span class="nc" id="L95">                            Event event = events.take();</span>
+<span class="nc" id="L96">                            EventType eventType = event.getType();</span>
+                            // Make sure that CacheFactory is getting this events first (to update cache structure)
+<span class="nc bnc" id="L98" title="All 2 branches missed.">                            if (event.getNodeID() == null) {</span>
+                                // Replace standalone caches with clustered caches and migrate data
+<span class="nc bnc" id="L100" title="All 2 branches missed.">                                if (eventType == EventType.joined_cluster) {</span>
+<span class="nc" id="L101">                                    CacheFactory.joinedCluster();</span>
+<span class="nc bnc" id="L102" title="All 2 branches missed.">                                } else if (eventType == EventType.left_cluster) {</span>
+<span class="nc" id="L103">                                    CacheFactory.leftCluster();</span>
+                                }
+                            }
+                            // Now notify rest of the listeners
+<span class="nc bnc" id="L107" title="All 2 branches missed.">                            for (ClusterEventListener listener : listeners) {</span>
+                                try {
+<span class="nc bnc" id="L109" title="All 4 branches missed.">                                    switch (eventType) {</span>
+                                        case joined_cluster: {
+<span class="nc bnc" id="L111" title="All 2 branches missed.">                                            if (event.getNodeID() == null) {</span>
+<span class="nc" id="L112">                                                listener.joinedCluster();</span>
+                                            }
+                                            else {
+<span class="nc" id="L115">                                                listener.joinedCluster(event.getNodeID());</span>
+                                            }
+<span class="nc" id="L117">                                            break;</span>
+                                        }
+                                        case left_cluster: {
+<span class="nc bnc" id="L120" title="All 2 branches missed.">                                            if (event.getNodeID() == null) {</span>
+<span class="nc" id="L121">                                                listener.leftCluster();</span>
+                                            }
+                                            else {
+<span class="nc" id="L124">                                                listener.leftCluster(event.getNodeID());</span>
+                                            }
+<span class="nc" id="L126">                                            break;</span>
+                                        }
+                                        case marked_senior_cluster_member: {
+<span class="nc" id="L129">                                            listener.markedAsSeniorClusterMember();</span>
+<span class="nc" id="L130">                                            break;</span>
+                                        }
+                                        default:
+                                            break;
+                                    }
+                                }
+<span class="nc" id="L136">                                catch (Exception e) {</span>
+<span class="nc" id="L137">                                    Log.error(e.getMessage(), e);</span>
+<span class="nc" id="L138">                                }</span>
+<span class="nc" id="L139">                            }</span>
+                            // Mark event as processed
+<span class="nc" id="L141">                            event.setProcessed(true);</span>
+<span class="nc" id="L142">                        } catch (Exception e) {</span>
+<span class="nc" id="L143">                            Log.warn(e.getMessage(), e);</span>
+<span class="nc" id="L144">                        }</span>
+                    }
+<span class="nc" id="L146">                }</span>
+            };
+<span class="nc" id="L148">            dispatcher.setDaemon(true);</span>
+<span class="nc" id="L149">            dispatcher.start();</span>
+        }
+<span class="nc" id="L151">    }</span>
+
+    /**
+     * Registers a listener to receive events.
+     *
+     * @param listener the listener.
+     */
+    public static void addListener(ClusterEventListener listener) {
+<span class="pc bpc" id="L159" title="1 of 2 branches missed.">        if (listener == null) {</span>
+<span class="nc" id="L160">            throw new NullPointerException();</span>
+        }
+<span class="fc" id="L162">        listeners.add(listener);</span>
+<span class="fc" id="L163">    }</span>
+
+    /**
+     * Unregisters a listener to receive events.
+     *
+     * @param listener the listener.
+     */
+    public static void removeListener(ClusterEventListener listener) {
+<span class="nc" id="L171">        listeners.remove(listener);</span>
+<span class="nc" id="L172">    }</span>
+
+
+    /**
+     * Triggers event indicating that this JVM is now part of a cluster. At this point the
+     * {@link org.jivesoftware.openfire.XMPPServer#getNodeID()} holds the new nodeID value and
+     * the old nodeID value is passed in case the listener needs it.
+     * &lt;p&gt;
+     * When joining the cluster as the senior cluster member the {@link #fireMarkedAsSeniorClusterMember()}
+     * event will be sent right after this event.
+     * &lt;/p&gt;
+     * This event will be triggered in another thread. This will avoid potential deadlocks
+     * in Coherence.
+     *
+     * @param asynchronous true if event will be triggered in background
+     */
+    public static void fireJoinedCluster(boolean asynchronous) {
+        try {
+<span class="nc" id="L190">            Log.info(&quot;Firing joined cluster event for this node&quot;);</span>
+<span class="nc" id="L191">            Event event = new Event(EventType.joined_cluster, null);</span>
+<span class="nc" id="L192">            events.put(event);</span>
+<span class="nc bnc" id="L193" title="All 2 branches missed.">            if (!asynchronous) {</span>
+<span class="nc bnc" id="L194" title="All 2 branches missed.">                while (!event.isProcessed()) {</span>
+<span class="nc" id="L195">                    Thread.sleep(50);</span>
+                }
+            }
+<span class="nc" id="L198">        } catch (InterruptedException e) {</span>
+            // Should never happen
+<span class="nc" id="L200">            Log.error(e.getMessage(), e);</span>
+<span class="nc" id="L201">        }</span>
+<span class="nc" id="L202">    }</span>
+
+    /**
+     * Triggers event indicating that another JVM is now part of a cluster.&lt;p&gt;
+     *
+     * This event will be triggered in another thread. This will avoid potential deadlocks
+     * in Coherence.
+     *
+     * @param nodeID    nodeID assigned to the JVM when joining the cluster.
+     * @param asynchronous true if event will be triggered in background
+     */
+    public static void fireJoinedCluster(byte[] nodeID, boolean asynchronous) {
+        try {
+<span class="nc" id="L215">            Log.info(&quot;Firing joined cluster event for another node:&quot; + new String(nodeID, StandardCharsets.UTF_8));</span>
+<span class="nc" id="L216">            Event event = new Event(EventType.joined_cluster, nodeID);</span>
+<span class="nc" id="L217">            events.put(event);</span>
+<span class="nc bnc" id="L218" title="All 2 branches missed.">            if (!asynchronous) {</span>
+<span class="nc bnc" id="L219" title="All 2 branches missed.">                while (!event.isProcessed()) {</span>
+<span class="nc" id="L220">                    Thread.sleep(50);</span>
+                }
+            }
+<span class="nc" id="L223">        } catch (InterruptedException e) {</span>
+            // Should never happen
+<span class="nc" id="L225">            Log.error(e.getMessage(), e);</span>
+<span class="nc" id="L226">        }</span>
+<span class="nc" id="L227">    }</span>
+
+    /**
+     * Triggers event indicating that this JVM is no longer part of the cluster. This could
+     * happen when disabling clustering support or removing the enterprise plugin that provides
+     * clustering support.&lt;p&gt;
+     *
+     * Moreover, if we were in a &quot;split brain&quot; scenario (ie. separated cluster islands) and the
+     * island were this JVM belonged was marked as &quot;old&quot; then all nodes of that island will
+     * get the {@code left cluster event} and {@code joined cluster events}. That means that
+     * caches will be reset and thus will need to be repopulated again with fresh data from this JVM.
+     * This also includes the case where this JVM was the senior cluster member and when the islands
+     * met again then this JVM stopped being the senior member.
+     */
+    public static void fireLeftCluster() {
+        try {
+<span class="nc" id="L243">            Log.info(&quot;Firing left cluster event for this node&quot;);</span>
+<span class="nc" id="L244">            Event event = new Event(EventType.left_cluster, null);</span>
+<span class="nc" id="L245">            events.put(event);</span>
+<span class="nc" id="L246">        } catch (InterruptedException e) {</span>
+            // Should never happen
+<span class="nc" id="L248">            Log.error(e.getMessage(), e);</span>
+<span class="nc" id="L249">        }</span>
+<span class="nc" id="L250">    }</span>
+
+    /**
+     * Triggers event indicating that another JVM is no longer part of the cluster. This could
+     * happen when disabling clustering support or removing the enterprise plugin that provides
+     * clustering support.
+     *
+     * @param nodeID    nodeID assigned to the JVM when joining the cluster.
+     */
+    public static void fireLeftCluster(byte[] nodeID) {
+        try {
+<span class="nc" id="L261">            Log.info(&quot;Firing left cluster event for another node:&quot; + new String(nodeID, StandardCharsets.UTF_8));</span>
+<span class="nc" id="L262">            Event event = new Event(EventType.left_cluster, nodeID);</span>
+<span class="nc" id="L263">            events.put(event);</span>
+<span class="nc" id="L264">        } catch (InterruptedException e) {</span>
+            // Should never happen
+<span class="nc" id="L266">            Log.error(e.getMessage(), e);</span>
+<span class="nc" id="L267">        }</span>
+<span class="nc" id="L268">    }</span>
+
+    /**
+     * Triggers event indicating that this JVM is now the senior cluster member. This
+     * could either happen when initially joining the cluster or when the senior cluster
+     * member node left the cluster and this JVM was marked as the new senior cluster member.
+     * &lt;p&gt;
+     * Moreover, in the case of a &quot;split brain&quot; scenario (ie. separated cluster islands) each
+     * island will have its own senior cluster member. However, when the islands meet again there
+     * could only be one senior cluster member so one of the senior cluster members will stop playing
+     * that role. When that happens the JVM no longer playing that role will receive the
+     * {@link #fireLeftCluster()} and {@link #fireJoinedCluster(boolean)} events.&lt;/p&gt;
+     * &lt;p&gt;
+     * This event will be triggered in another thread. This will avoid potential deadlocks
+     * in Coherence.&lt;/p&gt;
+     */
+    public static void fireMarkedAsSeniorClusterMember() {
+        try {
+<span class="nc" id="L286">            Log.info(&quot;Firing marked as senior event&quot;);</span>
+<span class="nc" id="L287">            events.put(new Event(EventType.marked_senior_cluster_member, null));</span>
+<span class="nc" id="L288">        } catch (InterruptedException e) {</span>
+            // Should never happen
+<span class="nc" id="L290">        }</span>
+<span class="nc" id="L291">    }</span>
+
+    /**
+     * Starts the cluster service if clustering is enabled. The process of starting clustering
+     * will recreate caches as distributed caches.
+     */
+    public static synchronized void startup() {
+<span class="nc bnc" id="L298" title="All 4 branches missed.">        if (isClusteringEnabled() &amp;&amp; !isClusteringStarted()) {</span>
+<span class="nc" id="L299">            initEventDispatcher();</span>
+<span class="nc" id="L300">            CacheFactory.startClustering();</span>
+        }
+<span class="nc" id="L302">    }</span>
+
+    /**
+     * Shuts down the clustering service. This method should be called when the
+     * system is shutting down or clustering has been disabled. Failing to call
+     * this method may temporarily impact cluster performance, as the system will
+     * have to do extra work to recover from a non-clean shutdown.
+     * If clustering is not enabled, this method will do nothing.
+     */
+    public static synchronized void shutdown() {
+<span class="nc bnc" id="L312" title="All 2 branches missed.">        if (isClusteringStarted()) {</span>
+<span class="nc" id="L313">            Log.debug(&quot;ClusterManager: Shutting down clustered cache service.&quot;);</span>
+<span class="nc" id="L314">            CacheFactory.stopClustering();</span>
+        }
+<span class="nc" id="L316">    }</span>
+
+    /**
+     * Sets true if clustering support is enabled. An attempt to start or join
+     * an existing cluster will be attempted in the service was enabled. On the
+     * other hand, if disabled then this JVM will leave or stop the cluster.
+     *
+     * @param enabled if clustering support is enabled.
+     */
+    public static void setClusteringEnabled(boolean enabled) {
+<span class="nc bnc" id="L326" title="All 2 branches missed.">        if (enabled) {</span>
+            // Check that clustering is not already enabled and we are already in a cluster
+<span class="nc bnc" id="L328" title="All 4 branches missed.">            if (isClusteringEnabled() &amp;&amp; isClusteringStarted()) {</span>
+<span class="nc" id="L329">                return;</span>
+            }
+        }
+        else {
+            // Check that clustering is disabled
+<span class="nc bnc" id="L334" title="All 2 branches missed.">            if (!isClusteringEnabled()) {</span>
+<span class="nc" id="L335">                return;</span>
+            }
+        }
+        // set the clustering property (listener will start/stop as needed)
+<span class="nc" id="L339">        JiveGlobals.setXMLProperty(CLUSTER_PROPERTY_NAME, Boolean.toString(enabled));</span>
+<span class="nc" id="L340">    }</span>
+
+    /**
+     * Returns true if clustering support is enabled. This does not mean
+     * that clustering has started or that clustering will be able to start.
+     *
+     * @return true if clustering support is enabled.
+     */
+    public static boolean isClusteringEnabled() {
+<span class="nc" id="L349">        return JiveGlobals.getXMLProperty(CLUSTER_PROPERTY_NAME, false);</span>
+    }
+
+    /**
+     * Returns true if clustering is installed and can be used by this JVM
+     * to join a cluster. A false value could mean that either clustering
+     * support is not available or the license does not allow to have more
+     * than 1 cluster node.
+     *
+     * @return true if clustering is installed and can be used by 
+     * this JVM to join a cluster.
+     */
+    public static boolean isClusteringAvailable() {
+<span class="nc" id="L362">        return CacheFactory.isClusteringAvailable();</span>
+    }
+
+    /**
+     * Returns true is clustering is currently being started. Once the cluster
+     * is started or failed to be started this value will be false.
+     *
+     * @return true is clustering is currently being started.
+     */
+    public static boolean isClusteringStarting() {
+<span class="nc" id="L372">        return CacheFactory.isClusteringStarting();</span>
+    }
+
+    /**
+     * Returns true if this JVM is part of a cluster. The cluster may have many nodes
+     * or this JVM could be the only node.
+     *
+     * @return true if this JVM is part of a cluster.
+     */
+    public static boolean isClusteringStarted() {
+<span class="nc" id="L382">        return CacheFactory.isClusteringStarted();</span>
+    }
+
+    /**
+     * Returns true if this member is the senior member in the cluster. If clustering
+     * is not enabled, this method will also return true. This test is useful for
+     * tasks that should only be run on a single member in a cluster.
+     *
+     * @return true if this cluster member is the senior or if clustering is not enabled.
+     * &lt;p&gt;&lt;strong&gt;Important:&lt;/strong&gt; If clustering is enabled but has not yet started, this may return an incorrect result&lt;/p&gt;
+     * @see #isSeniorClusterMemberOrNotClustered()
+     */
+    public static boolean isSeniorClusterMember() {
+<span class="fc" id="L395">        return CacheFactory.isSeniorClusterMember();</span>
+    }
+
+    /**
+     * Returns basic information about the current members of the cluster or an empty
+     * collection if not running in a cluster.
+     *
+     * @return information about the current members of the cluster or an empty
+     *         collection if not running in a cluster.
+     */
+    public static Collection&lt;ClusterNodeInfo&gt; getNodesInfo() {
+<span class="fc" id="L406">        return CacheFactory.getClusterNodesInfo();</span>
+    }
+
+    /**
+     * Returns basic information about a specific member of the cluster.
+     *
+     * @since Openfire 4.4
+     * @param nodeID the node whose information is required
+     * @return the node specific information, or {@link Optional#empty()} if the node could not be identified
+     */
+    public static Optional&lt;ClusterNodeInfo&gt; getNodeInfo(final byte[] nodeID) {
+<span class="fc" id="L417">        return getNodeInfo(NodeID.getInstance(nodeID));</span>
+    }
+
+    /**
+     * Returns basic information about a specific member of the cluster.
+     *
+     * @since Openfire 4.4
+     * @param nodeID the node whose information is required
+     * @return the node specific information, or {@link Optional#empty()} if the node could not be identified
+     */
+    public static Optional&lt;ClusterNodeInfo&gt; getNodeInfo(final NodeID nodeID) {
+<span class="fc" id="L428">        return CacheFactory.getClusterNodesInfo().stream()</span>
+<span class="pc" id="L429">            .filter(nodeInfo -&gt; nodeInfo.getNodeID().equals(nodeID))</span>
+<span class="fc" id="L430">            .findAny();</span>
+    }
+
+    /**
+     * Returns the maximum number of cluster members allowed. Both values 0 and 1 mean that clustering
+     * is not available. However, a value of 1 means that it's a license problem rather than not having
+     * the ability to do clustering as defined with value 0.
+     *
+     * @return the maximum number of cluster members allowed or 0 or 1 if clustering is not allowed.
+     */
+    public static int getMaxClusterNodes() {
+<span class="nc" id="L441">        return CacheFactory.getMaxClusterNodes();</span>
+    }
+
+    /**
+     * Returns the id of the node that is the senior cluster member. When not in a cluster the returned
+     * node id will be the {@link XMPPServer#getNodeID()}.
+     *
+     * @return the id of the node that is the senior cluster member.
+     */
+    public static NodeID getSeniorClusterMember() {
+<span class="fc" id="L451">        byte[] clusterMemberID = CacheFactory.getSeniorClusterMemberID();</span>
+<span class="pc bpc" id="L452" title="1 of 2 branches missed.">        if (clusterMemberID == null) {</span>
+<span class="fc" id="L453">            return XMPPServer.getInstance().getNodeID();</span>
+        }
+<span class="nc" id="L455">        return NodeID.getInstance(clusterMemberID);</span>
+    }
+
+    /**
+     * Returns true if the specified node ID belongs to a known cluster node
+     * of this cluster.
+     *
+     * @param nodeID the ID of the node to verify.
+     * @return true if the specified node ID belongs to a known cluster node
+     *         of this cluster.
+     */
+    public static boolean isClusterMember(byte[] nodeID) {
+<span class="nc bnc" id="L467" title="All 2 branches missed.">        for (ClusterNodeInfo nodeInfo : getNodesInfo()) {</span>
+<span class="nc bnc" id="L468" title="All 2 branches missed.">            if (nodeInfo.getNodeID().equals(nodeID)) {</span>
+<span class="nc" id="L469">                return true;</span>
+            }
+<span class="nc" id="L471">        }</span>
+<span class="nc" id="L472">        return false;</span>
+    }
+
+    /**
+     * If clustering is enabled, this method will wait until clustering is fully started.&lt;br&gt;
+     * If clustering is not enabled, this method will return immediately.
+     * &lt;p&gt;&lt;strong&gt;Important:&lt;/strong&gt; because this method blocks the current thread, it must not be called from a plugin
+     * constructor or {@link Plugin#initializePlugin(org.jivesoftware.openfire.container.PluginManager, java.io.File)}.
+     * This is because the Hazelcast clustering plugin waits until all plugins have initialised before starting, so a
+     * plugin cannot wait until clustering has started during initialisation.&lt;/p&gt;
+     *
+     * @throws InterruptedException if the thread is interrupted whilst waiting for clustering to start
+     * @since Openfire 4.3.0
+     */
+    @SuppressWarnings(&quot;WeakerAccess&quot;)
+    public static void waitForClusteringToStart() throws InterruptedException {
+<span class="nc bnc" id="L488" title="All 2 branches missed.">        if (!ClusterManager.isClusteringEnabled()) {</span>
+            // Clustering is not enabled, so return immediately
+<span class="nc" id="L490">            return;</span>
+        }
+
+<span class="nc" id="L493">        final Semaphore semaphore = new Semaphore(0);</span>
+<span class="nc" id="L494">        final ClusterEventListener listener = new ClusterEventListener() {</span>
+            @Override
+            public void joinedCluster() {
+<span class="nc" id="L497">                semaphore.release();</span>
+<span class="nc" id="L498">            }</span>
+
+            @Override
+            public void joinedCluster(final byte[] nodeID) {
+                // Not required
+<span class="nc" id="L503">            }</span>
+
+            @Override
+            public void leftCluster() {
+                // Not required
+<span class="nc" id="L508">            }</span>
+
+            @Override
+            public void leftCluster(final byte[] nodeID) {
+                // Not required
+<span class="nc" id="L513">            }</span>
+
+            @Override
+            public void markedAsSeniorClusterMember() {
+                // Not required
+<span class="nc" id="L518">            }</span>
+        };
+
+<span class="nc" id="L521">        ClusterManager.addListener(listener);</span>
+        try {
+<span class="nc bnc" id="L523" title="All 2 branches missed.">            if (!ClusterManager.isClusteringStarted()) {</span>
+                // We need to wait for the joinedCluster() event
+<span class="nc" id="L525">                semaphore.acquire();</span>
+            }
+        } finally {
+<span class="nc" id="L528">            ClusterManager.removeListener(listener);</span>
+<span class="nc" id="L529">        }</span>
+<span class="nc" id="L530">    }</span>
+
+    /**
+     * Returns true if this member is the senior member in the cluster. If clustering
+     * is not enabled, this method will also return true. This test is useful for
+     * tasks that should only be run on a single member in a cluster. Unlike {@link #isSeniorClusterMember()} this method
+     * will block, if necessary, until clustering has completed initialisation. For that reason, do not call in a
+     * plugin creation or initialisation stage.
+     *
+     * @return true if this cluster member is the senior or if clustering is not enabled.
+     * @see #isSeniorClusterMember()
+     * @since Openfire 4.3.0
+     */
+    @SuppressWarnings({&quot;unused&quot;, &quot;WeakerAccess&quot;})
+    public static boolean isSeniorClusterMemberOrNotClustered() {
+        try {
+<span class="nc" id="L546">            ClusterManager.waitForClusteringToStart();</span>
+<span class="nc" id="L547">            return ClusterManager.isSeniorClusterMember();</span>
+<span class="nc" id="L548">        } catch (final InterruptedException ignored) {</span>
+            // We were interrupted before clustering started. Re-interrupt the thread, and return false.
+<span class="nc" id="L550">            Thread.currentThread().interrupt();</span>
+<span class="nc" id="L551">            return false;</span>
+        }
+    }
+
+
+    private static class Event {
+        private EventType type;
+        private byte[] nodeID;
+        private boolean processed;
+
+<span class="nc" id="L561">        public Event(EventType type, byte[] oldNodeID) {</span>
+<span class="nc" id="L562">            this.type = type;</span>
+<span class="nc" id="L563">            this.nodeID = oldNodeID;</span>
+<span class="nc" id="L564">        }</span>
+
+        public EventType getType() {
+<span class="nc" id="L567">            return type;</span>
+        }
+
+        public byte[] getNodeID() {
+<span class="nc" id="L571">            return nodeID;</span>
+        }
+
+        public boolean isProcessed() {
+<span class="nc" id="L575">            return processed;</span>
+        }
+
+        public void setProcessed(boolean processed) {
+<span class="nc" id="L579">            this.processed = processed;</span>
+<span class="nc" id="L580">        }</span>
+
+        @Override
+        public String toString() {
+<span class="nc" id="L584">            return super.toString() + &quot; type: &quot; + type;</span>
+        }
+    }
+
+    /**
+     * Represents valid event types.
+     */
+<span class="nc" id="L591">    private enum EventType {</span>
+
+        /**
+         * This JVM joined a cluster.
+         */
+<span class="nc" id="L596">        joined_cluster,</span>
+
+        /**
+         * This JVM is no longer part of the cluster.
+         */
+<span class="nc" id="L601">        left_cluster,</span>
+
+        /**
+         * This JVM is now the senior cluster member.
+         */
+<span class="nc" id="L606">        marked_senior_cluster_member</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

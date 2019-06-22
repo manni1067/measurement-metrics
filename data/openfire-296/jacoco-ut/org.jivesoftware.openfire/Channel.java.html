@@ -1,0 +1,214 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>Channel.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire</a> &gt; <span class="el_source">Channel.java</span></div><h1>Channel.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire;
+
+import org.jivesoftware.openfire.session.Session;
+import org.jivesoftware.util.LocaleUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xmpp.packet.Packet;
+
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+
+/**
+ * A channel provides a mechanism to queue work units for processing. Each work unit is
+ * encapsulated as a ChannelMessage, and processing of each message is performed by a
+ * ChannelHandler.&lt;p&gt;
+ *
+ * As a request is handled by the system, it will travel through a sequence of channels.
+ * This architecture has a number of advantages:
+ * &lt;ul&gt;
+ *      &lt;li&gt; Each request doesn't need to correspond to a thread. Instead, a thread pool
+ *          in each channel processes requests from a queue.
+ *      &lt;li&gt; Due to the queue at each channel, the system is much better able to respond
+ *          to load spikes.
+ * &lt;/ul&gt;&lt;p&gt;
+ *
+ * Channels are modeled after SEDA stages. For much much more in-depth architecture information,
+ * refer to the &lt;a href=&quot;http://www.cs.berkeley.edu/~mdw/proj/sandstorm/&quot;&gt;SEDA website&lt;/a&gt;.
+ *
+ * @author Matt Tucker
+ */
+public class Channel&lt;T extends Packet&gt; {
+
+<span class="nc" id="L50">    private static final Logger Log = LoggerFactory.getLogger(Channel.class);</span>
+
+    private String name;
+    private ChannelHandler&lt;T&gt; channelHandler;
+
+    ThreadPoolExecutor executor;
+
+    /**
+     * Creates a new channel. The channel should be registered after it's created.
+     *
+     * @param name the name of the channel.
+     * @param channelHandler the handler for this channel.
+     */
+<span class="nc" id="L63">    public Channel(String name, ChannelHandler&lt;T&gt; channelHandler) {</span>
+<span class="nc" id="L64">        this.name = name;</span>
+<span class="nc" id="L65">        this.channelHandler = channelHandler;</span>
+
+<span class="nc" id="L67">        executor = new ThreadPoolExecutor(1, 8, 15, TimeUnit.SECONDS, new LinkedBlockingQueue&lt;Runnable&gt;());</span>
+<span class="nc" id="L68">    }</span>
+
+    /**
+     * Returns the name of the channel.
+     *
+     * @return the name of the channel.
+     */
+    public String getName() {
+<span class="nc" id="L76">        return name;</span>
+    }
+
+    /**
+     * Enqueus a message to be handled by this channel. After the ChannelHandler is done
+     * processing the message, it will be sent to the next channel. Messages with a higher
+     * priority will be handled first.
+     *
+     * @param packet an XMPP packet to add to the channel for processing.
+     */
+    public void add( final T packet )
+    {
+<span class="nc" id="L88">        Runnable r = new Runnable()</span>
+<span class="nc" id="L89">        {</span>
+            @Override
+            public void run()
+            {
+                try
+                {
+<span class="nc" id="L95">                    channelHandler.process( packet );</span>
+                }
+<span class="nc" id="L97">                catch ( Exception e )</span>
+                {
+<span class="nc" id="L99">                    Log.error( LocaleUtils.getLocalizedString( &quot;admin.error&quot; ), e );</span>
+
+                    try
+                    {
+<span class="nc" id="L103">                        Session session = SessionManager.getInstance().getSession( packet.getFrom() );</span>
+<span class="nc bnc" id="L104" title="All 2 branches missed.">                        if ( session != null )</span>
+                        {
+<span class="nc" id="L106">                            Log.debug( &quot;Closing session of '{}': {}&quot;, packet.getFrom(), session );</span>
+<span class="nc" id="L107">                            session.close();</span>
+                        }
+                    }
+<span class="nc" id="L110">                    catch ( Exception e1 )</span>
+                    {
+<span class="nc" id="L112">                        Log.error( &quot;Unexpected exception while trying to close session of '{}'.&quot;, packet.getFrom(), e1 );</span>
+<span class="nc" id="L113">                    }</span>
+<span class="nc" id="L114">                }</span>
+<span class="nc" id="L115">            }</span>
+        };
+<span class="nc" id="L117">        executor.execute(r);</span>
+<span class="nc" id="L118">    }</span>
+
+    /**
+     * Returns true if the channel is currently running. The channel can be started and
+     * stopped by calling the start() and stop() methods.
+     *
+     * @return true if the channel is running.
+     */
+    public boolean isRunning() {
+<span class="nc bnc" id="L127" title="All 2 branches missed.">        return !executor.isShutdown();</span>
+    }
+
+    /**
+     * Starts the channel, which means that worker threads will start processing messages
+     * from the queue. If the server isn't running, messages can still be enqueued.
+     */
+    public void start() {
+
+<span class="nc" id="L136">    }</span>
+
+    /**
+     * Stops the channel, which means that worker threads will stop processing messages from
+     * the queue. If the server isn't running, messages can still be enqueued.
+     */
+    public synchronized void stop() {
+<span class="nc" id="L143">        executor.shutdown();</span>
+<span class="nc" id="L144">    }</span>
+
+    /**
+     * Returns the number of currently active worker threads in the channel. This value
+     * will always fall in between the min a max thread count.
+     *
+     * @return the current number of worker threads.
+     */
+    public int getThreadCount() {
+<span class="nc" id="L153">        return executor.getPoolSize();</span>
+    }
+
+    /**
+     * Returns the min number of threads the channel will use for processing messages.
+     * The channel will automatically de-allocate worker threads as the queue load shrinks,
+     * down to the defined minimum. This lets the channel consume fewer resources when load
+     * is low.
+     *
+     * @return the min number of threads that can be used by the channel.
+     */
+    public int getMinThreadCount() {
+<span class="nc" id="L165">        return executor.getCorePoolSize();</span>
+    }
+
+    /**
+     * Sets the min number of threads the channel will use for processing messages.
+     * The channel will automatically de-allocate worker threads as the queue load shrinks,
+     * down to the defined minimum. This lets the channel consume fewer resources when load
+     * is low.
+     *
+     * @param minThreadCount the min number of threads that can be used by the channel.
+     */
+    public void setMinThreadCount(int minThreadCount) {
+<span class="nc" id="L177">        executor.setCorePoolSize(minThreadCount);</span>
+<span class="nc" id="L178">    }</span>
+
+    /**
+     * Returns the max number of threads the channel will use for processing messages. The
+     * channel will automatically allocate new worker threads as the queue load grows, up to the
+     * defined maximum. This lets the channel meet higher concurrency needs, but prevents too
+     * many threads from being allocated, which decreases overall system performance.
+     *
+     * @return the max number of threads that can be used by the channel.
+     */
+    public int getMaxThreadCount() {
+<span class="nc" id="L189">        return executor.getMaximumPoolSize();</span>
+    }
+
+    /**
+     * Sets the max number of threads the channel will use for processing messages. The channel
+     * will automatically allocate new worker threads as the queue size grows, up to the defined
+     * maximum. This lets the channel meet higher concurrency needs, but prevents too many threads
+     * from being allocated, which decreases overall system performance.
+     *
+     * @param maxThreadCount the max number of threads that can be used by the channel.
+     */
+    public void setMaxThreadCount(int maxThreadCount) {
+<span class="nc" id="L201">        executor.setMaximumPoolSize(maxThreadCount);</span>
+<span class="nc" id="L202">    }</span>
+
+    /**
+     * Returns the current number of ChannelMessage objects waiting to be processed by
+     * the channel.
+     *
+     * @return the current number of elements in the processing queue.
+     */
+    public int getQueueSize() {
+<span class="nc" id="L211">        return executor.getQueue().size();</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>

@@ -1,0 +1,394 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../.resources/report.css" type="text/css"/><link rel="shortcut icon" href="../.resources/report.gif" type="image/gif"/><title>RemoteServerManager.java</title><link rel="stylesheet" href="../.resources/prettify.css" type="text/css"/><script type="text/javascript" src="../.resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../.sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Core XMPP Server</a> &gt; <a href="index.source.html" class="el_package">org.jivesoftware.openfire.server</a> &gt; <span class="el_source">RemoteServerManager.java</span></div><h1>RemoteServerManager.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2005-2008 Jive Software. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.jivesoftware.openfire.server;
+
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.Collection;
+
+import org.jivesoftware.database.DbConnectionManager;
+import org.jivesoftware.openfire.ConnectionManager;
+import org.jivesoftware.openfire.SessionManager;
+import org.jivesoftware.openfire.server.RemoteServerConfiguration.Permission;
+import org.jivesoftware.openfire.session.ConnectionSettings;
+import org.jivesoftware.openfire.session.DomainPair;
+import org.jivesoftware.openfire.session.Session;
+import org.jivesoftware.util.JiveGlobals;
+import org.jivesoftware.util.cache.Cache;
+import org.jivesoftware.util.cache.CacheFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Manages the connection permissions for remote servers. When a remote server is allowed to
+ * connect to this server then a special configuration for the remote server will be kept.
+ * The configuration holds information such as the port to use when creating an outgoing connection.
+ *
+ * @author Gaston Dombiak
+ */
+<span class="nc" id="L45">public class RemoteServerManager {</span>
+
+<span class="nc" id="L47">    private static final Logger Log = LoggerFactory.getLogger(RemoteServerManager.class);</span>
+
+    private static final String ADD_CONFIGURATION =
+        &quot;INSERT INTO ofRemoteServerConf (xmppDomain,remotePort,permission) VALUES (?,?,?)&quot;;
+    private static final String DELETE_CONFIGURATION =
+        &quot;DELETE FROM ofRemoteServerConf WHERE xmppDomain=?&quot;;
+    private static final String LOAD_CONFIGURATION =
+        &quot;SELECT remotePort,permission FROM ofRemoteServerConf where xmppDomain=?&quot;;
+    private static final String LOAD_CONFIGURATIONS =
+        &quot;SELECT xmppDomain,remotePort FROM ofRemoteServerConf where permission=?&quot;;
+
+    private static Cache configurationsCache;
+
+    static {
+<span class="nc" id="L61">        configurationsCache = CacheFactory.createCache(&quot;Remote Server Configurations&quot;);</span>
+<span class="nc" id="L62">    }</span>
+
+    /**
+     * Allows a remote server to connect to the local server with the specified configuration.
+     *
+     * @param configuration the configuration for the remote server.
+     */
+    public static void allowAccess(RemoteServerConfiguration configuration) {
+        // Remove any previous configuration for this remote server
+<span class="nc" id="L71">        deleteConfiguration(configuration.getDomain());</span>
+        // Update the database with the new granted permission and configuration
+<span class="nc" id="L73">        configuration.setPermission(Permission.allowed);</span>
+<span class="nc" id="L74">        addConfiguration(configuration);</span>
+<span class="nc" id="L75">    }</span>
+
+    /**
+     * Blocks a remote server from connecting to the local server. If the remote server was
+     * connected when the permission was revoked then the connection of the entity will be closed.
+     *
+     * @param domain the domain of the remote server that is not allowed to connect.
+     */
+    public static void blockAccess(String domain) {
+        // Remove any previous configuration for this remote server
+<span class="nc" id="L85">        deleteConfiguration(domain);</span>
+        // Update the database with the new revoked permission
+<span class="nc" id="L87">        RemoteServerConfiguration config = new RemoteServerConfiguration(domain);</span>
+<span class="nc" id="L88">        config.setPermission(Permission.blocked);</span>
+<span class="nc" id="L89">        addConfiguration(config);</span>
+        // Check if the remote server was connected and proceed to close the connection
+<span class="nc bnc" id="L91" title="All 2 branches missed.">        for (Session session : SessionManager.getInstance().getIncomingServerSessions(domain)) {</span>
+<span class="nc" id="L92">            Log.debug( &quot;Closing session for domain '{}' as the domain is being blocked. Affected session: {}&quot;, domain, session );</span>
+<span class="nc" id="L93">            session.close();</span>
+<span class="nc" id="L94">        }</span>
+        // Can't just lookup a single remote server anymore, so check them all.
+<span class="nc bnc" id="L96" title="All 2 branches missed.">        for (DomainPair domainPair : SessionManager.getInstance().getOutgoingDomainPairs()) {</span>
+<span class="nc bnc" id="L97" title="All 2 branches missed.">            if (domainPair.getRemote().equals(domain)) {</span>
+<span class="nc" id="L98">                Session session = SessionManager.getInstance().getOutgoingServerSession(domainPair);</span>
+<span class="nc" id="L99">                Log.debug( &quot;Closing (domain-pair) session for domain '{}' as the domain is being blocked. Affected session: {}&quot;, domain, session );</span>
+<span class="nc" id="L100">                session.close();</span>
+            }
+<span class="nc" id="L102">        }</span>
+<span class="nc" id="L103">    }</span>
+
+    /**
+     * Returns true if the remote server with the specified domain can connect to the
+     * local server.
+     *
+     * @param domain the domain of the remote server.
+     * @return true if the remote server with the specified domain can connect to the
+     *         local server.
+     */
+    public static boolean canAccess(String domain) {
+        // If s2s is disabled then it is not possible to send packets to remote servers or
+        // receive packets from remote servers
+<span class="nc bnc" id="L116" title="All 2 branches missed.">        if (!JiveGlobals.getBooleanProperty(ConnectionSettings.Server.SOCKET_ACTIVE, true)) {</span>
+<span class="nc" id="L117">            return false;</span>
+        }
+
+        // By default there is no permission defined for the XMPP entity
+<span class="nc" id="L121">        Permission permission = null;</span>
+
+<span class="nc" id="L123">        RemoteServerConfiguration config = getConfiguration(domain);</span>
+<span class="nc bnc" id="L124" title="All 2 branches missed.">        if (config != null) {</span>
+<span class="nc" id="L125">            permission = config.getPermission();</span>
+        }
+
+<span class="nc bnc" id="L128" title="All 2 branches missed.">        if (PermissionPolicy.blacklist == getPermissionPolicy()) {</span>
+            // Anyone can access except those entities listed in the blacklist
+<span class="nc bnc" id="L130" title="All 2 branches missed.">            return Permission.blocked != permission;</span>
+        }
+        else {
+            // Access is limited to those present in the whitelist
+<span class="nc bnc" id="L134" title="All 2 branches missed.">            return Permission.allowed == permission;</span>
+        }
+    }
+
+    /**
+     * Returns the list of registered remote servers that are allowed to connect to/from this
+     * server when using a whitelist policy. However, when using a blacklist policy (i.e. anyone
+     * may connect to the server) the returned list of configurations will be used for obtaining
+     * the specific connection configuration for each remote server.
+     *
+     * @return the configuration of the registered external components.
+     */
+    public static Collection&lt;RemoteServerConfiguration&gt; getAllowedServers() {
+<span class="nc" id="L147">        return getConfigurations(Permission.allowed);</span>
+    }
+
+    /**
+     * Returns the list of remote servers that are NOT allowed to connect to/from this
+     * server.
+     *
+     * @return the configuration of the blocked external components.
+     */
+    public static Collection&lt;RemoteServerConfiguration&gt; getBlockedServers() {
+<span class="nc" id="L157">        return getConfigurations(Permission.blocked);</span>
+    }
+
+    /**
+     * Returns the number of milliseconds to wait to connect to a remote server or read
+     * data from a remote server. Default timeout value is 120 seconds. Configure the
+     * {@code xmpp.server.read.timeout} global property to override the default value.
+     *
+     * @return the number of milliseconds to wait to connect to a remote server or read
+     *         data from a remote server.
+     */
+    public static int getSocketTimeout() {
+<span class="nc" id="L169">        return JiveGlobals.getIntProperty(ConnectionSettings.Server.SOCKET_READ_TIMEOUT, 120000);</span>
+    }
+
+    /**
+     * Removes any existing defined permission and configuration for the specified
+     * remote server.
+     *
+     * @param domain the domain of the remote server.
+     */
+    public static void deleteConfiguration(String domain) {
+        // Remove configuration from cache
+<span class="nc" id="L180">        configurationsCache.remove(domain);</span>
+        // Remove the permission for the entity from the database
+<span class="nc" id="L182">        java.sql.Connection con = null;</span>
+<span class="nc" id="L183">        PreparedStatement pstmt = null;</span>
+        try {
+<span class="nc" id="L185">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L186">            pstmt = con.prepareStatement(DELETE_CONFIGURATION);</span>
+<span class="nc" id="L187">            pstmt.setString(1, domain);</span>
+<span class="nc" id="L188">            pstmt.executeUpdate();</span>
+        }
+<span class="nc" id="L190">        catch (SQLException sqle) {</span>
+<span class="nc" id="L191">            Log.error(sqle.getMessage(), sqle);</span>
+        }
+        finally {
+<span class="nc" id="L194">            DbConnectionManager.closeConnection(pstmt, con);</span>
+<span class="nc" id="L195">        }</span>
+<span class="nc" id="L196">    }</span>
+
+    /**
+     * Adds a new permission for the specified remote server.
+     *
+     * @param configuration the new configuration for a remote server
+     */
+    private static void addConfiguration(RemoteServerConfiguration configuration) {
+        // Remove configuration from cache
+<span class="nc" id="L205">        configurationsCache.put(configuration.getDomain(), configuration);</span>
+        // Remove the permission for the entity from the database
+<span class="nc" id="L207">        java.sql.Connection con = null;</span>
+<span class="nc" id="L208">        PreparedStatement pstmt = null;</span>
+        try {
+<span class="nc" id="L210">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L211">            pstmt = con.prepareStatement(ADD_CONFIGURATION);</span>
+<span class="nc" id="L212">            pstmt.setString(1, configuration.getDomain());</span>
+<span class="nc" id="L213">            pstmt.setInt(2, configuration.getRemotePort());</span>
+<span class="nc" id="L214">            pstmt.setString(3, configuration.getPermission().toString());</span>
+<span class="nc" id="L215">            pstmt.executeUpdate();</span>
+        }
+<span class="nc" id="L217">        catch (SQLException sqle) {</span>
+<span class="nc" id="L218">            Log.error(sqle.getMessage(), sqle);</span>
+        }
+        finally {
+<span class="nc" id="L221">            DbConnectionManager.closeConnection(pstmt, con);</span>
+<span class="nc" id="L222">        }</span>
+<span class="nc" id="L223">    }</span>
+
+    /**
+     * Returns the configuration for a remote server or {@code null} if none was found.
+     *
+     * @param domain the domain of the remote server.
+     * @return the configuration for a remote server or {@code null} if none was found.
+     */
+    public static RemoteServerConfiguration getConfiguration(String domain) {
+<span class="nc" id="L232">        Object value = configurationsCache.get(domain);</span>
+<span class="nc bnc" id="L233" title="All 2 branches missed.">        if (&quot;null&quot;.equals(value)) {</span>
+<span class="nc" id="L234">            return null;</span>
+        }
+<span class="nc" id="L236">        RemoteServerConfiguration configuration = (RemoteServerConfiguration) value;</span>
+<span class="nc bnc" id="L237" title="All 2 branches missed.">        if (configuration == null) {</span>
+<span class="nc" id="L238">            java.sql.Connection con = null;</span>
+<span class="nc" id="L239">            PreparedStatement pstmt = null;</span>
+<span class="nc" id="L240">            ResultSet rs = null;</span>
+            try {
+<span class="nc" id="L242">                con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L243">                pstmt = con.prepareStatement(LOAD_CONFIGURATION);</span>
+<span class="nc" id="L244">                pstmt.setString(1, domain);</span>
+<span class="nc" id="L245">                rs = pstmt.executeQuery();</span>
+<span class="nc bnc" id="L246" title="All 2 branches missed.">                while (rs.next()) {</span>
+<span class="nc" id="L247">                    configuration = new RemoteServerConfiguration(domain);</span>
+<span class="nc" id="L248">                    configuration.setRemotePort(rs.getInt(1));</span>
+<span class="nc" id="L249">                    configuration.setPermission(Permission.valueOf(rs.getString(2)));</span>
+                }
+            }
+<span class="nc" id="L252">            catch (SQLException sqle) {</span>
+<span class="nc" id="L253">                Log.error(sqle.getMessage(), sqle);</span>
+            }
+            finally {
+<span class="nc" id="L256">                DbConnectionManager.closeConnection(rs, pstmt, con);</span>
+<span class="nc" id="L257">            }</span>
+<span class="nc bnc" id="L258" title="All 2 branches missed.">            if (configuration != null) {</span>
+<span class="nc" id="L259">                configurationsCache.put(domain, configuration);</span>
+            }
+            else {
+<span class="nc" id="L262">                configurationsCache.put(domain, &quot;null&quot;);</span>
+            }
+        }
+<span class="nc" id="L265">        return configuration;</span>
+    }
+
+    private static Collection&lt;RemoteServerConfiguration&gt; getConfigurations(
+            Permission permission) {
+<span class="nc" id="L270">        Collection&lt;RemoteServerConfiguration&gt; answer =</span>
+                new ArrayList&lt;&gt;();
+<span class="nc" id="L272">        java.sql.Connection con = null;</span>
+<span class="nc" id="L273">        PreparedStatement pstmt = null;</span>
+<span class="nc" id="L274">        ResultSet rs = null;</span>
+        try {
+<span class="nc" id="L276">            con = DbConnectionManager.getConnection();</span>
+<span class="nc" id="L277">            pstmt = con.prepareStatement(LOAD_CONFIGURATIONS);</span>
+<span class="nc" id="L278">            pstmt.setString(1, permission.toString());</span>
+<span class="nc" id="L279">            rs = pstmt.executeQuery();</span>
+            RemoteServerConfiguration configuration;
+<span class="nc bnc" id="L281" title="All 2 branches missed.">            while (rs.next()) {</span>
+<span class="nc" id="L282">                configuration = new RemoteServerConfiguration(rs.getString(1));</span>
+<span class="nc" id="L283">                configuration.setRemotePort(rs.getInt(2));</span>
+<span class="nc" id="L284">                configuration.setPermission(permission);</span>
+<span class="nc" id="L285">                answer.add(configuration);</span>
+            }
+        }
+<span class="nc" id="L288">        catch (SQLException sqle) {</span>
+<span class="nc" id="L289">            Log.error(sqle.getMessage(), sqle);</span>
+        }
+        finally {
+<span class="nc" id="L292">            DbConnectionManager.closeConnection(rs, pstmt, con);</span>
+<span class="nc" id="L293">        }</span>
+<span class="nc" id="L294">        return answer;</span>
+    }
+
+    /**
+     * Returns the remote port to connect for the specified remote server. If no port was
+     * defined then use the default port (e.g. 5269).
+     *
+     * @param domain the domain of the remote server to get the remote port to connect to.
+     * @return the remote port to connect for the specified remote server.
+     */
+    public static int getPortForServer(String domain) {
+<span class="nc" id="L305">        int port = JiveGlobals.getIntProperty(ConnectionSettings.Server.REMOTE_SERVER_PORT, ConnectionManager.DEFAULT_SERVER_PORT);</span>
+<span class="nc" id="L306">        RemoteServerConfiguration config = getConfiguration(domain);</span>
+<span class="nc bnc" id="L307" title="All 2 branches missed.">        if (config != null) {</span>
+<span class="nc" id="L308">            port = config.getRemotePort();</span>
+<span class="nc bnc" id="L309" title="All 2 branches missed.">            if (port == 0) {</span>
+<span class="nc" id="L310">                port = JiveGlobals</span>
+<span class="nc" id="L311">                        .getIntProperty(ConnectionSettings.Server.REMOTE_SERVER_PORT, ConnectionManager.DEFAULT_SERVER_PORT);</span>
+            }
+        }
+<span class="nc" id="L314">        return port;</span>
+    }
+
+    /**
+     * Returns the permission policy being used for new XMPP entities that are trying to
+     * connect to the server. There are two types of policies: 1) blacklist: where any entity
+     * is allowed to connect to the server except for those listed in the black list and
+     * 2) whitelist: where only the entities listed in the white list are allowed to connect to
+     * the server.
+     *
+     * @return the permission policy being used for new XMPP entities that are trying to
+     *         connect to the server.
+     */
+    public static PermissionPolicy getPermissionPolicy() {
+        try {
+<span class="nc" id="L329">            return PermissionPolicy.valueOf(JiveGlobals.getProperty(ConnectionSettings.Server.PERMISSION_SETTINGS,</span>
+<span class="nc" id="L330">                    PermissionPolicy.blacklist.toString()));</span>
+        }
+<span class="nc" id="L332">        catch (Exception e) {</span>
+<span class="nc" id="L333">            Log.error(e.getMessage(), e);</span>
+<span class="nc" id="L334">            return PermissionPolicy.blacklist;</span>
+        }
+    }
+
+    /**
+     * Sets the permission policy being used for new XMPP entities that are trying to
+     * connect to the server. There are two types of policies: 1) blacklist: where any entity
+     * is allowed to connect to the server except for those listed in the black list and
+     * 2) whitelist: where only the entities listed in the white list are allowed to connect to
+     * the server.
+     *
+     * @param policy the new PermissionPolicy to use.
+     */
+    public static void setPermissionPolicy(PermissionPolicy policy) {
+<span class="nc" id="L348">        JiveGlobals.setProperty(ConnectionSettings.Server.PERMISSION_SETTINGS, policy.toString());</span>
+        // Check if the connected servers can remain connected to the server
+<span class="nc bnc" id="L350" title="All 2 branches missed.">        for (String hostname : SessionManager.getInstance().getIncomingServers()) {</span>
+<span class="nc bnc" id="L351" title="All 2 branches missed.">            if (!canAccess(hostname)) {</span>
+<span class="nc bnc" id="L352" title="All 2 branches missed.">                for (Session session : SessionManager.getInstance().getIncomingServerSessions(hostname)) {</span>
+<span class="nc" id="L353">                    Log.debug( &quot;Closing session for hostname '{}' as a changed permission policy is taken into effect. Affected session: {}&quot;, hostname, session );</span>
+<span class="nc" id="L354">                    session.close();</span>
+<span class="nc" id="L355">                }</span>
+            }
+<span class="nc" id="L357">        }</span>
+<span class="nc bnc" id="L358" title="All 2 branches missed.">        for (DomainPair domainPair : SessionManager.getInstance().getOutgoingDomainPairs()) {</span>
+<span class="nc bnc" id="L359" title="All 2 branches missed.">            if (!canAccess(domainPair.getRemote())) {</span>
+<span class="nc" id="L360">                Session session = SessionManager.getInstance().getOutgoingServerSession(domainPair);</span>
+<span class="nc" id="L361">                Log.debug( &quot;Closing session as a changed permission policy is taken into effect. Affected session: {}&quot;, session );</span>
+<span class="nc" id="L362">                session.close();</span>
+            }
+<span class="nc" id="L364">        }</span>
+<span class="nc" id="L365">    }</span>
+
+    /**
+     * Sets the permission policy being used for new XMPP entities that are trying to
+     * connect to the server. There are two types of policies: 1) blacklist: where any entity
+     * is allowed to connect to the server except for those listed in the black list and
+     * 2) whitelist: where only the entities listed in the white list are allowed to connect to
+     * the server.
+     *
+     * @param policy the new policy to use.
+     */
+    public static void setPermissionPolicy(String policy) {
+<span class="nc" id="L377">        setPermissionPolicy(PermissionPolicy.valueOf(policy));</span>
+<span class="nc" id="L378">    }</span>
+
+<span class="nc" id="L380">    public enum PermissionPolicy {</span>
+        /**
+         * Any XMPP entity is allowed to connect to the server except for those listed in
+         * the &lt;b&gt;not allowed list&lt;/b&gt;.
+         */
+<span class="nc" id="L385">        blacklist,</span>
+
+        /**
+         * Only the XMPP entities listed in the &lt;b&gt;allowed list&lt;/b&gt; are able to connect to
+         * the server.
+         */
+<span class="nc" id="L391">        whitelist;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.eclemma.org/jacoco">JaCoCo</a> 0.7.5.201505241946</span></div></body></html>
