@@ -1,0 +1,729 @@
+Summary,Issue key,Issue id,Issue Type,Status,Project key,Project name,Project type,Project lead,Project description,Project url,Priority,Resolution,Assignee,Reporter,Creator,Created,Updated,Last Viewed,Resolved,Affects Version/s,Affects Version/s,Affects Version/s,Affects Version/s,Affects Version/s,Affects Version/s,Affects Version/s,Component/s,Component/s,Due Date,Votes,Description,Environment,Log Work,Log Work,Original Estimate,Remaining Estimate,Time Spent,Work Ratio,Σ Original Estimate,Σ Remaining Estimate,Σ Time Spent,Security Level,Outward issue link (Reference),Attachment,Attachment,Attachment,Attachment,Attachment,Custom field (Attachment count),Custom field (Blog - New Blog Administrators),Custom field (Blog - New Blog PMC),Custom field (Blog - Write access),Custom field (Blog Administrator?),Custom field (Blogs - Admin for blog),Custom field (Blogs - Email Address),Custom field (Blogs - Existing Blog Access Level),Custom field (Blogs - Existing Blog Name),Custom field (Blogs - New Blog Write Access),Custom field (Blogs - Username),Custom field (Bug Category),Custom field (Bugzilla - Email Notification Address),Custom field (Bugzilla - List of usernames),Custom field (Bugzilla - PMC Name),Custom field (Bugzilla - Project Name),Custom field (Bugzilla Id),Custom field (Change Category),Custom field (Complexity),Custom field (Date of First Response),Custom field (Discovered By),Custom field (Docs Text),Custom field (Enable Automatic Patch Review),Custom field (Epic Link),Custom field (Existing GitBox Approval),Custom field (External issue ID),Custom field (External issue URL),Custom field (Flags),Custom field (Flags),Custom field (Git Notification Mailing List),Custom field (Git Repository Import Path),Custom field (Git Repository Name),Custom field (Git Repository Type),Custom field (GitHub Options),Custom field (Github Integration),Custom field (Github Integrations - Other),Custom field (Global Rank),Custom field (INFRA - Subversion Repository Path),Custom field (Initial Confluence Contributors),Custom field (Last public comment date),Custom field (Machine Readable Info),Custom field (New-TLP-TLPName),Custom field (Priority),Custom field (Project),Custom field (Protected Branch),Custom field (Rank),Custom field (Rank (Obsolete)),Custom field (Severity),Custom field (Severity),Custom field (Source Control Link),Custom field (Space Description),Custom field (Space Key),Custom field (Space Name),Custom field (Test and Documentation Plan),Custom field (Testcase included),Comment,Comment,Comment,Comment,Comment,Comment,Comment,Comment,Comment,Comment,Comment,Comment,Comment,Comment,Comment,Comment,Comment,Comment,Comment,Comment,Comment,Comment,Comment,Comment,Comment,Comment,Comment,Comment,Comment,Comment,Comment,Comment,Comment,Comment,Comment,Comment,Comment,Comment,Comment,Comment,Comment,Comment,Comment,Comment,Comment
+Tailer erroneously considers file as new,IO-279,12514326,Bug,Reopened,IO,Commons IO,software,issues@commons.apache.org,Commons IO is a library of utilities to assist with developing IO functionality. ,http://commons.apache.org/io/,Major,,,sbtourist,sbtourist,16/Jul/11 14:37,11/Apr/19 12:14,20/Jun/19 08:22,,2.0.1,2.4,,,,,,,,,5,"Tailer sometimes erroneously considers the tailed file as new, forcing a repositioning at the start of the file: I'm still unable to reproduce this in a test case, because it only happens to me with huge log files during Apache Tomcat startup.
+
+This is the piece of code causing the problem:
+
+{code}
+// See if the file needs to be read again
+if (length > position) {
+
+    // The file has more content than it did last time
+    last = System.currentTimeMillis();
+    position = readLines(reader);
+
+} else if (FileUtils.isFileNewer(file, last)) {
+
+    /* This can happen if the file is truncated or overwritten
+        * with the exact same length of information. In cases like
+        * this, the file position needs to be reset
+        */
+    position = 0;
+    reader.seek(position); // cannot be null here
+
+    // Now we can read new lines
+    last = System.currentTimeMillis();
+    position = readLines(reader);
+}
+{code}
+
+What probably happens is that the new file content is about to be written on disk, the date is already updated but content is still not flushed, so actual length is untouched and there you go.
+
+In other words, I think there should be some better method to verify the condition above, rather than relying only on dates: keeping and comparing the hash code of the latest line may be a solution, but may hurt performances ... other ideas?",,"Misiu commented on issue #40: IO-279: Added ignoreNew parameter on instantiating Tailer.
+URL: https://github.com/apache/commons-io/pull/40#issuecomment-482084210
+ 
+ 
+   @garydgregory could You take a look at this PR?
+   We need this for openHAB - https://github.com/openhab/openhab2-addons/issues/5442
+ 
+----------------------------------------------------------------
+This is an automated message from the Apache Git Service.
+To respond to the message, please log on to GitHub and use the
+URL above to go to the specific comment.
+ 
+For queries about this service, please contact Infrastructure at:
+users@infra.apache.org
+;11/Apr/19 11:56;githubbot;600","garydgregory commented on issue #40: IO-279: Added ignoreNew parameter on instantiating Tailer.
+URL: https://github.com/apache/commons-io/pull/40#issuecomment-482089524
+ 
+ 
+   Hi @Misiu,
+   
+   Thanks for the ping.
+   I am -1 to this PR because:
+   - It breaks binary compatibility. You can tell since this build is broken. See the red ""All checks have failed"" note on this page and the associated Travis builds.
+   - It does not contain a unit test to test the new feature.
+   
+   Gary
+ 
+----------------------------------------------------------------
+This is an automated message from the Apache Git Service.
+To respond to the message, please log on to GitHub and use the
+URL above to go to the specific comment.
+ 
+For queries about this service, please contact Infrastructure at:
+users@infra.apache.org
+;11/Apr/19 12:14;githubbot;600",,0,1200,,,0,1200,,,08/Jun/12 02:05;niallp;IO-279.patch;https://issues.apache.org/jira/secure/attachment/12531358/IO-279.patch,01/Sep/13 09:50;kgr;disable_resetting.patch;https://issues.apache.org/jira/secure/attachment/12600974/disable_resetting.patch,25/Apr/13 14:43;meerlol;fix-tailer.patch;https://issues.apache.org/jira/secure/attachment/12580537/fix-tailer.patch,22/Apr/13 07:26;meerlol;modify-test-fixed.patch;https://issues.apache.org/jira/secure/attachment/12579793/modify-test-fixed.patch,18/Apr/13 08:54;meerlol;modify-test.patch;https://issues.apache.org/jira/secure/attachment/12579292/modify-test.patch,5.0,,,,,,,,,,,,,,,,,,,2011-11-17 23:57:08.727,,,false,,,,,,,,,,,,,,3157,,,Thu Jul 06 09:18:36 UTC 2017,,,,,,0|i0b0mv:,62215,,,,,,,,,"17/Nov/11 23:57;cmbaron;There are at least two additional causes that I've identified:
+
+(1) ""last"" time stamp does not include time spent reading or listener handling.
+
+last = System.currentTimeMillis();
+position = readLines(reader);
+
+readLines(...) continues to read and handle lines from the log until it reaches the EOF.
+
+An erroneous truncation can be detected ff (a) content is added to the file between the recording of the ""last"" timestamp and (b) before readLine encounters EOF and (c) no content is added during the delay time.
+
+The fix is to reverse the two lines such that the timestamp is recorded after the call to readLines(...).
+
+
+(2) On very highly loaded system content could be written between the point the file length is saved and the timestamp is compared.
+
+The fix is to compare the file date to the ""last"" timestamp prior to checking its length and to use that boolean result in the nested else if.
+
+
+","22/Dec/11 11:35;markltbaker;I see this bug as well, I am using this class to tail log files during a lengthly build process and occasionally the entire log file will be regurgitated :(
+","22/Dec/11 13:30;sbtourist;Mark, that should be fixed in my fork: https://github.com/sbtourist/tayler","07/Jun/12 23:44;sebb;There's a general problem here, in that it's not possible to obtain both the file position and the current timestamp (System or File) as part of a single transaction.
+
+However, the critical case is where the File timestamp is greater than the System timestamp, so it does not matter if the File timestamp is measured too early or the System timestamp is measured too late.","08/Jun/12 02:05;niallp;Firstly I don't know why System.currentTimeMillis() is used. What matters is if the files lastModified time compared to its previous lastModified value.
+
+I agree with Chris that the lastModified time should be stored after the file is read.","08/Jun/12 02:11;niallp;Ooo, my bad - this is already fixed. Still same as my patch except using file.lastModified() rather than System.currentTimeMillis()","08/Jun/12 08:40;sebb;bq. What matters is if the files lastModified time compared to its previous lastModified value.
+
+Yes, but if that is measured after calling readLines, this might trigger case (2) above.","27/Nov/12 14:31;molendag;I am tailing with the fixed Tailer (commons-io 2.4.0) a log4j log file and I still see the issue. Despite the fact that the log file was neither rotated nor new data was added, the position is being reset to 0, causing the Tailer re-reading the monitored file from the begining. 
+
+Since log4j's asynchronous logger is used to log into the monitored file, it might happen, that the modifiedDate is set before the content is actually flushed to the file. 
+
+I assume reseting position was added to cover the case, when the monitored file is overriden. I think it is imposiilble for the Tailer to determine this. The current implementation covers only the case, when the file length is equal to the last read position. If the file legth after being overriden is higher than the last read position, then the Tailer will assume data was normally appended and process the file from the last read position. 
+
+Assuming the data is only appended to the file, I'd just get rid of the reseting position feature from Tailer to resolve the issue finally.","27/Nov/12 16:08;sebb;It seems odd that the OS should update the file modification date before the file has actually been modified.
+I would expect the flush to write the data to the file and then update the date.
+
+But perhaps it does behave that way.
+
+Could you provide a patch that works with your use case?","10/Jan/13 11:41;richard_hawkes;Guys, I have downloaded 2.4 which (I think) you are saying has fixed it. However, I notice that the fileRotated is still getting called erroneously. I have done a fair bit of research into this, and it would seem that the file.length() method is not always 100% up to date, which leads to position occasionally being greater than file.length() !! Quite often it seems to be a few miliseconds behind the actual position. I suppose with that much data bouncing around the network.
+
+I have added a check after the readLines(reader) to see if position is greater than file.length() if it is, it waits a second. That seems to mop up this issue, although I know it's one ALMIGHTY hack!",16/Apr/13 11:54;meerlol;Just a mere 'touch <file>' triggers a complete reload of the file. I can not imagine that that is wanted behaviour.,"16/Apr/13 12:51;richard_hawkes;Herman, I don't think anyone's looking at this. I would say that the tailer is flawed and should not be used. It's no better than reading the file via standard Java methods. I had really hoped to leverage this, but such is the way with open source :-(","16/Apr/13 20:20;sebb;The issue has been marked resolved; if you have a patch please re-open and provide the patch, preferably with a test case that demonstrates the problem.","17/Apr/13 06:12;meerlol;Well, this is the world turned upside down. I can only reopen the issue if I have a patch for it. That doesn't make sense. The problem still exists and therefore the ticket should be reopened. I have patched it locally for myself but I doubt that my patch is ok for everyone because I completely removed the last else if statement. For me it makes no sense to check if the file is newer. The only use case would be that the file had been overwritten with exactly the same amount of data. Truncation is not an issue because that would mean that the length and position must have been 0 anyway. For me it is way more likely that the file's modified time has been updated than that the content has been overwritten with the same amount of bytes.","17/Apr/13 06:54;richard_hawkes;Strikes me that this should simply be re-opened. Issue is recreatable, but as yet no fix is known.","17/Apr/13 11:08;sebb;bq.  I can only reopen the issue if I have a patch for it.
+
+That's not what I meant. The issue had been marked resolved, so developers were unlikely to look at it.
+But without a proposed patch (even if incomplete) or a test case, there's not a lot developers can do.","18/Apr/13 08:54;meerlol;Hi, here is the requested test case patch. It tests both cases: only the lastmodified updated and content overwritten with exactly the same amount of bytes.","20/Apr/13 18:40;sebb;The test seems wrong to me.
+Only one line is written to the file, yet the check says:
+
+{code}
+assertEquals(""1 line count"", 2, lines.size());
+{code}
+
+Also, I'm not sure that changing the file modification date should be ignored.
+How can one tell the difference between a file that has been touched from one that has been re-written to the same length? 
+
+Potentially it may even be the same data - that would be an unusual use-case, but not impossible.
+For example, a rotating logger that records events but does not include a timestamp. The same event sequence could recur.
+
+A further problem with the test case in the patch is that it does not check the data, only the line count.","20/Apr/13 22:10;sebb;Having said that, if there is still a problem whereby the code does not follow the file properly, please provide full details.","22/Apr/13 07:25;meerlol;I'm sorry, I had the test correct but modified it before making the patch. I will correct it and upload it in a few minutes.
+
+Let's be clear, I'm not suggesting to ignore the file modification date as a solution. For me that would be the perfect solution and I think the most common use case as well. The likelihood of the file being touched seems way higher to me than the likelihood that the exact same sequence of bytes are written, especially when the files get larger. And as can be seen from other comments above there are more people reporting this problem. It is probably not an option to make Java 7 a requirement so we can use the WatchService?","22/Apr/13 07:26;meerlol;Fixed testcase, mea culpa.","22/Apr/13 09:41;sebb;My point was that discriminating between 'touch' and an updated file is tricky and not always possible.
+I don't consider it a fault that the a touched file is seen as new (cf. backup).
+
+We really need a test case that shows the exact same error.
+
+Also it would be helpful to know if the failures occurred on Unix or Windows, and whether reOpen is true or false.","22/Apr/13 09:53;meerlol;I totally agree, it is very hard to discriminate between the different use cases. It might only be possible with Java 7. What do you mean with (cf. backup) by the way?
+
+My case occurs on Linux (Debian) where I wrote a tool to tail GlassFish log files and out put them to Kafka. Every now and then it spits out the entire log file again, which makes the Tailer useless for me. I have a suspicion that the problem might be related to the fact that the 'last' is set to System.currentTimeMillis() instead of to file.lastModified(). Maybe there is a granularity difference between the two, where the FS rounds the last modified upwards? If I stat the file then it always has a 1 sec precision. That would explain it I guess. I will patch it here and run a test today.","22/Apr/13 10:26;sebb;OK thanks.
+
+bq. (cf. backup)
+
+I meant that backup treats touched files as new, so Tailer should too.
+
+","25/Apr/13 14:43;meerlol;Ok, I've tested the patch for a few days now. The problem has not reoccured anymore whereas before it used to happen multiple times per day. I have attached the patch.","26/Apr/13 07:14;sebb;Thanks. Can you confirm exactly what you changed? Did you replace all 3 instances of System.currentTimeMillis() or only some of them?
+
+Also the new test case testModifiedTime fails for me both with the current code and when the code is patched by replacing all 3 System.currentTimeMillis() with file.lastModifiedTime(). Is that what you expect? Or should the test succeed?","26/Apr/13 07:20;meerlol;Yes I replaced all 3 instances of System.currentTimeMillis()
+
+The test will indeed still fail, it doesn't solve the specific case of differentiating between the touch of a file and overwriting the contents of the file with the exact same amount of bytes. It solves this specific bug as the title says 'Tailer erroneously considers file as new'. So I guess it is better to create a new ticket and attach the testcase to that ticket, because that is a different bug (which is very hard to solve as has already been said by most of us).","26/Apr/13 07:52;sebb;OK, thanks, I'll apply the same fix to Tailer.","26/Apr/13 08:48;sebb;URL: http://svn.apache.org/r1476097
+Log:
+IO-279  Tailer erroneously considers file as new.
+        Fix to use file.lastModified() rather than System.currentTimeMillis()
+
+Modified:
+    commons/proper/io/trunk/src/changes/changes.xml
+    commons/proper/io/trunk/src/main/java/org/apache/commons/io/input/Tailer.java","05/Jul/13 17:15;otis;bq. My case occurs on Linux (Debian) where I wrote a tool to tail GlassFish log files and out put them to Kafka. Every now and then it spits out the entire log file again, which makes the Tailer useless for me.
+
+What about tracking the current position/line in the file, at least approximately.
+Then, after detecting apparent new/rotated file one could check things like size of the file or some such and compare it with the offset to answer the question such as ""Does this apparently new file that I'm about to start tailing from its beginning actually already have the offset I was at before?  If so, maybe this is the same file and somebody just touched it.  In that case, let me just jump to that offset"".
+
+Doable?
+","05/Jul/13 17:44;sebb;Note that the particular problem you quoted has been solved.
+
+We already keep track of the location in the file within the code, and we compare file sizes and times.
+
+The problem is trying to distinguish a file that has been touched from a file that has been rewritten or truncated to exactly the same size.",05/Jul/13 20:27;otis;Thanks Sebb.  I see.  So things like logrotate can confuse the tailer if they truncate files instead of moving them?,"26/Jul/13 17:47;mqsquidy;Just wanted to confirm to anyone who cares, commons-io 2.4 tag with the April patch attached to this JIRA, still has the issue in the scenerio we are using it. We have a daemon network listener process written in C++ that opens a log file, appends new data, closes the file, repeatedly, for which we are trying to use the Tailer classes to pump the log through Kafka, similar to Herman in the above thread. Using commons-io 2.4 prebuilt jar we were getting the intermittent reatart on almost all hosts more than once a day. Using the patched jar it happened less, but still happens. I am trying the forked version in github published by Sergio. I will respond with my findings.",01/Sep/13 09:34;kgr;In many cases it can be assumed that a file can not be overwritten with the exact same length of data (always will be smaller after reset). In our project we are using a slightly patched version of commons-io library with a flag added to the Tailer class that enables/disables resetting file position when a file update is encountered but a file length is not changed. If we are sure that a file can not be overwritten with the exact size then we disable the flag to prevent this issue. I've attached the patch we are using ([^disable_resetting.patch]). It is based on the version 2.4. Maybe it would be worth to apply this patch to the trunk?,"05/Mar/14 10:47;unlogic;I stumbled across this issue while tailing a file on a remote server via Samba.
+
+The clock on the server was running a few seconds ahead of my local machine which caused the file to be seen as newer even though it wasn't.
+
+I solved this by simply replacing the line:
+
+last = System.currentTimeMillis();
+
+With:
+
+last = file.lastModified();
+
+That way it doesn't matter if the clocks are not in perfect sync.","05/Mar/14 15:46;sebb;bq. last = file.lastModified();
+
+That change has already been made in trunk and will be in 2.5","07/Mar/14 08:15;liuhongyan;I have downloaded from the trunk, but the question remains.Repeat output for three times, it seems that problems unresolved.","09/Jun/14 13:58;sleepy9090;Hi,
+I was curious if there has been any progress on this issue?
+
+Thanks","25/Feb/15 01:15;spullara;We are running into this bug on a terribly slow EBS volume. I think that the behavior should match what ""tail -f"" would do in this situation which appears to not reset the read position when the file is newer and the lengths are equal. Only if the length is less do they consider it a truncation.
+
+http://git.savannah.gnu.org/cgit/coreutils.git/tree/src/tail.c#n1205
+
+","25/Feb/15 01:29;spullara;Also, any plan to upgrade this to Java 7 so we can use the WatchService rather than this polling version?","13/May/15 09:10;kervin;This issue is still present in 2.5-SNAPSHOT and I think found why, at least for my application.
+
+The problem is on some OSes 'File.lastmodified()' is cached until an event e.g. File.close().  This at least happens on Windows in some circumstances.  I was monitoring a log4net file on a IIS application.
+
+*Reference* : http://blogs.technet.com/b/asiasupp/archive/2010/12/14/file-date-modified-property-are-not-updating-while-modifying-a-file-without-closing-it.aspx
+
+This means that the file will grow in reported size as it remains open, but the 'lastmodified()' result will remain constant until that other application closes the file.
+
+Tailer does something very puzzling.  It will call seek(0) in this case...
+{code:title=Tailer.java|borderStyle=solid}
+                    } else if (newer) {
+                        /*
+                         * This can happen if the file is truncated or overwritten with the exact same length of
+                         * information. In cases like this, the file position needs to be reset
+                         */
+                        position = 0;
+                        reader.seek(position); // cannot be null here
+
+                        // Now we can read new lines
+                        position = readLines(reader);
+                        last = file.lastModified();
+                    }
+{code}
+Shouldn't Tailer throw an exception in the worse case?  But I would argue that seeing the lastmodified update but not seeing the size update isn't really an exception condition.  The file could have been 'touched', lastmodified manually set other ways, etc.
+
+By the way, [~kgr] also proposed similar in September 2013.  [~spullara] also proposed this in February 2015.
+
+There can be a 'useFileTimestamps' flag which would allow users to ignore the lastmodified() related tests.  Using filesize as the only method of detecting change.",13/Aug/15 21:44;shawnhe;I am encountering the same issue with commons-io 2.4 and using the Tailer class. I assume we could manually build a commons-io class and use that in Java before an official release comes out with a patch suggested by the above two people.,"14/Apr/16 18:16;vanteo;I am also encountering this problem with 2.4. Using it on RHEL 5.11 (yes, very old). It seems that there is a window that gets hit a few times per day where the OS file system updates the file modification date slightly before the file size is updated, hence Tailer thinks it needs to re-read from the very beginning.
+
+To workaround, I have removed all checks to file modification time from the run method. In my case, detecting changes by file size alone is enough. It would be nice for this to be configurable.
+",08/Mar/17 21:41;vanteo;FYI. This issue is still present on commons.io 2.5 on RHEL 5.11 for me.,"06/Jul/17 09:18;githubbot;GitHub user myyron opened a pull request:
+
+    https://github.com/apache/commons-io/pull/40
+
+    IO-279: Added ignoreNew parameter on instantiating Tailer.
+
+    Encountered this bug today when we try to tail a file that is being modified even though there is no new content being added.
+
+You can merge this pull request into a Git repository by running:
+
+    $ git pull https://github.com/myyron/commons-io IO_279
+
+Alternatively you can review and apply these changes as the patch at:
+
+    https://github.com/apache/commons-io/pull/40.patch
+
+To close this pull request, make a commit to your master/trunk branch
+with (at least) the following in the commit message:
+
+    This closes #40
+    
+----
+commit 79dd3567811f0f155c43cb88f331489b85e6189c
+Author: mlatorilla <mlatorilla@sunpowercorp.com>
+Date:   2017-07-06T08:44:57Z
+
+    IO-279: Added ignoreNew parameter on instantiating Tailer.
+
+----
+"
+"FileUtils.copyFile methods throw an unnecessary ""Failed to copy full contents from"" exception ",IO-443,12714251,Bug,Open,IO,Commons IO,software,issues@commons.apache.org,Commons IO is a library of utilities to assist with developing IO functionality. ,http://commons.apache.org/io/,Major,,,oerlybird,oerlybird,14/May/14 19:20,11/Dec/17 11:31,20/Jun/19 08:22,,2.4,,,,,,,Utilities,,,0,"The private doCopyFile method of FileUtils does a comparison between the source and destination file sizes after the data has been copied. 
+
+If the destination file has been removed, renamed, or otherwise no more accessible (remote share no more available) between the finally block and the size comparison the destFile.length() returns zero. If the source file is not zero bytes in size an exception with the message ""Failed to copy full contents from '"" + srcFile + ""' to '"" + destFile "" will be thrown.
+
+Regards
+Sami",Win x86  32 bit,,,,,,,,,,,IO-544,,,,,,0.0,,,,,,,,,,,,,,,,,,,2017-12-11 11:29:05.164,,,false,,,,,,,,,,,,,,392564,,,Mon Dec 11 11:29:05 UTC 2017,,,,,,0|i1vlrz:,392747,,,,,,,,,"11/Dec/17 11:29;sebb;If the output size were checked before the file is closed but after it is flushed, that should catch actual copy errors (assuming the input does not change) regardless of subsequent changes to the destination.
+
+I think the question here is: what is the check really for?",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+DeferredFileOutputStream produces unhandled IOExceptions if the java.io.tmpdir is deleted,IO-497,12933229,Bug,Open,IO,Commons IO,software,issues@commons.apache.org,Commons IO is a library of utilities to assist with developing IO functionality. ,http://commons.apache.org/io/,Major,,,nbyrd,nbyrd,22/Jan/16 01:18,13/Sep/17 18:42,20/Jun/19 08:22,,2.4,,,,,,,Streams/Writers,,,0,"In the event that the Java temporary directory is deleted prior to the DeferredFileOutputStream trying to use it, the stream will throw one of two different IOExceptions (depending on how the Stream was constructed). 
+
+This may sound like an unrealistic use-case at first, but it is legitimate as one of my company's applications encountered it after the underlying operating system (CentOS) automatically purged the contents of its tmp directory. (The application uses Commons FileUpload, which invokes DeferredFileOutputStream and does not handle the error itself.) Our current work-around is to restart the server when this happens, but we feel that the underlying library should perhaps be intelligent enough to recover from such an error.
+
+Additionally, it seems an awkward experience that two different errors are produced based on how the stream was constructed. One approach produces a FileNotFoundException while the other produces a plain IOException. 
+
+A small maven project containing a single JUnit test that highlights the error will be attached (see [dfos-bug.tar.gz|https://issues.apache.org/jira/secure/attachment/12783728/dfos-bug.tar.gz]). ",unix-like operating systems where temporary disk storage is routinely purged; CentOS specifically,,,,,,,,,,,,22/Jan/16 20:05;nbyrd;dfos-bug-v2.tar.gz;https://issues.apache.org/jira/secure/attachment/12783898/dfos-bug-v2.tar.gz,22/Jan/16 01:22;nbyrd;dfos-bug.tar.gz;https://issues.apache.org/jira/secure/attachment/12783728/dfos-bug.tar.gz,22/Jan/16 20:05;nbyrd;example_stack.txt;https://issues.apache.org/jira/secure/attachment/12783899/example_stack.txt,,,3.0,,,,,,,,,,,,,,,,,,,2016-01-22 09:09:21.492,,,false,,,,,,,,,,,,,,9223372036854775807,,,Wed Sep 13 18:42:45 UTC 2017,,,,,,0|i2rtpz:,9223372036854775807,,,,,,,,,"22/Jan/16 01:22;nbyrd;Attached you will find the small Maven project that highlights this bug. Please see the ""TestDeferredFileOutputStream.java"" file. The tarball contains a README file documenting how to run the tests from the command line.
+
+Alternatively, if you would like the file by itself, I will paste it here:
+{code:Java}
+import org.apache.commons.io.FileUtils;
+import org.apache.commons.io.IOUtils;
+import org.apache.commons.io.output.DeferredFileOutputStream;
+import org.junit.Before;
+import org.junit.Test;
+
+import java.io.*;
+import java.util.Random;
+
+import static org.junit.Assume.assumeFalse;
+import static org.junit.Assume.assumeTrue;
+
+/**
+ * Tests the Commons IO {@link org.apache.commons.io.output.DeferredFileOutputStream}.
+ */
+public class TestDeferredFileOutputStream {
+    /**
+     * The threshold value that will be used to construct
+     * {@link org.apache.commons.io.output.DeferredFileOutputStream}s. 10KiB was chosen because
+     * this value is used in the Commons FileUpload library.
+     */
+    public static final int THRESHOLD = 10240;
+
+    /**
+     * Will hold a sizable chunk of data that the test can pass through streams.
+     */
+    private byte[] data;
+
+    /**
+     * Sets up the test fixture, creating some data to work with and ensuring that
+     * the tmpdir is usable.
+     */
+    @Before
+    public void setup() {
+        // Create a (fairly large) chunk of data for the test to work with.
+        // Must be larger than the stream's threshold, so that
+        // org.apache.commons.io.output.ThresholdingOutputStream.thresholdReached() is invoked.
+        data = new byte[2*THRESHOLD];
+        Random rng = new Random(System.currentTimeMillis());
+        rng.nextBytes(data);
+
+        // ensure that the java tmpdir exists between tests
+        File tmpDir = new File(System.getProperty(""java.io.tmpdir""));
+        if (!tmpDir.isDirectory()) {
+            assumeFalse(""tmpDir exists but is actually a file"", tmpDir.exists());
+            assumeTrue(""able to rebuild tmpdir"", tmpDir.mkdir());
+        }
+        assumeTrue(""can write to tmpDir"", tmpDir.canWrite());
+        assumeTrue(""can read from tmpDir"", tmpDir.canRead());
+    }
+
+    /**
+     * This is a basic test of the DeferredFileOutputStream. This is not expected to fail.
+     * @throws IOException in the event that something goes horribly wrong.
+     */
+    @Test
+    public void testStream() throws IOException {
+        File someFile = File.createTempFile(""something"", ""tmp"");
+        try (InputStream is = new ByteArrayInputStream(data)) {
+            try (OutputStream dfos = new DeferredFileOutputStream(THRESHOLD, someFile)) {
+                IOUtils.copy(is, dfos);
+            }
+        }
+    }
+
+    // This test fails due to an uncaught FileNotFoundException that bubbles
+    // up from DeferredFileOutputStream.
+    /**
+     * Tests what happens if the tmpDir gets deleted before the DeferredFileOutputStream tries to use it.
+     */
+    @Test
+    public void testStreamWithDelete() throws IOException {
+        File someFile = File.createTempFile(""something2"", "".tmp"");
+        File tmpDir = new File(System.getProperty(""java.io.tmpdir""));
+        FileUtils.deleteDirectory(tmpDir);
+
+        try (InputStream is = new ByteArrayInputStream(data)) {
+            try (OutputStream dfos = new DeferredFileOutputStream(THRESHOLD, someFile)) {
+                IOUtils.copy(is, dfos);
+            }
+        }
+    }
+
+    // This test fails due to an uncaught IOException bubbling up from DeferredFileOutputStream.
+
+    /**
+     * Tests what happens if the tmpDir is not usable due to being deleted. Uses
+     * the non-{@link java.io.File} constructor when creating the
+     * {@link org.apache.commons.io.output.DeferredFileOutputStream}.
+     */
+    @Test
+    public void testStreamWithDeleteAlternative() throws IOException {
+        File tmpDir = new File(System.getProperty(""java.io.tmpdir""));
+        FileUtils.deleteDirectory(tmpDir);
+
+        try (InputStream is = new ByteArrayInputStream(data)) {
+            try (OutputStream dfos = new DeferredFileOutputStream(THRESHOLD, ""something3"", "".tmp"", tmpDir)) {
+                IOUtils.copy(is, dfos);
+            }
+        }
+    }
+}
+{code}","22/Jan/16 09:09;sebb;bq. One approach produces a FileNotFoundException while the other produces a plain IOException.
+
+These are both IOExceptions, so that does not seem unreasonable.
+
+As to the behaviour of CentOS - I understand why it might delete old files from the temporary directory, but it does not seem reasonable to delete the directory entirely.
+Surely that will cause problems for lots of applications, not just the IO class? What happens when the next app wants to create a temporary file?
+
+Note: assuming that CentOS does not delete the temporary directory if it contains any active files, a work-round for your case might be to have a background task which updates a dummy file in the temporary directory.","22/Jan/16 20:05;nbyrd;@Sebb, I think you bring up a good point. I don't have any reason to believe that the entire directory is being deleted, but it is definitely being cleared on a regular basis (deleting all files and sub directories). Attached, you will find a ""v2"" of the test package which more closely emulates this behavior. The exceptions still exist in these cases.
+
+Additionally, I am attaching an example stack trace from our production application where these issues started popping up. (Just for reference, the version of Spring-Web we're using is 3.1.2-RELEASE; however the file management is still all being performed by Commons-FileUpload and Commons-IO.)","22/Jan/16 22:21;sebb;It still does not make sense to purge the contents which are clearly still being used.
+
+Are you sure that this is not a faulty cron job?
+
+I'm not convinced that this is something that the IO library either should (or even could) handle.","22/Jan/16 23:59;nbyrd;Thanks for the input, [~sebb@apache.org]. I have forwarded your question (asking exactly how tmpfs is being managed) to my company's technical operations manager and will respond once I have the answer.",15/Aug/16 15:52;hauser@acm.org;see also IO-512,"13/Sep/17 18:42;nbyrd;Thanks for the update, [~ralfhauser]. I've retried the attached unit tests using the latest commons-io 2.6-SNAPSHOT build. The ""testStreamWithDelete"" test now passes, but the ""testStreamWithDeleteAlternative"" test still fails. So it would seem that IO-512 is potentially only a partial fix at this point. ",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+Maven-Bundle-Plugin imports version 2.4 as 1.4,IO-350,12613100,Bug,Open,IO,Commons IO,software,issues@commons.apache.org,Commons IO is a library of utilities to assist with developing IO functionality. ,http://commons.apache.org/io/,Major,,,adrian2k7,adrian2k7,23/Oct/12 07:25,27/Nov/16 09:43,20/Jun/19 08:22,,2.4,2.5,,,,,,,,,1,"In 2.4 you added 
+{code}
+ <commons.osgi.export>
+        <!-- Explicit list of packages from IO 1.4 -->
+        org.apache.commons.io;
+        org.apache.commons.io.comparator;
+        org.apache.commons.io.filefilter;
+        org.apache.commons.io.input;
+        org.apache.commons.io.output;version=1.4.9999;-noimport:=true,
+        <!-- Same list plus * for new packages -->
+        org.apache.commons.io;
+        org.apache.commons.io.comparator;
+        org.apache.commons.io.filefilter;
+        org.apache.commons.io.input;
+        org.apache.commons.io.output;
+        org.apache.commons.io.*;version=${project.version};-noimport:=true
+    </commons.osgi.export>
+{code}
+
+This creates an entry in the MANIFEST.MF like
+{code}
+Import-Package: org.apache.commons.io;version=""[1.4,2)""
+{code}
+
+Which leads to our bundles not working with 2.4, as we are exporting 2.4 and not 1.4 in our application.
+
+I think the solution is, that if somebody want's to use it as 1.4 he should export the packages as 1.4 by themselves.
+
+I added an example project.",,,,,,,,,,,,,23/Oct/12 07:27;adrian2k7;commons-io-osgi-bug.zip;https://issues.apache.org/jira/secure/attachment/12550418/commons-io-osgi-bug.zip,,,,,1.0,,,,,,,,,,,,,,,,,,,,,,false,,,,,,,,,,,,,,250502,,,2012-10-23 07:25:47.0,,,,,,0|i0ayyn:,61937,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+Tailer should not seek to the last line in case if file was just created,IO-460,12754093,Bug,Open,IO,Commons IO,software,issues@commons.apache.org,Commons IO is a library of utilities to assist with developing IO functionality. ,http://commons.apache.org/io/,Major,,,zerkms,zerkms,10/Nov/14 09:22,10/Nov/14 09:22,20/Jun/19 08:22,,2.4,,,,,,,Utilities,,,0,"If Tailer did could not open file on its first attempt - it means the file did not exist yet hence when the file finally appears it must not be seeked to the end even if the `end` argument is set.
+
+Otherwise the lines that are added withing waiting timeout are not captured by Tailer.
+
+I find this behaviour wrong, since if a file did not exist on a moment of running Tailer thread - then it must capture every line from the beginning.
+
+Thoughts?",,,,,,,,,,,,,,,,,,0.0,,,,,,,,,,,,,,,,,,,,,,false,,,,,,,,,,,,,,9223372036854775807,,,2014-11-10 09:22:49.0,,,,,,0|i2268v:,9223372036854775807,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+Detection of deleted directories fails if the directory does not exist when the observer is created.,IO-420,12687883,Bug,Open,IO,Commons IO,software,issues@commons.apache.org,Commons IO is a library of utilities to assist with developing IO functionality. ,http://commons.apache.org/io/,Major,,,joepacde,joepacde,08/Jan/14 15:46,08/Jan/14 15:48,20/Jun/19 08:22,,2.4,,,,,,,Utilities,,,0,"If a directory is observed, that doesn't exist when the observer is created, no deletion event will be created, when this directory is deleted again.
+Use case: mounting/unmounting of usb devices",,,,,,,,,,,,,,,,,,0.0,,,,,,,,,,,,,,,,,,,,,,false,,,,,,,,,,,,,,366890,,,Wed Jan 08 15:48:29 UTC 2014,,,,,,0|i1r8pr:,367201,,,,,,,,,"08/Jan/14 15:48;joepacde;Issue is solved when changing FileAlterationOberserver.checkAndNotify to:
+
+		if (rootFile.exists()) {
+			rootEntry.setExists(true);
+			checkAndNotify(rootEntry, rootEntry.getChildren(),
+					listFiles(rootFile));
+		} else if (rootEntry.isExists()) {
+			rootEntry.setExists(false);
+			checkAndNotify(rootEntry, rootEntry.getChildren(),
+					FileUtils.EMPTY_FILE_ARRAY);
+		} else {
+			// Didn't exist and still doesn't
+		}
+",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+IOUtils.writeLines is not correct with a charset with BOM,IO-414,12683335,Bug,Open,IO,Commons IO,software,issues@commons.apache.org,Commons IO is a library of utilities to assist with developing IO functionality. ,http://commons.apache.org/io/,Major,,,florent.brosse,florent.brosse,08/Dec/13 16:36,08/Dec/13 16:43,20/Jun/19 08:22,,2.4,2.5,,,,,,Streams/Writers,Utilities,,0,"When a charset has a BOM (like UTF-16), the method IOUtils.writeLines put 2 BOM on each line.
+
+",,,,,,,,,,,,,,,,,,0.0,,,,,,,,,,,,,,,,,,,,,,false,,,,,,,,,,,,,,362587,,,Sun Dec 08 16:40:24 UTC 2013,,,,,,0|i1qi1b:,362881,,,,,,,,,"08/Dec/13 16:40;florent.brosse;I suggest that code to correct that bug:
+
+    public static void writeLines(final Collection<?> lines, String lineEnding, final OutputStream output, final Charset encoding)
+            throws IOException {
+        if (lines == null) {
+            return;
+        }
+        if (lineEnding == null) {
+            lineEnding = LINE_SEPARATOR;
+        }
+        final Charset cs = Charsets.toCharset(encoding);
+        StringBuilder stringBuilder = new StringBuilder();
+        for (final Object line : lines) {
+            if (line != null) {
+            	stringBuilder.append(line.toString());
+            }
+            stringBuilder.append(lineEnding);
+        }
+        output.write(stringBuilder.toString().getBytes(cs));
+    }
+
+ public static void writeLines(final Collection<?> lines, String lineEnding,
+            final Writer writer) throws IOException {
+        if (lines == null) {
+            return;
+        }
+        if (lineEnding == null) {
+            lineEnding = LINE_SEPARATOR;
+        }
+        StringBuilder stringBuilder = new StringBuilder();
+        for (final Object line : lines) {
+            if (line != null) {
+            	stringBuilder.append(line.toString());
+            }
+            stringBuilder.append(lineEnding);
+        }
+        writer.write(stringBuilder.toString());
+    }
+",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+ClassLoaderInputStream - should this delegate to the parent class loader?,IO-378,12642933,Bug,Open,IO,Commons IO,software,issues@commons.apache.org,Commons IO is a library of utilities to assist with developing IO functionality. ,http://commons.apache.org/io/,Major,,,sebb,sebb,17/Apr/13 14:12,20/Apr/13 23:27,20/Jun/19 08:22,,2.4,,,,,,,,,,0,"ClassLoaderInputStream currently delegates to its superclass if it cannot resolve the class itself.
+
+This means it may resolve classes that are not in the specified class loader.
+
+Consider whether to change this, or add an option to suppress the delegation.
+
+This would affect the resolveClass and resolveProxyClass methods.",,,,,,,,,,,,,,,,,,0.0,,,,,,,,,,,,,,,,,,,,,,false,,,,,,,,,,,,,,323343,,,Sat Apr 20 23:27:11 UTC 2013,,,,,,0|i1jscf:,323688,,,,,,,,,"20/Apr/13 23:27;sebb;Note: it would still need to create primitive classes, either by delegation or by creating them directly.",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+FilenameUtils.getFullPath incorrectly parses file names that begin with a tilde,IO-545,13086967,Bug,Open,IO,Commons IO,software,issues@commons.apache.org,Commons IO is a library of utilities to assist with developing IO functionality. ,http://commons.apache.org/io/,Minor,,,tfjpg,tfjpg,13/Jul/17 18:12,02/Aug/17 17:16,20/Jun/19 08:22,,2.4,2.5,,,,,,Utilities,,,0,"For any file with a name that begins with a tilde, which is a valid file name in BSD and Windows, if you call FilenameUtils.getFullPath and pass the file name, it returns the file name followed by a path separator. It should return an empty string. It seems to be parsing it as a unix user directory because it starts with the tilde.","OpenJDK Runtime Environment (build 1.8.0_92-b14)
+FreeBSD 10.0-RELEASE-p11
+",,,,,,,,,,,MNG-6267,,,,,,0.0,,,,,,,,,,,,,,,,,,,2017-07-15 21:57:45.593,,,false,,,,,,,,,,,,,,9223372036854775807,,,Mon Jul 17 13:41:50 UTC 2017,,,,,,0|i3hhrr:,9223372036854775807,,,,,,,,,15/Jul/17 21:57;michael-o;Why are you still on 10.0? It is out of support. Can you create an sample code for me? I can try on 10.3 and 11.0. I highly doubt the issue because there is no tilde expansion here.,"17/Jul/17 13:41;tfjpg;The OS is irrelevant because getFullPath just does parsing, it doesn't hit the file system. To be totally sure, I tested on Ubuntu 16.04.2 and got the same result. 
+
+FilenameUtils.getFullPath(""~tildefilename.txt"") returns:
+ ~tildefilename.txt/
+
+It should return an empty string.
+
+I went through the code for getFullPath and see where the issue is. It eventually calls getPrefixLength which has this block:
+{code:java}
+if (ch0 == '~') {
+    int posUnix = filename.indexOf(UNIX_SEPARATOR, 1);
+    int posWin = filename.indexOf(WINDOWS_SEPARATOR, 1);
+    if (posUnix == -1 && posWin == -1) {
+        return len + 1;  // return a length greater than the input
+    }
+    posUnix = posUnix == -1 ? posWin : posUnix;
+    posWin = posWin == -1 ? posUnix : posWin;
+    return Math.min(posUnix, posWin) + 1;
+}
+{code}
+
+So if you pass getFullPath just a file name, with no path part, and that file name starts with a '~', the if (posUnix == -1 && posWin == -1) condition will be true. It is interpreting it as a ""named user"". It's actually in the javadoc for the method:
+ * ~user/a/b/c.txt     --> ""~user/""    --> named user
+ * ~user               --> ""~user/""    --> named user (slash added)
+
+However, since you can have a file named something like ""~tildefilename.txt"", this is a problem. Either the method needs to be altered to account for this (although I am not sure it is possible to figure out if it is a file or a named user without hitting the file system), or at the very least the javadoc needs to be updated to note that the method will fail in these cases.",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+"FilenameUtils.directoryContains(String, String) gives false positive when two directories exist with equal prefixes",IO-499,12939560,Bug,Open,IO,Commons IO,software,issues@commons.apache.org,Commons IO is a library of utilities to assist with developing IO functionality. ,http://commons.apache.org/io/,Minor,,,fedechicco,fedechicco,16/Feb/16 17:27,23/Apr/17 15:12,20/Jun/19 08:22,,2.4,,,,,,,,,,0,"In a folder layout as such:
+
+{code}
+/foo/a.txt
+/foo2/b.txt
+{code}
+
+The result of invoking directoryContains is wrong:
+{code}
+FilenameUtils.directoryContains(""/foo"", ""/foo2/b.txt""); // returns true
+{code}
+
+even if ""/foo"" and ""/foo2/b.txt"" are the canonical paths, they start with the same characters, and the current implementation of the method fails.
+
+As workaround we are currently appending a path separator '/' to the first argument.
+It is noteworthy that the current implementation of FileUtils.directoryContains() reveals this issue because it uses the File.getCanonicalPath() to obtain the String paths of ""/foo"" and ""/foo2/b.txt"".",,,,,,,,,,,,,,,,,,0.0,,,,,,,,,,,,,,,,,,,2016-09-24 22:24:49.901,,,false,,,,,,,,,,,,,,9223372036854775807,,,Sun Apr 23 15:12:45 UTC 2017,,,,,,0|i2swgn:,9223372036854775807,,,,,,,,,"24/Sep/16 22:24;githubbot;GitHub user cagdasyelen opened a pull request:
+
+    https://github.com/apache/commons-io/pull/20
+
+    [IO-499] FilenameUtils.directoryContains false positive issue 
+
+    IO-499 bug has been fixed. 
+    
+    The old version was looking at if the child canonical path string starts with the parent's. 
+    However, it fails in the case of:
+    
+    .../top/foo
+    .../top/foo2/b.txt
+    
+    since the directory path of b.txt starts with the same directory path with the one above even though the second one is a different directory(foo2). This issue is resolved by comparing the path strings of foo and foo2. 
+
+You can merge this pull request into a Git repository by running:
+
+    $ git pull https://github.com/cagdasyelen/commons-io io499-fix
+
+Alternatively you can review and apply these changes as the patch at:
+
+    https://github.com/apache/commons-io/pull/20.patch
+
+To close this pull request, make a commit to your master/trunk branch
+with (at least) the following in the commit message:
+
+    This closes #20
+    
+----
+commit fd95ccde6310bfee7314744d879c597882cb3381
+Author: Cagdas Yelen <cagdas@utexas.edu>
+Date:   2016-09-24T22:21:37Z
+
+    [IO-499] FilenameUtils.directoryContains false positive issue is resolved
+
+----
+",07/Oct/16 14:08;fedechicco;@cagdasyelen I'm afraid this patch doesn't consider the case when the file path is composed using '\' separators (aka Windows case). We should adapt it to that case before pulling the patch.,"23/Apr/17 15:12;githubbot;Github user asfgit closed the pull request at:
+
+    https://github.com/apache/commons-io/pull/20
+",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+"FileUtils.directoryContains(File, File) returns wrong results when the file name contains unreadable characters",IO-498,12938802,Bug,Open,IO,Commons IO,software,issues@commons.apache.org,Commons IO is a library of utilities to assist with developing IO functionality. ,http://commons.apache.org/io/,Minor,,,fedechicco,fedechicco,12/Feb/16 13:11,12/Feb/16 17:39,20/Jun/19 08:22,,2.4,,,,,,,Utilities,,,0,"When testing for FileUtils.directoryContains(File, File) on a file which is in fact contained in the given directory but has odd characters in the name, the method returns wrong results.
+
+This file:
+{code:title=File name}
+bof@testcorso2015:~/tmp/test$ ls col* | xxd
+0000000: 636f 6c74 e00a                           colt..
+{code}
+
+fails to be recognized as belonging to the current directory in this simple snippet of code:
+
+{code:title=Snippet|borderStyle=solid}
+File[] files = new File(""."").listFiles();
+for(File f : files){
+     System.out.println(""contains "" + f + "" = "" + FileUtils.directoryContains(new File("".""), f));
+}
+{code}
+",linux,,,,,,,,,,,,,,,,,0.0,,,,,,,,,,,,,,,,,,,2016-02-12 17:31:40.124,,,false,,,,,,,,,,,,,,9223372036854775807,,,Fri Feb 12 17:39:21 UTC 2016,,,,,,0|i2srtb:,9223372036854775807,,,,,,,,,"12/Feb/16 16:27;fedechicco;Is it worth noticing that in this case the method fails because of what I think being a JVM bug.
+
+The snippet
+{code}
+File[] files = new File(""."").listFiles();
+for(File f : files){
+     System.out.println(""exists: "" + f.exists());
+}
+{code}
+
+shows that with an ill formed name as the one I'm using the File class is not able to work properly.
+The same file object returned by listFiles() is said to be unexistant.","12/Feb/16 17:31;b.eckenfels;Is this on a UTF8 system? I think with an ISO88591 native name encoding it should be binary transparent.
+But in any case nothing Commons IO can do about. I propose to close it.
+http://jonisalonen.com/2012/java-and-file-names-with-invalid-characters/","12/Feb/16 17:39;fedechicco;Yes it is on a UTF8 system.
+
+I'm afraid you are right, this is nothing we can solve in the Commons IO.
+
+I wish this was fixable, but I agree to close it.",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+File doesn't end with blank line and cann't get the last line using Tailer!,IO-450,12725431,Bug,Open,IO,Commons IO,software,issues@commons.apache.org,Commons IO is a library of utilities to assist with developing IO functionality. ,http://commons.apache.org/io/,Minor,,,davidchiu,davidchiu,04/Jul/14 07:56,22/Nov/15 07:44,20/Jun/19 08:22,,2.4,,,,,,,Utilities,,,0,"I use Tailer to read file, I can't get the last line if the file doesn't end with a blank line!
+
+My file like as following:
+
+AAAAAAAAAAAA
+BBBBBBBBBBBB
+
+And Not end with a blank line, ""BBBBBBBBBBBB"" is the last line, When I use io.input.Tailer to tail the file, I cann't get the last line ""BBBBBBBBBBBB""!
+
+All  versions(2.3/2.4/2.5) of Commons-IO have the same problem! ",linux and windows 7,,,,,,,,,,,,,,,,,0.0,,,,,,,,,,,,,,,,,,,2014-07-28 09:50:26.897,,,false,,,,,,,,,,,,,,403591,,,Fri May 22 11:53:09 UTC 2015,,,,,,0|i1xgmv:,403635,,,,,,,,,"28/Jul/14 09:50;sebb;Sounds like the file does not have a trailing EOL.
+Since Tailer reads complete lines, it won't see the last (incomplete) line.
+
+I'm not sure there is any way around this without breaking existing functionality.
+How can Tailer know when the last line is complete if it does not have an EOL?","19/May/15 20:37;britter;The documentation says 
+
+bq. Simple implementation of the unix ""tail -f"" functionality.
+
+How does {{tail -f}} behave in the case of a missing EOL in the last line? Tailer should behave the same way IMHO.","22/May/15 11:53;britter;The problem is, that tail is stream based but Tailer is line based. So the comparison doesn't work out completely. If I have a file with the following content:
+
+{code}
+AAAAAAA\n
+BBBBBBB
+{code}
+
+And I do a {{tail -f}} on the file, I'll get the following output:
+
+{code}
+$: tail -f file.txt
+AAAAAAA
+BBBBBBB
+{code}
+
+It simply waits for new input on the last line. That could be an EOL or it could be EOF. Tailer OTOH currently detects lines based on the EOL character. I agree that lines without EOF at EOF should also be handled. A simple solution would be to call {{listener.handle(new String(lineBuf.toByteArray(), cset))}} after the while-loop in {{readLines(final RandomAccessFile reader)}} if the {{lineBuf}} stil has content.",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+BOMInputStream.hasBOM(ByteOrderMark) do not read the BOM header,IO-482,12844674,Bug,Open,IO,Commons IO,software,issues@commons.apache.org,Commons IO is a library of utilities to assist with developing IO functionality. ,http://commons.apache.org/io/,Minor,,,hoppermann,hoppermann,13/Jul/15 15:30,13/Jul/15 15:32,20/Jun/19 08:22,,2.4,,,,,,,Streams/Writers,,,0,The method hasBOM(ByteOrderMark) in BOMInputStream do not read a BOM prefix.,,,,,,,,,,,,,13/Jul/15 15:32;hoppermann;add_fix_for_IO-482.patch;https://issues.apache.org/jira/secure/attachment/12745055/add_fix_for_IO-482.patch,13/Jul/15 15:32;hoppermann;add_unit_test_testHasBOMFirstThenRead.patch;https://issues.apache.org/jira/secure/attachment/12745054/add_unit_test_testHasBOMFirstThenRead.patch,,,,2.0,,,,,,,,,,,,,,,,,,,,,,false,,,,,,,,,,,,,,9223372036854775807,,,Mon Jul 13 15:32:40 UTC 2015,,,,,,0|i2h6on:,9223372036854775807,,,,,,,,,13/Jul/15 15:32;hoppermann;unit test,13/Jul/15 15:32;hoppermann;patch with bugfix,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+FilenameUtils#normalizeNoEndSeparator returns null for UNC prefix without trailing backslash,IO-475,12819096,Bug,Open,IO,Commons IO,software,issues@commons.apache.org,Commons IO is a library of utilities to assist with developing IO functionality. ,http://commons.apache.org/io/,Minor,,,shoof,shoof,07/Apr/15 22:06,07/Apr/15 23:04,20/Jun/19 08:22,,1.4,2.0,2.0.1,2.1,2.2,2.3,2.4,,,,0,"FilenameUtils#normalizeNoEndSeparator returns null for UNC prefix without trailing backslash.
+
+The observed behavior is that normalizeNoEndSeparator returns a non-null value for the following unc-path-prefix:
+\\{serverName-or-IP}\
+
+{backSlash}{backSlash}{serverName-or-IP}{backSlash} 
+but returns null for the following unc-path-prefix:
+\\{serverName-or-IP}
+
+{backSlash}{backSlash}{serverName-or-IP}
+
+The markdown seems to eat my backslashes prepended to the serverName-or-IP.
+
+There is nothing in the Microsoft API documentation which would suggest that the second unc-path-prefix would be invalid.
+
+Therefore the expectation is that they should be treated as equivalent by FilenameUtils#normalizeNoEndSeparator.
+
+The handling of unc-path-prefix is inconsistent with how FilenameUtils#normalizeNoEndSeparator handles drive relative and drive absolute path prefixes, where each notation is accepted and returns a non-null --> ( C: and C:\ ).",,,,,,,,,,,,,,,,,,0.0,,,,,,,,,,,,,,,,,,,,,,false,,,,,Important,Patch,,,,,,,,9223372036854775807,,,2015-04-07 22:06:00.0,,,,,,0|i2cxq7:,9223372036854775807,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+FileUtils.copyDirectory and copyFile fail on AIX hosts over CIFS mounted directory,IO-371,12635685,Bug,Open,IO,Commons IO,software,issues@commons.apache.org,Commons IO is a library of utilities to assist with developing IO functionality. ,http://commons.apache.org/io/,Minor,,,jonnybot,jonnybot,06/Mar/13 23:25,14/Mar/14 12:12,20/Jun/19 08:22,,2.4,,,,,,,Utilities,,,0,"In a groovy script that imports org.apache.commons.io.FileUtils, I'm trying to copy a directory from one location to another. Both locations are accessed through a mounted CIFS directory. When I try, I get this exception:
+{code}
+java.io.IOException: A system call received a parameter that is not valid.
+	at sun.nio.ch.FileChannelImpl.map0(Native Method)
+	at sun.nio.ch.FileChannelImpl.map(FileChannelImpl.java:768)
+	at sun.nio.ch.FileChannelImpl.transferFromFileChannel(FileChannelImpl.java:552)
+	at sun.nio.ch.FileChannelImpl.transferFrom(FileChannelImpl.java:615)
+	at org.apache.commons.io.FileUtils.doCopyFile(FileUtils.java:1147)
+	at org.apache.commons.io.FileUtils.doCopyDirectory(FileUtils.java:1428)
+	at org.apache.commons.io.FileUtils.copyDirectory(FileUtils.java:1389)
+	at org.apache.commons.io.FileUtils.copyDirectory(FileUtils.java:1261)
+	at org.apache.commons.io.FileUtils.copyDirectory(FileUtils.java:1230)
+	at org.apache.commons.io.FileUtils$copyDirectory.call(Unknown Source)
+	at org.codehaus.groovy.runtime.callsite.CallSiteArray.defaultCall(CallSiteArray.java:45)
+	at org.codehaus.groovy.runtime.callsite.AbstractCallSite.call(AbstractCallSite.java:108)
+	at org.codehaus.groovy.runtime.callsite.AbstractCallSite.call(AbstractCallSite.java:120)
+	at plutarch.archiveOldFilesOnSabrina(plutarch.groovy:111)
+	at plutarch$archiveOldFilesOnSabrina.callCurrent(Unknown Source)
+	at org.codehaus.groovy.runtime.callsite.CallSiteArray.defaultCallCurrent(CallSiteArray.java:49)
+	at org.codehaus.groovy.runtime.callsite.AbstractCallSite.callCurrent(AbstractCallSite.java:133)
+	at org.codehaus.groovy.runtime.callsite.AbstractCallSite.callCurrent(AbstractCallSite.java:149)
+	at plutarch.run(plutarch.groovy:47)
+	at groovy.lang.GroovyShell.runScriptOrMainOrTestOrRunnable(GroovyShell.java:257)
+	at groovy.lang.GroovyShell.run(GroovyShell.java:220)
+	at groovy.lang.GroovyShell.run(GroovyShell.java:150)
+	at groovy.ui.GroovyMain.processOnce(GroovyMain.java:588)
+	at groovy.ui.GroovyMain.run(GroovyMain.java:375)
+	at groovy.ui.GroovyMain.process(GroovyMain.java:361)
+	at groovy.ui.GroovyMain.processArgs(GroovyMain.java:120)
+	at groovy.ui.GroovyMain.main(GroovyMain.java:100)
+	at sun.reflect.NativeMethodAccessorImpl.invoke0(Native Method)
+	at sun.reflect.NativeMethodAccessorImpl.invoke(NativeMethodAccessorImpl.java:60)
+	at sun.reflect.DelegatingMethodAccessorImpl.invoke(DelegatingMethodAccessorImpl.java:37)
+	at java.lang.reflect.Method.invoke(Method.java:611)
+	at org.codehaus.groovy.tools.GroovyStarter.rootLoader(GroovyStarter.java:106)
+	at org.codehaus.groovy.tools.GroovyStarter.main(GroovyStarter.java:128)
+{code}
+
+This executes normally on Windows using the same version of Java (1.6). Another user has a similar experience that makes me think this is an issue specific to AIX: http://stackoverflow.com/questions/15092855/howto-copy-a-folder-and-all-its-content-in-java-recursively-including-symbolic
+
+Given the stack trace, this is probably something that Java 1.7 addressed, but it may be worthwhile for the copyDirectory and copyFile methods to provide a switch to handle symbolic links.","Java 1.6, AIX, FileUtils, Groovy 2.1.1, cifs",,,,,,,,,,,,,,,,,0.0,,,,,,,,,,,,,,,,,,,2014-03-14 12:12:21.769,,,false,,,,,,,,,,,,,,316178,,,Fri Mar 14 12:12:21 UTC 2014,,,,,,0|i1ik4n:,316521,,,,,,,,,"14/Mar/14 12:12;ukslim;map() does not work on AIX CIFS mounts. You can demonstrate it with a short program:
+
+{code:java}
+		File file = new File(path);
+		FileInputStream stream = new FileInputStream(file);
+		FileChannel channel = stream.getChannel();
+		MappedByteBuffer buffer = 
+				channel.map(MapMode.READ_ONLY, 0, channel.size());
+{/code}
+
+Throws: java.io.IOException: A system call received a parameter that is not valid 
+
+... on AIX CIFS mounts.
+
+",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+"""Self-suppression not permitted"" while using BrokenOutput and BrokenInput streams with try-with-resource. ",IO-469,12777178,Bug,Open,IO,Commons IO,software,issues@commons.apache.org,Commons IO is a library of utilities to assist with developing IO functionality. ,http://commons.apache.org/io/,Trivial,,,gfadeev,gfadeev,24/Feb/15 13:42,19/Jun/15 17:28,20/Jun/19 08:22,,2.4,,,,,,,Streams/Writers,,,0,"Hi,
+First of all thanks a lot for great library :)
+ 
+I faced with ""Self-suppression not permitted"" issue while using BrokenInputStream & BrokenOutputStream classes with try-with-resources. 
+
+Root cause of this issue is that these classes always throws same exception instance for all methods.
+That's how it looks like when javac unfolds try-with-resources: 
+{code:java}
+        InputStream is = new BrokenInputStream();
+        Throwable localThrowable2 = null;
+        try {
+            is.read();
+        } catch (Throwable localThrowable1) {
+            localThrowable2 = localThrowable1;
+            throw localThrowable1;
+        } finally {
+            if (is != null) {
+                if (localThrowable2 != null) {
+                    try {
+                        is.close();
+                    } catch (Throwable x2) {
+                        localThrowable2.addSuppressed(x2);
+                    }
+                } else {
+                    is.close();
+                }
+            }
+        }
+{code}
+So as you can see when close method is invoked resulting exception will be added to itself (first time thrown during read method), this leads to IllegalArgumentException ""Self-suppression not permitted"".
+
+It can be easily fixed by omitting throwing of same exception instance for close method. 
+If you don't mind I would attach patch which will fix this issue.  ",Oracle JVM 1.8_25 (but should be reproducible starting from Java 7).,,,,,,,,,,,,,,,,,0.0,,,,,,,,,,,,,,,,,,,2015-06-19 17:04:20.511,,,false,,,,,,,,,,,,,,9223372036854775807,,,Fri Jun 19 17:28:52 UTC 2015,,,,,,0|i25z3j:,9223372036854775807,,,,,,,,,19/Jun/15 17:04;krosenvold;Fixed in r1686456,19/Jun/15 17:28;krosenvold;And reverted again in r1686460 due to slight compatibility break,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+FileAlterationObserver should check whether inputFile is a directory,IO-439,12710314,Bug,Open,IO,Commons IO,software,issues@commons.apache.org,Commons IO is a library of utilities to assist with developing IO functionality. ,http://commons.apache.org/io/,Trivial,,,beniamin.kalinowski,beniamin.kalinowski,24/Apr/14 13:54,24/Apr/14 13:54,20/Jun/19 08:22,,2.4,,,,,,,Utilities,,,0,"A FileAlterationObserver class receives a String/File object indicating directory and checks whether this file has changed. It doesn't work if file isn't a directory but no warnings/errors are being thrown.
+I think there should be a check if a given input is a directory.","Unix, Ubuntu 64",,,3600,3600,,0%,3600,3600,,,,,,,,,0.0,,,,,,,,,,,,,,,,,,,,,,false,,,,,,,,,,,,,,388636,,,2014-04-24 13:54:01.0,,,,,,0|i1uy1r:,388887,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
