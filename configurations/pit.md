@@ -1,11 +1,11 @@
-We have used PI-Test tool to calculate the mutation testing metrics.
+We have used Pit-Test tool to calculate the mutation testing metrics.
 
-We used the PI-test with the following steps:
+We used the Pit-test with the following steps:
 
 1. Install pitest plugin by adding the plugin parameter into `pom.xml` of the project.
 2. Run the `clean` task in the maven builder
 3. Run the `test` task in the maven builder
-4. Results are generated in `target/pitest-reports` directory
+4. Results are generated in `target/pit-reports` directory
 
 Since we are using project that uses only maven builder, we configure the pitest plugin the same way in all the projects.
 
