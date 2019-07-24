@@ -1,12 +1,12 @@
 # Team K
 
-|Name|Student ID|Email|Github Username|
-|----|----------|-----|---------------|
-Anand Kacha|40047673|a_kacha@encs.concordia.ca|ndkcha
-Shareen Ali|40075802|a_hareen@encs.concordia.ca|ShareenAli
-Manpreet Singh|40083737|si_preet@encs.concordia.ca|manni1067
-Shivani Jindal|40071296|shivani1995jindal@gmail.com|ShivaniJindal
-Jasmeet Kaur|40088712|k_asmeet@encs.concordia.ca|Jasmeet8
+|Name|Email|Github Username|
+|----|-----|---------------|
+Anand Kacha|ndkcha@gmail.com|ndkcha
+Shareen Ali|shareenali96@gmail.com|ShareenAli
+Manpreet Singh|si_preet@encs.concordia.ca|manni1067
+Shivani Jindal|shivani1995jindal@gmail.com|ShivaniJindal
+Jasmeet Kaur|k_asmeet@encs.concordia.ca|Jasmeet8
 
 # Directory Structure
 
